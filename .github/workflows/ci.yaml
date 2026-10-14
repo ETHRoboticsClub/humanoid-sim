@@ -17,7 +17,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.13.1"
-      - run: uv sync --python 3.12 --extra dev
+      - run: uv sync --python 3.12 --extra dev --extra newton
       - run: uv run ruff check src tests spikes
       - run: uv run pytest -m "not physics and not data"
   isaaclab-image:

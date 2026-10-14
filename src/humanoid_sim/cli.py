@@ -1,9 +1,9 @@
 """humanoid-sim command line.
 
     humanoid-sim build-asset                       robot USD from the description (Isaac Lab image)
-    humanoid-sim replay <exc-dir> [--period-ms 4]  fixed-base drive-level replay, scored against the capture
+    humanoid-sim replay <exc-dir> [--period-ms 4]  fixed-base drive-level replay on MJWarp, scored against the capture
     humanoid-sim view-replay <replay-dir> --save x.rrd   sim and real robot + every drive signal in Rerun
-    humanoid-sim bench cpu|gpu                     real-time factor / throughput benchmarks
+    humanoid-sim bench --num-envs N                real-time factor / throughput (Isaac Lab / MJWarp)
 """
 
 from __future__ import annotations
@@ -49,17 +49,18 @@ def cmd_replay(args) -> int:
 
     cap = ExcitationCapture(Path(args.capture))
     period_ns = int(round(args.period_ms * 1e6))
-    sim = SimCore(args.backend, _usd(args), robot=args.robot, period_ns=period_ns, fixed_base=True,
-                  integrator=args.integrator, device=args.device, use_mujoco_cpu=args.backend == "newton")
+    sim = SimCore(_usd(args), device=args.device, robot=args.robot, period_ns=period_ns, fixed_base=True,
+                  integrator=args.integrator)
     t = time.time()
     res = replay(cap, sim, duration_s=args.duration)
     wall = time.time() - t
-    out = Path(args.out) / f"{cap.dataset_id}_{args.backend}_{args.integrator or 'default'}_{period_ns // 1000}us"
+    integrator = args.integrator or sim.profile["physics"]["integrator"]
+    out = Path(args.out) / f"{cap.dataset_id}_mjwarp_{integrator}_{period_ns // 1000}us"
     out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out / "trace.npz", t_ns=res.t_ns, demand=res.demand,
                         **{f"sim_{k}": v for k, v in res.sim.items()}, **{f"real_{k}": v for k, v in res.real.items()})
-    summary = {"dataset_id": cap.dataset_id, "name": cap.name, "period_ns": period_ns, "backend": args.backend,
-               "integrator": args.integrator or sim.profile["physics"]["integrator"], "wall_s": wall,
+    summary = {"dataset_id": cap.dataset_id, "name": cap.name, "period_ns": period_ns,
+               "physics": "isaaclab/mjwarp", "device": args.device, "integrator": integrator, "wall_s": wall,
                "sim_s": len(res.t_ns) * period_ns / 1e9, "drives": res.drives,
                "rms_position_rad": res.rms("position"), "rms_velocity_rad_s": res.rms("velocity"),
                "rms_torque_nm": res.rms("torque"), "tracking_rms_rad": res.tracking_rms(), **res.meta}
@@ -101,10 +102,9 @@ def main(argv: list[str] | None = None) -> int:
 
     r = sub.add_parser("replay")
     r.add_argument("capture")
-    r.add_argument("--backend", choices=("newton", "isaaclab"), default="newton")
     r.add_argument("--period-ms", type=float, default=4.0)
     r.add_argument("--integrator", default=None)
-    r.add_argument("--device", default="cpu")
+    r.add_argument("--device", default="cuda:0", help="cuda:N, or cpu (MJWarp on Warp's CPU device: slow)")
     r.add_argument("--duration", type=float, default=None)
     r.add_argument("--out", default="outputs/replay")
     r.set_defaults(func=cmd_replay)
@@ -117,11 +117,9 @@ def main(argv: list[str] | None = None) -> int:
     v.set_defaults(func=cmd_view_replay)
 
     be = sub.add_parser("bench")
-    be.add_argument("kind", choices=("cpu", "gpu"))
-    be.add_argument("--backend", choices=("newton", "isaaclab"), default="newton")
     be.add_argument("--num-envs", type=int, default=1)
     be.add_argument("--steps", type=int, default=1000)
-    be.add_argument("--device", default="cpu")
+    be.add_argument("--device", default="cuda:0")
     be.add_argument("--integrator", default=None)
     be.add_argument("--no-self-collision", action="store_true")
     be.set_defaults(func=cmd_bench)

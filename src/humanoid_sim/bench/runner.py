@@ -1,4 +1,4 @@
-"""Benchmarks: single-robot real-time factor (CPU) and batched throughput (GPU).
+"""Benchmarks on Isaac Lab / MJWarp: single-robot real-time factor and batched throughput.
 
 Workload: free base, standing on flat ground, every drive holding the standing pose at baseline gains,
 with a new demand every 20 ms (the policy period) carrying a small random target perturbation. Timing
@@ -22,9 +22,8 @@ POLICY_PERIOD_NS = 20 * NS_PER_MS
 
 def run_bench(args, usd: Path) -> dict:
     device = args.device
-    sim = SimCore(args.backend, usd, robot=args.robot, num_envs=args.num_envs, base_height_m=0.93,
-                  integrator=args.integrator, device=device,
-                  use_mujoco_cpu=(args.backend == "newton" and device == "cpu"),
+    sim = SimCore(usd, device=device, robot=args.robot, num_envs=args.num_envs, base_height_m=0.93,
+                  integrator=args.integrator,
                   self_collision=False if getattr(args, "no_self_collision", False) else None)
     plant = sim.plant
     q, qd = sim.joint_state()
@@ -69,7 +68,7 @@ def run_bench(args, usd: Path) -> dict:
     sim_s = args.steps * sim.period_ns / NS_PER_S
     upright = (q - q0).abs().amax(dim=1).lt(0.5).float().mean().item()
     return {
-        "backend": args.backend, "device": device, "num_envs": args.num_envs, "period_ns": sim.period_ns,
+        "physics": "isaaclab/mjwarp", "device": device, "num_envs": args.num_envs, "period_ns": sim.period_ns,
         "steps": args.steps, "wall_s": wall, "rtf_per_env": sim_s / wall,
         "env_steps_per_s": args.num_envs * args.steps / wall,
         "sim_seconds_per_wall_second": args.num_envs * sim_s / wall,

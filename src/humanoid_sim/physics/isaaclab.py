@@ -1,4 +1,7 @@
-"""Isaac Lab 3.0 / Newton backend: the robot USD as an Isaac Lab articulation, stepped by MJWarp.
+"""Isaac Lab 3.0 / Newton: the robot USD as an Isaac Lab articulation, stepped by MJWarp (the only physics).
+
+``use_mujoco_cpu`` is never set: MuJoCo C does not step the robot in this repo. On ``device="cpu"`` MJWarp
+runs on Warp's CPU device (slow, for tests); real-time and batched use is on CUDA.
 
 The solver PD gains are the plant's constant ``k0, d0`` (joint space), written once at spawn. Each step the
 plant writes position targets (velocity target 0); nothing else changes in the model while stepping.
@@ -22,7 +25,6 @@ class IsaacLabCfg:
     device: str = "cpu"
     period_s: float = 0.004
     integrator: str = "implicitfast"
-    use_mujoco_cpu: bool = True
     fixed_base: bool = False
     base_height_m: float = 1.0
     env_spacing_m: float = 3.0
@@ -78,10 +80,7 @@ class IsaacLabRobot:
 
         scene_cfg = SceneCfg(num_envs=cfg.num_envs, env_spacing=cfg.env_spacing_m, replicate_physics=True)
         scene_cfg.robot = robot
-        solver_cls = MJWarpSolverCfg
-        if cfg.use_mujoco_cpu:
-            from humanoid_sim.physics.isaaclab_cpu import MujocoCpuSolverCfg as solver_cls
-        solver = solver_cls(integrator=cfg.integrator, use_mujoco_cpu=cfg.use_mujoco_cpu,
+        solver = MJWarpSolverCfg(integrator=cfg.integrator, use_mujoco_cpu=False,
                                  iterations=cfg.iterations, ls_iterations=cfg.ls_iterations, cone=cfg.cone,
                                  njmax=cfg.njmax, nconmax=cfg.nconmax)
         visualizers = []

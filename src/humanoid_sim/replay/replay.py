@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
+from humanoid_sim.core import PlantCore
 from humanoid_sim.devices.demand import JVPT_PER_SI_GAIN, DriveDemand
 from humanoid_sim.replay.exc import ExcitationCapture, sample_linear
 from humanoid_sim.sim import SimCore
@@ -33,11 +34,11 @@ class ReplayResult:
     demand: np.ndarray  # [T, D]
     meta: dict = field(default_factory=dict)
 
-    def real_joint_q(self, sim: SimCore) -> np.ndarray:
+    def real_joint_q(self, plant: PlantCore) -> np.ndarray:
         """URDF joint positions of the real robot at each sample (1:1 signs; ankle FK from the cranks)."""
-        out = np.zeros((len(self.t_ns), len(sim.plant.map.joint_names)))
+        out = np.zeros((len(self.t_ns), len(plant.map.joint_names)))
         for k in range(len(self.t_ns)):
-            out[k] = initial_joint_state(sim, self.real["position"][k])[0].cpu().numpy()
+            out[k] = initial_joint_state(plant, self.real["position"][k])[0].cpu().numpy()
         return out
 
     def rms(self, key="position", *, skip_s: float = 1.0) -> dict[str, float]:
@@ -53,9 +54,8 @@ class ReplayResult:
         return {d: float(np.sqrt(np.nanmean(err[:, i] ** 2))) for i, d in enumerate(self.drives)}
 
 
-def initial_joint_state(sim: SimCore, native: np.ndarray) -> torch.Tensor:
+def initial_joint_state(plant: PlantCore, native: np.ndarray) -> torch.Tensor:
     """URDF joint positions ``[1, J]`` whose drive-frame positions are ``native`` ``[D]``."""
-    plant = sim.plant
     desc = plant.desc
     q = torch.tensor([[desc.joints[n].standing_offset_rad for n in plant.map.joint_names]],
                      dtype=plant.cfg.dtype, device=plant.cfg.device)
@@ -93,7 +93,7 @@ def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None
 
     native0 = np.array([sample_linear(pdo[d].t_ns, pdo[d]["native_position_rad"], np.array([t_start]))[0]
                         for d in drives])
-    q0 = initial_joint_state(sim, native0)
+    q0 = initial_joint_state(plant, native0)
     sim.write_joint_state(q0, torch.zeros_like(q0))
     plant.reset(torch.tensor([0], device=dev))
     sim.t_ns = 0

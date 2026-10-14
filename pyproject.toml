@@ -14,10 +14,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Newton directly (replay, CPU runtime, spikes, macOS). Pins match Isaac Lab release/3.0.0.
-# usd-core provides pxr outside the Isaac Lab image; the image gets pxr from usd-exchange and installs this
-# package with --no-deps, so the two never meet in one environment.
-physics = [
+# Newton on the host for kinematics only (viewers, model checks); physics runs only through Isaac Lab /
+# MJWarp in the Isaac Lab image. Pins match Isaac Lab release/3.0.0. usd-core provides pxr outside the
+# image; the image gets pxr from usd-exchange and installs this package with --no-deps.
+newton = [
     "newton[sim]==1.6.1",
     "warp-lang==1.17.0",
     "newton-usd-schemas>=0.5.0",
@@ -42,7 +42,7 @@ where = ["src"]
 testpaths = ["tests"]
 addopts = "-ra"
 markers = [
-    "physics: needs Newton/Warp (install the physics extra)",
+    "physics: steps physics through Isaac Lab / MJWarp (run in the Isaac Lab image)",
     "data: needs datasets/humanoid-v1 exc-* captures (HUMANOID_SIM_DATASETS)",
 ]
 

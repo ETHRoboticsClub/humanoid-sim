@@ -63,10 +63,8 @@ def view_replay(trace_dir: Path, usd: Path, rrd: str | None, *, fps: float = 50.
                 connect: str | None = None) -> None:
     from humanoid_sim.core import PlantCfg, PlantCore
     from humanoid_sim.model.description import Description
-    from humanoid_sim.model.joint_properties import joint_properties
-    from humanoid_sim.physics.newton_direct import NewtonCfg, NewtonRobot
+    from humanoid_sim.model.kinematics import RobotKinematics
     from humanoid_sim.replay.replay import ReplayResult
-    from humanoid_sim.sim import SimCore
 
     tr = np.load(trace_dir / "trace.npz")
     summary = json.loads((trace_dir / "summary.json").read_text())
@@ -74,22 +72,16 @@ def view_replay(trace_dir: Path, usd: Path, rrd: str | None, *, fps: float = 50.
     desc = Description.load(robot)
     joints = list(desc.joints)
     plant = PlantCore(desc, joints, 1, PlantCfg(robot=robot, dtype=torch.float64))
-    kin = NewtonRobot(usd, joint_properties(plant, joints),
-                      NewtonCfg(num_envs=1, fixed_base=True, ground=False, kinematics_only=True))
+    kin = RobotKinematics(usd, joints)
 
     stride = max(1, int(round(NS_PER_S / fps / summary["period_ns"])))
     frames = np.arange(0, len(t_ns), stride)
-    sim1 = SimCore("newton", usd, robot=robot, fixed_base=True)
     res = ReplayResult(summary["dataset_id"], summary["period_ns"], drives, t_ns[frames], {},
                        {"position": tr["real_position"][frames]}, tr["demand"][frames])
-    real_q = res.real_joint_q(sim1)
+    real_q = res.real_joint_q(plant)
 
     def body_poses(qs):
-        out = []
-        for q in qs:
-            kin.write_state(torch.as_tensor(q)[None], torch.zeros(1, len(q), dtype=torch.float64))
-            out.append(kin.state0.body_q.numpy().copy())
-        return np.stack(out)
+        return np.stack([kin.body_poses(torch.as_tensor(q)[None]) for q in qs])
 
     joint_of = {d.name: (d.joints[0] if d.crank is None else f"{d.joints[0]}/{d.crank} crank")
                 for d in desc.drives.values()}

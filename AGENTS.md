@@ -11,8 +11,9 @@ Design: `docs/architecture.md` (copy of the accepted proposal). Read it before a
   output is physical drive-output position, velocity, applied torque and demanded torque. Controller
   behaviour (standing frame, ankle targets, Madgwick, slew/blend, trip rule, policy contract) belongs
   to Controls and to humanoid-learning's `controls_model`, not here.
-- **MuJoCo** is not a physics backend here. Newton's MJWarp solver is (and its `use_mujoco_cpu` path
-  for the CPU runtime). MuJoCo is used only to cross-check kinematics against Controls' MJCF.
+- **Physics is Isaac Lab on Newton's MJWarp solver, only.** Never set `use_mujoco_cpu`: MuJoCo C does not
+  step the robot here, on any device. Newton on the host is for kinematics (viewers, model checks), and
+  MuJoCo only for cross-checking kinematics against Controls' MJCF. The real-time runtime runs on a GPU.
 
 ## Rules
 
@@ -31,15 +32,15 @@ Design: `docs/architecture.md` (copy of the accepted proposal). Read it before a
 
 ## Layout
 
-`src/humanoid_sim/`: `model/` (description → prepared URDF → USD asset), `timing/`, `devices/`,
-`transmissions/`, `core.py` (plant), `physics/` (`isaaclab`, `newton` backends), `sim.py` (SimCore),
+`src/humanoid_sim/`: `model/` (description → prepared URDF → USD asset; host kinematics), `timing/`, `devices/`,
+`transmissions/`, `core.py` (plant), `physics/isaaclab.py` (MJWarp), `sim.py` (SimCore),
 `replay/`, `signals/` (Rerun), `bench/`, `cli.py`. `sensors/` and `world/` arrive with their first feature.
 Spikes live in `spikes/` and are not imported by the package. M0 results: `docs/m0-report.md`.
 
 ## Workflow
 
-- `uv sync --extra dev` then `uv run pytest -m "not physics"`. Physics tests need `--extra physics` and a built
-  asset: `humanoid-sim build-asset` runs only in the Isaac Lab image (`docker/Dockerfile`).
+- `uv sync --extra dev` then `uv run pytest -m "not physics"`. Kinematics tests need `--extra newton`; physics
+  tests and `humanoid-sim build-asset` run only in the Isaac Lab image (`docker/Dockerfile`).
 - Submodules: `git submodule update --init --recursive`. humanoid-urdf and ankle_kinematics must stay at
   the commits Controls pins.
 - Preserve unrelated work. Commit completed, validated work in cohesive commits by concern; push only

@@ -17,7 +17,8 @@ Checks (numeric pass criteria from the design, §3.9):
   4. reset by settling: start with the loop open by a few mm, measure the residual after 0.2 s;
   5. cost per step vs the hinge-only rig.
 
-Run: ``uv run python spikes/closed_chain/ankle_rig.py [--device cuda:0]``
+Physics: MJWarp only (``use_mujoco_cpu`` is never set). Run in the Isaac Lab image or on a GPU node:
+``python spikes/closed_chain/ankle_rig.py --device cuda:0`` (``cpu`` runs MJWarp on Warp's CPU device, slowly).
 """
 
 from __future__ import annotations
@@ -36,8 +37,7 @@ EQ_SOLIMP = (0.99, 0.999, 0.0005, 0.5, 2.0)
 MODELED = {"crank_mass_kg": 0.06, "rod_mass_kg": 0.04, "foot_mass_kg": 0.9, "cross_mass_kg": 0.12}
 
 
-def rig(desc: Description, *, closed: bool, kp: float, kd: float, device: str, use_mujoco_cpu: bool,
-        eq_solref=None):
+def rig(desc: Description, *, closed: bool, kp: float, kd: float, device: str, eq_solref=None):
     import newton
 
     geom = desc.ankle_geometry("r")
@@ -88,20 +88,16 @@ def rig(desc: Description, *, closed: bool, kp: float, kd: float, device: str, u
         b.add_joint_ball(foot, rod, parent_xform=wp.transform(wp.vec3(*p_anchor0), eye),
                          child_xform=wp.transform(wp.vec3(*rod_vec), eye), label=f"loop_{name}")
     model = b.finalize(device=device)
-    solver = newton.solvers.SolverMuJoCo(model, use_mujoco_cpu=use_mujoco_cpu, integrator="implicitfast",
+    solver = newton.solvers.SolverMuJoCo(model, use_mujoco_cpu=False, integrator="implicitfast",
                                          iterations=100, ls_iterations=50)
     if closed and eq_solref is not None:
         # Loop CONNECTs get MuJoCo's default solref (0.02 s, 1): far too soft for 700 N. Stiffen them.
-        if use_mujoco_cpu:
-            solver.mj_model.eq_solref[:] = eq_solref
-            solver.mj_model.eq_solimp[:] = EQ_SOLIMP
-        else:
-            ref = solver.mjw_model.eq_solref.numpy()
-            ref[..., :] = eq_solref
-            solver.mjw_model.eq_solref.assign(ref)
-            imp = solver.mjw_model.eq_solimp.numpy()
-            imp[..., :] = EQ_SOLIMP
-            solver.mjw_model.eq_solimp.assign(imp)
+        ref = solver.mjw_model.eq_solref.numpy()
+        ref[..., :] = eq_solref
+        solver.mjw_model.eq_solref.assign(ref)
+        imp = solver.mjw_model.eq_solimp.numpy()
+        imp[..., :] = EQ_SOLIMP
+        solver.mjw_model.eq_solimp.assign(imp)
     return model, solver, tr, hinge_dofs, crank_dofs
 
 
@@ -113,8 +109,7 @@ def run(args):
     dt = 0.004
     for gains, eq_solref in (((480.0, 8.0), None), ((480.0, 8.0), (0.008, 1.0)), ((100.0, 3.5), (0.008, 1.0))):
         kp, kd = gains
-        model, solver, tr, hd, cd = rig(desc, closed=True, kp=kp, kd=kd, device=args.device,
-                                        use_mujoco_cpu=args.device == "cpu", eq_solref=eq_solref)
+        model, solver, tr, hd, cd = rig(desc, closed=True, kp=kp, kd=kd, device=args.device, eq_solref=eq_solref)
         s0, s1, ctl = model.state(), model.state(), model.control()
         newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
         res = {}
@@ -177,14 +172,10 @@ def run(args):
         res["load_deflection_rad"] = (q_loaded - q_unloaded).tolist()
         res["hinge_model_deflection_rad"] = predicted.tolist()
         res["load_finite"] = bool(np.isfinite(q_loaded).all())
-        if args.device == "cpu":
-            import mujoco
-
-            # MuJoCo C resets the state when it diverges; count those events so a reset can't pass as a result.
-            res["mujoco_badqacc_warnings"] = int(solver.mj_data.warning[mujoco.mjtWarning.mjWARN_BADQACC].number)
+        res["diverged"] = bool(not np.isfinite(q_loaded).all() or np.abs(q_loaded).max() > 10.0)
         out[f"gains_{int(kp)}_{kd}_eqsolref_{eq_solref}"] = res
     # 5: hinge-only rig cost (same solver, no cranks/rods/loops).
-    model, solver, *_ = rig(desc, closed=False, kp=480, kd=8, device=args.device, use_mujoco_cpu=args.device == "cpu")
+    model, solver, *_ = rig(desc, closed=False, kp=480, kd=8, device=args.device)
     s0, s1, ctl = model.state(), model.state(), model.control()
     t0 = time.perf_counter()
     for _ in range(500):
@@ -197,5 +188,5 @@ def run(args):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--device", default="cpu")
+    ap.add_argument("--device", default="cuda:0")
     run(ap.parse_args())
