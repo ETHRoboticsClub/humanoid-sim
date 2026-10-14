@@ -1,8 +1,0 @@
-include README.md AGENTS.md Dockerfile compose.yaml justfile runtime.lock.yaml uv.lock
-include .dockerignore .gitignore .skyignore
-recursive-include profiles *.yaml
-recursive-include scripts *.sh
-recursive-include scripts *.py
-recursive-include sky *.yaml
-recursive-include examples *.py
-recursive-include tests *.py
