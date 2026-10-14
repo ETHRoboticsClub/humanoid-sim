@@ -11,7 +11,7 @@ from collections.abc import Iterable
 
 import numpy as np
 
-TIMELINE = "time"  # Newton's ViewerRerun timeline (seconds)
+TIMELINE = "time"  # elapsed seconds since the start of the recording
 
 
 def signal_path(source: str, group: str, name: str, env: int | None = None) -> str:
@@ -36,7 +36,7 @@ class SignalLog:
                 rr.spawn()
 
     def at(self, t_ns: int) -> None:
-        self.rr.set_time(TIMELINE, timestamp=t_ns / 1e9)
+        self.rr.set_time(TIMELINE, duration=t_ns / 1e9)
 
     def log(self, name: str, value, *, source: str = "sim", group: str = "signals",
             envs: Iterable[int] | None = (0,)) -> None:
@@ -51,5 +51,5 @@ class SignalLog:
     def series(self, path: str, t_ns: np.ndarray, values: np.ndarray) -> None:
         """A whole time series in one call (columnar; the efficient path for recorded data)."""
         rr = self.rr
-        rr.send_columns(path, indexes=[rr.TimeColumn(TIMELINE, timestamp=np.asarray(t_ns) / 1e9)],
+        rr.send_columns(path, indexes=[rr.TimeColumn(TIMELINE, duration=np.asarray(t_ns) / 1e9)],
                         columns=rr.Scalars.columns(scalars=np.asarray(values, dtype=np.float64)))

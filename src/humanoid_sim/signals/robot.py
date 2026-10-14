@@ -49,7 +49,7 @@ class RobotMeshes:
         """All frames of one robot at once: ``body_q`` ``[T, B, 7]`` (columnar, cheap)."""
         import rerun as rr
 
-        times = rr.TimeColumn(TIMELINE, timestamp=np.asarray(t_ns) / 1e9)
+        times = rr.TimeColumn(TIMELINE, duration=np.asarray(t_ns) / 1e9)
         for b, name in enumerate(self.body_names):
             rr.send_columns(f"{root}/{name}", indexes=[times],
                             columns=rr.Transform3D.columns(translation=body_q[:, b, :3],
