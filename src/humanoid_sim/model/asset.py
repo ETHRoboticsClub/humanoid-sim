@@ -2,10 +2,11 @@
 
 Isaac Lab spawns robots only from USD, so the canonical sim model is a USD built here:
 
-1. :class:`~humanoid_sim.model.urdf.PreparedUrdf` (welds, sole boxes, absolute mesh paths);
+1. :class:`~humanoid_sim.model.urdf.PreparedUrdf` (welds, sole boxes, collision meshes, absolute mesh paths);
 2. Isaac Lab's URDF converter (``isaacsim-asset-isolated``, kitless): fixed joints merged, convex-hull
    colliders, self-collision on, no joint drives (gains are set at spawn from the plant);
-3. contact excludes authored as ``physics:filteredPairs`` between the named bodies.
+3. ``physics:filteredPairs`` between bodies: the profile's contact excludes and every body pair the
+   profile's self-collision sets do not pair up.
 
 The output directory is keyed by the content digest, so a description or profile change rebuilds. Runs in
 the Isaac Lab image (Linux); imports are lazy.
@@ -88,13 +89,17 @@ def build_asset(desc: Description, profile: dict, out_root: Path, *, force: bool
         collision_type="Convex Hull", self_collision=True, joint_drive=None, force_usd_conversion=True))
     usd = Path(conv.usd_path)
     excludes = add_contact_excludes(usd, profile["model"].get("contact_excludes", []))
+    self_excludes = add_contact_excludes(usd, prepared.self_collision_excludes())
     meta = {
         "schema": ASSET_SCHEMA, "key": key, "usd": str(usd.relative_to(out)), **desc.identity(),
         "welded_joints": prepared.welded,
         "sole_boxes": [{"side": s.side, "body": s.body, "replaces_mesh": s.mesh,
                         "center": s.center.tolist(), "rotation": s.rotation.tolist(),
                         "half_extents": s.half_extents.tolist()} for s in prepared.soles],
+        "merged_collision_bodies": sorted(prepared.merged),
         "contact_excludes": excludes,
+        "self_collision_sets": prepared.body_sets() if "self_collision" in profile["model"] else None,
+        "self_collision_excludes": self_excludes,
     }
     meta_path.write_text(json.dumps(meta, indent=1))
     return usd

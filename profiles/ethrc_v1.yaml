@@ -28,6 +28,20 @@ model:
     - [hej90_hip_abduction_1, hej90_leg_abduction_r_1]
     - [hej50_arm_rotation_l_1, shoulder_connector_l_1]
     - [hej50_arm_rotation_r_1, shoulder_connector_r_1]
+  # One convex hull per body (see model/urdf.py): the hands' 17 finger links and every bracket become
+  # part of their body's hull. `per_mesh` makes one hull per URDF collision mesh: 120 hulls instead of 23.
+  collision_hulls: per_body
+  # Which bodies collide with each other. A set is every body at or below its joint; the bodies in no
+  # set (base, hip carrier, torso) are `rest`. Only the listed set pairs collide; `pairs: all` keeps every pair.
+  self_collision:
+    sets: {leg_l: leg_flexion_l, leg_r: leg_flexion_r, arm_l: shoulder_flexion_l, arm_r: shoulder_flexion_r}
+    rest: trunk
+    pairs:
+      - [leg_l, leg_r]
+      - [arm_l, trunk]
+      - [arm_r, trunk]
+      - [arm_l, leg_l]
+      - [arm_r, leg_r]
   # Ground contact (Controls urdf/scene.xml floor: friction 1, condim 3).
   ground_friction: 1.0
 

@@ -2,11 +2,18 @@
 
 Applied, in order:
 1. weld every movable joint that has no actuators.yaml entry (the ORCA hands; Controls ``--fixed-orca-hands``);
-2. resolve ``package://`` mesh URIs to absolute paths;
-3. joint ranges: the description's calibration travel (Controls ``ethrc_ssot/joint_travel.py`` rule);
-4. sole boxes: on the body carrying each ``foot_roll`` joint, fit a thin box to the face of its lowest
+2. joint ranges: the description's calibration travel (Controls ``ethrc_ssot/joint_travel.py`` rule);
+3. sole boxes: on the body carrying each ``foot_roll`` joint, fit a thin box to the face of its lowest
    collision mesh (including meshes of fixed-joint children), add the box, drop that mesh's collision.
-   Algorithm: Controls ``build_mjcf.py`` ``sole_plate`` @ 447b4acb, unchanged.
+   Algorithm: Controls ``build_mjcf.py`` ``sole_plate`` @ 447b4acb, unchanged;
+4. one hull per body (profile ``collision_hulls: per_body``): every remaining collision mesh of a
+   body and of its fixed-joint children becomes one mesh in the body frame, so the converter makes one
+   convex hull per body. Against the ground plane the hull of the union reaches exactly as far as the
+   separate hulls did; between bodies it fills the gaps between parts. Primitive colliders stay;
+5. resolve ``package://`` mesh URIs to absolute paths.
+
+A *body* is a link that no fixed joint merges into a parent: the root and the child of every movable
+joint. Self-collision sets (profile ``self_collision``) group bodies by the joint they hang from.
 
 Nothing here invents geometry; every number comes from the meshes, the description or the profile.
 """
@@ -34,6 +41,10 @@ class SoleBox:
     half_extents: np.ndarray  # (m)
 
 
+COLLISION_HULLS = ("per_mesh", "per_body")
+MERGED_DIR = "collision"  # merged meshes, written next to the prepared URDF
+
+
 def read_stl(path: Path) -> np.ndarray:
     """Vertices of a binary or ASCII STL as ``[N, 3]`` (duplicates kept; only extremes are used)."""
     data = path.read_bytes()
@@ -45,6 +56,18 @@ def read_stl(path: Path) -> np.ndarray:
     tri = np.frombuffer(data[84:84 + 50 * n], dtype=np.dtype([("n", "<f4", 3), ("v", "<f4", (3, 3)),
                                                                 ("a", "<u2")]))
     return tri["v"].reshape(-1, 3).astype(np.float64)
+
+
+def write_stl(path: Path, triangles: np.ndarray) -> None:
+    """Binary STL of a triangle soup ``[3T, 3]`` (consecutive vertex triplets, as :func:`read_stl` returns)."""
+    tri = np.asarray(triangles, dtype=np.float64).reshape(-1, 3, 3)
+    normal = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    length = np.linalg.norm(normal, axis=1, keepdims=True)
+    normal = np.divide(normal, length, out=np.zeros_like(normal), where=length > 0)
+    rec = np.zeros(len(tri), dtype=np.dtype([("n", "<f4", 3), ("v", "<f4", (3, 3)), ("a", "<u2")]))
+    rec["n"], rec["v"] = normal, tri
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\0" * 80 + len(tri).to_bytes(4, "little") + rec.tobytes())
 
 
 def _origin(el) -> np.ndarray:
@@ -104,6 +127,7 @@ class PreparedUrdf:
         self.root = self.tree.getroot()
         self.welded: list[str] = []
         self.soles: list[SoleBox] = []
+        self.merged: dict[str, np.ndarray] = {}  # body → triangle soup [3T, 3] in the body frame (m)
         self._links = {link.get("name"): link for link in self.root.findall("link")}
         self._joints = self.root.findall("joint")
 
@@ -143,9 +167,13 @@ class PreparedUrdf:
             ET.SubElement(j, "limit", {"lower": f"{lo:.9g}", "upper": f"{hi:.9g}",
                                        "effort": f"{jd.effort_peak:.9g}", "velocity": f"{jd.velocity:.9g}"})
 
+    def _merged_mesh(self, mesh) -> bool:
+        return mesh.get("filename").startswith(f"{MERGED_DIR}/")
+
     def resolve_meshes(self) -> None:
         for mesh in self.root.iter("mesh"):
-            mesh.set("filename", str(self._resolve(mesh.get("filename"))))
+            if not self._merged_mesh(mesh):
+                mesh.set("filename", str(self._resolve(mesh.get("filename"))))
 
     def _fixed_subtree(self, link: str, tf: np.ndarray):
         """(link, transform in the given link's frame) for the link and its fixed-joint descendants."""
@@ -162,14 +190,9 @@ class PreparedUrdf:
             candidates = []
             for link_name, tf in self._fixed_subtree(body, np.eye(4)):
                 for col in self._links[link_name].findall("collision"):
-                    mesh = col.find("geometry/mesh")
-                    if mesh is None:
-                        continue
-                    scale = np.array([float(v) for v in mesh.get("scale", "1 1 1").split()])
-                    v = read_stl(self._resolve(mesh.get("filename"))) * scale
-                    t = tf @ _origin(col.find("origin"))
-                    pts = v @ t[:3, :3].T + t[:3, 3]
-                    candidates.append((float(pts[:, 2].min()), link_name, col, mesh, pts))
+                    pts = self._mesh_vertices(col, tf)
+                    if pts is not None:
+                        candidates.append((float(pts[:, 2].min()), link_name, col, col.find("geometry/mesh"), pts))
             if not candidates:
                 raise RuntimeError(f"sole body {body} has no collision mesh")
             _, link_name, col, mesh, pts = min(candidates, key=lambda c: c[0])
@@ -183,12 +206,102 @@ class PreparedUrdf:
             ET.SubElement(geom, "box", {"size": " ".join(f"{2 * v:.9g}" for v in half)})
             self.soles.append(SoleBox(side, body, Path(mesh.get("filename")).name, center, rot, half))
 
+    def _mesh_vertices(self, col, tf: np.ndarray) -> np.ndarray | None:
+        """Vertices of a mesh collision element in the frame ``tf`` maps its link into (None: primitive)."""
+        mesh = col.find("geometry/mesh")
+        if mesh is None:
+            return None
+        scale = np.array([float(v) for v in mesh.get("scale", "1 1 1").split()])
+        v = read_stl(self._resolve(mesh.get("filename"))) * scale
+        t = tf @ _origin(col.find("origin"))
+        return v @ t[:3, :3].T + t[:3, 3]
+
+    def body_tree(self) -> dict[str, tuple[str | None, str | None]]:
+        """Bodies in URDF order, each with the movable joint above it and its parent body (None, None: root)."""
+        parent_joint = {j.find("child").get("link"): j for j in self._joints}
+
+        def body_of(link: str) -> str:
+            while link in parent_joint and parent_joint[link].get("type") == "fixed":
+                link = parent_joint[link].find("parent").get("link")
+            return link
+
+        out = {}
+        for link in self._links:
+            j = parent_joint.get(link)
+            if j is None:
+                out[link] = (None, None)
+            elif j.get("type") != "fixed":
+                out[link] = (j.get("name"), body_of(j.find("parent").get("link")))
+        return out
+
+    def merge_body_collisions(self) -> None:
+        """One collision mesh per body: its own and its fixed-joint children's meshes, in the body frame."""
+        for body in self.body_tree():
+            parts = []
+            for link_name, tf in self._fixed_subtree(body, np.eye(4)):
+                link = self._links[link_name]
+                for col in link.findall("collision"):
+                    v = self._mesh_vertices(col, tf)
+                    if v is not None:
+                        parts.append(v)
+                        link.remove(col)
+            if not parts:
+                continue
+            self.merged[body] = np.concatenate(parts)
+            col = ET.SubElement(self._links[body], "collision", {"name": f"{body}_collision"})
+            ET.SubElement(col, "origin", {"xyz": "0 0 0", "rpy": "0 0 0"})
+            ET.SubElement(ET.SubElement(col, "geometry"), "mesh", {"filename": f"{MERGED_DIR}/{body}.stl"})
+
+    def body_sets(self) -> dict[str, str]:
+        """Body → self-collision set: the nearest set whose root joint is at or above the body, else ``rest``."""
+        cfg = self.model_cfg["self_collision"]
+        roots = {joint: name for name, joint in cfg["sets"].items()}
+        tree = self.body_tree()
+        unknown = set(roots) - {joint for joint, _ in tree.values() if joint}
+        if unknown:
+            raise ValueError(f"self_collision sets name unknown joints {sorted(unknown)}")
+        out = {}
+        for body in tree:
+            b, name = body, cfg["rest"]
+            while b is not None:
+                joint, parent = tree[b]
+                if joint in roots:
+                    name = roots[joint]
+                    break
+                b = parent
+            out[body] = name
+        return out
+
+    def self_collision_excludes(self) -> list[tuple[str, str]]:
+        """Body pairs (with colliders) whose sets the profile does not pair; ``pairs: all`` excludes none."""
+        cfg = self.model_cfg.get("self_collision")
+        if cfg is None or cfg["pairs"] == "all":
+            return []
+        sets = self.body_sets()
+        names = set(cfg["sets"]) | {cfg["rest"]}
+        allowed = set()
+        for pair in cfg["pairs"]:
+            unknown = set(pair) - names
+            if len(pair) != 2 or unknown:
+                raise ValueError(f"self_collision pair {pair}: expected two of {sorted(names)}")
+            allowed.add(frozenset(pair))
+        bodies = [b for b in self.body_tree()
+                  if any(self._links[link].findall("collision") for link, _ in self._fixed_subtree(b, np.eye(4)))]
+        return [(a, b) for i, a in enumerate(bodies) for b in bodies[i + 1:]
+                if frozenset((sets[a], sets[b])) not in allowed]
+
     def build(self) -> PreparedUrdf:
         if self.model_cfg.get("weld_unlisted_joints", False):
             self.weld_unlisted()
         self.set_joint_limits()
         self.add_sole_boxes()
-        # Digest before mesh URIs become absolute paths, so it is the same on every machine.
+        hulls = self.model_cfg.get("collision_hulls", "per_mesh")
+        if hulls not in COLLISION_HULLS:
+            raise ValueError(f"collision_hulls {hulls!r}; expected one of {COLLISION_HULLS}")
+        if hulls == "per_body":
+            self.merge_body_collisions()
+        # Digest before mesh URIs become absolute paths, so it is the same on every machine. Merged meshes
+        # are a function of this text and the description's meshes.
         self._digest = hashlib.sha256(self.text().encode()).hexdigest()
         self.resolve_meshes()
         return self
@@ -201,6 +314,17 @@ class PreparedUrdf:
         return self._digest
 
     def write(self, path: Path) -> Path:
+        """Write the URDF and its merged meshes (absolute paths in the written file only)."""
+        path = Path(path).resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self.text())
+        merged = [m for m in self.root.iter("mesh") if self._merged_mesh(m)]
+        for mesh in merged:
+            target = path.parent / mesh.get("filename")
+            write_stl(target, self.merged[target.stem])
+            mesh.set("filename", str(target))
+        try:
+            path.write_text(self.text())
+        finally:
+            for mesh in merged:
+                mesh.set("filename", f"{MERGED_DIR}/{Path(mesh.get('filename')).name}")
         return path
