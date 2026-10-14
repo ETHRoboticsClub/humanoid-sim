@@ -1,0 +1,19 @@
+schema: humanoid-sim-runtime/v1
+resolved_on: '2026-10-14'
+python: '3.12'
+uv:
+  version: '0.12.9'
+  linux_x86_64_wheel_sha256: 5badfd805fd88bf99b4b4f044f6e8f762f1892cab27477f4427bb473e93dd049
+  linux_aarch64_wheel_sha256: cce6e716df290b7f4a31f76ef39866e1dc006e947520a660459dea00b5d55234
+container_platforms: [linux/amd64, linux/arm64]
+isaaclab:
+  repository: https://github.com/isaac-sim/IsaacLab.git
+  channel: develop
+  revision: b9a673a29f3a7f09508f339c3ec370fdda2f542f
+  dependency_lock: uv.lock
+newton:
+  repository: https://github.com/newton-physics/newton.git
+  revision: 5ea82eef6f7911388025a8df6ccdb172e2fed286
+torch: '2.11.0'
+warp: '1.17.0'
+runtime: kitless
