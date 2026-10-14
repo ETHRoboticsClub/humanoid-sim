@@ -30,12 +30,11 @@ run: |
   cd "$HOME/sky_workdir"
   mkdir -p outputs/replay-mjwarp
   humanoid-sim build-asset | tail -1
-  git_rev=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
   # One process per capture in parallel: a single env leaves the GPU mostly idle.
   for cap in /data/exc-*; do
     (
       for r in $RUNS; do
-        humanoid-sim replay "$cap" --backend isaaclab --device cuda:0 --period-ms "${r%%:*}" --integrator "${r##*:}" \
+        humanoid-sim replay "$cap" --device cuda:0 --period-ms "${r%%:*}" --integrator "${r##*:}" \
           --out outputs/replay-mjwarp > "outputs/replay-mjwarp/$(basename "$cap")_${r/:/_}.log" 2>&1 \
           || echo "FAILED $cap $r"
       done

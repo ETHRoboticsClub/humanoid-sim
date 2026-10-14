@@ -19,7 +19,6 @@ file_mounts:
 envs:
   ISAACLAB_COMMIT: 32712682b69edd488eea26689da6905c48d31037
   UV_VERSION: 0.13.1
-  NUM_ENVS: "4096"
   STEPS: "500"
   ENV_COUNTS: "1 4096"          # self-collision on (full convex-hull set; OOMs above ~2k envs on 46 GB)
   NOSELF_COUNTS: "4096 8192 16384"
@@ -35,7 +34,7 @@ run: |
   humanoid-sim build-asset | tail -1
   bench() {  # name, extra args...
     local name=$1; shift
-    humanoid-sim bench gpu --backend isaaclab --device cuda:0 --steps "$STEPS" "$@" > "outputs/bench/$name.log" 2>&1 || true
+    humanoid-sim bench --device cuda:0 --steps "$STEPS" "$@" > "outputs/bench/$name.log" 2>&1 || true
     echo "== $name: $(grep -c overflow "outputs/bench/$name.log") solver overflow messages"
     sed -n '/^{/,/^}/p' "outputs/bench/$name.log" | tee "outputs/bench/$name.json"
   }
@@ -47,6 +46,6 @@ run: |
   fi
   # One excitation capture replayed through Isaac Lab/MJWarp.
   if [ "$REPLAY" = "1" ]; then
-    humanoid-sim replay /data/exc-503fc128aaf14405a0c2418d63ff9a60 --backend isaaclab --device cuda:0 \
+    humanoid-sim replay /data/exc-503fc128aaf14405a0c2418d63ff9a60 --device cuda:0 \
       --out outputs/bench/replay 2>&1 | tail -24
   fi
