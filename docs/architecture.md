@@ -1,6 +1,6 @@
 # humanoid-sim and humanoid-learning: architecture proposal
 
-Draft, 2026-10-14 (revision 3.1: M0 outcomes folded in; revision 3 is kept in `humanoid-sim-learning.rev3.md`, revision 2 in `humanoid-sim-learning.rev2.md`).
+Draft, 2026-10-14 (revision 3.2: physics only through Isaac Lab/MJWarp, runtime on a GPU. Earlier revisions are kept as `humanoid-sim-learning.rev3.1.md`, `.rev3.md` and `.rev2.md`).
 
 This proposal is based on:
 - the "09 Envisioned stack" figure;
@@ -26,7 +26,7 @@ This proposal is based on:
 - **Fidelity.** Drive-level replay of all three `exc-*` captures. Legs 3–16 mrad, inside or near PACE's band, with description values only. 4 ms matches 1 ms (ADR-5 holds). `implicitfast` is required for the ankle cranks (ADR-3). The upper body is the weak spot (waist, shoulder flexion and elbows up to 59 mrad): unmeasured passive parameters and the gantry base motion.
 - **Backend parity.** Isaac Lab/MJWarp on the GPU and Newton/MuJoCo C on the CPU agree to ≤0.9 mrad on the same USD.
 - **Throughput.** 1,751 sim-s per wall-s at 4096 envs and 6,463 at 16384 (L40S, no self-collision), against walk v2's ~220 for its whole loop. The full convex-hull self-collision set overflows, or runs out of memory, at 4096 envs, so training needs a pruned set (ADR-17).
-- **CPU runtime.** 1.16× real time on a Mac, 1.03× in a linux/arm64 container. Isaac Lab 3.0 cannot run `use_mujoco_cpu`, so the runtime uses Newton directly (ADR-9). MuJoCo-lane deletion waits for ≥1.5×.
+- **Runtime.** Physics runs only through Isaac Lab on MJWarp (decided 2026-10-14, revision 3.2). MuJoCo C never steps the robot, so the real-time runtime runs on a GPU. Single-robot Isaac Lab/MJWarp on an L40S runs at 0.44× real time today: ~9 ms of per-step overhead, not physics. M2 must reach ≥1.5×. MJWarp on a CPU runs at 0.09× and is used for tests only.
 - **Closed-chain ankle.** No-go for M1 (ADR-14): stable only with stiffened loop constraints, 2–2.4× softer than the hinge model under standing load, +19% cost.
 - **Asset pipeline.** USD is the canonical sim model, built from humanoid-urdf by humanoid-sim (ADR-16).
 
@@ -49,7 +49,7 @@ Factual corrections from the review are folded in throughout: the drive-boundary
   - It is checked against real robot logs (`.policyrun`, `exc-*`) from M1, plus golden vectors and declared `training_assumptions`.
 - **Robot facts live in humanoid-urdf.** That includes the resolved embodiment JSON, contact primitives, the IMU spec, reading bias and hard stops. Plant modeling lives in humanoid-sim, and task design in humanoid-learning.
 - **Physics:**
-  - Isaac Lab 3.0 (`release/3.0.0` pin, then GA) with Newton MJWarp, at 250 Hz (4 ms).
+  - Isaac Lab 3.0 (`release/3.0.0` pin, then GA) with Newton MJWarp, at 250 Hz (4 ms). This is the only physics: `use_mujoco_cpu` is never used.
   - Solver PD gains are constant per episode.
   - MuJoCo stays in Controls for kinematics and logic only.
 - **Visualization:**
@@ -238,7 +238,7 @@ third_party/      humanoid-urdf, ankle_kinematics
 
 **Profiles:**
 - **`train`:** batched, with the reporting layer. A fixed-base flag covers sysid replay.
-- **`runtime`:** a single robot without the reporting layer, real-time, on CPU (`MJWarpSolverCfg(use_mujoco_cpu=True)`) or GPU.
+- **`runtime`:** a single robot without the reporting layer, real-time, on a GPU (Isaac Lab/MJWarp). MJWarp on Warp's CPU device is for tests only (0.09× real time).
 
 A 100 µs reference simulator is deferred. Fidelity is checked by comparing 4 ms against 1 ms of the same stack, and against `exc-*` real data. A dedicated reference is built only for a term that real data can't settle.
 
@@ -356,7 +356,7 @@ Numeric pass criteria: stable at baseline crank gains (480/8) and walk gains (10
   - In M0, check the sim model against Controls' MJCF on 10 poses: FK, CoM, mass, and collision primitives and contact pairs.
   - Later, both builds test against the resolved embodiment JSON in humanoid-urdf's CI.
 - **Deletion gate.** The MuJoCo physics lanes are deleted only after two things:
-  - the CPU runtime benchmark passes (Isaac Lab 3.0 doesn't support macOS, so Mac developers run a linux/arm64 container);
+  - the GPU runtime benchmark passes (single robot ≥1.5× real time on Isaac Lab/MJWarp). Mac developers run physics on a remote GPU; locally they get kinematics and viewers;
   - the runtime passes Controls' integration suite (§5.6).
 
 ### 3.11 Cameras (M2 and later)
@@ -619,7 +619,7 @@ Gates, caching, bootstrap confidence intervals and the domain plugin registry (P
   - every PR: CPU contract tests and the ABI golden frame;
   - nightly on GPU: throughput, profiler sync check, `exc-*` replay, 4 ms vs 1 ms parity;
   - release: Controls' integration suite against the runtime.
-- **Mac:** Isaac Lab 3.0 has no macOS support. Use linux/arm64 containers with the CPU runtime.
+- **Mac:** Isaac Lab 3.0 has no macOS support, and physics runs only on MJWarp. Macs run the CPU contract tests, kinematics and Rerun viewers natively; physics goes to a remote GPU (Sky). The linux/arm64 image runs MJWarp on the CPU for tests only.
 
 ## 12. Hardware asks (M0)
 
@@ -680,7 +680,7 @@ Each item needs an owner and sign-off before M1:
 | 6 | Rerun (Isaac Lab visualizer plus signal logging), Viser for interaction | Decided |
 | 7 | Hugging Face only; bundle id = sha256 of files; promotion by tags; run-branch retention; W&B tracking | Decided |
 | 8 | Lockstep or virtual time in Controls | Out of scope; a Controls ADR if ever |
-| 9 | CPU runtime on Newton directly with MuJoCo C (Isaac Lab 3.0 cannot run `use_mujoco_cpu`); same USD and property table as training; MuJoCo-lane deletion gated on ≥1.5× real time (M0: 1.16 Mac, 1.03 arm64 container) | Decided; target open |
+| 9 | Runtime on a GPU with Isaac Lab/MJWarp. No MuJoCo-C physics anywhere (M0 measured a Newton/MuJoCo-C runtime at 1.16× but rejected it under the physics rule). MuJoCo-lane deletion gated on single-robot ≥1.5× real time (M0: 0.44×, overhead-bound) | Decided (rev 3.2); M2 performance target open |
 | 10 | Cameras: Warp first (M2); OVRTX after a legal check; splat and kit later | Decided |
 | 11 | Isaac Lab 3.0, `release/3.0.0` pin then GA; MJWarp; MuJoCo for Controls kinematics only | Decided |
 | 12 | Ankle: hinges plus `ankle_kinematics` torch transmission; `ankle_kinematics` v2 in Controls and sim; one C++ core in Controls | Decided (pending Controls alignment) |
@@ -703,7 +703,7 @@ Each item needs an owner and sign-off before M1:
 4. **Fidelity:** replay 0x6062 from the three `exc-*` datasets on a fixed base. Report per-joint RMS against `pdo_feedback` at 4 ms and 1 ms, against the PACE baseline.
 5. **Benchmarks:**
    - 4096-env throughput, with no host syncs (profiler);
-   - single-robot real-time factor on CPU (`use_mujoco_cpu`) and GPU, including in a linux/arm64 container on a Mac.
+   - single-robot real-time factor on Isaac Lab/MJWarp (GPU).
 6. **Closed-chain spike:** 3 days, numeric criteria, written go/no-go.
 7. **Visualization:** `humanoid-sim view` and `replay`, using Isaac Lab's Rerun visualizer plus logged drive signals for env 0, overlaid on `exc-*`.
 8. **Write-ups:** the Controls alignment note (§13) and the hardware asks (§12).
@@ -711,7 +711,7 @@ Each item needs an owner and sign-off before M1:
 **Exit criteria:**
 - `exc-*` replay within 2× the PACE RMS;
 - 4096-env throughput no worse than walk v2's current iteration time;
-- CPU real-time factor ≥ 1.0, or MuJoCo-lane deletion formally blocked;
+- runtime real-time factor ≥ 1.0, or MuJoCo-lane deletion formally blocked (result: blocked; GPU single robot 0.44×);
 - the closed-chain decision recorded.
 
 **M1: walk v2 parity.**
