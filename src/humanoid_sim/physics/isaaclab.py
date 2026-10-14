@@ -78,7 +78,10 @@ class IsaacLabRobot:
 
         scene_cfg = SceneCfg(num_envs=cfg.num_envs, env_spacing=cfg.env_spacing_m, replicate_physics=True)
         scene_cfg.robot = robot
-        solver = MJWarpSolverCfg(integrator=cfg.integrator, use_mujoco_cpu=cfg.use_mujoco_cpu,
+        solver_cls = MJWarpSolverCfg
+        if cfg.use_mujoco_cpu:
+            from humanoid_sim.physics.isaaclab_cpu import MujocoCpuSolverCfg as solver_cls
+        solver = solver_cls(integrator=cfg.integrator, use_mujoco_cpu=cfg.use_mujoco_cpu,
                                  iterations=cfg.iterations, ls_iterations=cfg.ls_iterations, cone=cfg.cone,
                                  njmax=cfg.njmax, nconmax=cfg.nconmax)
         visualizers = []

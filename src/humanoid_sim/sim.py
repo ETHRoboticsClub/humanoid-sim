@@ -29,10 +29,7 @@ class SimCore:
             raise ValueError(f"unknown backend {backend!r}; choose one of {BACKENDS}")
         if use_mujoco_cpu is None:
             use_mujoco_cpu = backend == "newton" and device == "cpu"
-        if backend == "isaaclab" and use_mujoco_cpu:
-            # Isaac Lab 3.0 (release/3.0.0 @ 3271268) asks SolverMuJoCo.get_max_contact_count(), which the
-            # MuJoCo-CPU path does not implement. Use the newton backend for the CPU runtime.
-            raise ValueError("isaaclab backend cannot use use_mujoco_cpu; use backend='newton' on CPU")
+        # isaaclab + use_mujoco_cpu goes through physics/isaaclab_cpu.py (works around an Isaac Lab 3.0 gap).
         self.desc = Description.load(robot)
         self.profile = load_profile(robot)
         phys = self.profile["physics"]

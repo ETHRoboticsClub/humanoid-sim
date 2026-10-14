@@ -37,7 +37,7 @@ The output directory is keyed by a machine-independent content hash.
 - `isaaclab`: Isaac Lab 3.0 articulation on MJWarp. The training and GPU path.
 - `newton`: Newton plus MuJoCo C. The CPU runtime, and native on macOS.
 
-Isaac Lab 3.0 cannot run `use_mujoco_cpu`: its MJWarp manager calls `get_max_contact_count()`, which the MuJoCo-CPU path doesn't implement. MJWarp on Warp's CPU device runs at 0.09× real time.
+Out of the box, Isaac Lab 3.0 cannot run `use_mujoco_cpu`: its MJWarp manager calls `get_max_contact_count()`, which the MuJoCo-CPU path doesn't implement. It runs with our manager subclass, but about 20% slower than Newton-direct. MJWarp on Warp's CPU device runs at 0.09× real time.
 
 **Plant.** `core.PlantCore`, backend-independent, batched torch:
 - an exact `FakeDriveDemand` mirror;
@@ -139,6 +139,8 @@ Levers, in order:
 1. the pruned self-collision set (same as for training);
 2. fusing the plant's small torch ops;
 3. a dedicated runtime thread.
+
+**Isaac Lab on MuJoCo C.** The Isaac Lab gap is worked around in `physics/isaaclab_cpu.py`: a manager subclass selected through the solver config's `class_type`, which allocates an empty contact report. Isaac Lab contact sensors get no data on that path. Isaac Lab's per-step overhead then costs about 20%. Interleaved runs in the container on a loaded machine gave Newton-direct 0.97/0.95 and Isaac Lab 0.75/0.78. The CPU runtime therefore stays on Newton-direct, and the Isaac Lab CPU path is kept for consistency checks. Upstream: Newton's `SolverMuJoCo.get_max_contact_count` and `update_contacts` raise `NotImplementedError` on the MuJoCo-C path.
 
 **Recommendation:** keep the MuJoCo physics lanes until the runtime reaches ≥ 1.5× with headroom (ADR-9 stays "benchmark", now with a target).
 
