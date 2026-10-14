@@ -1,4 +1,4 @@
-"""M0 spike (ADR-14): the real closed-chain ankle in Newton / MuJoCo, against the hinge + transmission model.
+"""Spike: the real closed-chain ankle in MJWarp, against the hinge + transmission model.
 
 Rig (right ankle, pivot frame = world, shin fixed):
     shin ─pitch(+Y)→ cross ─roll(+X)→ foot
@@ -8,7 +8,7 @@ The two rod→foot ball joints sit outside the articulation, so SolverMuJoCo tur
 equality (Newton's loop-closure path; the UsdPhysics ``excludeFromArticulation`` equivalent).
 
 Geometry: humanoid-urdf ``ankle_model.right_geometry``. MODELED, not measured: crank, rod and foot masses
-(hardware ask #4 — crank and rod masses do not exist in the description), foot inertia.
+(crank and rod masses do not exist in the description), foot inertia.
 
 Checks (numeric pass criteria from the design, §3.9):
   1. kinematics: cranks driven to the transmission's angles for a pose → foot reaches that pose;

@@ -1,7 +1,6 @@
 # humanoid-sim
 
 The robot below Controls: drives, mechanism, body, sensors and world, on Isaac Lab 3.0 / Newton.
-Design: `docs/architecture.md` (copy of the accepted proposal). Read it before adding a module.
 
 ## Boundaries
 
@@ -35,7 +34,7 @@ Design: `docs/architecture.md` (copy of the accepted proposal). Read it before a
 `src/humanoid_sim/`: `model/` (description → prepared URDF → USD asset; host kinematics), `timing/`, `devices/`,
 `transmissions/`, `core.py` (plant), `physics/isaaclab.py` (MJWarp), `sim.py` (SimCore),
 `replay/`, `signals/` (Rerun), `bench/`, `cli.py`. `sensors/` and `world/` arrive with their first feature.
-Spikes live in `spikes/` and are not imported by the package. M0 results: `docs/m0-report.md`.
+Spikes live in `spikes/` and are not imported by the package.
 
 ## Workflow
 
@@ -43,6 +42,8 @@ Spikes live in `spikes/` and are not imported by the package. M0 results: `docs/
   tests and `humanoid-sim build-asset` run only in the Isaac Lab image (`docker/Dockerfile`).
 - Submodules: `git submodule update --init --recursive`. humanoid-urdf and ankle_kinematics must stay at
   the commits Controls pins.
+- Docs explain how the repo works and how to use it. Design proposals, ADRs, milestone reports and
+  other records of how it was built stay out of the repo, as do references to them.
 - Preserve unrelated work. Commit completed, validated work in cohesive commits by concern; push only
   when authorized; never push directly to master.
 - Commit messages say what changed and why. No `Co-Authored-By` trailers or AI/model attribution in

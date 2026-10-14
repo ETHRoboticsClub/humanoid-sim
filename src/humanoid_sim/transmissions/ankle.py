@@ -13,7 +13,7 @@ is typed in here. ``q`` is in URDF (calibration) joint coordinates; the descript
 ``semantic_to_kinematic_sign`` maps it to the linkage frame. Crank angles are relative to the
 linkage neutral, which is the drive's calibration zero.
 
-This is the M0 torch port. It is golden-tested against ``ankle_kinematics`` (numpy reference) and
+It is golden-tested against ``ankle_kinematics`` (numpy reference) and
 humanoid-urdf ``ankle_model``; it moves into ankle_kinematics v2 once Controls agrees the plan.
 """
 

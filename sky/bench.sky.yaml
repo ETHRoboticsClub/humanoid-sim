@@ -1,4 +1,4 @@
-# M0 GPU benchmarks and backend parity on one GPU.
+# GPU throughput benchmarks and a replay on one GPU.
 #   sky launch -y -c hsim-bench -i 10 sky/bench.sky.yaml       (autostop: stop, not down)
 #   sky exec hsim-bench sky/bench.sky.yaml                       (re-run; setup is skipped)
 #   rsync -avz hsim-bench:sky_workdir/outputs/bench/ outputs/bench-gpu/
@@ -41,11 +41,11 @@ run: |
   }
   for n in ${ENV_COUNTS}; do bench "isaaclab_gpu_${n}" --num-envs "$n"; done
   for n in ${NOSELF_COUNTS}; do bench "isaaclab_gpu_${n}_noself" --num-envs "$n" --no-self-collision; done
-  # Closed-chain ankle spike under MJWarp (CPU numbers come from MuJoCo C on a Mac).
+  # Closed-chain ankle spike under MJWarp.
   if [ "$SPIKE" = "1" ]; then
     python spikes/closed_chain/ankle_rig.py --device cuda:0 2>&1 | sed -n '/^{/,/^}/p' | tee outputs/bench/spike_closed_chain_gpu.json
   fi
-  # Backend parity: the same capture through MJWarp on the GPU (Isaac Lab) vs MuJoCo C on the Mac.
+  # One excitation capture replayed through Isaac Lab/MJWarp.
   if [ "$REPLAY" = "1" ]; then
     humanoid-sim replay /data/exc-503fc128aaf14405a0c2418d63ff9a60 --backend isaaclab --device cuda:0 \
       --out outputs/bench/replay 2>&1 | tail -24

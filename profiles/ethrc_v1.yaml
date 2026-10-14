@@ -1,6 +1,6 @@
 # Plant modeling choices for humanoid-v1 (ETHRC V1). Robot facts are NOT here: they come from
 # third_party/humanoid-urdf. The `model` block below holds facts that today live only in Controls code;
-# each names its source and moves to humanoid-urdf under ADR-15 (then this block shrinks to a reference).
+# each names its source and moves to humanoid-urdf once it is added there.
 schema: humanoid-sim-profile/v1
 robot: ethrc_v1
 
@@ -32,9 +32,9 @@ model:
   ground_friction: 1.0
 
 physics:
-  period_ns: 4000000          # ADR-5: 250 Hz
+  period_ns: 4000000          # 250 Hz
   solver: mjwarp
-  integrator: implicitfast    # ADR-3: compared against euler in M0
+  integrator: implicitfast    # euler tracks the ankle cranks 5-9x worse in replay
   cone: pyramidal
   iterations: 100
   ls_iterations: 50
