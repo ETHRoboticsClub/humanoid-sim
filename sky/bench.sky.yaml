@@ -1,0 +1,77 @@
+# M0 GPU benchmarks and backend parity on one GPU.
+#   sky launch -y -c hsim-bench -i 10 sky/bench.sky.yaml       (autostop: stop, not down)
+#   sky exec hsim-bench sky/bench.sky.yaml                       (re-run; setup is skipped)
+#   rsync -avz hsim-bench:sky_workdir/outputs/bench/ outputs/bench-gpu/
+# Environment: Isaac Lab release/3.0.0 at the pinned commit, resolved from its own uv.lock on the VM.
+name: humanoid-sim-bench
+workdir: .
+
+resources:
+  cloud: aws
+  accelerators: L40S:1
+  cpus: 8+
+  memory: 32+
+  disk_size: 200
+
+file_mounts:
+  /data/exc-503fc128aaf14405a0c2418d63ff9a60: ../datasets/humanoid-v1/exc-503fc128aaf14405a0c2418d63ff9a60
+
+envs:
+  ISAACLAB_COMMIT: 32712682b69edd488eea26689da6905c48d31037
+  UV_VERSION: 0.13.1
+  NUM_ENVS: "4096"
+  STEPS: "500"
+  ENV_COUNTS: "1 4096"          # self-collision on (full convex-hull set; OOMs above ~2k envs on 46 GB)
+  NOSELF_COUNTS: "4096 8192 16384"
+  REPLAY: "1"
+  SPIKE: "0"
+
+setup: |
+  set -euo pipefail
+  nvidia-smi --query-gpu=name,driver_version --format=csv
+  sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends git libgl1 libegl1 libglib2.0-0 \
+    libgomp1 libsm6 libxt6 libxrender1 libxext6 > /dev/null
+  curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+  export PATH="$HOME/.local/bin:$PATH"
+  if [ ! -d "$HOME/isaaclab/.git" ]; then
+    git init -q "$HOME/isaaclab" && git -C "$HOME/isaaclab" remote add origin https://github.com/isaac-sim/IsaacLab.git
+  fi
+  git -C "$HOME/isaaclab" fetch -q --depth 1 origin "$ISAACLAB_COMMIT" && git -C "$HOME/isaaclab" checkout -q --detach FETCH_HEAD
+  cd "$HOME/isaaclab"
+  uv python install 3.12
+  export UV_PROJECT_ENVIRONMENT="$HOME/il-venv"
+  uv venv -q --python 3.12 --seed "$UV_PROJECT_ENVIRONMENT" --allow-existing
+  uv sync -q --frozen --inexact --extra importers --extra rerun --extra viser
+  PY="$UV_PROJECT_ENVIRONMENT/bin/python"
+  # torch cu130 needs driver >= 580; fall back to the same torch built for CUDA 12.8 on older drivers.
+  if ! "$PY" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"; then
+    echo "[setup] torch cu130 cannot use this driver; installing torch 2.11.0+cu128"
+    uv pip install -q --python "$PY" --reinstall torch==2.11.0 torchvision==0.26.0 \
+      --index-url https://download.pytorch.org/whl/cu128
+  fi
+  "$PY" -c "import torch, warp as wp; wp.init(); print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), 'warp devices', wp.get_cuda_device_count())"
+  uv pip install -q --python "$PY" --no-deps -e "$HOME/sky_workdir"
+
+run: |
+  set -euo pipefail
+  export PATH="$HOME/.local/bin:$HOME/il-venv/bin:$PATH"
+  cd "$HOME/sky_workdir"
+  mkdir -p outputs/bench
+  humanoid-sim build-asset | tail -1
+  bench() {  # name, extra args...
+    local name=$1; shift
+    humanoid-sim bench gpu --backend isaaclab --device cuda:0 --steps "$STEPS" "$@" > "outputs/bench/$name.log" 2>&1 || true
+    echo "== $name: $(grep -c overflow "outputs/bench/$name.log") solver overflow messages"
+    sed -n '/^{/,/^}/p' "outputs/bench/$name.log" | tee "outputs/bench/$name.json"
+  }
+  for n in ${ENV_COUNTS}; do bench "isaaclab_gpu_${n}" --num-envs "$n"; done
+  for n in ${NOSELF_COUNTS}; do bench "isaaclab_gpu_${n}_noself" --num-envs "$n" --no-self-collision; done
+  # Closed-chain ankle spike under MJWarp (CPU numbers come from MuJoCo C on a Mac).
+  if [ "$SPIKE" = "1" ]; then
+    python spikes/closed_chain/ankle_rig.py --device cuda:0 2>&1 | sed -n '/^{/,/^}/p' | tee outputs/bench/spike_closed_chain_gpu.json
+  fi
+  # Backend parity: the same capture through MJWarp on the GPU (Isaac Lab) vs MuJoCo C on the Mac.
+  if [ "$REPLAY" = "1" ]; then
+    humanoid-sim replay /data/exc-503fc128aaf14405a0c2418d63ff9a60 --backend isaaclab --device cuda:0 \
+      --out outputs/bench/replay 2>&1 | tail -24
+  fi
