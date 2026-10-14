@@ -5,8 +5,8 @@ samples, arriving without added latency: it is already what the drive used) at t
 mode, no feed-forward or target velocity (as in the capture). The sim's drive-frame position, velocity
 and applied torque are scored against the drive's own measurements at the same times.
 
-Fixed base: the capture was taken on a gantry whose base swings (IMU |ω| up to ~1 rad/s); PACE fits with a
-fixed root too, so this is the same approximation as the sysid baseline.
+Fixed base: the capture was taken on a gantry whose base swings (IMU |ω| up to ~1 rad/s); the replay
+ignores that motion.
 """
 
 from __future__ import annotations

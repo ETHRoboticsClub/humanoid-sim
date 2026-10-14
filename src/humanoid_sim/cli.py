@@ -93,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--robot", default="ethrc_v1")
     p.add_argument("--assets", default=str(DEFAULT_ASSETS))
-    p.add_argument("--usd", default=None, help="robot USD (default: newest built asset)")
+    p.add_argument("--usd", default=None, help="robot USD (default: the asset built for this description and profile)")
     sub = p.add_subparsers(dest="command")
 
     b = sub.add_parser("build-asset")

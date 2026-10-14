@@ -7,6 +7,5 @@
 outputs
 runs
 third_party
-docs
 tests
 spikes

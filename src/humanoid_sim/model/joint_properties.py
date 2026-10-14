@@ -1,4 +1,4 @@
-"""Per-joint solver properties, shared by every physics backend so they cannot diverge.
+"""Per-joint solver properties, written to the articulation at spawn.
 
 * ``stiffness``, ``damping``: the plant's constant solver PD (``k0``, ``d0``; ankles via J at standing).
 * ``armature``: description (ankles: ``armature_joint``, the reflected crank inertia).

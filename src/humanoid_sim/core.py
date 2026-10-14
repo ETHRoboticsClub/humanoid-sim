@@ -61,7 +61,7 @@ class PlantCore:
         standing = torch.tensor([desc.joints[n].standing_offset_rad if n in desc.joints else 0.0
                                  for n in joint_names], device=dev, dtype=dt)
         k0, d0 = self.map.joint_space_gains(self.drive_stiffness, self.drive_damping, standing)
-        # Constant per-episode solver gains [E, J]; randomization writes these at reset only.
+        # Constant per-episode solver gains [E, J], written at reset only.
         self.k0 = k0.expand(num_envs, -1).clone()
         self.d0 = d0.expand(num_envs, -1).clone()
         self.actuated = self.map.actuated_joints

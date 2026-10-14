@@ -1,7 +1,7 @@
 """Batched drive bank: demands in, drive-output torque out, in the physical drive frame.
 
 Force law and clip follow Controls' MuJoCo plant (``ethrc_sim/plant.py`` ``Plant.step`` and
-``plant_host.references_from_demands``), which is what the fake-CoE lane runs today:
+``plant_host.references_from_demands``), which runs behind Controls' fake EtherCAT bank:
 
 * enabled and mode JVPT (-64): ``τ = kp (target − q) + kd (v_target − v) + ff``;
 * enabled and mode freeze (-62) or homing (6): hold the position latched on entry, ``v_target = 0``, no ff;

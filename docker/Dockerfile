@@ -1,5 +1,5 @@
 # Isaac Lab 3.0 (kitless, Newton) + humanoid-sim. Multi-arch: linux/amd64 (GPU hosts) and linux/arm64
-# (Mac development on the CPU runtime, DGX Spark). Isaac Lab is resolved from its own frozen uv.lock at
+# (Mac development and tests, DGX Spark). Isaac Lab is resolved from its own frozen uv.lock at
 # the pinned commit; humanoid-sim installs into the same environment without touching that resolution.
 ARG BASE_IMAGE=public.ecr.aws/ubuntu/ubuntu:24.04
 FROM ${BASE_IMAGE}

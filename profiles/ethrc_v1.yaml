@@ -1,6 +1,6 @@
 # Plant modeling choices for humanoid-v1 (ETHRC V1). Robot facts are NOT here: they come from
-# third_party/humanoid-urdf. The `model` block below holds facts that today live only in Controls code;
-# each names its source and moves to humanoid-urdf once it is added there.
+# third_party/humanoid-urdf. The `model` block below holds facts that live only in Controls code;
+# each names its source.
 schema: humanoid-sim-profile/v1
 robot: ethrc_v1
 
@@ -34,12 +34,12 @@ model:
 physics:
   period_ns: 4000000          # 250 Hz
   solver: mjwarp
-  integrator: implicitfast    # euler tracks the ankle cranks 5-9x worse in replay
+  integrator: implicitfast    # implicit in the damping: stable with the stiff ankle-crank PD at 4 ms
   cone: pyramidal
   iterations: 100
   ls_iterations: 50
-  # MJWarp per-world buffers. With self-collision on (convex hulls + 9 excludes) the 4096-env benchmark
-  # overflowed at njmax 300 / default nconmax (needed nconmax 879, njmax up to 238): size with margin.
+  # MJWarp per-world constraint and contact buffers. Self-collision (convex hulls minus the excludes above)
+  # needs about nconmax 880 and njmax 240 standing on flat ground; MJWarp reports overflows at run time.
   njmax: 400
   nconmax: 1024
   self_collision: true

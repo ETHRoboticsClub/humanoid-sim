@@ -1,18 +1,19 @@
 # humanoid-sim
 
-The robot below Controls: drives, mechanism, body, sensors and world, on Isaac Lab 3.0 / Newton.
+The robot below Controls: drives, ankle mechanism and body, on Isaac Lab 3.0 / Newton (MJWarp).
 
 ## Boundaries
 
-- **No ROS.** Nothing here imports rclpy, ament or colcon. Controls reaches the sim through the
-  runtime segment (`runtime/abi`), never the other way round.
+- **No ROS.** Nothing here imports rclpy, ament or colcon, or any Controls code. Controls behaviour that the
+  plant depends on is mirrored here with its source cited.
 - **Drive boundary.** Input is a `FakeDriveDemand` mirror per EtherCAT drive (ankle cranks included);
   output is physical drive-output position, velocity, applied torque and demanded torque. Controller
   behaviour (standing frame, ankle targets, Madgwick, slew/blend, trip rule, policy contract) belongs
-  to Controls and to humanoid-learning's `controls_model`, not here.
+  to Controls, not here.
 - **Physics is Isaac Lab on Newton's MJWarp solver, only.** Never set `use_mujoco_cpu`: MuJoCo C does not
   step the robot here, on any device. Newton on the host is for kinematics (viewers, model checks), and
-  MuJoCo only for cross-checking kinematics against Controls' MJCF. The real-time runtime runs on a GPU.
+  MuJoCo only for cross-checking kinematics against Controls' MJCF. Physics runs on CUDA; Warp's CPU
+  device is for tests only.
 
 ## Rules
 
@@ -33,7 +34,7 @@ The robot below Controls: drives, mechanism, body, sensors and world, on Isaac L
 
 `src/humanoid_sim/`: `model/` (description → prepared URDF → USD asset; host kinematics), `timing/`, `devices/`,
 `transmissions/`, `core.py` (plant), `physics/isaaclab.py` (MJWarp), `sim.py` (SimCore),
-`replay/`, `signals/` (Rerun), `bench/`, `cli.py`. `sensors/` and `world/` arrive with their first feature.
+`replay/`, `signals/` (Rerun), `bench/`, `cli.py`.
 Spikes live in `spikes/` and are not imported by the package.
 
 ## Workflow

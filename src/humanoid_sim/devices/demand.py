@@ -18,7 +18,7 @@ MODE_JVPT = -64
 MODE_FREEZE = -62
 
 # Raw JVPT gain counts per SI gain (Nm/rad, Nm s/rad). Controls ethrc_ssot/drive_gains.py:29
-# JVPT_PER_SI_GAIN; humanoid-urdf records it only in a comment. Modeled: to move into humanoid-urdf.
+# JVPT_PER_SI_GAIN; humanoid-urdf records it only in a comment. Modeled.
 JVPT_PER_SI_GAIN = 1000.0
 
 
@@ -35,7 +35,7 @@ class DriveDemand:
     i_gain_raw: torch.Tensor
     d_gain_raw: torch.Tensor
     max_torque_mnm: torch.Tensor
-    homing_hold: torch.Tensor  # bool; never read by Controls' plant_host, carried for the ABI
+    homing_hold: torch.Tensor  # bool; never read by Controls' plant_host, kept so the mirror is exact
 
     @classmethod
     def disabled(cls, num_envs: int, num_drives: int, *, device="cpu", dtype=torch.float32) -> DriveDemand:

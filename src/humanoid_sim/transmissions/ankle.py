@@ -13,8 +13,7 @@ is typed in here. ``q`` is in URDF (calibration) joint coordinates; the descript
 ``semantic_to_kinematic_sign`` maps it to the linkage frame. Crank angles are relative to the
 linkage neutral, which is the drive's calibration zero.
 
-It is golden-tested against ``ankle_kinematics`` (numpy reference) and
-humanoid-urdf ``ankle_model``; it moves into ankle_kinematics v2 once Controls agrees the plan.
+It is golden-tested against ``ankle_kinematics`` (numpy reference) and humanoid-urdf ``ankle_model``.
 """
 
 from __future__ import annotations

@@ -2,7 +2,7 @@
 
 Naming: ``/{source}/{env}/{group}/{name}`` for simulated signals and ``/{source}/{group}/{name}`` for one
 robot's recorded data, e.g. ``/sim/0/drives/maxonHEJ90L4/position``, ``/real/drives/maxonHEJ90L4/position``,
-``/sim/0/imu/gyro``, ``/sim/0/truth/base/twist``. Units are SI and implied by the name.
+``/residual/0/drives/maxonHEJ90L4/position``. Units are SI and implied by the name.
 """
 
 from __future__ import annotations

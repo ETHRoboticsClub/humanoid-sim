@@ -1,6 +1,6 @@
 # humanoid-sim
 
-The ETHRC humanoid below Controls: drives, ankle mechanism, body, sensors and world, on Isaac Lab 3.0 /
+The ETHRC humanoid below Controls: drives, ankle mechanism and body, on Isaac Lab 3.0 /
 Newton (MJWarp). ROS-free. See `AGENTS.md` for the rules and the layout.
 
 ```bash

@@ -2,7 +2,7 @@ name: CI
 on: [push, pull_request]
 jobs:
   cpu-contracts:
-    # Device layer, transmissions, model build, readers: no Isaac Lab, no Newton.
+    # Device layer, transmissions, model build, readers and host kinematics (Newton): no Isaac Lab.
     strategy:
       fail-fast: false
       matrix:

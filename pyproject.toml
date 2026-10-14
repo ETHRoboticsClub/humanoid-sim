@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "humanoid-sim"
 version = "0.1.0"
-description = "ETHRC humanoid plant: drives, mechanism, body and sensors below Controls, on Isaac Lab 3.0 / Newton"
+description = "ETHRC humanoid plant: drives, ankle mechanism and body below Controls, on Isaac Lab 3.0 / Newton"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "numpy>=2",

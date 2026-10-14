@@ -10,7 +10,7 @@ equality (Newton's loop-closure path; the UsdPhysics ``excludeFromArticulation``
 Geometry: humanoid-urdf ``ankle_model.right_geometry``. MODELED, not measured: crank, rod and foot masses
 (crank and rod masses do not exist in the description), foot inertia.
 
-Checks (numeric pass criteria from the design, §3.9):
+Checks:
   1. kinematics: cranks driven to the transmission's angles for a pose → foot reaches that pose;
   2. stability at crank gains 480/8 (baseline) and 100/3.5 (walk) at 4 ms;
   3. 700 N foot load with a 5 cm CoP offset: ankle deflection vs the hinge model's ``(JᵀKJ)⁻¹ τ``;

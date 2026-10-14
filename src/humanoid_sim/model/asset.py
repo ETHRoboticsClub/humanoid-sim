@@ -1,4 +1,4 @@
-"""Robot asset: description + profile → USD, the one model every physics path loads.
+"""Robot asset: description + profile → USD, the model the physics and host kinematics load.
 
 Isaac Lab spawns robots only from USD, so the canonical sim model is a USD built here:
 
