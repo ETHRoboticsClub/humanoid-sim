@@ -52,10 +52,11 @@ physics:
   cone: pyramidal
   iterations: 100
   ls_iterations: 50
-  # MJWarp per-world constraint and contact buffers. Self-collision (convex hulls minus the excludes above)
-  # needs about nconmax 880 and njmax 240 standing on flat ground; MJWarp reports overflows at run time.
+  # MJWarp buffers. nconmax is a per-world average (the contact pool is shared by all worlds), njmax a
+  # per-world maximum. With per-body hulls a standing robot needs about 30 and 130, a fallen one up to
+  # about 390 constraint rows. MJWarp prints an overflow warning when either runs out.
   njmax: 400
-  nconmax: 1024
+  nconmax: 64
   self_collision: true
 
 solver_gains: baseline        # constant per-episode PD = humanoid-urdf baseline_position_gains (ankles via J at standing)

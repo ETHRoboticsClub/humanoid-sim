@@ -20,8 +20,8 @@ envs:
   ISAACLAB_COMMIT: 32712682b69edd488eea26689da6905c48d31037
   UV_VERSION: 0.13.1
   STEPS: "500"
-  ENV_COUNTS: "1 4096"          # self-collision on (full convex-hull set; OOMs above ~2k envs on 46 GB)
-  NOSELF_COUNTS: "4096 8192 16384"
+  ENV_COUNTS: "1 4096 8192 16384"   # self-collision on
+  NOSELF_COUNTS: "4096 16384"
   REPLAY: "1"
   SPIKE: "0"
 
