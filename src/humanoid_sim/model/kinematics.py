@@ -44,3 +44,29 @@ class RobotKinematics:
         joint_q = self._wp.from_torch(jq)
         self._newton.eval_fk(self.model, joint_q, self.model.joint_qd, self.state)
         return self.state.body_q.numpy().copy()
+
+
+def standing_base_height(usd_path: Path, desc, soles: list[dict]) -> float:
+    """Height of the upright base at which the standing pose touches the ground with its lowest sole-box corner
+    (``asset.json`` ``sole_boxes``). With the description's standing offsets the soles are not level under an
+    upright base (they pitch toes-down by 10° and 17°), so the robot stands on their edges; as a rigid pose it
+    is not balanced and tips over within about a second."""
+    joints = list(desc.joints)
+    kin = RobotKinematics(usd_path, joints, base_height_m=0.0)
+    q = torch.tensor([[desc.joints[n].standing_offset_rad for n in joints]], dtype=torch.float64)
+    poses = kin.body_poses(q)
+    labels = [lbl.rsplit("/", 1)[-1] for lbl in kin.model.body_label]
+    signs = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], dtype=np.float64)
+    lowest = np.inf
+    for sole in soles:
+        pose = poses[labels.index(sole["body"])]
+        local = np.asarray(sole["center"]) + (signs * np.asarray(sole["half_extents"])) @ np.asarray(sole["rotation"]).T
+        lowest = min(lowest, float((_rotate(pose[3:], local) + pose[:3])[:, 2].min()))
+    return -lowest
+
+
+def _rotate(q_xyzw: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Rotate vectors ``v`` (``[3]`` or ``[N, 3]``) by the quaternion."""
+    x, y, z, w = q_xyzw
+    u = np.array([x, y, z])
+    return v + 2 * w * np.cross(u, v) + 2 * np.cross(u, np.cross(u, v))

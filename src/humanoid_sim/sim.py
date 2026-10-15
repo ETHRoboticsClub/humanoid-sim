@@ -45,7 +45,8 @@ class SimCore:
             iterations=phys["iterations"], ls_iterations=phys["ls_iterations"], cone=phys["cone"],
             njmax=phys["njmax"], nconmax=phys["nconmax"],
             self_collision=phys["self_collision"] if self_collision is None else self_collision,
-            base_joints=base_joints, rerun=rerun, rerun_rrd=rerun_rrd), props=props)
+            base_joints=base_joints, ground_friction=self.profile["model"]["ground_friction"],
+            rerun=rerun, rerun_rrd=rerun_rrd), props=props)
         order = [self.backend.joint_names.index(n) for n in joints]
         self._to_plant = torch.tensor(order, device=self.plant.cfg.device)
         self._base = (torch.tensor([self.backend.joint_names.index(n) for n, _ in BASE_JOINTS],

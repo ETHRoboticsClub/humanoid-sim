@@ -73,6 +73,18 @@ def add_contact_excludes(usd_path: Path, pairs: list[list[str]]) -> list[tuple[s
     return authored
 
 
+def asset_meta(usd_path: Path) -> dict:
+    """``asset.json`` of the asset a built USD belongs to."""
+    usd_path = Path(usd_path).resolve()
+    for parent in usd_path.parents:
+        meta = parent / "asset.json"
+        if meta.exists():
+            data = json.loads(meta.read_text())
+            if (parent / data["usd"]).resolve() == usd_path:
+                return data
+    raise FileNotFoundError(f"{usd_path} is not inside a built asset (no asset.json)")
+
+
 def build_asset(desc: Description, profile: dict, out_root: Path, *, force: bool = False,
                 base_joints: bool = False) -> Path:
     """Build (or reuse) the robot USD; returns its path. Writes ``asset.json`` with the provenance."""
