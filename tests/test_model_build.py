@@ -117,16 +117,17 @@ def test_self_collision_sets_and_excludes(built):
     sets = p.body_sets()
     count = {name: sum(s == name for s in sets.values()) for name in set(sets.values())}
     assert count == {"leg_l": 6, "leg_r": 6, "arm_l": 4, "arm_r": 4, "trunk": 3}
-    allowed = {frozenset(pair) for pair in load_profile("ethrc_v1")["model"]["self_collision"]["pairs"]}
-    excluded = {frozenset(pair) for pair in p.self_collision_excludes()}
+    assert p.self_collision_excludes() == []  # the profile collides every pair
+    pairs = [["leg_l", "leg_r"], ["arm_l", "trunk"], ["arm_r", "trunk"]]
+    subset = PreparedUrdf(desc, _profile(self_collision={**p.model_cfg["self_collision"], "pairs": pairs})).build()
+    allowed = {frozenset(pair) for pair in pairs}
+    excluded = {frozenset(pair) for pair in subset.self_collision_excludes()}
     bodies = list(p.body_tree())
     for i, a in enumerate(bodies):
         for b in bodies[i + 1:]:
             assert (frozenset((a, b)) in excluded) == (frozenset((sets[a], sets[b])) not in allowed)
     assert frozenset(("bottom_universal_joint_l_1", "bottom_universal_joint_l_Mirror__1")) not in excluded
     assert frozenset(("connector_elbow_forearm_l_1", "connector_elbow_forearm_r_1")) in excluded
-    everything = PreparedUrdf(desc, _profile(self_collision={**p.model_cfg["self_collision"], "pairs": "all"}))
-    assert everything.build().self_collision_excludes() == []
 
 
 def test_collision_config_is_checked(built):

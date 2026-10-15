@@ -32,16 +32,13 @@ model:
   # part of their body's hull. `per_mesh` makes one hull per URDF collision mesh: 120 hulls instead of 23.
   collision_hulls: per_body
   # Which bodies collide with each other. A set is every body at or below its joint; the bodies in no
-  # set (base, hip carrier, torso) are `rest`. Only the listed set pairs collide; `pairs: all` keeps every pair.
+  # set (base, hip carrier, torso) are `rest`. `pairs` lists the set pairs that collide, or `all`.
+  # Every pair collides: on an L40S at 4096-16384 envs, colliding only legs with legs and arms with the
+  # trunk and their own leg ran no faster.
   self_collision:
     sets: {leg_l: leg_flexion_l, leg_r: leg_flexion_r, arm_l: shoulder_flexion_l, arm_r: shoulder_flexion_r}
     rest: trunk
-    pairs:
-      - [leg_l, leg_r]
-      - [arm_l, trunk]
-      - [arm_r, trunk]
-      - [arm_l, leg_l]
-      - [arm_r, leg_r]
+    pairs: all
   # Ground contact (Controls urdf/scene.xml floor: friction 1, condim 3).
   ground_friction: 1.0
 
@@ -53,7 +50,7 @@ physics:
   iterations: 100
   ls_iterations: 50
   # MJWarp buffers. nconmax is a per-world average (the contact pool is shared by all worlds), njmax a
-  # per-world maximum. With per-body hulls a standing robot needs about 30 and 130, a fallen one up to
+  # per-world maximum. With per-body hulls a standing robot needs about 30 contacts, a fallen one up to
   # about 390 constraint rows. MJWarp prints an overflow warning when either runs out.
   njmax: 400
   nconmax: 64
