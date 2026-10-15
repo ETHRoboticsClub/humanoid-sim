@@ -64,6 +64,11 @@ physics:
   njmax: 400
   nconmax: 64
   self_collision: true
+  # Joint stops: MuJoCo's own limit constraint (solref 0.02 s, damping ratio 1), as Controls' MJCF has it.
+  # Newton's force-space default (1e4 Nm/rad) is softer for the legs: 40 Nm on the hip abduction sinks 11 mrad
+  # past its stop (under 2 mrad here), and Controls' range survey found that stop 4 mrad out. The real stops'
+  # stiffness is not measured (modeled).
+  joint_limits: mujoco
 
 sensors:
   imu:

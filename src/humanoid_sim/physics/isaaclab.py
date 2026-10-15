@@ -47,12 +47,31 @@ class IsaacLabCfg:
     njmax: int = 300
     nconmax: int | None = None
     self_collision: bool = True
+    joint_limits: str = "mujoco"  # see apply_joint_limits
     base_joints: bool = False
     ground_friction: float = 1.0
     imu: bool = False  # the IMU sensor at the description's mount
     contacts: bool = False  # a contact sensor on every body
     rerun: bool = False
     rerun_rrd: str | None = None
+
+
+def apply_joint_limits(kind: str) -> None:
+    """The joint-limit constraint of every DOF in the scene. ``mujoco``: MuJoCo's own (solref 0.02 s, damping
+    ratio 1, scaled by each DOF's inertia), as Controls' MJCF has it; Newton writes it when the force-space limit
+    gains are zero. ``newton``: Newton's force-space default, 1e4 Nm/rad whatever the inertia, in which 40 Nm on
+    the hip abduction sinks 11 mrad past its stop (under 2 mrad with MuJoCo's). Applied from the next step."""
+    if kind == "newton":
+        return
+    if kind != "mujoco":
+        raise ValueError(f"joint limits {kind!r}: mujoco or newton")
+    from isaaclab_newton.physics import NewtonManager
+    from newton import ModelFlags
+
+    model = NewtonManager.get_model()
+    model.joint_limit_ke.fill_(0.0)
+    model.joint_limit_kd.fill_(0.0)
+    NewtonManager.add_model_change(ModelFlags.JOINT_DOF_PROPERTIES)
 
 
 def _per_joint(names, values):
@@ -179,6 +198,7 @@ class IsaacLabRobot:
                                                               visualizers=visualizers))
         self.scene = instantiate(scene_cfg)
         self.sim.reset()
+        apply_joint_limits(cfg.joint_limits)
         self.robot = self.scene["robot"]
         self.imu = self.scene["imu"] if cfg.imu else None
         self.contacts = self.scene["contacts"] if cfg.contacts else None

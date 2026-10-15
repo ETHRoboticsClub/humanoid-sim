@@ -119,6 +119,9 @@ class RobotPlant:
                                      num_envs=e, device=self.device, seed=cfg.seed, level=cfg.level)
         if "friction" in used and physics_manager is None:
             raise ValueError("randomizing friction needs the physics manager (env.sim.physics_manager)")
+        from humanoid_sim.physics.isaaclab import apply_joint_limits
+
+        apply_joint_limits(self.profile["physics"]["joint_limits"])
         self._write_physics()
         self._write_device(torch.arange(e, device=self.device))
 

@@ -59,6 +59,7 @@ class SimCore:
             iterations=phys["iterations"], ls_iterations=phys["ls_iterations"], cone=phys["cone"],
             njmax=phys["njmax"], nconmax=phys["nconmax"],
             self_collision=phys["self_collision"] if self_collision is None else self_collision,
+            joint_limits=phys["joint_limits"],
             base_joints=base_joints, ground_friction=self.profile["model"]["ground_friction"],
             imu=imu, contacts=contacts, rerun=rerun, rerun_rrd=rerun_rrd), props=props)
         order = [self.backend.joint_names.index(n) for n in joints]

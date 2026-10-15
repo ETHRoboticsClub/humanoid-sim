@@ -136,3 +136,26 @@ def test_cuda_graph_step_matches_eager(usd):
     for compile in (False, True):
         _, (seq, gyro) = run(True, imu=True, compile=compile)
         assert (seq[:8].diff() == -1).all() and gyro[:8].std() > 0  # samples delivered, noise drawn per replay
+
+
+def test_a_joint_pushed_into_its_stop_stays_at_it(usd):
+    """MuJoCo's own limit constraint (profile joint_limits: mujoco): 40 Nm into the hip abduction stop sinks less
+    than 2 mrad past it (Newton's force-space default lets it sink 11 mrad)."""
+    pytest.importorskip("isaaclab_newton")
+    from humanoid_sim.sim import SimCore
+
+    sim = SimCore(usd, device="cpu", fixed_base=True)
+    try:
+        j = list(sim.desc.joints).index("leg_abduction_l")
+        lo, hi = sim.desc.calibration_travel("leg_abduction_l")
+        q, qd = sim.joint_state()
+        q = q.clone()
+        q[0, j] = hi - 0.01
+        sim.write_joint_state(q, torch.zeros_like(qd))
+        sim.plant.external_torque[0, j] = 40.0
+        for _ in range(150):
+            sim.step()
+        past = float(sim.joint_state()[0][0, j]) - hi
+        assert -0.001 < past < 0.002, past
+    finally:
+        sim.close()
