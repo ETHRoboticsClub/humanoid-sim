@@ -197,7 +197,7 @@ def cmd_serve(args) -> int:
     host = RuntimeHost(args.segment, _usd(args), device=args.device, robot=args.robot, support=args.support,
                        bus_period_ns=int(args.bus_period_us * 1000),
                        client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
-                       sim_revision=_revision())
+                       sim_revision=_revision(), truth_every=args.truth_every)
     print(json.dumps({"segment": str(args.segment), "session_id": host.session_id, "ready": True}), flush=True)
     try:
         code = host.run(max_steps=args.max_steps)
@@ -317,6 +317,8 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--bus-period-us", type=float, default=1500.0, help="the client's bus cycle (informational)")
     sv.add_argument("--client-timeout-ms", type=float, default=500.0,
                     help="end the session when an attached client's demands are this old")
+    sv.add_argument("--truth-every", type=int, default=5, help="publish the truth every this many steps (and after "
+                    "every command); 1 for test oracles that track maxima")
     sv.add_argument("--max-steps", type=int, default=None)
     sv.add_argument("--seed", type=int, default=0)
     sv.set_defaults(func=cmd_serve)

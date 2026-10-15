@@ -62,23 +62,22 @@ SOLES = 2  # left, right
 # Header state.
 STATE_CREATING, STATE_READY, STATE_ENDED = 0, 1, 2
 
-# Mailbox commands. Arguments are a JSON object (see :data:`COMMANDS`).
+# Mailbox commands. Arguments are a JSON object:
+# RESET            {"pose": "standing" | "current"} or {"joint_pos": {name: rad}, "base_pose": [x,y,z,qx,qy,qz,qw]}
+# PAUSE, RESUME    {}: while paused physics stops and feedback keeps being written
+# SET_SUPPORT      {"support": "free"} or {"support": "gantry", ...Gantry.hang_tension or hang_cable arguments}
+# APPLY_DISTURBANCE {"body": name, "force_n": [x,y,z], "torque_nm": [x,y,z], "duration_s": s}
+# INJECT_FAULT     {"fault": name, "drive": name | null, "value": number, "duration_s": s | null}
+# PRESCRIBE_POSE   {"joint_pos": {...}, "base_pose": [...] | null, "floor_clearance_m": m | null}: hold a pose
+#                  (the base dropped so its lowest sole corner sits that far above the floor); {"release": true}
 CMD_NONE = 0
-CMD_RESET = 1  # {"pose": "standing" | "current"} or {"joint_pos": {name: rad}, "base_pose": [x,y,z,qx,qy,qz,qw]}
-CMD_PAUSE = 2  # {}: physics stops, feedback keeps being written
-CMD_RESUME = 3  # {}
-CMD_SET_SUPPORT = (
-    4  # {"support": "free"} | {"support": "gantry", ...Gantry.hang_tension/hang_cable arguments}
-)
-CMD_APPLY_DISTURBANCE = (
-    5  # {"body": name, "force_n": [x,y,z], "torque_nm": [x,y,z], "duration_s": s}
-)
-CMD_INJECT_FAULT = (
-    6  # {"fault": name, "drive": name | null, "value": number, "duration_s": s | null}
-)
-CMD_PRESCRIBE_POSE = (
-    7  # {"joint_pos": {...}, "base_pose": [...] | null}: hold a pose; {"release": true}
-)
+CMD_RESET = 1
+CMD_PAUSE = 2
+CMD_RESUME = 3
+CMD_SET_SUPPORT = 4
+CMD_APPLY_DISTURBANCE = 5
+CMD_INJECT_FAULT = 6
+CMD_PRESCRIBE_POSE = 7
 COMMANDS = {
     CMD_RESET: "reset",
     CMD_PAUSE: "pause",
@@ -167,10 +166,13 @@ IMU_SAMPLE = np.dtype(
 
 SOLE = np.dtype(
     [
-        ("position_m", "<f8", (3,)),
+        ("position_m", "<f8", (3,)),  # the sole body's frame
         ("quat_xyzw", "<f8", (4,)),
-        ("lowest_z_m", "<f8"),
-        ("normal_force_n", "<f8"),
+        ("lowest_z_m", "<f8"),  # lowest corner of the sole plate
+        ("normal_force_n", "<f8"),  # vertical contact force on the sole body
+        ("plate_normal_w", "<f8", (3,)),  # the plate's face normal, world
+        ("plate_face_height_span_m", "<f8"),  # height difference across the plate's face
+        ("face_xy_m", "<f8", (4, 2)),  # the plate's bottom-face corners, world x and y
     ],
     align=True,
 )

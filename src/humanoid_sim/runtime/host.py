@@ -152,15 +152,26 @@ class RuntimeHost:
         }
 
     def _sole_geometry(self, boxes: list[dict]) -> list[dict]:
+        """Each sole plate in its body's frame: corners, bottom-face corners, axes and half extents."""
         signs = torch.tensor([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], dtype=torch.float32)
+        face = torch.tensor([[x, y, -1] for x, y in ((-1, -1), (1, -1), (1, 1), (-1, 1))], dtype=torch.float32)
         out = []
         for side in ("l", "r"):
             box = next(b for b in boxes if b["side"] == side)
-            corners = (torch.tensor(box["center"]) + (signs * torch.tensor(box["half_extents"]))
-                       @ torch.tensor(box["rotation"]).T).to(torch.float32)
+            center, half = torch.tensor(box["center"]), torch.tensor(box["half_extents"])
+            rotation = torch.tensor(box["rotation"], dtype=torch.float32)
             out.append({"body": box["body"], "id": self.robot.body_names.index(box["body"]),
-                        "corners": corners.to(self.device)})
+                        "corners": (center + (signs * half) @ rotation.T).to(self.device, torch.float32),
+                        "face": (center + (face * half) @ rotation.T).to(self.device, torch.float32),
+                        "axes": rotation.T.contiguous().to(self.device),  # rows: the plate's x, y, z axes
+                        "half": half.to(self.device, torch.float32)})
         return out
+
+    def _lowest_sole_z(self) -> float:
+        pose = self.robot.data.body_link_pose_w.torch[0]
+        lowest = [(pose[s["id"], :3] + _quat_rotate(pose[s["id"], 3:].expand(8, 4), s["corners"]))[:, 2].min()
+                  for s in self._soles]
+        return float(torch.stack(lowest).min())
 
     # -- commands ---------------------------------------------------------------------------------
 
@@ -342,6 +353,13 @@ class RuntimeHost:
             return "released"
         q = self._joint_vector(args.get("joint_pos", {}))
         base = self._base_pose(args["base_pose"]) if args.get("base_pose") is not None else None
+        clearance = args.get("floor_clearance_m")
+        if clearance is not None:
+            if base is None or not (math.isfinite(float(clearance)) and float(clearance) >= 0):
+                raise ValueError("floor_clearance_m needs a base_pose and a finite non-negative height")
+            self._write_pose(q, base)
+            base = base.clone()
+            base[0, 2] += float(clearance) - self._lowest_sole_z()
         self._prescribed = (q, base)
         self._write_pose(q, base)
         return "prescribed"
@@ -459,7 +477,11 @@ class RuntimeHost:
         for k, s in enumerate(self._soles):
             pose = data.body_link_pose_w.torch[0, s["id"]]
             corners = pose[:3] + _quat_rotate(pose[3:].expand(8, 4), s["corners"])
-            soles.append(torch.cat([pose, corners[:, 2].min().view(1), normal[k].view(1)]))
+            face = pose[:3] + _quat_rotate(pose[3:].expand(4, 4), s["face"])
+            axes = _quat_rotate(pose[3:].expand(3, 4), s["axes"])  # the plate's axes in the world
+            span = 2 * (axes[0, 2].abs() * s["half"][0] + axes[1, 2].abs() * s["half"][1])
+            soles.append(torch.cat([pose, corners[:, 2].min().view(1), normal[k].view(1), axes[2], span.view(1),
+                                    face[:, :2].reshape(-1)]))
         flat = torch.cat([root, vel, com, q[0], qd[0], sim.gantry.tension_n[:1], self._mass.sum().view(1),
                           *soles]).to(torch.float64).cpu().numpy()
         i = 0
@@ -479,9 +501,11 @@ class RuntimeHost:
         t["gantry_tension_n"], t["mass_kg"], t["num_joints"] = tension, mass, nj
         t["joint_pos_rad"][:nj], t["joint_vel_rad_s"][:nj] = q_np, qd_np
         for k in range(len(soles)):
-            s = take(9)
+            s = take(21)
             t["sole"]["position_m"][k], t["sole"]["quat_xyzw"][k] = s[:3], s[3:7]
             t["sole"]["lowest_z_m"][k], t["sole"]["normal_force_n"][k] = s[7], s[8]
+            t["sole"]["plate_normal_w"][k], t["sole"]["plate_face_height_span_m"][k] = s[9:12], s[12]
+            t["sole"]["face_xy_m"][k] = s[13:21].reshape(4, 2)
         self.seg.regions["truth"].write(t)
 
     def _frozen_encoders(self):

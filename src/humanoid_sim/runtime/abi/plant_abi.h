@@ -17,8 +17,8 @@ extern "C" {
 #define HSIM_PLANT_ABI_MAJOR 1
 #define HSIM_PLANT_ABI_MINOR 0
 #define HSIM_PLANT_MAGIC "HSIMPLNT"
-#define HSIM_PLANT_LAYOUT_HASH 0x93d27dd415b5c26bULL
-#define HSIM_PLANT_SEGMENT_BYTES 27648
+#define HSIM_PLANT_LAYOUT_HASH 0x8b55fa9a7f94d7f2ULL
+#define HSIM_PLANT_SEGMENT_BYTES 27840
 
 #define HSIM_PLANT_MAX_DRIVES 32
 #define HSIM_PLANT_MAX_JOINTS 64
@@ -39,7 +39,7 @@ enum {
   HSIM_CMD_APPLY_DISTURBANCE = 5,
   HSIM_CMD_INJECT_FAULT = 6,
   HSIM_CMD_PRESCRIBE_POSE = 7,
-};
+}; // arguments: plant_abi.py
 
 enum { HSIM_ACK_OK = 0, HSIM_ACK_REJECTED = 1, HSIM_ACK_UNKNOWN = 2, HSIM_ACK_FAILED = 3 };
 
@@ -80,10 +80,13 @@ typedef struct {
 } HsimImuSample;
 
 typedef struct {
-  double position_m[3];
+  double position_m[3]; // the sole body's frame
   double quat_xyzw[4];
-  double lowest_z_m;
-  double normal_force_n;
+  double lowest_z_m;     // lowest corner of the sole plate
+  double normal_force_n; // vertical contact force on the sole body
+  double plate_normal_w[3];
+  double plate_face_height_span_m;
+  double face_xy_m[4][2]; // the plate's bottom-face corners, world x and y
 } HsimSole;
 
 #define HSIM_REGION_HEAD \
@@ -153,9 +156,11 @@ typedef struct {
 #ifdef __cplusplus
 static_assert(sizeof(HsimHeader) == 272, "header layout");
 static_assert(sizeof(HsimFeedback) == 3400, "feedback layout");
+static_assert(sizeof(HsimTruth) == 1536, "truth layout");
 #else
 _Static_assert(sizeof(HsimHeader) == 272, "header layout");
 _Static_assert(sizeof(HsimFeedback) == 3400, "feedback layout");
+_Static_assert(sizeof(HsimTruth) == 1536, "truth layout");
 #endif
 
 #ifdef __cplusplus

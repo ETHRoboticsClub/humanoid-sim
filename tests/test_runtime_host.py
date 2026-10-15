@@ -128,3 +128,32 @@ def test_serve_round_trip(tmp_path):
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+def test_prescribed_pose_with_floor_clearance_and_sole_truth(tmp_path):
+    pytest.importorskip("isaaclab_newton")
+    from humanoid_sim.runtime.host import RuntimeHost
+
+    out = asset_dir(Description.load(), load_profile("ethrc_v1"), REPO / "outputs" / "assets")
+    if not (out / "asset.json").exists():
+        pytest.skip("robot asset not built; run `humanoid-sim build-asset` in the Isaac Lab image")
+    usd = out / json.loads((out / "asset.json").read_text())["usd"]
+    host = RuntimeHost(tmp_path / "plant", usd, device="cpu", support="free", compile=False)
+    try:
+        tilt = [0.0, 0.0871557, 0.0, 0.9961947]  # 10 degrees about y
+        result = host._prescribe({"joint_pos": {}, "base_pose": [0.0, 0.0, 1.5, *tilt], "floor_clearance_m": 0.002})
+        assert result == "prescribed"
+        host.step()  # the pose is held: written again before the step
+        host._publish_truth()
+        _, truth = host.seg.regions["truth"].read()
+        lowest = truth["sole"]["lowest_z_m"].min()
+        assert lowest == pytest.approx(0.002, abs=0.003)  # one step of motion under the hold
+        normals = truth["sole"]["plate_normal_w"]
+        assert np.allclose(np.linalg.norm(normals, axis=1), 1.0, atol=1e-5)
+        assert (truth["sole"]["plate_face_height_span_m"] > 0.01).all()  # tilted plates
+        face = truth["sole"]["face_xy_m"]
+        assert np.allclose(face.mean(axis=1), truth["sole"]["position_m"][:, :2], atol=0.15)
+        with pytest.raises(ValueError, match="floor_clearance_m"):
+            host._prescribe({"floor_clearance_m": 0.002})
+    finally:
+        host.close()
