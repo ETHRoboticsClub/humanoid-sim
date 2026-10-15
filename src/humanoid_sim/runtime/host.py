@@ -16,7 +16,10 @@ Session: the client attaches by writing demands that carry the segment's ``sessi
 the session (:meth:`RuntimeHost.run` returns :data:`EXIT_DETACHED`), as do demands older than
 ``client_timeout_ns`` once attached (:data:`EXIT_CLIENT_LOST`); the segment's state becomes ended, and Controls'
 bank ends its side when this host's heartbeat stops. :meth:`RuntimeHost.new_session` then serves the next client
-on a new segment at the same path, the robot back in its start state, without recompiling the step.
+on a new segment at the same path, the robot back in its start state, without recompiling the step. Until its
+client attaches, a session holds the robot in its start pose (standing; the base too when free), so the session
+starts when the client does, as a plant started with its client would: a robot left hanging with idle drives
+between clients would sag to its rest pose first.
 
 IMU sample times (``sample_ns``, ``stamp_ns``) are plant time; the feedback region's ``sim_time_ns`` and
 ``written_mono_ns`` map them to the host clock.
@@ -174,7 +177,8 @@ class RuntimeHost:
         self._client_mono_ns = 0
         self._demand_seq = 0
         self._command_seq = 0
-        self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = None
+        self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = self._standing()  # until attached
+        self._write_pose(*self._prescribed)
         self._truth_due = True
         self._publish()
         self.seg.mark_ready()
@@ -465,7 +469,9 @@ class RuntimeHost:
         if int(rec["session_id"]) != self.session_id:
             return  # a client of an earlier session
         self._demand_seq = seq
-        self.attached = True
+        if not self.attached:
+            self.attached = True
+            self._prescribed = None  # the start pose is released when the client arrives
         self._client_mono_ns = int(rec["written_mono_ns"])
         self._intake(rec["drive"][:len(self.drives)], self.sim.t_ns)
 
