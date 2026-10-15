@@ -7,6 +7,8 @@
     humanoid-sim view-replay <replay-dir> --save x.rrd   sim and real robot + every drive signal in Rerun
     humanoid-sim bench --num-envs N [--train]      real-time factor / throughput (Isaac Lab / MJWarp); --train runs
                                                    the Train-Time API scene (sensors, randomization)
+    humanoid-sim fit-passive <exc-dir>... --num-envs N --generations G
+                                                   fit upper-body passive joint parameters by batched replay
 """
 
 from __future__ import annotations
@@ -101,6 +103,57 @@ def cmd_bench(args) -> int:
     return 0
 
 
+# Joints tied left/right for the passive fit: the upper body, the worst-replayed part of the robot.
+UPPER_BODY_GROUPS = {
+    "waist": ("waist_upperbody_yaw",),
+    "shoulder_flexion": ("shoulder_flexion_l", "shoulder_flexion_r"),
+    "shoulder_abduction": ("shoulder_abduction_l", "shoulder_abduction_r"),
+    "shoulder_rotation": ("shoulder_rotation_l", "shoulder_rotation_r"),
+    "elbow": ("elbow_flexion_l", "elbow_flexion_r"),
+}
+
+
+def cmd_fit_passive(args) -> int:
+    import numpy as np
+
+    from humanoid_sim.replay.exc import ExcitationCapture
+    from humanoid_sim.sim import SimCore
+    from humanoid_sim.sysid.passive import FitSpace, Group, evaluate, fit
+
+    moving = args.base != "fixed"
+    sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, num_envs=args.num_envs,
+                  fixed_base=not moving, base_joints=moving)
+    space = FitSpace([Group(name, joints) for name, joints in UPPER_BODY_GROUPS.items()])
+    drives = sim.plant.map.drive_names
+    scored = sorted({drives.index(sim.desc.joints[j].device) for g in space.groups for j in g.joints})
+    captures = [ExcitationCapture(Path(c)) for c in args.captures]
+    base = args.base if moving else None
+    t = time.time()
+    result = fit(sim, captures, space, scored, generations=args.generations, base_motion=base,
+                 duration_s=args.duration, seed=args.seed)
+    result |= {"captures": [c.dataset_id for c in captures], "base": args.base, "num_envs": args.num_envs,
+               "wall_s": time.time() - t, "drives": drives, "scored": [drives[i] for i in scored],
+               **sim.desc.identity()}
+    m = dict(zip(space.names, result["multipliers"], strict=True))
+    result["values"] = {j: {p: getattr(sim.desc.joints[j], p) * m[f"{g.name}.{p}"] for p in space.params}
+                        for g in space.groups for j in g.joints}
+    if args.holdout:
+        x = np.zeros((args.num_envs, space.dim))
+        x[1:] = result["x"]
+        held = [ExcitationCapture(Path(c)) for c in args.holdout]
+        f, per = evaluate(sim, held, space, x, scored, base_motion=base, duration_s=None)
+        result["holdout"] = {"captures": [c.dataset_id for c in held], "objective_description": float(f[0]),
+                             "objective_fit": float(f[1]), "rms_description": per[:, 0].tolist(),
+                             "rms_fit": per[:, 1].tolist()}
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "fit-passive.json").write_text(json.dumps(result, indent=1))
+    print(json.dumps({k: result[k] for k in ("objective_description", "objective", "multipliers", "names")}))
+    if args.holdout:
+        print(json.dumps(result["holdout"]["objective_description"]), json.dumps(result["holdout"]["objective_fit"]))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="humanoid-sim", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -143,6 +196,17 @@ def main(argv: list[str] | None = None) -> int:
     be.add_argument("--train", action="store_true", help="Train-Time API scene: RobotPlant, IMU, contacts")
     be.set_defaults(func=cmd_bench)
 
+    fp = sub.add_parser("fit-passive", help="fit upper-body passive joint parameters to captures")
+    fp.add_argument("captures", nargs="+")
+    fp.add_argument("--holdout", nargs="*", default=[])
+    fp.add_argument("--num-envs", type=int, default=256, help="CMA-ES population + 1 (env 0 keeps the best)")
+    fp.add_argument("--generations", type=int, default=15)
+    fp.add_argument("--duration", type=float, default=None, help="replay only the first seconds of each capture")
+    fp.add_argument("--base", choices=("yaw", "orientation", "fixed"), default="yaw")
+    fp.add_argument("--device", default="cuda:0")
+    fp.add_argument("--seed", type=int, default=0)
+    fp.add_argument("--out", default="outputs/sysid")
+    fp.set_defaults(func=cmd_fit_passive)
 
     args = p.parse_args(argv)
     if args.command is None:

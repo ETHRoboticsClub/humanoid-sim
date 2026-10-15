@@ -33,9 +33,9 @@ The robot below Controls: drives, ankle mechanism and body, on Isaac Lab 3.0 / N
 ## Layout
 
 `src/humanoid_sim/`: `model/` (description → prepared URDF → USD asset; host kinematics), `timing/`, `devices/`,
-`transmissions/`, `core.py` (plant), `sensors/` (IMU delivery), `randomization/`, `physics/isaaclab.py` (MJWarp),
-`sim.py` (SimCore: replays, benchmarks), `train/` (Train-Time API: the plant in an Isaac Lab scene and action
-term), `replay/`, `signals/` (Rerun), `bench/`, `cli.py`.
+`transmissions/`, `core.py` (plant), `sensors/` (IMU delivery), `randomization/`, `world/` (terrains, pushes),
+`physics/isaaclab.py` (MJWarp), `sim.py` (SimCore: replays, benchmarks), `train/` (Train-Time API: the plant in
+an Isaac Lab scene and action term), `replay/`, `sysid/` (fits to captures), `signals/` (Rerun), `bench/`, `cli.py`.
 Spikes live in `spikes/` and are not imported by the package.
 
 ## Workflow

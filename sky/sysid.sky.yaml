@@ -1,0 +1,37 @@
+# Fit the upper body's passive joint parameters to the exc-* captures by batched replay (CMA-ES, one
+# candidate per env), with the base turning as the capture's IMU yaw. The third capture is held out.
+#   sky launch -y -c hsim-bench -i 10 sky/sysid.sky.yaml       (autostop: stop, not down)
+#   rsync -avz hsim-bench:sky_workdir/outputs/sysid/ outputs/sysid/
+name: humanoid-sim-sysid
+workdir: .
+
+resources:
+  cloud: aws
+  accelerators: L40S:1
+  cpus: 8+
+  memory: 32+
+  disk_size: 200
+
+file_mounts:
+  /data/exc-3a498000fc114f2db2b0655d5d87280c: ../datasets/humanoid-v1/exc-3a498000fc114f2db2b0655d5d87280c
+  /data/exc-503fc128aaf14405a0c2418d63ff9a60: ../datasets/humanoid-v1/exc-503fc128aaf14405a0c2418d63ff9a60
+  /data/exc-ece46c33aacc4ec5bbdf538aaa7f297a: ../datasets/humanoid-v1/exc-ece46c33aacc4ec5bbdf538aaa7f297a
+
+envs:
+  ISAACLAB_COMMIT: 32712682b69edd488eea26689da6905c48d31037
+  UV_VERSION: 0.13.1
+  NUM_ENVS: "512"
+  GENERATIONS: "20"
+  DURATION: "20"   # seconds of each capture per generation; the holdout runs in full
+
+setup: bash sky/setup.sh
+run: |
+  set -euo pipefail
+  export PATH="$HOME/.local/bin:$HOME/il-venv/bin:$PATH"
+  cd "$HOME/sky_workdir"
+  mkdir -p outputs/sysid
+  humanoid-sim build-asset --base-joints | tail -1
+  humanoid-sim fit-passive /data/exc-503fc128aaf14405a0c2418d63ff9a60 /data/exc-3a498000fc114f2db2b0655d5d87280c \
+    --holdout /data/exc-ece46c33aacc4ec5bbdf538aaa7f297a --num-envs "$NUM_ENVS" --generations "$GENERATIONS" \
+    --duration "$DURATION" --device cuda:0 --out outputs/sysid 2>&1 | tee outputs/sysid/fit-passive.log \
+    | grep -E '^gen|^\{|^[0-9]'
