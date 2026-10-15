@@ -160,6 +160,8 @@ class RuntimeHost:
         self.seg = None
         self._faults: dict[tuple[str, int | None], tuple[int | None, object]] = {}
         self._disturbances: list[_Disturbance] = []
+        self._joint_torques: dict[int, tuple[float, float, int | None]] = {}  # joint -> (Nm, Hz, end ns)
+        self._joint_torque_active = False
         self._stop = False
         self._warm_up()
         self._open_session()
@@ -326,6 +328,7 @@ class RuntimeHost:
         self.sim.imu.reset(env, self.sim.t_ns)
         self._prescribed = None
         self._disturbances.clear()
+        self._joint_torques.clear()  # the plant's reset zeroed the external torque
         self._demand_seq = 0  # the client's next demands take effect again
         return "reset"
 
@@ -383,6 +386,8 @@ class RuntimeHost:
         return "gantry"
 
     def _disturb(self, args: dict) -> str:
+        if "joint" in args or "drive" in args:
+            return self._disturb_joint(args)
         body = self.robot.body_names.index(args["body"])
         force = torch.tensor(args.get("force_n", [0.0, 0.0, 0.0]), dtype=torch.float32, device=self.device)
         torque = torch.tensor(args.get("torque_nm", [0.0, 0.0, 0.0]), dtype=torch.float32, device=self.device)
@@ -392,6 +397,31 @@ class RuntimeHost:
         end = self.sim.t_ns + int(round(duration * NS_PER_S))
         self._disturbances.append(_Disturbance(body, force.view(1, 1, 3), torque.view(1, 1, 3), end))
         return f"until {end} ns"
+
+    def _disturb_joint(self, args: dict) -> str:
+        """A torque on one joint (``joint``, or the joint of a 1:1 ``drive``), constant or a sine at
+        ``frequency_hz``, outside the drive's feedback; ``torque_nm`` 0 clears it."""
+        if "drive" in args:
+            drive = self.desc.drives.get(args["drive"])
+            if drive is None or drive.crank is not None or len(drive.joints) != 1:
+                raise ValueError(f"drive {args['drive']!r}: a 1:1 drive of this robot")
+            name = drive.joints[0]
+        else:
+            name = args["joint"]
+        if name not in self.joints:
+            raise ValueError(f"unknown joint {name!r}")
+        torque, frequency = float(args["torque_nm"]), float(args.get("frequency_hz", 0.0))
+        duration = args.get("duration_s")
+        if not (math.isfinite(torque) and math.isfinite(frequency) and frequency >= 0) or (
+                duration is not None and not float(duration) > 0):
+            raise ValueError("torque_nm finite, frequency_hz non-negative, duration_s positive or null")
+        j = self.joints.index(name)
+        if torque == 0.0:
+            self._joint_torques.pop(j, None)
+            return "cleared"
+        end = None if duration is None else self.sim.t_ns + int(round(float(duration) * NS_PER_S))
+        self._joint_torques[j] = (torque, frequency, end)
+        return f"{name} until {end} ns" if end is not None else f"{name} until cleared"
 
     def _inject(self, args: dict) -> str:
         fault = args["fault"]
@@ -489,9 +519,24 @@ class RuntimeHost:
         for x in self._disturbances:
             composer.add_forces_and_torques_index(forces=x.force, torques=x.torque, body_ids=[x.body_id],
                                                   env_ids=torch.tensor([0], device=self.device), is_global=True)
+        self._apply_joint_torques(t)
         for key, (end, _) in list(self._faults.items()):
             if end is not None and t >= end:
                 self._clear_fault(key)
+
+    def _apply_joint_torques(self, t: int) -> None:
+        """The joint disturbances' torques for the step starting at ``t``, into the plant (a copy only while any
+        is active, and one to clear the last)."""
+        expired = [j for j, (_, _, end) in self._joint_torques.items() if end is not None and t >= end]
+        for j in expired:
+            del self._joint_torques[j]
+        if not self._joint_torques and not self._joint_torque_active:
+            return
+        value = np.zeros(len(self.joints))
+        for j, (torque, frequency, _) in self._joint_torques.items():
+            value[j] = torque * math.sin(2 * math.pi * frequency * t / NS_PER_S) if frequency else torque
+        self.sim.plant.external_torque[0].copy_(torch.from_numpy(value))
+        self._joint_torque_active = bool(self._joint_torques)
 
     def step(self) -> None:
         """One period: command, demands, physics, publish (no pacing)."""

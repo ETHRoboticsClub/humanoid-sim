@@ -72,7 +72,9 @@ STATE_CREATING, STATE_READY, STATE_ENDED = 0, 1, 2
 # RESET            {"pose": "standing" | "current"} or {"joint_pos": {name: rad}, "base_pose": [x,y,z,qx,qy,qz,qw]}
 # PAUSE, RESUME    {}: while paused physics stops and feedback keeps being written
 # SET_SUPPORT      {"support": "free"} or {"support": "gantry", ...Gantry.hang_tension or hang_cable arguments}
-# APPLY_DISTURBANCE {"body": name, "force_n": [x,y,z], "torque_nm": [x,y,z], "duration_s": s}
+# APPLY_DISTURBANCE {"body": name, "force_n": [x,y,z], "torque_nm": [x,y,z], "duration_s": s}, or a torque on one
+#                  joint outside the drive's feedback: {"joint" | "drive" (1:1): name, "torque_nm": Nm,
+#                  "frequency_hz": f (0: constant), "duration_s": s | null (until cleared)}; torque_nm 0 clears it
 # INJECT_FAULT     {"fault": name, "drive": name | null, "value": number, "duration_s": s | null}
 # PRESCRIBE_POSE   {"joint_pos": {...}, "base_pose": [...] | null, "floor_clearance_m": m | null}: hold a pose
 #                  (the base dropped so its lowest sole corner sits that far above the floor); {"release": true}

@@ -4,7 +4,7 @@ One physics step ``[t0, t0 + period)``:
 
 1. joint state → drive-frame state (1:1 signs, ankle crank transmission);
 2. drive bank: demands in force during the step (arrival-blended) → demanded and applied drive torque;
-3. drive torque → joint torque (``sign``, ankle ``Jᵀ``);
+3. drive torque → joint torque (``sign``, ankle ``Jᵀ``), plus any external joint torque (:attr:`external_torque`);
 4. joint torque → position target for the constant solver PD (target shaping);
 5. after the solver step: drive-frame feedback (position, velocity, applied and demanded torque).
 
@@ -72,12 +72,17 @@ class PlantCore:
         self.post_state: tuple | None = None
         self.last: DriveOutput | None = None
         self.gain_warnings = torch.zeros(num_envs, self.map.num_drives, device=dev, dtype=torch.bool)
+        # External torque on each joint [E, J] (a test's disturbance), on top of the drives' and outside their
+        # feedback. Written in place.
+        self.external_torque = torch.zeros(num_envs, len(joint_names), device=dev, dtype=dt)
 
     # -- demands ----------------------------------------------------------------------------------
 
     def reset(self, env_ids: torch.Tensor, demand: DriveDemand | None = None) -> None:
         self.bank.reset(env_ids, demand)
         self.gain_warnings.index_fill_(0, env_ids, False)
+        self.external_torque.index_fill_(0, env_ids, 0.0)
+
     def submit(self, demand: DriveDemand, arrival_ns: torch.Tensor, env_mask: torch.Tensor | None = None):
         # The solver gains are the baseline drive gains, so shaping is stable up to twice those.
         self.gain_warnings |= outside_stable_region(
@@ -94,7 +99,7 @@ class PlantCore:
         drive-frame state of ``q, qd`` if already computed (``DriveJointMap.drive_state``)."""
         qdrv, vdrv, self._jacs = state if state is not None else self.map.drive_state(q, qd)
         out = self._keep("last", self.bank.compute(t0_ns, t0_ns + self.cfg.physics_period_ns, qdrv, vdrv))
-        tau = self.map.joint_torque(out.applied, self._jacs)
+        tau = self.map.joint_torque(out.applied, self._jacs) + self.external_torque
         target = q.clone()
         a = self.actuated
         target[:, a] = shaped_position_target(q[:, a], qd[:, a], tau[:, a], self.k0[:, a], self.d0[:, a])

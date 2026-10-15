@@ -277,3 +277,54 @@ def test_demand_intake_queues_what_the_record_says(tmp_path):
                 assert torch.equal(got[k], v), (graph, k)
     finally:
         sim.close()
+
+
+def test_joint_disturbance_deflects_a_held_joint_and_clears(tmp_path):
+    pytest.importorskip("isaaclab_newton")
+    from humanoid_sim.runtime.host import RuntimeHost
+
+    out = asset_dir(Description.load(), load_profile("ethrc_v1"), REPO / "outputs" / "assets")
+    if not (out / "asset.json").exists():
+        pytest.skip("robot asset not built; run `humanoid-sim build-asset` in the Isaac Lab image")
+    usd = out / json.loads((out / "asset.json").read_text())["usd"]
+    path = tmp_path / "plant"
+    host = RuntimeHost(path, usd, device="cpu", support="suspended", compile=False)
+    try:
+        client = abi.Segment.open(path, wait_s=1)
+        drives = client.descriptor()["drives"]
+        n = len(drives)
+        gains = Description.load().table["baseline_position_gains"]
+        hold = client.regions["feedback"].read()[1]["drive"]["position_rad"][:n].copy()
+        demand = {name: np.zeros(n) for name in abi.DRIVE_DEMAND.names if not name.startswith("_")}
+        demand |= {"torque_enabled": np.ones(n), "mode": np.full(n, -64), "target_position_rad": hold,
+                   "p_gain_raw": np.array([round(gains[d]["stiffness"] * 1000) for d in drives]),
+                   "d_gain_raw": np.array([round(gains[d]["damping"] * 1000) for d in drives])}
+        client.regions["demands"].write(abi.demands_record(demand, cycle=1, session_id=client.session_id))
+        j = host.joints.index("elbow_flexion_r")
+
+        def settle(steps=60):
+            for _ in range(steps):
+                host.step()
+            return float(host.sim.joint_state()[0][0, j])
+
+        reference = settle()
+        assert host._disturb({"drive": "maxonHEJ50AR4", "torque_nm": 10.0, "duration_s": None}) \
+            == "elbow_flexion_r until cleared"
+        deflected = settle()
+        assert float(host.sim.plant.external_torque[0, j]) == 10.0
+        assert deflected - reference == pytest.approx(10.0 / 50.0, rel=0.35)  # against the drive's 50 Nm/rad
+        assert host._disturb({"joint": "elbow_flexion_r", "torque_nm": 0.0}) == "cleared"
+        assert abs(settle() - reference) < 0.02
+        assert float(host.sim.plant.external_torque.abs().max()) == 0.0
+        host._disturb({"joint": "elbow_flexion_r", "torque_nm": 4.0, "frequency_hz": 5.0, "duration_s": 0.04})
+        host.step()
+        t = host.sim.t_ns - host.period_ns  # the step just taken started here
+        assert float(host.sim.plant.external_torque[0, j]) == pytest.approx(4.0 * np.sin(2 * np.pi * 5.0 * t / 1e9),
+                                                                         abs=1e-5)
+        settle(12)
+        assert float(host.sim.plant.external_torque.abs().max()) == 0.0  # expired
+        with pytest.raises(ValueError, match="1:1 drive"):
+            host._disturb({"drive": "maxonHEJ50L_ANK1", "torque_nm": 1.0})
+        client.close()
+    finally:
+        host.close()
