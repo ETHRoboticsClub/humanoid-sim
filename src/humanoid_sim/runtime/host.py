@@ -53,7 +53,7 @@ EXIT_DETACHED = 4
 RUNNING_MODES = (MODE_JVPT, MODE_FREEZE, MODE_HOMING)  # 0x6061 modes a drive acts in (homing holds)
 
 KEEPING_UP_WINDOW_NS = NS_PER_S
-SPIN_NS = 300_000  # sleep until this close to a deadline, then spin
+SPIN_NS = 100_000  # sleep until this close to a deadline, then spin
 
 # What the runtime does not model (published in the descriptor).
 FIDELITY_GAPS = [
@@ -108,7 +108,9 @@ class _DemandIntake:
         for k, name in enumerate(self.FIELDS):
             self.host_np[k * n:(k + 1) * n] = drive[name]
         self.host_np[-1:].view(np.int64)[0] = arrival_ns
-        self.dev.copy_(self.host)  # blocking: the host buffer is reused next cycle
+        # The host buffer is written again next cycle, after the step's feedback came back: by then this copy,
+        # queued before it, is done.
+        self.dev.copy_(self.host, non_blocking=True)
         if self.graph is not None:
             self.graph.replay()
         else:
@@ -170,6 +172,10 @@ class RuntimeHost:
         self._friction_off = torch.tensor([[float(self.desc.family(self.desc.drives[self.drives[k]].family)[
             "backdrive_torque"]) for k, _ in one_to_one]], device=self.device)
         self._drive_off: np.ndarray | None = None
+        # Device-to-host copies: into pinned buffers, waited for on a blocking event (the host thread sleeps
+        # instead of spinning while the GPU finishes: it shares the machine with Controls).
+        self._pinned: dict[str, torch.Tensor] = {}
+        self._copied = torch.cuda.Event(blocking=True) if self.device.type == "cuda" else None
         self._segment_args = dict(
             path=segment, robot_id=robot, description_digest=self.desc.digest, sim_revision=sim_revision,
             num_drives=len(self.drives), num_joints=len(self.joints), physics_period_ns=self.period_ns,
@@ -588,6 +594,18 @@ class RuntimeHost:
             self._truth_due = False
         self.seg.heartbeat()
 
+    def _to_host(self, name: str, value: torch.Tensor) -> np.ndarray:
+        """``value`` on the host, as NumPy (a pinned buffer per ``name``, reused: copy out before the next call)."""
+        if self._copied is None:
+            return value.numpy()
+        buf = self._pinned.get(name)
+        if buf is None or buf.shape != value.shape or buf.dtype != value.dtype:
+            buf = self._pinned[name] = torch.empty(value.shape, dtype=value.dtype, pin_memory=True)
+        buf.copy_(value, non_blocking=True)
+        self._copied.record()
+        self._copied.synchronize()
+        return buf.numpy()
+
     def _publish_feedback(self) -> None:
         sim, n = self.sim, len(self.drives)
         fb = sim.feedback if sim.feedback is not None else sim.plant.feedback(*sim.joint_state())
@@ -598,7 +616,7 @@ class RuntimeHost:
         flat = torch.cat([fb.position_rad[0], fb.velocity_rad_s[0], fb.applied_torque_nm[0],
                           fb.demanded_torque_nm[0], imu.gyro[0].reshape(-1), imu.specific_force[0].reshape(-1),
                           ]).to(torch.float64)
-        host = torch.cat([flat, ints]).cpu().numpy()
+        host = self._to_host("feedback", torch.cat([flat, ints]))
         drive = host[: 4 * n].reshape(4, n)
         for (position, velocity), d in self._frozen_encoders():
             drive[0, d], drive[1, d] = position, velocity
@@ -640,8 +658,8 @@ class RuntimeHost:
             span = 2 * (axes[0, 2].abs() * s["half"][0] + axes[1, 2].abs() * s["half"][1])
             soles.append(torch.cat([pose, corners[:, 2].min().view(1), normal[k].view(1), axes[2], span.view(1),
                                     face[:, :2].reshape(-1)]))
-        flat = torch.cat([root, vel, com, q[0], qd[0], sim.gantry.tension_n[:1], self._mass.sum().view(1),
-                          *soles]).to(torch.float64).cpu().numpy()
+        flat = self._to_host("truth", torch.cat([root, vel, com, q[0], qd[0], sim.gantry.tension_n[:1],
+                                                 self._mass.sum().view(1), *soles]).to(torch.float64))
         i = 0
 
         def take(k):
