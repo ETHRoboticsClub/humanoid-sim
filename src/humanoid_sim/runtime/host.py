@@ -107,8 +107,27 @@ class RuntimeHost:
         self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = None
         self._faults: dict[tuple[str, int | None], tuple[int | None, object]] = {}
         self._stop = False
+        self._warm_up()
         self._publish()
         self.seg.mark_ready()
+
+    def _warm_up(self, steps: int = 3) -> None:
+        """Step a few times and put the state back: the first steps compile kernels (seconds on a CPU), which must
+        not happen while a client watches the heartbeat."""
+        r = self.robot
+        q, qd = self.sim.joint_state()
+        q, qd = q.clone(), qd.clone()
+        root, vel = r.data.root_link_pose_w.torch.clone(), r.data.root_link_vel_w.torch.clone()
+        for _ in range(steps):
+            self.sim.step()
+        if self.support != "suspended":
+            r.write_root_pose_to_sim_index(root_pose=root)
+            r.write_root_velocity_to_sim_index(root_velocity=vel)
+        self.sim.write_joint_state(q, qd)
+        env = torch.tensor([0], device=self.device)
+        self.sim.plant.reset(env)  # plant time keeps running: the IMU's sample clock depends on it
+        self.sim.feedback = None
+        self.sim.imu.reset(env, self.sim.t_ns)
 
     # -- descriptor and geometry ------------------------------------------------------------------
 
