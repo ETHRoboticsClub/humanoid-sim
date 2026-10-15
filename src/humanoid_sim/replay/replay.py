@@ -75,12 +75,14 @@ def initial_joint_state(plant: PlantCore, native: np.ndarray) -> torch.Tensor:
 class _Run:
     t_grid: np.ndarray
     t_meas: np.ndarray
-    demand: np.ndarray  # [T, D]
+    demand: np.ndarray  # [T, D], or [T, E, D] with a delay per env
     real: dict[str, np.ndarray]
     base: BaseMotion | None
 
 
-def _prepare(capture: ExcitationCapture, sim: SimCore, duration_s: float | None, base_motion: str | None) -> _Run:
+def _prepare(capture: ExcitationCapture, sim: SimCore, duration_s: float | None, base_motion: str | None,
+             delays_ns: np.ndarray | None = None) -> _Run:
+    """``delays_ns`` ``[E]``: env ``e`` applies the demand recorded at ``t`` at ``t + delay`` (negative: earlier)."""
     plant = sim.plant
     drives = plant.map.drive_names
     pdo = capture.pdo()
@@ -98,7 +100,11 @@ def _prepare(capture: ExcitationCapture, sim: SimCore, duration_s: float | None,
             "torque": series("torque_nm", t_meas)}
     # Base targets at the step start: with the velocity target the base PD lands on the step-end orientation.
     base = BaseMotion.from_imu(capture.imu(), t_grid, base_motion) if base_motion else None
-    return _Run(t_grid, t_meas, series("position_demand_rad", t_grid), real, base)
+    if delays_ns is None:
+        demand = series("position_demand_rad", t_grid)
+    else:
+        demand = np.stack([series("position_demand_rad", t_grid - int(d)) for d in delays_ns], axis=1)
+    return _Run(t_grid, t_meas, demand, real, base)
 
 
 def _run(capture: ExcitationCapture, sim: SimCore, run: _Run, on_step) -> None:
@@ -121,7 +127,8 @@ def _run(capture: ExcitationCapture, sim: SimCore, run: _Run, on_step) -> None:
     plant.reset(torch.arange(e, device=dev))
     sim.t_ns = 0
     for k in range(len(run.t_grid)):
-        d = DriveDemand.jvpt(demand[k].expand(e, -1), kp.to(dt) / JVPT_PER_SI_GAIN, kd.to(dt) / JVPT_PER_SI_GAIN)
+        target = demand[k] if demand.dim() == 3 else demand[k].expand(e, -1)
+        d = DriveDemand.jvpt(target, kp.to(dt) / JVPT_PER_SI_GAIN, kd.to(dt) / JVPT_PER_SI_GAIN)
         d.p_gain_raw, d.d_gain_raw = kp.clone(), kd.clone()
         plant.submit(d, torch.full((e,), sim.t_ns, dtype=torch.int64, device=dev))
         if angles is not None:
@@ -130,11 +137,12 @@ def _run(capture: ExcitationCapture, sim: SimCore, run: _Run, on_step) -> None:
 
 
 def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None = None,
-           base_motion: str | None = None) -> ReplayResult:
+           base_motion: str | None = None, demand_delay_ns: int = 0) -> ReplayResult:
     """Replay on env 0. ``base_motion``: None (fixed base) or a :data:`~humanoid_sim.replay.base.BASE_MODES`
-    mode."""
+    mode. ``demand_delay_ns``: apply the demand recorded at ``t`` at ``t + delay``."""
     plant = sim.plant
-    run = _prepare(capture, sim, duration_s, base_motion)
+    delays = np.full(plant.num_envs, demand_delay_ns) if demand_delay_ns else None
+    run = _prepare(capture, sim, duration_s, base_motion, delays)
     keys = ("position_rad", "velocity_rad_s", "applied_torque_nm", "demanded_torque_nm")
     acc = {k: torch.zeros(len(run.t_grid), plant.map.num_drives, device=plant.cfg.device) for k in keys}
     acc_q = torch.zeros(len(run.t_grid), len(plant.map.joint_names), device=plant.cfg.device)
@@ -150,16 +158,19 @@ def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None
     out["joint_q"] = acc_q.cpu().double().numpy()
     out["base_angles"] = run.base.angles if run.base is not None else np.zeros((len(run.t_grid), 3))
     return ReplayResult(capture.dataset_id, sim.period_ns, plant.map.drive_names, run.t_meas, out, run.real,
-                        run.demand, meta={"name": capture.name, "base": base_motion or "fixed",
-                                          **plant.desc.identity()})
+                        run.demand[:, 0] if run.demand.ndim == 3 else run.demand,
+                        meta={"name": capture.name, "base": base_motion or "fixed",
+                              "demand_delay_ns": demand_delay_ns, **plant.desc.identity()})
 
 
 def replay_position_rms(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None = None,
-                        base_motion: str | None = None, skip_s: float = 1.0) -> torch.Tensor:
-    """Every env replays the capture; position RMS (sim − measured) per env and drive ``[E, D]``, after ``skip_s``.
-    Accumulated on the device: nothing leaves it until the end."""
+                        base_motion: str | None = None, skip_s: float = 1.0,
+                        delays_ns: np.ndarray | None = None) -> torch.Tensor:
+    """Every env replays the capture (with its own demand delay if ``delays_ns`` ``[E]`` is given); position RMS
+    (sim − measured) per env and drive ``[E, D]``, after ``skip_s``. Accumulated on the device: nothing leaves it
+    until the end."""
     plant = sim.plant
-    run = _prepare(capture, sim, duration_s, base_motion)
+    run = _prepare(capture, sim, duration_s, base_motion, delays_ns)
     real = torch.as_tensor(run.real["position"], dtype=torch.float32, device=plant.cfg.device)
     first = int(np.searchsorted(run.t_meas, run.t_meas[0] + int(skip_s * NS_PER_S)))
     sq = torch.zeros(plant.num_envs, plant.map.num_drives, device=plant.cfg.device)

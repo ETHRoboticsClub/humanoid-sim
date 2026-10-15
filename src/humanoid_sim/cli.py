@@ -8,8 +8,10 @@
     humanoid-sim bench --num-envs N [--train]      real-time factor / throughput (Isaac Lab / MJWarp); --train runs
                                                    the Train-Time API scene (sensors, randomization); --runtime
                                                    the real-time host's step
-    humanoid-sim fit-passive <exc-dir>... --num-envs N --generations G
+    humanoid-sim fit-passive <exc-dir>... --num-envs N --generations G [--params ...] [--start G.P=V ...]
                                                    fit upper-body passive joint parameters by batched replay
+    humanoid-sim fit-delay <exc-dir>... [--delays-ms FROM TO STEP]
+                                                   replay with a range of demand delays, best delay per drive
     humanoid-sim serve --segment PATH [--support suspended|free]
                                                    one robot in real time behind the runtime segment, for
                                                    Controls' plant host
@@ -65,10 +67,12 @@ def cmd_replay(args) -> int:
     sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, period_ns=period_ns,
                   fixed_base=not moving, base_joints=moving, integrator=args.integrator)
     t = time.time()
-    res = replay(cap, sim, duration_s=args.duration, base_motion=args.base if moving else None)
+    res = replay(cap, sim, duration_s=args.duration, base_motion=args.base if moving else None,
+                 demand_delay_ns=int(round(args.demand_delay_ms * 1e6)))
     wall = time.time() - t
     integrator = args.integrator or sim.profile["physics"]["integrator"]
-    out = Path(args.out) / f"{cap.dataset_id}_mjwarp_{integrator}_{period_ns // 1000}us_base-{args.base}"
+    delay = f"_demand{args.demand_delay_ms:+g}ms" if args.demand_delay_ms else ""
+    out = Path(args.out) / f"{cap.dataset_id}_mjwarp_{integrator}_{period_ns // 1000}us_base-{args.base}{delay}"
     out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out / "trace.npz", t_ns=res.t_ns, demand=res.demand,
                         **{f"sim_{k}": v for k, v in res.sim.items()}, **{f"real_{k}": v for k, v in res.real.items()})
@@ -131,30 +135,40 @@ def cmd_fit_passive(args) -> int:
     from humanoid_sim.sim import SimCore
     from humanoid_sim.sysid.passive import FitSpace, Group, evaluate, fit
 
+    groups = args.groups or list(UPPER_BODY_GROUPS)
+    unknown = set(groups) - set(UPPER_BODY_GROUPS)
+    if unknown:
+        raise SystemExit(f"unknown groups {sorted(unknown)}; known: {sorted(UPPER_BODY_GROUPS)}")
+    start = {}
+    for item in args.start:
+        key, _, value = item.partition("=")
+        start[key] = float(value)
+    space = FitSpace([Group(name, UPPER_BODY_GROUPS[name]) for name in groups], params=tuple(args.params),
+                     log_bound=math.log(args.bound), start=start)
     moving = args.base != "fixed"
     sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, num_envs=args.num_envs,
                   fixed_base=not moving, base_joints=moving)
-    space = FitSpace([Group(name, joints) for name, joints in UPPER_BODY_GROUPS.items()],
-                     log_bound=math.log(args.bound))
     drives = sim.plant.map.drive_names
     scored = sorted({drives.index(sim.desc.joints[j].device) for g in space.groups for j in g.joints})
     captures = [ExcitationCapture(Path(c)) for c in args.captures]
     base = args.base if moving else None
     t = time.time()
+    delay = int(round(args.demand_delay_ms * 1e6))
     result = fit(sim, captures, space, scored, generations=args.generations, base_motion=base,
-                 duration_s=args.duration, seed=args.seed)
+                 duration_s=args.duration, seed=args.seed, demand_delay_ns=delay)
     result |= {"captures": [c.dataset_id for c in captures], "base": args.base, "num_envs": args.num_envs,
-               "bound": args.bound,
+               "bound": args.bound, "params": list(space.params), "start": space.start, "demand_delay_ns": delay,
                "wall_s": time.time() - t, "drives": drives, "scored": [drives[i] for i in scored],
                **sim.desc.identity()}
     m = dict(zip(space.names, result["multipliers"], strict=True))
-    result["values"] = {j: {p: getattr(sim.desc.joints[j], p) * m[f"{g.name}.{p}"] for p in space.params}
+    result["values"] = {j: {p: space.start_value(sim.desc, g, j, p) * m.get(f"{g.name}.{p}", 1.0)
+                            for p in ("damping", "friction", "armature")}
                         for g in space.groups for j in g.joints}
     if args.holdout:
         x = np.zeros((args.num_envs, space.dim))
         x[1:] = result["x"]
         held = [ExcitationCapture(Path(c)) for c in args.holdout]
-        f, per = evaluate(sim, held, space, x, scored, base_motion=base, duration_s=None)
+        f, per = evaluate(sim, held, space, x, scored, base_motion=base, duration_s=None, demand_delay_ns=delay)
         result["holdout"] = {"captures": [c.dataset_id for c in held], "objective_description": float(f[0]),
                              "objective_fit": float(f[1]), "rms_description": per[:, 0].tolist(),
                              "rms_fit": per[:, 1].tolist()}
@@ -194,6 +208,30 @@ def cmd_serve(args) -> int:
     return code
 
 
+def cmd_fit_delay(args) -> int:
+    import numpy as np
+
+    from humanoid_sim.replay.exc import ExcitationCapture
+    from humanoid_sim.sim import SimCore
+    from humanoid_sim.sysid.delay import scan_delay
+
+    lo, hi, step = args.delays_ms
+    delays = np.round(np.arange(lo, hi + step / 2, step) * 1e6).astype(np.int64)
+    moving = args.base != "fixed"
+    sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, num_envs=len(delays),
+                  fixed_base=not moving, base_joints=moving)
+    captures = [ExcitationCapture(Path(c)) for c in args.captures]
+    t = time.time()
+    result = scan_delay(sim, captures, delays, base_motion=args.base if moving else None, duration_s=args.duration)
+    result |= {"captures": [c.dataset_id for c in captures], "base": args.base, "wall_s": time.time() - t,
+               **sim.desc.identity()}
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "fit-delay.json").write_text(json.dumps(result, indent=1))
+    print(json.dumps(result["regions"], indent=1))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="humanoid-sim", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -217,6 +255,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--base", choices=("yaw", "orientation", "fixed"), default="yaw",
                    help="base yaw or full orientation from the capture's IMU (asset built with --base-joints), "
                         "or a fixed base")
+    r.add_argument("--demand-delay-ms", type=float, default=0.0,
+                   help="apply each recorded demand this much after its stamp (negative: before); see fit-delay")
     r.add_argument("--out", default="outputs/replay")
     r.set_defaults(func=cmd_replay)
 
@@ -248,8 +288,26 @@ def main(argv: list[str] | None = None) -> int:
     fp.add_argument("--device", default="cuda:0")
     fp.add_argument("--seed", type=int, default=0)
     fp.add_argument("--bound", type=float, default=10.0, help="multipliers stay within [1/bound, bound]")
+    fp.add_argument("--groups", nargs="*", default=None, help=f"joint groups to fit (default all: "
+                    f"{', '.join(UPPER_BODY_GROUPS)})")
+    fp.add_argument("--params", nargs="*", default=["damping", "friction", "armature"],
+                    help="parameters to fit; the others stay at their start values")
+    fp.add_argument("--start", nargs="*", default=[], metavar="GROUP.PARAM=VALUE",
+                    help="start value for every joint of a group instead of the description's, e.g. "
+                         "elbow.armature=0.0055")
+    fp.add_argument("--demand-delay-ms", type=float, default=0.0, help="as replay's")
     fp.add_argument("--out", default="outputs/sysid")
     fp.set_defaults(func=cmd_fit_passive)
+
+    fd = sub.add_parser("fit-delay", help="scan the delay between recorded drive demands and the drive acting on "
+                                          "them, by batched replay")
+    fd.add_argument("captures", nargs="+")
+    fd.add_argument("--delays-ms", nargs=3, type=float, default=[-6.0, 10.0, 0.5], metavar=("FROM", "TO", "STEP"))
+    fd.add_argument("--duration", type=float, default=None)
+    fd.add_argument("--base", choices=("yaw", "orientation", "fixed"), default="yaw")
+    fd.add_argument("--device", default="cuda:0")
+    fd.add_argument("--out", default="outputs/sysid")
+    fd.set_defaults(func=cmd_fit_delay)
 
     sv = sub.add_parser("serve", help="one robot in real time behind the runtime segment")
     sv.add_argument("--segment", required=True, help="segment file (on a volume shared with the plant host)")

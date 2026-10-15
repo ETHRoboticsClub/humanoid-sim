@@ -2,8 +2,9 @@
 
 Each env of a batched replay (:func:`~humanoid_sim.replay.replay.replay_position_rms`) runs the same capture
 with its own parameters, written to the solver before the run. A candidate is a vector of log multipliers on
-the description's values, one per (joint group, parameter); a group ties joints that share a value (left and
-right). The objective is the mean position RMS of the scored drives over the captures. CMA-ES with the
+start values, one per (joint group, parameter); a group ties joints that share a value (left and right). Start
+values are the description's unless given (``FitSpace.start``, e.g. a datasheet armature); parameters not in
+``FitSpace.params`` stay at their start values. The objective is the mean position RMS of the scored drives over the captures. CMA-ES with the
 population as the number of envs; a candidate outside the multiplier bounds is evaluated at the bound and
 penalized by its squared distance from it, so the search does not drift through the flat region beyond.
 
@@ -14,7 +15,7 @@ back here (robot facts land in humanoid-urdf).
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import torch
@@ -31,8 +32,20 @@ class Group:
 @dataclass
 class FitSpace:
     groups: list[Group]
-    params: tuple[str, ...] = PASSIVE_PARAMS
+    params: tuple[str, ...] = PASSIVE_PARAMS  # fitted
     log_bound: float = math.log(10.0)  # multipliers in [1/10, 10]
+    start: dict[str, float] = field(default_factory=dict)  # "group.param" -> value for every joint of the group
+
+    def __post_init__(self):
+        unknown = set(self.params) - set(PASSIVE_PARAMS)
+        if unknown:
+            raise ValueError(f"unknown parameters {sorted(unknown)}; known: {PASSIVE_PARAMS}")
+        names = {f"{g.name}.{p}" for g in self.groups for p in PASSIVE_PARAMS}
+        if set(self.start) - names:
+            raise ValueError(f"start values for unknown group parameters {sorted(set(self.start) - names)}")
+
+    def start_value(self, desc, group: Group, joint: str, param: str) -> float:
+        return float(self.start.get(f"{group.name}.{param}", getattr(desc.joints[joint], param)))
 
     @property
     def names(self) -> list[str]:
@@ -51,18 +64,22 @@ class FitSpace:
 
 
 def _write(robot, desc, space: FitSpace, x: np.ndarray) -> None:
-    """Write candidate ``x[e]`` to env ``e``: description value × multiplier, per joint."""
+    """Write candidate ``x[e]`` to env ``e``: start value × multiplier per joint (start value alone for the
+    parameters not fitted)."""
     m = space.multipliers(x)  # [E, G*P]
+    e = m.shape[0]
     joints = [j for g in space.groups for j in g.joints]
     ids = torch.tensor([robot.joint_names.index(j) for j in joints], device=robot.device)
-    cols = {p: [] for p in space.params}
+    cols = {p: [] for p in PASSIVE_PARAMS}
+    nominal = {p: [] for p in PASSIVE_PARAMS}
     for gi, g in enumerate(space.groups):
-        for pi, p in enumerate(space.params):
-            cols[p] += [m[:, gi * len(space.params) + pi]] * len(g.joints)
-    nominal = {"damping": [desc.joints[j].damping for j in joints],
-               "friction": [desc.joints[j].friction for j in joints],
-               "armature": [desc.joints[j].armature for j in joints]}
-    for p in space.params:
+        for p in PASSIVE_PARAMS:
+            col = m[:, gi * len(space.params) + space.params.index(p)] if p in space.params else np.ones(e)
+            cols[p] += [col] * len(g.joints)
+            nominal[p] += [space.start_value(desc, g, j, p) for j in g.joints]
+    for p in PASSIVE_PARAMS:
+        if p not in space.params and not any(k.endswith(f".{p}") for k in space.start):
+            continue  # neither fitted nor moved from the description: leave the solver's value
         value = torch.tensor(np.stack(cols[p], axis=1) * np.asarray(nominal[p])[None], dtype=torch.float32,
                              device=robot.device)
         if p == "damping":
@@ -75,13 +92,14 @@ def _write(robot, desc, space: FitSpace, x: np.ndarray) -> None:
 
 
 def evaluate(sim, captures, space: FitSpace, x: np.ndarray, scored: list[int], *, base_motion: str | None,
-             duration_s: float | None) -> np.ndarray:
+             duration_s: float | None, demand_delay_ns: int = 0) -> np.ndarray:
     """Objective per candidate ``[E]`` and the per-capture, per-drive RMS ``[C, E, D]``."""
     from humanoid_sim.replay.replay import replay_position_rms
 
     _write(sim.backend.robot, sim.desc, space, x)
-    per = np.stack([replay_position_rms(c, sim, base_motion=base_motion, duration_s=duration_s).cpu().numpy()
-                    for c in captures])
+    delays = np.full(len(x), demand_delay_ns) if demand_delay_ns else None
+    per = np.stack([replay_position_rms(c, sim, base_motion=base_motion, duration_s=duration_s,
+                                        delays_ns=delays).cpu().numpy() for c in captures])
     return per[:, :, scored].mean(axis=(0, 2)), per
 
 
@@ -133,19 +151,21 @@ BOUND_PENALTY = 1e-3  # rad of objective per squared log-unit outside the bounds
 
 
 def fit(sim, captures, space: FitSpace, scored: list[int], *, generations: int, sigma: float = 0.7,
-        base_motion: str | None = "yaw", duration_s: float | None = None, seed: int = 0, log=print) -> dict:
+        base_motion: str | None = "yaw", duration_s: float | None = None, seed: int = 0, demand_delay_ns: int = 0,
+        log=print) -> dict:
     """CMA-ES from the description's values (x = 0). Env 0 of every generation re-evaluates the best so far."""
     e = sim.plant.num_envs
     es = Cmaes(np.zeros(space.dim), sigma, e - 1, seed)
     x0 = np.zeros((e, space.dim))
-    f0, per0 = evaluate(sim, captures, space, x0, scored, base_motion=base_motion, duration_s=duration_s)
+    f0, per0 = evaluate(sim, captures, space, x0, scored, base_motion=base_motion, duration_s=duration_s,
+                        demand_delay_ns=demand_delay_ns)
     best_x, best_f, best_per = np.zeros(space.dim), float(f0[0]), per0[:, 0]
     history = [{"generation": 0, "best": best_f, "median": best_f}]
     log(f"gen 0 description values: {best_f * 1e3:.2f} mrad", flush=True)
     for g in range(1, generations + 1):
         xs = es.ask()
         f, per = evaluate(sim, captures, space, np.vstack([best_x, xs]), scored, base_motion=base_motion,
-                          duration_s=duration_s)
+                          duration_s=duration_s, demand_delay_ns=demand_delay_ns)
         es.tell(xs, f[1:] + BOUND_PENALTY * space.out_of_bounds(xs))
         i = int(np.argmin(f))
         if f[i] < best_f:
