@@ -12,9 +12,11 @@ Pacing is to ``CLOCK_MONOTONIC``: the host sleeps until each step's deadline. A 
 period late counts as late and the schedule restarts from now (plant time never jumps). ``keeping_up`` is
 true while no step in the last second was late.
 
-Session: the client attaches by writing demands that carry the segment's ``session_id``. Once attached, demands
-older than ``client_timeout_ns`` end the session (the segment's state becomes ended and :meth:`RuntimeHost.run`
-returns :data:`EXIT_CLIENT_LOST`); Controls' bank ends its side when this host's heartbeat stops.
+Session: the client attaches by writing demands that carry the segment's ``session_id``. A DETACH command ends
+the session (:meth:`RuntimeHost.run` returns :data:`EXIT_DETACHED`), as do demands older than
+``client_timeout_ns`` once attached (:data:`EXIT_CLIENT_LOST`); the segment's state becomes ended, and Controls'
+bank ends its side when this host's heartbeat stops. :meth:`RuntimeHost.new_session` then serves the next client
+on a new segment at the same path, the robot back in its start state, without recompiling the step.
 
 IMU sample times (``sample_ns``, ``stamp_ns``) are plant time; the feedback region's ``sim_time_ns`` and
 ``written_mono_ns`` map them to the host clock.
@@ -38,6 +40,7 @@ from humanoid_sim.world.supports import _quat_rotate
 
 EXIT_DONE = 0  # max steps or a stop request
 EXIT_CLIENT_LOST = 3
+EXIT_DETACHED = 4
 
 KEEPING_UP_WINDOW_NS = NS_PER_S
 SPIN_NS = 300_000  # sleep until this close to a deadline, then spin
@@ -88,33 +91,51 @@ class RuntimeHost:
         self.joints = list(self.desc.joints)
         self.client_timeout_ns = client_timeout_ns
         self.truth_every = truth_every
-        self._truth_due = True
         self._soles = self._sole_geometry(meta["sole_boxes"])
         contacts = self.sim.backend.contacts
         names = [n.rsplit("/", 1)[-1] for n in contacts.sensor_names]
         self._sole_contacts = torch.tensor([names.index(s["body"]) for s in self._soles], device=self.device)
         self._mass = self.robot.data.body_mass.torch[0]
-        self.seg = abi.Segment.create(
-            segment, robot_id=robot, description_digest=self.desc.digest, sim_revision=sim_revision,
+        self._segment_args = dict(
+            path=segment, robot_id=robot, description_digest=self.desc.digest, sim_revision=sim_revision,
             num_drives=len(self.drives), num_joints=len(self.joints), physics_period_ns=self.period_ns,
             bus_period_ns=bus_period_ns, descriptor=self._descriptor(support), ready=False)
+        self.seg = None
+        self._faults: dict[tuple[str, int | None], tuple[int | None, object]] = {}
+        self._disturbances: list[_Disturbance] = []
+        self._stop = False
+        self._warm_up()
+        self._open_session()
+
+    def _open_session(self) -> None:
+        """A new segment (new session id) at the path, published before it is marked ready."""
+        self.seg = abi.Segment.create(**self._segment_args)
         self.session_id = self.seg.session_id
-        # State.
         self.step_count = 0
         self.late_steps = 0
         self._last_late_ns = -KEEPING_UP_WINDOW_NS
         self.paused = False
         self.attached = False
+        self.detached = False
         self._client_mono_ns = 0
         self._demand_seq = 0
         self._command_seq = 0
-        self._disturbances: list[_Disturbance] = []
         self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = None
-        self._faults: dict[tuple[str, int | None], tuple[int | None, object]] = {}
-        self._stop = False
-        self._warm_up()
+        self._truth_due = True
         self._publish()
         self.seg.mark_ready()
+
+    def new_session(self) -> None:
+        """End the current session and serve the next client: the robot back in its start pose with the drives
+        idle, gantry, disturbances, faults and pause cleared, on a new segment at the same path. Plant time runs
+        on."""
+        self.seg.end()
+        self.seg.close()
+        for key in list(self._faults):
+            self._clear_fault(key)
+        self.sim.gantry.release(torch.tensor([0], device=self.device))
+        self._reset({"pose": "standing"})
+        self._open_session()
 
     def _warm_up(self, steps: int = 3) -> None:
         """Step a few times and put the state back: the first steps compile kernels (seconds on a CPU), which must
@@ -186,7 +207,8 @@ class RuntimeHost:
             return
         handler = {abi.CMD_RESET: self._reset, abi.CMD_PAUSE: self._pause, abi.CMD_RESUME: self._resume,
                    abi.CMD_SET_SUPPORT: self._set_support, abi.CMD_APPLY_DISTURBANCE: self._disturb,
-                   abi.CMD_INJECT_FAULT: self._inject, abi.CMD_PRESCRIBE_POSE: self._prescribe}.get(command)
+                   abi.CMD_INJECT_FAULT: self._inject, abi.CMD_PRESCRIBE_POSE: self._prescribe,
+                   abi.CMD_DETACH: self._detach}.get(command)
         if handler is None:
             self.seg.ack(seq, abi.ACK_UNKNOWN, f"unknown command {command}")
             return
@@ -253,6 +275,10 @@ class RuntimeHost:
             self.robot.write_root_pose_to_sim_index(root_pose=base)
             self.robot.write_root_velocity_to_sim_index(root_velocity=torch.zeros(1, 6, device=self.device))
         self.sim.write_joint_state(q, torch.zeros_like(q))
+
+    def _detach(self, args: dict) -> str:
+        self.detached = True
+        return "detached"
 
     def _pause(self, args: dict) -> str:
         self.paused = True
@@ -522,7 +548,7 @@ class RuntimeHost:
         self._stop = True
 
     def run(self, max_steps: int | None = None) -> int:
-        """Serve in real time until ``max_steps`` periods, a stop request, or the client is lost."""
+        """Serve in real time until ``max_steps`` periods, a stop request, or the client detaches or is lost."""
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 signal.signal(sig, self.stop)
@@ -545,6 +571,9 @@ class RuntimeHost:
                     deadline = now
                 self.step()
                 periods += 1
+                if self.detached:
+                    code = EXIT_DETACHED
+                    break
                 if self._client_lost():
                     code = EXIT_CLIENT_LOST
                     break

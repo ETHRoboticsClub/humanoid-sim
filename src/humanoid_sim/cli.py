@@ -192,20 +192,24 @@ def _revision() -> str:
 
 
 def cmd_serve(args) -> int:
-    from humanoid_sim.runtime.host import RuntimeHost
+    from humanoid_sim.runtime.host import EXIT_CLIENT_LOST, EXIT_DETACHED, RuntimeHost
 
     host = RuntimeHost(args.segment, _usd(args), device=args.device, robot=args.robot, support=args.support,
                        bus_period_ns=int(args.bus_period_us * 1000),
                        client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
                        sim_revision=_revision(), truth_every=args.truth_every)
-    print(json.dumps({"segment": str(args.segment), "session_id": host.session_id, "ready": True}), flush=True)
     try:
-        code = host.run(max_steps=args.max_steps)
+        while True:
+            print(json.dumps({"segment": str(args.segment), "session_id": host.session_id, "ready": True}),
+                  flush=True)
+            code = host.run(max_steps=args.max_steps)
+            print(json.dumps(host.status() | {"exit": code}), flush=True)
+            if not (args.persist and code in (EXIT_CLIENT_LOST, EXIT_DETACHED)):
+                break
+            host.new_session()
     finally:
-        status = host.status()
         host.close()
-    print(json.dumps(status | {"exit": code}), flush=True)
-    return code
+    return 0 if code == EXIT_DETACHED else code
 
 
 def cmd_fit_delay(args) -> int:
@@ -319,7 +323,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="end the session when an attached client's demands are this old")
     sv.add_argument("--truth-every", type=int, default=5, help="publish the truth every this many steps (and after "
                     "every command); 1 for test oracles that track maxima")
-    sv.add_argument("--max-steps", type=int, default=None)
+    sv.add_argument("--persist", action="store_true", help="when a client detaches or is lost, reset the robot "
+                    "and serve the next client on a new session, until stopped")
+    sv.add_argument("--max-steps", type=int, default=None, help="periods per session")
     sv.add_argument("--seed", type=int, default=0)
     sv.set_defaults(func=cmd_serve)
 

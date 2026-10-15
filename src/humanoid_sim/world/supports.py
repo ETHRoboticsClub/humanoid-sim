@@ -99,6 +99,8 @@ class Gantry:
             ids = [self.robot.body_names.index(b) for b in attachment_bodies]
             rel = pose[env_ids][:, ids, :3] - root[:, None, :3]
             return _quat_rotate_inverse(root[:, None, 3:].expand(-1, len(ids), -1), rel)
+        if attachment_b is None:
+            raise ValueError("a rope needs attachment points: attachment_b or attachment_bodies")
         p = torch.as_tensor(attachment_b, dtype=torch.float32, device=self.device).reshape(-1, 3)
         return p.expand(len(env_ids), -1, -1)
 

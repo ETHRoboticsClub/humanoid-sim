@@ -157,3 +157,58 @@ def test_prescribed_pose_with_floor_clearance_and_sole_truth(tmp_path):
             host._prescribe({"floor_clearance_m": 0.002})
     finally:
         host.close()
+
+
+def test_detach_and_next_session(tmp_path):
+    pytest.importorskip("isaaclab_newton")
+    from humanoid_sim.runtime.host import EXIT_DETACHED, RuntimeHost
+
+    out = asset_dir(Description.load(), load_profile("ethrc_v1"), REPO / "outputs" / "assets")
+    if not (out / "asset.json").exists():
+        pytest.skip("robot asset not built; run `humanoid-sim build-asset` in the Isaac Lab image")
+    usd = out / json.loads((out / "asset.json").read_text())["usd"]
+    path = tmp_path / "plant"
+    host = RuntimeHost(path, usd, device="cpu", support="free", compile=False)
+    try:
+        first = abi.Segment.open(path, wait_s=1)
+        n = first.num_drives
+        demand = {"torque_enabled": np.zeros(n), "mode": np.zeros(n), "homing_hold": np.zeros(n),
+                  "target_position_rad": np.zeros(n), "target_velocity_rad_s": np.zeros(n),
+                  "feedforward_torque_nm": np.zeros(n), "i_gain_raw": np.zeros(n), "max_torque_mnm": np.zeros(n),
+                  "p_gain_raw": np.zeros(n), "d_gain_raw": np.zeros(n)}
+        first.regions["demands"].write(abi.demands_record(demand, cycle=1, session_id=first.session_id))
+        host.step()
+        assert host.attached
+        assert host._set_support({"support": "gantry", "tension_breakpoints_s_n": [[0, 300]],
+                                  "attachment_local_m": [[0.0, 0.0, 0.3]]}) == "gantry"
+        assert host._inject({"fault": "power_sag", "value": 0.5}) == "power_sag active"
+        for _ in range(20):
+            host.step()
+
+        seq = first.send(abi.CMD_DETACH)
+        assert host.run(max_steps=5) == EXIT_DETACHED
+        assert first.wait_ack(seq, timeout_s=1) == (abi.ACK_OK, "detached")
+        assert first.state == abi.STATE_ENDED
+
+        host.new_session()
+        assert first.state == abi.STATE_ENDED  # the old client keeps the ended file
+        second = abi.Segment.open(path, wait_s=1)
+        assert second.state == abi.STATE_READY and second.session_id not in (0, first.session_id)
+        assert int(second.regions["feedback"].read()[1]["step"]) == 0
+        assert not host._faults and float(host.sim.plant.bank.torque_scale.min()) == 1.0
+        assert int(host.sim.gantry.mode[0]) == 0
+        _, truth = second.regions["truth"].read()
+        standing = [host.desc.joints[j].standing_offset_rad for j in host.joints]
+        assert np.allclose(truth["joint_pos_rad"][: len(standing)], standing, atol=1e-4)
+        assert float(truth["base_position_m"][2]) == pytest.approx(host.standing_height_m, abs=1e-3)
+
+        first.regions["demands"].write(abi.demands_record(demand, cycle=2, session_id=first.session_id))
+        host.step()
+        assert not host.attached  # a client of the ended session does not attach
+        second.regions["demands"].write(abi.demands_record(demand, cycle=1, session_id=second.session_id))
+        host.step()
+        assert host.attached
+        first.close()
+        second.close()
+    finally:
+        host.close()

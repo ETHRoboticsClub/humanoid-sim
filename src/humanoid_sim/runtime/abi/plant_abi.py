@@ -25,6 +25,12 @@ reads of ``seq`` and accepts it only if its CRC matches. The CRC makes a torn co
 on memory ordering, which Python does not give. Values are little-endian, at natural alignment; every region
 starts on a 64-byte boundary.
 
+Sessions: the header's ``session_id`` names one client session. A client attaches by writing demands that echo
+it. The session ends (state ended) when the client sends DETACH, when its demands are older than the sim's client
+timeout, or when the sim stops. A sim that serves sessions one after another creates each on a new file it
+renames over the same path: a client still mapping the old file sees it ended, a client that opens the path gets
+the new session.
+
 Time: ``*_mono_ns`` fields are ``CLOCK_MONOTONIC`` of the writing process; ``sim_time_ns`` and the IMU samples'
 ``sample_ns`` and ``stamp_ns`` are plant time. The feedback region maps plant time ``t`` to the sim host's clock:
 ``written_mono_ns - (sim_time_ns - t)``. Identity: the description digest is :func:`description_digest`.
@@ -46,7 +52,7 @@ from pathlib import Path
 import numpy as np
 
 ABI_MAJOR = 1
-ABI_MINOR = 0
+ABI_MINOR = 1
 MAGIC = b"HSIMPLNT"
 ALIGN = 64
 
@@ -70,6 +76,7 @@ STATE_CREATING, STATE_READY, STATE_ENDED = 0, 1, 2
 # INJECT_FAULT     {"fault": name, "drive": name | null, "value": number, "duration_s": s | null}
 # PRESCRIBE_POSE   {"joint_pos": {...}, "base_pose": [...] | null, "floor_clearance_m": m | null}: hold a pose
 #                  (the base dropped so its lowest sole corner sits that far above the floor); {"release": true}
+# DETACH           {}: the client is leaving; the sim acks and ends the session (ABI 1.1)
 CMD_NONE = 0
 CMD_RESET = 1
 CMD_PAUSE = 2
@@ -78,6 +85,7 @@ CMD_SET_SUPPORT = 4
 CMD_APPLY_DISTURBANCE = 5
 CMD_INJECT_FAULT = 6
 CMD_PRESCRIBE_POSE = 7
+CMD_DETACH = 8
 COMMANDS = {
     CMD_RESET: "reset",
     CMD_PAUSE: "pause",
@@ -86,6 +94,7 @@ COMMANDS = {
     CMD_APPLY_DISTURBANCE: "apply_disturbance",
     CMD_INJECT_FAULT: "inject_fault",
     CMD_PRESCRIBE_POSE: "prescribe_pose",
+    CMD_DETACH: "detach",
 }
 
 # Ack results.
