@@ -1,1 +1,1 @@
-"""The world around the robot: terrains and disturbances."""
+"""The world around the robot: terrains, disturbances and supports."""

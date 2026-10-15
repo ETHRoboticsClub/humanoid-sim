@@ -5,6 +5,9 @@ MJWarp solver is the only physics in this repo (on CUDA, or on Warp's CPU device
 
 With ``base_joints`` (the asset variant built with them), :meth:`SimCore.set_base` prescribes the base
 orientation as yaw, pitch and roll (``R = Rz Ry Rx``) and their rates, held through the next steps.
+
+``gantry`` (:class:`~humanoid_sim.world.supports.Gantry`) hangs the robot from a rope from the next step on;
+``fixed_base`` suspends it (the base welded to the world).
 """
 
 from __future__ import annotations
@@ -52,6 +55,9 @@ class SimCore:
         self._base = (torch.tensor([self.backend.joint_names.index(n) for n, _ in BASE_JOINTS],
                                    device=self.plant.cfg.device) if base_joints else None)
         self._base_target: tuple[torch.Tensor, torch.Tensor] | None = None
+        from humanoid_sim.world.supports import Gantry
+
+        self.gantry = Gantry(self.backend.robot)
         self.t_ns = 0
         self.feedback: DriveFeedback | None = None
 
@@ -95,6 +101,7 @@ class SimCore:
             self.backend.set_targets(bt, bv)
         else:
             self.backend.set_targets(bt)
+        self.gantry.apply(self.t_ns)
         self.backend.step()
         self.t_ns += self.period_ns
         q, qd = self.joint_state()
