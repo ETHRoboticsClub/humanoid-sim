@@ -18,9 +18,10 @@ runs (`bench`, `replay`, `sysid`).
 ```bash
 humanoid-sim build-asset                  # robot USD for the profile, under outputs/assets/
 humanoid-sim build-asset --base-joints    # the variant replays use: yaw/pitch/roll joints above the base
-humanoid-sim replay <exc-dir>             # drive-level replay, the base turning with the capture's IMU yaw
+humanoid-sim replay <exc-dir> [--demand-delay-ms -7]   # drive-level replay, the base turning with the IMU yaw
 humanoid-sim view-replay <replay-dir> --save replay.rrd
-humanoid-sim bench --num-envs 4096 [--train]
+humanoid-sim bench --num-envs 4096 [--train]   # or --runtime: the real-time host's step
+humanoid-sim fit-delay <exc-dir>...       # when each recorded demand acts, relative to its stamp
 humanoid-sim fit-passive <exc-dir>... --holdout <exc-dir> --num-envs 512   # upper-body passive parameters
 humanoid-sim serve --segment /run/hsim/plant --support suspended   # one robot in real time, for Controls
 ```
@@ -52,6 +53,8 @@ cfg.actions.drives = PlantActionCfg(class_type=Drives, action_dim=22, plant=Trai
     {"param": "friction", "dist": "uniform", "range": [0.3, 1.0], "op": "set"},
 ]))
 # in terms: plant = env.action_manager.get_term("drives").plant
-#   plant.measured(): drive feedback (and per-step history) and the raw IMU samples received so far
+#   plant.measured(): drive feedback as the drives report it (encoder counts, mNm), its per-step history, and
+#     the raw IMU samples received so far
 #   plant.truth(): joint state, root pose and twist, contact forces
+#   plant.attach_log(SignalLog(...)); plant.log("name", tensor): named signals into the Rerun log
 ```
