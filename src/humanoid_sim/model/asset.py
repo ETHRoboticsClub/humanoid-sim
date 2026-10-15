@@ -8,8 +8,9 @@ Isaac Lab spawns robots only from USD, so the canonical sim model is a USD built
 3. ``physics:filteredPairs`` between bodies: the profile's contact excludes and every body pair the
    profile's self-collision sets do not pair up.
 
-The output directory is keyed by the content digest, so a description or profile change rebuilds. Runs in
-the Isaac Lab image (Linux); imports are lazy.
+A variant with base joints (see :mod:`~humanoid_sim.model.urdf`) is a separate asset, for replays that
+prescribe the base orientation. The output directory is keyed by the content digest, so a description or
+profile change rebuilds. Runs in the Isaac Lab image (Linux); imports are lazy.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from pathlib import Path
 import yaml
 
 from humanoid_sim.model.description import Description
-from humanoid_sim.model.urdf import PreparedUrdf
+from humanoid_sim.model.urdf import BASE_JOINTS, PreparedUrdf
 
 ASSET_SCHEMA = "humanoid-sim-asset/v1"
 
@@ -41,9 +42,9 @@ def asset_key(desc: Description, profile: dict, prepared: PreparedUrdf) -> str:
     return h.hexdigest()[:16]
 
 
-def asset_dir(desc: Description, profile: dict, out_root: Path) -> Path:
+def asset_dir(desc: Description, profile: dict, out_root: Path, *, base_joints: bool = False) -> Path:
     """Directory of the asset for this description and profile (exists only once built)."""
-    prepared = PreparedUrdf(desc, profile).build()
+    prepared = PreparedUrdf(desc, profile).build(base_joints=base_joints)
     return Path(out_root) / desc.robot / asset_key(desc, profile, prepared)
 
 
@@ -72,9 +73,10 @@ def add_contact_excludes(usd_path: Path, pairs: list[list[str]]) -> list[tuple[s
     return authored
 
 
-def build_asset(desc: Description, profile: dict, out_root: Path, *, force: bool = False) -> Path:
+def build_asset(desc: Description, profile: dict, out_root: Path, *, force: bool = False,
+                base_joints: bool = False) -> Path:
     """Build (or reuse) the robot USD; returns its path. Writes ``asset.json`` with the provenance."""
-    prepared = PreparedUrdf(desc, profile).build()
+    prepared = PreparedUrdf(desc, profile).build(base_joints=base_joints)
     key = asset_key(desc, profile, prepared)
     out = Path(out_root) / desc.robot / key
     meta_path = out / "asset.json"
@@ -92,6 +94,7 @@ def build_asset(desc: Description, profile: dict, out_root: Path, *, force: bool
     self_excludes = add_contact_excludes(usd, prepared.self_collision_excludes())
     meta = {
         "schema": ASSET_SCHEMA, "key": key, "usd": str(usd.relative_to(out)), **desc.identity(),
+        "base_joints": [name for name, _ in BASE_JOINTS] if base_joints else [],
         "welded_joints": prepared.welded,
         "sole_boxes": [{"side": s.side, "body": s.body, "replaces_mesh": s.mesh,
                         "center": s.center.tolist(), "rotation": s.rotation.tolist(),

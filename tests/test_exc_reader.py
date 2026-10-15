@@ -35,3 +35,22 @@ def test_captures_load_and_match_description():
         for name, d in desc.drives.items():
             assert gains[name].stiffness == pytest.approx(d.baseline_stiffness)
             assert gains[name].damping == pytest.approx(d.baseline_damping)
+
+
+@pytest.mark.data
+@pytest.mark.skipif(not CAPTURES, reason="exc-* captures not available")
+def test_imu_stream_is_base_frame_and_bursty():
+    from humanoid_sim.replay.base import BaseMotion, sample_times_ns
+
+    for root in CAPTURES:
+        cap = ExcitationCapture(root)
+        imu = cap.imu()
+        f = imu.specific_force.mean(axis=0)
+        assert f[2] == pytest.approx(9.8, abs=0.1) and np.hypot(f[0], f[1]) < 0.2  # base z up, at rest-ish
+        ts = sample_times_ns(imu)
+        assert np.all(np.diff(ts) > 0) and np.all(ts <= imu.t_ns)
+        assert (imu.t_ns - ts).max() < 25_000_000  # never older than a burst period plus jitter
+        a, b = cap.time_span_ns()
+        bm = BaseMotion.from_imu(imu, np.arange(a, b, 4_000_000))
+        assert np.ptp(bm.angles[:, 0]) > np.radians(5)  # the gantry turns the base
+        assert not bm.angles[:, 1:].any()

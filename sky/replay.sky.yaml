@@ -30,6 +30,7 @@ run: |
   cd "$HOME/sky_workdir"
   mkdir -p outputs/replay-mjwarp
   humanoid-sim build-asset | tail -1
+  humanoid-sim build-asset --base-joints | tail -1  # replays turn the base with the capture's IMU yaw
   # One process per capture in parallel: a single env leaves the GPU mostly idle.
   for cap in /data/exc-*; do
     (

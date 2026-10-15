@@ -1,7 +1,7 @@
 """Rerun recording of a replay: the simulated robot with the real robot as a ghost, plus every drive signal.
 
-3D: ``/world/sim`` (opaque) and ``/world/real`` (translucent orange), same fixed base, so any disagreement
-shows as the ghost separating from the robot. Signals: ``/sim/0/drives/<drive>/{position,velocity,torque}``,
+3D: ``/world/sim`` (opaque) and ``/world/real`` (translucent orange) on the same base (fixed, or turning as the
+replay prescribed it), so any disagreement shows as the ghost separating from the robot. Signals: ``/sim/0/drives/<drive>/{position,velocity,torque}``,
 ``/real/drives/<drive>/{position,velocity,torque}``, ``/demand/drives/<drive>/position`` and
 ``/residual/0/drives/<drive>/position`` (sim − real). Written to an .rrd file (or streamed to a viewer the
 caller started); nothing here spawns a viewer.
@@ -59,6 +59,18 @@ def label(root: str, text: str, color, offset_y: float) -> None:
                                                   radii=[0.02], show_labels=True), static=True)
 
 
+def turn_base(poses: np.ndarray, angles: np.ndarray, origin: np.ndarray) -> np.ndarray:
+    """Body poses ``[F, B, 7]`` (xyz, quaternion xyzw) of a base at ``origin`` turned by yaw, pitch, roll ``[F, 3]``."""
+    from scipy.spatial.transform import Rotation
+
+    out = poses.copy()
+    for f, a in enumerate(angles):
+        r = Rotation.from_euler("ZYX", a)
+        out[f, :, :3] = r.apply(poses[f, :, :3] - origin) + origin
+        out[f, :, 3:] = (r * Rotation.from_quat(poses[f, :, 3:])).as_quat()
+    return out
+
+
 def view_replay(trace_dir: Path, usd: Path, rrd: str | None, *, fps: float = 50.0, robot: str = "ethrc_v1",
                 connect: str | None = None) -> None:
     from humanoid_sim.core import PlantCfg, PlantCore
@@ -80,8 +92,11 @@ def view_replay(trace_dir: Path, usd: Path, rrd: str | None, *, fps: float = 50.
                        {"position": tr["real_position"][frames]}, tr["demand"][frames])
     real_q = res.real_joint_q(plant)
 
+    base = tr["sim_base_angles"][frames] if "sim_base_angles" in tr else np.zeros((len(frames), 3))
+
     def body_poses(qs):
-        return np.stack([kin.body_poses(torch.as_tensor(q)[None]) for q in qs])
+        poses = np.stack([kin.body_poses(torch.as_tensor(q)[None]) for q in qs])
+        return turn_base(poses, base, kin.base_origin) if base.any() else poses
 
     joint_of = {d.name: (d.joints[0] if d.crank is None else f"{d.joints[0]}/{d.crank} crank")
                 for d in desc.drives.values()}

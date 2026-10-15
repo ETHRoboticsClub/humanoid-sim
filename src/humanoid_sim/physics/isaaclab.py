@@ -6,6 +6,9 @@ runs on Warp's CPU device (slow, for tests); real-time and batched use is on CUD
 The solver PD gains are the plant's constant ``k0, d0`` (joint space), written once at spawn. Each step the
 plant writes position targets (velocity target 0); nothing else changes in the model while stepping.
 Passive joint damping and Coulomb friction, armature and effort limits come from the description.
+
+With base joints (an asset built with them), the root is fixed to the world and the base orientation follows
+position and velocity targets on the three base joints, through a stiff PD.
 """
 
 from __future__ import annotations
@@ -17,6 +20,13 @@ import torch
 
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.joint_properties import JointProperties
+from humanoid_sim.model.urdf import BASE_JOINTS
+
+# Base-joint PD. Each joint carries the whole robot (a few kg m² about yaw, ~10 about pitch and roll at the
+# pelvis), so 1e5 Nm/rad holds a 30 Nm waist reaction to 0.3 mrad and stays below the explicit-stiffness
+# limit 4 I / dt² at 4 ms; the damping is implicit (implicitfast) and near critical.
+BASE_JOINT_STIFFNESS = 1e5
+BASE_JOINT_DAMPING = 2e3
 
 
 @dataclass
@@ -34,6 +44,7 @@ class IsaacLabCfg:
     njmax: int = 300
     nconmax: int | None = None
     self_collision: bool = True
+    base_joints: bool = False
     rerun: bool = False
     rerun_rrd: str | None = None
 
@@ -63,15 +74,22 @@ class IsaacLabRobot:
             viscous_friction=_per_joint(joints, props.passive_damping),
             joint_effort_limit=_per_joint(joints, props.effort_limit),
         )
+        actuators = {"drives": actuator}
+        joint_pos = _per_joint(joints, props.standing)
+        if cfg.base_joints:
+            names = [name for name, _ in BASE_JOINTS]
+            actuators["base"] = ImplicitActuatorCfg(
+                joint_names_expr=[f"^{n}$" for n in names], stiffness=BASE_JOINT_STIFFNESS,
+                damping=BASE_JOINT_DAMPING, armature=0.0, friction=0.0)
+            joint_pos |= {f"^{n}$": 0.0 for n in names}
         robot = ArticulationCfg(
             prim_path="{ENV_REGEX_NS}/Robot",
             spawn=sim_utils.UsdFileCfg(
-                usd_path=str(usd_path), fix_root_link=cfg.fixed_base,
+                usd_path=str(usd_path), fix_root_link=cfg.fixed_base or cfg.base_joints,
                 articulation_props=[NewtonArticulationCfg(self_collision_enabled=cfg.self_collision)]),
             init_state=ArticulationCfg.InitialStateCfg(
-                pos=(0.0, 0.0, cfg.base_height_m), joint_pos=_per_joint(joints, props.standing),
-                joint_vel={".*": 0.0}),
-            actuators={"drives": actuator},
+                pos=(0.0, 0.0, cfg.base_height_m), joint_pos=joint_pos, joint_vel={".*": 0.0}),
+            actuators=actuators,
         )
 
         @configclass
@@ -114,15 +132,21 @@ class IsaacLabRobot:
         self.robot.write_joint_position_to_sim_index(position=q, env_ids=env_ids)
         self.robot.write_joint_velocity_to_sim_index(velocity=qd, env_ids=env_ids)
 
-    def set_targets(self, target: torch.Tensor) -> None:
+    def set_targets(self, target: torch.Tensor, velocity: torch.Tensor | None = None) -> None:
         tc = self.robot.actuators.target_command
         tc.set_position_index(value=target)
-        tc.set_velocity_index(value=torch.zeros_like(target))
+        tc.set_velocity_index(value=torch.zeros_like(target) if velocity is None else velocity)
 
     def step(self) -> None:
         self.scene.write_data_to_sim()
         self.sim.step()
         self.scene.update(self.cfg.period_s)
+
+    def close(self) -> None:
+        """Release the simulation (Isaac Lab allows one per process)."""
+        import isaaclab.sim as sim_utils
+
+        sim_utils.SimulationContext.clear_instance()
 
     def model_summary(self) -> dict:
         """Masses and names straight from the Newton model, for model checks."""

@@ -140,3 +140,19 @@ def test_collision_config_is_checked(built):
     with pytest.raises(ValueError, match="expected two of"):
         PreparedUrdf(desc, _profile(self_collision={**sc, "pairs": [["leg_l", "tail"]]})).build() \
             .self_collision_excludes()
+
+
+def test_base_joints_chain_world_to_root(built):
+    from humanoid_sim.model.urdf import BASE_JOINTS, BASE_ROOT
+
+    desc, p = built
+    root = p.root_link()
+    g = PreparedUrdf(desc, load_profile("ethrc_v1")).build(base_joints=True)
+    assert g.root_link() == BASE_ROOT
+    chain = {j.get("name"): j for j in g.root.findall("joint") if j.get("name") in dict(BASE_JOINTS)}
+    assert [chain[n].find("axis").get("xyz") for n, _ in BASE_JOINTS] == ["0 0 1", "0 1 0", "1 0 0"]
+    assert chain["base_roll"].find("child").get("link") == root
+    assert g.digest() != p.digest()
+    tree = g.body_tree()
+    assert tree[root] == ("base_roll", "base_pitch_link")
+    assert g.self_collision_excludes() == []  # the chain's links have no colliders

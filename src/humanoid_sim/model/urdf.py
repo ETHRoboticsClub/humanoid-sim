@@ -10,7 +10,10 @@ Applied, in order:
    body and of its fixed-joint children becomes one mesh in the body frame, so the converter makes one
    convex hull per body. Against the ground plane the hull of the union reaches exactly as far as the
    separate hulls did; between bodies it fills the gaps between parts. Primitive colliders stay;
-5. resolve ``package://`` mesh URIs to absolute paths.
+5. optionally, base joints: three revolute joints (yaw about z, pitch about y, roll about x, in that order)
+   between a new world-fixed root and the robot's root, so a replay can prescribe the base orientation of
+   a robot hanging on a gantry;
+6. resolve ``package://`` mesh URIs to absolute paths.
 
 A *body* is a link that no fixed joint merges into a parent: the root and the child of every movable
 joint. Self-collision sets (profile ``self_collision``) group bodies by the joint they hang from.
@@ -43,6 +46,10 @@ class SoleBox:
 
 COLLISION_HULLS = ("per_mesh", "per_body")
 MERGED_DIR = "collision"  # merged meshes, written next to the prepared URDF
+# World → robot root through these, in order: R = Rz(yaw) Ry(pitch) Rx(roll).
+BASE_JOINTS = (("base_yaw", (0, 0, 1)), ("base_pitch", (0, 1, 0)), ("base_roll", (1, 0, 0)))
+BASE_ROOT = "base_world"
+BASE_LINK_MASS_KG = 1e-3  # links between the base joints: negligible next to the robot, nonzero for the solver
 
 
 def read_stl(path: Path) -> np.ndarray:
@@ -290,7 +297,36 @@ class PreparedUrdf:
         return [(a, b) for i, a in enumerate(bodies) for b in bodies[i + 1:]
                 if frozenset((sets[a], sets[b])) not in allowed]
 
-    def build(self) -> PreparedUrdf:
+    def root_link(self) -> str:
+        children = {j.find("child").get("link") for j in self._joints}
+        roots = [name for name in self._links if name not in children]
+        if len(roots) != 1:
+            raise ValueError(f"expected one root link, found {roots}")
+        return roots[0]
+
+    def add_base_joints(self) -> None:
+        """World-fixed root → yaw → pitch → roll → robot root (:data:`BASE_JOINTS`), all at the root's origin."""
+        robot_root = self.root_link()
+        chain = [BASE_ROOT] + [f"{name}_link" for name, _ in BASE_JOINTS[:-1]] + [robot_root]
+        inertia = {k: "1e-06" for k in ("ixx", "iyy", "izz")} | {k: "0" for k in ("ixy", "ixz", "iyz")}
+        for name in chain[:-1]:
+            link = ET.SubElement(self.root, "link", {"name": name})
+            inertial = ET.SubElement(link, "inertial")
+            ET.SubElement(inertial, "origin", {"xyz": "0 0 0", "rpy": "0 0 0"})
+            ET.SubElement(inertial, "mass", {"value": f"{BASE_LINK_MASS_KG:g}"})
+            ET.SubElement(inertial, "inertia", inertia)
+            self._links[name] = link
+        for (name, axis), parent, child in zip(BASE_JOINTS, chain[:-1], chain[1:], strict=True):
+            joint = ET.SubElement(self.root, "joint", {"name": name, "type": "revolute"})
+            ET.SubElement(joint, "parent", {"link": parent})
+            ET.SubElement(joint, "child", {"link": child})
+            ET.SubElement(joint, "origin", {"xyz": "0 0 0", "rpy": "0 0 0"})
+            ET.SubElement(joint, "axis", {"xyz": " ".join(str(v) for v in axis)})
+            ET.SubElement(joint, "limit", {"lower": f"{-math.pi:.9g}", "upper": f"{math.pi:.9g}",
+                                           "effort": "1e6", "velocity": "100"})
+            self._joints.append(joint)
+
+    def build(self, *, base_joints: bool = False) -> PreparedUrdf:
         if self.model_cfg.get("weld_unlisted_joints", False):
             self.weld_unlisted()
         self.set_joint_limits()
@@ -300,6 +336,8 @@ class PreparedUrdf:
             raise ValueError(f"collision_hulls {hulls!r}; expected one of {COLLISION_HULLS}")
         if hulls == "per_body":
             self.merge_body_collisions()
+        if base_joints:
+            self.add_base_joints()
         # Digest before mesh URIs become absolute paths, so it is the same on every machine. Merged meshes
         # are a function of this text and the description's meshes.
         self._digest = hashlib.sha256(self.text().encode()).hexdigest()

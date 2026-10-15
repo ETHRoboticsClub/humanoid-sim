@@ -26,6 +26,7 @@ class RobotKinematics:
         if missing:
             raise RuntimeError(f"USD lacks joints {missing}")
         self.joint_names = list(joint_names)
+        self.base_origin = np.array([0.0, 0.0, base_height_m])  # the robot root's position in world 0
         qstart = list(robot.joint_q_start)
         scene = newton.ModelBuilder()
         scene.replicate(robot, num_envs, spacing=spacing_m)

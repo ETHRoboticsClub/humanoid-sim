@@ -5,8 +5,9 @@ samples, arriving without added latency: it is already what the drive used) at t
 mode, no feed-forward or target velocity (as in the capture). The sim's drive-frame position, velocity
 and applied torque are scored against the drive's own measurements at the same times.
 
-Fixed base: the capture was taken on a gantry whose base swings (IMU |ω| up to ~1 rad/s); the replay
-ignores that motion.
+Base: the capture was taken on a gantry that lets the base swing, mostly in yaw (tens of degrees, IMU
+|ω| up to ~1 rad/s). A fixed-base replay ignores that motion; with a base mode (on the asset built with base
+joints) the base follows the capture's IMU (:class:`~humanoid_sim.replay.base.BaseMotion`).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import torch
 
 from humanoid_sim.core import PlantCore
 from humanoid_sim.devices.demand import JVPT_PER_SI_GAIN, DriveDemand
+from humanoid_sim.replay.base import BaseMotion
 from humanoid_sim.replay.exc import ExcitationCapture, sample_linear
 from humanoid_sim.sim import SimCore
 from humanoid_sim.timing.clock import NS_PER_S
@@ -69,7 +71,9 @@ def initial_joint_state(plant: PlantCore, native: np.ndarray) -> torch.Tensor:
     return q
 
 
-def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None = None) -> ReplayResult:
+def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None = None,
+           base_motion: str | None = None) -> ReplayResult:
+    """``base_motion``: None (fixed base) or a :data:`~humanoid_sim.replay.base.BASE_MODES` mode."""
     plant = sim.plant
     drives = plant.map.drive_names
     pdo = capture.pdo()
@@ -95,17 +99,25 @@ def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None
                         for d in drives])
     q0 = initial_joint_state(plant, native0)
     sim.write_joint_state(q0, torch.zeros_like(q0))
+    base = None
+    if base_motion:
+        # Targets at the step start: with the velocity target the base PD lands on the step-end orientation.
+        base = BaseMotion.from_imu(capture.imu(), t_grid, base_motion)
+        sim.set_base(*_base_row(base, 0, dev), write_state=True)
     plant.reset(torch.tensor([0], device=dev))
     sim.t_ns = 0
 
     out = {k: np.zeros((len(t_grid), len(drives))) for k in ("position", "velocity", "applied", "demanded")}
     out["joint_q"] = np.zeros((len(t_grid), len(plant.map.joint_names)))
+    out["base_angles"] = base.angles if base is not None else np.zeros((len(t_grid), 3))
     dt = plant.cfg.dtype
     for k in range(len(t_grid)):
         pos = torch.as_tensor(demand[k], dtype=dt, device=dev).unsqueeze(0)
         d = DriveDemand.jvpt(pos, kp.to(dt) / JVPT_PER_SI_GAIN, kd.to(dt) / JVPT_PER_SI_GAIN)
         d.p_gain_raw, d.d_gain_raw = kp.clone(), kd.clone()
         plant.submit(d, torch.tensor([sim.t_ns], device=dev))
+        if base is not None:
+            sim.set_base(*_base_row(base, k, dev))
         fb = sim.step()
         out["position"][k] = fb.position_rad[0].cpu().numpy()
         out["velocity"][k] = fb.velocity_rad_s[0].cpu().numpy()
@@ -113,4 +125,10 @@ def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None
         out["demanded"][k] = fb.demanded_torque_nm[0].cpu().numpy()
         out["joint_q"][k] = sim.joint_state()[0][0].cpu().numpy()
     return ReplayResult(capture.dataset_id, period, drives, t_meas, out, real, demand,
-                        meta={"name": capture.name, **plant.desc.identity()})
+                        meta={"name": capture.name, "base": base_motion or "fixed",
+                              **plant.desc.identity()})
+
+
+def _base_row(base: BaseMotion, k: int, device) -> tuple[torch.Tensor, torch.Tensor]:
+    return (torch.tensor(base.angles[k:k + 1], dtype=torch.float32, device=device),
+            torch.tensor(base.rates[k:k + 1], dtype=torch.float32, device=device))

@@ -12,12 +12,17 @@ from humanoid_sim.model.description import Description
 ASSETS = Path(__file__).resolve().parents[1] / "outputs" / "assets"
 
 
+def _asset(base_joints=False):
+    out = asset_dir(Description.load(), load_profile("ethrc_v1"), ASSETS, base_joints=base_joints)
+    if not (out / "asset.json").exists():
+        flag = " --base-joints" if base_joints else ""
+        pytest.skip(f"robot asset not built ({out}); run `humanoid-sim build-asset{flag}` in the Isaac Lab image")
+    return out / json.loads((out / "asset.json").read_text())["usd"]
+
+
 @pytest.fixture(scope="module")
 def usd():
-    out = asset_dir(Description.load(), load_profile("ethrc_v1"), ASSETS)
-    if not (out / "asset.json").exists():
-        pytest.skip(f"robot asset not built ({out}); run `humanoid-sim build-asset` in the Isaac Lab image")
-    return out / json.loads((out / "asset.json").read_text())["usd"]
+    return _asset()
 
 
 def test_kinematic_model_mass_and_bodies(usd):
@@ -31,12 +36,13 @@ def test_kinematic_model_mass_and_bodies(usd):
 
 
 @pytest.mark.physics
-def test_holds_standing_on_fixed_base(usd):
+def test_holds_standing_on_fixed_base(usd, request):
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.devices.demand import DriveDemand
     from humanoid_sim.sim import SimCore
 
     sim = SimCore(usd, device="cpu", fixed_base=True)
+    request.addfinalizer(sim.close)
     q, qd = sim.joint_state()
     p = sim.plant
     qdrv, _, _ = p.map.drive_state(q, qd)
@@ -47,3 +53,31 @@ def test_holds_standing_on_fixed_base(usd):
     q1, _ = sim.joint_state()
     assert (q1 - q).abs().max().item() < 0.006  # gravity sag at baseline gains
     assert torch.isfinite(fb.applied_torque_nm).all()
+
+
+@pytest.mark.physics
+def test_base_joints_follow_prescribed_yaw(request):
+    pytest.importorskip("isaaclab_newton")
+    from humanoid_sim.devices.demand import DriveDemand
+    from humanoid_sim.model.urdf import BASE_JOINTS
+    from humanoid_sim.sim import SimCore
+
+    sim = SimCore(_asset(base_joints=True), device="cpu", base_joints=True)
+    request.addfinalizer(sim.close)
+    q, qd = sim.joint_state()
+    p = sim.plant
+    qdrv, _, _ = p.map.drive_state(q, qd)
+    p.submit(DriveDemand.jvpt(qdrv, p.drive_stiffness.expand(1, -1), p.drive_damping.expand(1, -1)),
+             torch.zeros(1, dtype=torch.long))
+    names = sim.backend.joint_names
+    yaw = names.index(BASE_JOINTS[0][0])
+    rate = 0.5  # rad/s
+    sim.set_base(torch.zeros(1, 3), torch.tensor([[rate, 0.0, 0.0]]), write_state=True)
+    for k in range(100):
+        # Targets at the step start: with the velocity target the base lands on the step-end angle.
+        sim.set_base(torch.tensor([[rate * k * 0.004, 0.0, 0.0]]), torch.tensor([[rate, 0.0, 0.0]]))
+        sim.step()
+    bq, _ = sim.backend.joint_state()
+    assert bq[0, yaw].item() == pytest.approx(rate * 0.4, abs=2e-4)
+    q1, _ = sim.joint_state()
+    assert (q1 - q).abs().max().item() < 0.02  # the robot holds its pose while the base turns

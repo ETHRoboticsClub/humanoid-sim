@@ -8,6 +8,9 @@ Streams used for drive-level replay (``pdo_feedback.csv``, ~200 Hz per drive):
 * ``native_position_rad``, ``velocity_rad_s``, ``torque_nm``, ``current_a``, ``current_demand_a`` — what the
   drive measured; the replay is scored against these.
 
+``imu.csv`` is Controls' ``/rt/imu``: the IMU relay's output, already rotated into the ``base_link`` frame
+(orientation from the Madgwick filter, angular velocity, specific force), stamped on host receipt.
+
 Times are ``t_source_ros_ns`` (ROS epoch, integer ns). ``t_recv_runtime_ns`` is a different clock and is
 never mixed in. ``gains.json`` holds the drive gains in force (raw JVPT counts and SI).
 """
@@ -42,6 +45,15 @@ class DriveGains:
     damping: float  # Nm s/rad
     p_gain_raw: int
     d_gain_raw: int
+
+
+@dataclass
+class ImuTrace:
+    t_ns: np.ndarray  # int64, t_source_ros_ns (host receipt), sorted
+    seq: np.ndarray  # int64, the relay's sample sequence
+    orientation_xyzw: np.ndarray  # [N, 4], base_link in the filter's gravity-aligned frame
+    angular_velocity: np.ndarray  # [N, 3] rad/s, base_link frame
+    specific_force: np.ndarray  # [N, 3] m/s², base_link frame
 
 
 class ExcitationCapture:
@@ -96,6 +108,23 @@ class ExcitationCapture:
                 traces[dev] = DriveTrace(dev, t[keep], fields)
             self._pdo = traces
         return self._pdo
+
+    def imu(self) -> ImuTrace:
+        with (self.root / "imu.csv").open(newline="") as f:
+            reader = csv.reader(f)
+            col = {name: i for i, name in enumerate(next(reader))}
+            rows = list(reader)
+
+        def num(*names, dtype=np.float64):
+            return np.array([[r[col[n]] for n in names] for r in rows], dtype=dtype)
+
+        t = num("t_source_ros_ns", dtype=np.int64)[:, 0]
+        order = np.argsort(t, kind="stable")
+        return ImuTrace(
+            t[order], num("source_seq", dtype=np.int64)[order, 0],
+            num("orientation_x", "orientation_y", "orientation_z", "orientation_w")[order],
+            num("angular_velocity_x_rad_s", "angular_velocity_y_rad_s", "angular_velocity_z_rad_s")[order],
+            num("specific_force_x_m_s2", "specific_force_y_m_s2", "specific_force_z_m_s2")[order])
 
     def time_span_ns(self) -> tuple[int, int]:
         """Interval covered by every drive's PDO trace."""

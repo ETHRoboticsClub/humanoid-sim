@@ -1,7 +1,9 @@
 """humanoid-sim command line.
 
-    humanoid-sim build-asset                       robot USD from the description (Isaac Lab image)
-    humanoid-sim replay <exc-dir> [--period-ms 4]  fixed-base drive-level replay on MJWarp, scored against the capture
+    humanoid-sim build-asset [--base-joints]       robot USD from the description (Isaac Lab image)
+    humanoid-sim replay <exc-dir> [--period-ms 4] [--base yaw|orientation|fixed]
+                                                   drive-level replay on MJWarp, scored against the capture;
+                                                   base following the capture's IMU yaw (default), or fixed
     humanoid-sim view-replay <replay-dir> --save x.rrd   sim and real robot + every drive signal in Rerun
     humanoid-sim bench --num-envs N                real-time factor / throughput (Isaac Lab / MJWarp)
 """
@@ -17,17 +19,19 @@ from pathlib import Path
 DEFAULT_ASSETS = Path("outputs/assets")
 
 
-def _usd(args) -> Path:
+def _usd(args, *, base_joints: bool = False) -> Path:
     if args.usd:
         return Path(args.usd)
     from humanoid_sim.model.asset import asset_dir, load_profile
     from humanoid_sim.model.description import Description
 
-    out = asset_dir(Description.load(args.robot), load_profile(args.robot), Path(args.assets))
+    out = asset_dir(Description.load(args.robot), load_profile(args.robot), Path(args.assets),
+                    base_joints=base_joints)
     meta = out / "asset.json"
     if not meta.exists():
+        flag = " --base-joints" if base_joints else ""
         raise SystemExit(f"asset {out} is not built for this description and profile; "
-                         "run `humanoid-sim build-asset` in the Isaac Lab image")
+                         f"run `humanoid-sim build-asset{flag}` in the Isaac Lab image")
     return out / json.loads(meta.read_text())["usd"]
 
 
@@ -35,7 +39,8 @@ def cmd_build_asset(args) -> int:
     from humanoid_sim.model.asset import build_asset, load_profile
     from humanoid_sim.model.description import Description
 
-    usd = build_asset(Description.load(args.robot), load_profile(args.robot), Path(args.assets), force=args.force)
+    usd = build_asset(Description.load(args.robot), load_profile(args.robot), Path(args.assets), force=args.force,
+                      base_joints=args.base_joints)
     print(usd)
     return 0
 
@@ -49,18 +54,20 @@ def cmd_replay(args) -> int:
 
     cap = ExcitationCapture(Path(args.capture))
     period_ns = int(round(args.period_ms * 1e6))
-    sim = SimCore(_usd(args), device=args.device, robot=args.robot, period_ns=period_ns, fixed_base=True,
-                  integrator=args.integrator)
+    moving = args.base != "fixed"
+    sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, period_ns=period_ns,
+                  fixed_base=not moving, base_joints=moving, integrator=args.integrator)
     t = time.time()
-    res = replay(cap, sim, duration_s=args.duration)
+    res = replay(cap, sim, duration_s=args.duration, base_motion=args.base if moving else None)
     wall = time.time() - t
     integrator = args.integrator or sim.profile["physics"]["integrator"]
-    out = Path(args.out) / f"{cap.dataset_id}_mjwarp_{integrator}_{period_ns // 1000}us"
+    out = Path(args.out) / f"{cap.dataset_id}_mjwarp_{integrator}_{period_ns // 1000}us_base-{args.base}"
     out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out / "trace.npz", t_ns=res.t_ns, demand=res.demand,
                         **{f"sim_{k}": v for k, v in res.sim.items()}, **{f"real_{k}": v for k, v in res.real.items()})
     summary = {"dataset_id": cap.dataset_id, "name": cap.name, "period_ns": period_ns,
-               "physics": "isaaclab/mjwarp", "device": args.device, "integrator": integrator, "wall_s": wall,
+               "physics": "isaaclab/mjwarp", "device": args.device, "integrator": integrator, "base": args.base,
+               "wall_s": wall,
                "sim_s": len(res.t_ns) * period_ns / 1e9, "drives": res.drives,
                "rms_position_rad": res.rms("position"), "rms_velocity_rad_s": res.rms("velocity"),
                "rms_torque_nm": res.rms("torque"), "tracking_rms_rad": res.tracking_rms(), **res.meta}
@@ -98,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
 
     b = sub.add_parser("build-asset")
     b.add_argument("--force", action="store_true")
+    b.add_argument("--base-joints", action="store_true",
+                   help="the variant with yaw/pitch/roll joints above the base, for replays with a moving base")
     b.set_defaults(func=cmd_build_asset)
 
     r = sub.add_parser("replay")
@@ -106,6 +115,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--integrator", default=None)
     r.add_argument("--device", default="cuda:0", help="cuda:N, or cpu (MJWarp on Warp's CPU device: slow)")
     r.add_argument("--duration", type=float, default=None)
+    r.add_argument("--base", choices=("yaw", "orientation", "fixed"), default="yaw",
+                   help="base yaw or full orientation from the capture's IMU (asset built with --base-joints), "
+                        "or a fixed base")
     r.add_argument("--out", default="outputs/replay")
     r.set_defaults(func=cmd_replay)
 
