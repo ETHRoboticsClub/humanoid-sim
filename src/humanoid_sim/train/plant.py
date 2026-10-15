@@ -13,7 +13,10 @@ sits between demands and the solver:
   samples received so far (sensor frame, receipt stamps). :meth:`RobotPlant.truth` is everything else, for
   critics and rewards;
 * :meth:`RobotPlant.reset` writes the state of the envs being reset and redraws their device parameters;
-  :meth:`RobotPlant.set_level` redraws everything at a new randomization level (solver writes: rare).
+  :meth:`RobotPlant.set_level` redraws everything at a new randomization level (solver writes: rare);
+* :meth:`RobotPlant.log` writes named signals of a few envs into a Rerun recording at plant time
+  (:class:`~humanoid_sim.signals.log.SignalLog`, attached with :meth:`RobotPlant.attach_log`): a host copy per
+  call, so for inspection runs, not steady-state training.
 
 Time is integer nanoseconds from construction, one physics period per :meth:`pre_physics`. Joint order is the
 description's; drive order is the description's drive order. No host syncs in steady state.
@@ -194,6 +197,17 @@ class RobotPlant:
                                  ("imu_misalignment", self.imu.misalignment)):
                 if name in v:
                     target[env_ids] = v[name][env_ids].to(target.dtype)
+
+    def attach_log(self, log) -> None:
+        """Log signals into ``log`` (a :class:`~humanoid_sim.signals.log.SignalLog`) from now on."""
+        self._log = log
+
+    def log(self, name: str, value: torch.Tensor, *, envs=(0,), group: str = "signals") -> None:
+        """Log ``value`` (``[E]`` or ``[E, ...]``) of ``envs`` as ``/sim/{env}/{group}/{name}`` at the plant time."""
+        if getattr(self, "_log", None) is None:
+            raise RuntimeError("no signal log attached (RobotPlant.attach_log)")
+        self._log.at(self.t_ns)
+        self._log.log(name, value.detach().float().cpu().numpy(), group=group, envs=envs)
 
     def params(self) -> dict[str, torch.Tensor]:
         """Realized randomized parameters per env (units: :data:`~humanoid_sim.randomization.PARAMS`)."""
