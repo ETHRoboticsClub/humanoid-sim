@@ -393,7 +393,10 @@ class RuntimeHost:
     # -- demands ----------------------------------------------------------------------------------
 
     def _take_demands(self) -> None:
-        got = self.seg.regions["demands"].read()
+        try:
+            got = self.seg.regions["demands"].read()
+        except abi.StaleRead:  # the client is mid-write: take it next step
+            return
         if got is None or got[0] == self._demand_seq:
             return
         seq, rec = got

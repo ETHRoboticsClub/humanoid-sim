@@ -144,7 +144,10 @@ def test_concurrent_reads_are_never_torn(tmp_path):
     ready.wait(30)
     fb, seen = seg.regions["feedback"], 0
     while p.is_alive() or seen < 20000:
-        got = fb.read(attempts=100000)
+        try:
+            got = fb.read()
+        except abi.StaleRead:  # the writer was descheduled mid-write: not a torn copy
+            continue
         if got is None:
             continue
         rec = got[1]

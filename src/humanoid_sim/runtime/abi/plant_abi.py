@@ -336,7 +336,9 @@ class Region:
         return s + 2
 
     def read(self, attempts: int = 1000) -> tuple[int, np.ndarray] | None:
-        """``(seq, record)`` of the latest complete write, or None if never written."""
+        """``(seq, record)`` of the latest complete write, or None if never written. Raises :class:`StaleRead`
+        when no attempt finds a complete write, as when the writer was descheduled mid-write: a periodic reader
+        keeps its last record and reads again next cycle."""
         for _ in range(attempts):
             s0 = int(self._seq[0])
             if s0 == 0:
@@ -546,9 +548,12 @@ class Segment:
         return self.regions["mailbox"].write(rec)
 
     def poll_command(self, last_seq: int) -> tuple[int, int, dict] | None:
-        """Sim: ``(seq, command, args)`` of a command newer than ``last_seq``, or None. Malformed JSON gives
-        ``args = None``."""
-        got = self.regions["mailbox"].read()
+        """Sim: ``(seq, command, args)`` of a command newer than ``last_seq``, or None (also while the client is
+        writing one). Malformed JSON gives ``args = None``."""
+        try:
+            got = self.regions["mailbox"].read()
+        except StaleRead:
+            return None
         if got is None or got[0] <= last_seq:
             return None
         seq, rec = got
@@ -568,7 +573,10 @@ class Segment:
         """Client: ``(result, message)`` once the sim has handled command ``seq``."""
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            got = self.regions["ack"].read()
+            try:
+                got = self.regions["ack"].read()
+            except StaleRead:  # the sim is writing it
+                continue
             if got is not None and int(got[1]["acked"]) >= seq:
                 rec = got[1]
                 if int(rec["acked"]) == seq:
