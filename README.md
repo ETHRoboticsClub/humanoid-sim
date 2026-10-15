@@ -31,7 +31,7 @@ demands in, physical drive feedback and raw IMU samples out, a mailbox for reset
 faults and prescribed poses, and a truth region for tests. A session ends when the client detaches or goes silent;
 with `--persist` the robot is reset and the next client gets a new session without restarting. The layout and
 protocol are in `src/humanoid_sim/runtime/abi/plant_abi.py` and `plant_abi.h`, which a client vendors unchanged.
-On CUDA the host captures and compiles the plant's step at startup (about a minute) and then runs about 2.6x real
+On CUDA the host captures and compiles the plant's step at startup (about a minute) and then runs about 2.4x real
 time on an A10G (`humanoid-sim bench --runtime`); on Warp's CPU device it runs below real time.
 
 Train-Time API, from a manager-based Isaac Lab environment config:

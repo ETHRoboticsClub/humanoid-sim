@@ -212,3 +212,61 @@ def test_detach_and_next_session(tmp_path):
         second.close()
     finally:
         host.close()
+
+
+def test_demand_intake_queues_what_the_record_says(tmp_path):
+    """The packed, graphed intake queues exactly the demand built field by field from the record."""
+    pytest.importorskip("isaaclab_newton")
+    import torch
+
+    from humanoid_sim.devices.demand import DriveDemand
+    from humanoid_sim.runtime.host import _DemandIntake
+    from humanoid_sim.sim import SimCore
+
+    out = asset_dir(Description.load(), load_profile("ethrc_v1"), REPO / "outputs" / "assets")
+    if not (out / "asset.json").exists():
+        pytest.skip("robot asset not built; run `humanoid-sim build-asset` in the Isaac Lab image")
+    usd = out / json.loads((out / "asset.json").read_text())["usd"]
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    sim = SimCore(usd, device=device, fixed_base=True)
+    try:
+        p, n = sim.plant, len(sim.plant.map.drive_names)
+        rng = np.random.default_rng(0)
+        rec = np.zeros(n, abi.DRIVE_DEMAND)
+        rec["torque_enabled"], rec["mode"], rec["homing_hold"] = rng.integers(0, 2, n), -64, rng.integers(0, 2, n)
+        rec["mode"][:3] = [6, -62, 0]
+        for name in ("target_position_rad", "target_velocity_rad_s", "feedforward_torque_nm"):
+            rec[name] = rng.normal(size=n)
+        for name in ("p_gain_raw", "d_gain_raw", "max_torque_mnm"):
+            rec[name] = rng.integers(0, 2**32 - 1, n)
+        env = torch.tensor([0], device=device)
+
+        def queued():
+            q = p.bank.queue
+            return {k: v.clone() for k, v in q.pending.items()} | {"arrival": q.arrival.clone(),
+                                                                   "count": q.count.clone()}
+
+        def t(name, dtype):
+            return torch.as_tensor(rec[name].astype(np.float64), device=device).to(dtype).view(1, n)
+
+        dt = p.cfg.dtype
+        p.reset(env)
+        p.submit(DriveDemand(torque_enabled=t("torque_enabled", torch.bool), mode=t("mode", torch.int8),
+                             target_position_rad=t("target_position_rad", dt),
+                             target_velocity_rad_s=t("target_velocity_rad_s", dt),
+                             feedforward_torque_nm=t("feedforward_torque_nm", dt),
+                             p_gain_raw=t("p_gain_raw", torch.int64), i_gain_raw=t("i_gain_raw", torch.int64),
+                             d_gain_raw=t("d_gain_raw", torch.int64), max_torque_mnm=t("max_torque_mnm", torch.int64),
+                             homing_hold=t("homing_hold", torch.bool)),
+                 torch.tensor([123_456_789], device=device))
+        expected = queued()
+        cuda = device.startswith("cuda")
+        for graph in ((False, True) if cuda else (False,)):
+            intake = _DemandIntake(p, n, torch.device(device), cuda_graph=graph, compile=False)
+            p.reset(env)
+            intake(rec, 123_456_789)
+            got = queued()
+            for k, v in expected.items():
+                assert torch.equal(got[k], v), (graph, k)
+    finally:
+        sim.close()

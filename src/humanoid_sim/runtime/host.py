@@ -53,6 +53,57 @@ FIDELITY_GAPS = [
 ]
 
 
+class _DemandIntake:
+    """The client's demands into the drive bank. The record's fields are packed into one pinned host buffer and
+    copied to the device in one transfer; unpacking and queueing run there, as a CUDA graph on CUDA (otherwise a
+    new demand every bus cycle costs more than the physics). The arrival time travels in the same buffer."""
+
+    FIELDS = ("torque_enabled", "mode", "target_position_rad", "target_velocity_rad_s", "feedforward_torque_nm",
+              "p_gain_raw", "i_gain_raw", "d_gain_raw", "max_torque_mnm", "homing_hold")
+
+    def __init__(self, plant, num_drives: int, device: torch.device, *, cuda_graph: bool, compile: bool,
+                 warmup: int = 3):
+        self.plant, self.n = plant, num_drives
+        cuda = device.type == "cuda"
+        self.host = torch.zeros(len(self.FIELDS) * num_drives + 1, dtype=torch.float64, pin_memory=cuda)
+        self.host_np = self.host.numpy()
+        self.dev = torch.zeros_like(self.host, device=device)
+        self._submit = torch.compile(self._unpack_and_submit, dynamic=False) if compile else self._unpack_and_submit
+        self.graph = None
+        if cuda_graph:  # the warm-up queues disabled demands: reset the plant afterwards
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                for _ in range(warmup):
+                    self._submit()
+            torch.cuda.current_stream().wait_stream(side)
+            self.graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(self.graph):
+                self._submit()
+
+    def _unpack_and_submit(self) -> None:
+        f = self.dev[:-1].view(len(self.FIELDS), 1, self.n)
+        dt = self.plant.cfg.dtype
+        demand = DriveDemand(torque_enabled=f[0] != 0, mode=f[1].to(torch.int8), target_position_rad=f[2].to(dt),
+                             target_velocity_rad_s=f[3].to(dt), feedforward_torque_nm=f[4].to(dt),
+                             p_gain_raw=f[5].to(torch.int64), i_gain_raw=f[6].to(torch.int64),
+                             d_gain_raw=f[7].to(torch.int64), max_torque_mnm=f[8].to(torch.int64),
+                             homing_hold=f[9] != 0)
+        self.plant.submit(demand, self.dev[-1:].view(torch.int64))
+
+    def __call__(self, drive: np.ndarray, arrival_ns: int) -> None:
+        """Queue the record's per-drive demands (``drive``: the first ``num_drives`` entries) from ``arrival_ns``."""
+        n = self.n
+        for k, name in enumerate(self.FIELDS):
+            self.host_np[k * n:(k + 1) * n] = drive[name]
+        self.host_np[-1:].view(np.int64)[0] = arrival_ns
+        self.dev.copy_(self.host)  # blocking: the host buffer is reused next cycle
+        if self.graph is not None:
+            self.graph.replay()
+        else:
+            self._submit()
+
+
 @dataclass
 class _Disturbance:
     body_id: int
@@ -84,6 +135,8 @@ class RuntimeHost:
                            base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
                            compile=compile and cuda)
         self.device = torch.device(device)
+        self._intake = _DemandIntake(self.sim.plant, len(self.sim.plant.map.drive_names), self.device,
+                                     cuda_graph=cuda, compile=compile and cuda)
         self.desc = self.sim.desc
         self.robot = self.sim.backend.robot
         self.period_ns = self.sim.period_ns
@@ -405,23 +458,7 @@ class RuntimeHost:
         self._demand_seq = seq
         self.attached = True
         self._client_mono_ns = int(rec["written_mono_ns"])
-        n = len(self.drives)
-        d = rec["drive"][:n]
-        dev, dt = self.device, self.sim.plant.cfg.dtype
-
-        def t(name, dtype):
-            a = np.ascontiguousarray(d[name])
-            a = a.astype(np.int64) if a.dtype.kind in "iu" else a.astype(np.float64)
-            return torch.from_numpy(a).to(device=dev, dtype=dtype).view(1, n)
-
-        demand = DriveDemand(torque_enabled=t("torque_enabled", torch.bool), mode=t("mode", torch.int8),
-                             target_position_rad=t("target_position_rad", dt),
-                             target_velocity_rad_s=t("target_velocity_rad_s", dt),
-                             feedforward_torque_nm=t("feedforward_torque_nm", dt),
-                             p_gain_raw=t("p_gain_raw", torch.int64), i_gain_raw=t("i_gain_raw", torch.int64),
-                             d_gain_raw=t("d_gain_raw", torch.int64), max_torque_mnm=t("max_torque_mnm", torch.int64),
-                             homing_hold=t("homing_hold", torch.bool))
-        self.sim.plant.submit(demand, torch.full((1,), self.sim.t_ns, dtype=torch.int64, device=dev))
+        self._intake(rec["drive"][:len(self.drives)], self.sim.t_ns)
 
     def _client_lost(self) -> bool:
         return self.attached and abi.mono_ns() - self._client_mono_ns > self.client_timeout_ns

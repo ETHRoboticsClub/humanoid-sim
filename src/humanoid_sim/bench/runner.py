@@ -2,7 +2,9 @@
 
 ``run_runtime_bench``: the real-time host's whole step (commands, demands, the graphed plant and physics,
 publishing feedback and truth to the segment), unpaced, as fast as it goes: its real-time factor is the
-headroom the host has when paced.
+headroom the host has when paced. A client in the same process writes new demands before every step (a bus
+cycle shorter than the physics period gives the host a new record every step), holding the start pose at the
+baseline gains.
 
 Workload: free base, standing on flat ground, every drive holding the standing pose at baseline gains,
 with a new demand every 20 ms (the policy period) carrying a small random target perturbation. Timing
@@ -84,22 +86,48 @@ def run_bench(args, usd: Path) -> dict:
 def run_runtime_bench(args, usd: Path) -> dict:
     import tempfile
 
+    import numpy as np
+
+    from humanoid_sim.model.description import Description
+    from humanoid_sim.runtime.abi import plant_abi as abi
     from humanoid_sim.runtime.host import RuntimeHost
 
+    gains = Description.load(args.robot).table["baseline_position_gains"]
     with tempfile.TemporaryDirectory() as tmp:
         host = RuntimeHost(Path(tmp) / "plant", usd, device=args.device, robot=args.robot, support="free")
+        client = abi.Segment.open(Path(tmp) / "plant")
         try:
-            for _ in range(50):
+            n = len(host.drives)
+            hold = client.regions["feedback"].read()[1]["drive"]["position_rad"][:n].copy()
+            demand = {name: np.zeros(n) for name in abi.DRIVE_DEMAND.names if not name.startswith("_")}
+            demand |= {"torque_enabled": np.ones(n), "mode": np.full(n, -64), "target_position_rad": hold,
+                       "p_gain_raw": np.array([round(gains[d]["stiffness"] * 1000) for d in host.drives]),
+                       "d_gain_raw": np.array([round(gains[d]["damping"] * 1000) for d in host.drives])}
+            cycle = 0
+
+            def step():
+                nonlocal cycle
+                cycle += 1
+                client.regions["demands"].write(abi.demands_record(demand, cycle=cycle, session_id=host.session_id))
                 host.step()
+
+            for _ in range(50):
+                step()
             if str(args.device).startswith("cuda"):
                 torch.cuda.synchronize()
+            walls = np.empty(args.steps)
             t = time.perf_counter()
-            for _ in range(args.steps):
-                host.step()
-            wall = time.perf_counter() - t
+            for k in range(args.steps):
+                step()
+                walls[k] = time.perf_counter()
+            wall = walls[-1] - t
         finally:
+            client.close()
             host.close()
     step_s = wall / args.steps
-    return {"workload": "runtime host", "device": args.device, "steps": args.steps, "ms_per_step": step_s * 1e3,
+    each_ms = np.diff(walls, prepend=t) * 1e3
+    return {"workload": "runtime host, a new demand every step", "device": args.device, "steps": args.steps,
+            "ms_per_step": step_s * 1e3, "ms_p99": float(np.percentile(each_ms, 99)), "ms_max": float(each_ms.max()),
+            "steps_over_period": int((each_ms > host.period_ns / 1e6).sum()),
             "real_time_factor": host.period_ns / NS_PER_S / step_s, "cuda_graph": host.sim._graphs is not None}
 
