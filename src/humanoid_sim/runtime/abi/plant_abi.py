@@ -77,6 +77,8 @@ STATE_CREATING, STATE_READY, STATE_ENDED = 0, 1, 2
 # PRESCRIBE_POSE   {"joint_pos": {...}, "base_pose": [...] | null, "floor_clearance_m": m | null}: hold a pose
 #                  (the base dropped so its lowest sole corner sits that far above the floor); {"release": true}
 # DETACH           {}: the client is leaving; the sim acks and ends the session (ABI 1.1)
+# SET_FIDELITY     {"imu": "ideal" | "real"}: the IMU without or with its white noise, for this session; every
+#                  session starts real (ABI 1.1)
 CMD_NONE = 0
 CMD_RESET = 1
 CMD_PAUSE = 2
@@ -86,6 +88,7 @@ CMD_APPLY_DISTURBANCE = 5
 CMD_INJECT_FAULT = 6
 CMD_PRESCRIBE_POSE = 7
 CMD_DETACH = 8
+CMD_SET_FIDELITY = 9
 COMMANDS = {
     CMD_RESET: "reset",
     CMD_PAUSE: "pause",
@@ -95,6 +98,7 @@ COMMANDS = {
     CMD_INJECT_FAULT: "inject_fault",
     CMD_PRESCRIBE_POSE: "prescribe_pose",
     CMD_DETACH: "detach",
+    CMD_SET_FIDELITY: "set_fidelity",
 }
 
 # Ack results.

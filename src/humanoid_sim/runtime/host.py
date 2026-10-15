@@ -50,6 +50,7 @@ FIDELITY_GAPS = [
     "drive current, thermal and backlash models absent; applied torque is the envelope-clipped control law",
     "upper-body passive joint parameters (waist, shoulders, elbows) are description values, not identified",
     "ankle as pitch and roll hinges driven through the crank transmission (no closed chain)",
+    "IMU white noise as the MTi-610 datasheet gives it (SET_FIDELITY ideal turns it off); no bias drift",
 ]
 
 
@@ -187,6 +188,7 @@ class RuntimeHost:
         for key in list(self._faults):
             self._clear_fault(key)
         self.sim.gantry.release(torch.tensor([0], device=self.device))
+        self.sim.imu.set_noise(True)
         self._reset({"pose": "standing"})
         self._open_session()
 
@@ -261,7 +263,7 @@ class RuntimeHost:
         handler = {abi.CMD_RESET: self._reset, abi.CMD_PAUSE: self._pause, abi.CMD_RESUME: self._resume,
                    abi.CMD_SET_SUPPORT: self._set_support, abi.CMD_APPLY_DISTURBANCE: self._disturb,
                    abi.CMD_INJECT_FAULT: self._inject, abi.CMD_PRESCRIBE_POSE: self._prescribe,
-                   abi.CMD_DETACH: self._detach}.get(command)
+                   abi.CMD_DETACH: self._detach, abi.CMD_SET_FIDELITY: self._set_fidelity}.get(command)
         if handler is None:
             self.seg.ack(seq, abi.ACK_UNKNOWN, f"unknown command {command}")
             return
@@ -328,6 +330,13 @@ class RuntimeHost:
             self.robot.write_root_pose_to_sim_index(root_pose=base)
             self.robot.write_root_velocity_to_sim_index(root_velocity=torch.zeros(1, 6, device=self.device))
         self.sim.write_joint_state(q, torch.zeros_like(q))
+
+    def _set_fidelity(self, args: dict) -> str:
+        imu = args["imu"]
+        if imu not in ("ideal", "real"):
+            raise ValueError(f"imu fidelity {imu!r}: ideal or real")
+        self.sim.imu.set_noise(imu == "real")
+        return f"imu {imu}"
 
     def _detach(self, args: dict) -> str:
         self.detached = True

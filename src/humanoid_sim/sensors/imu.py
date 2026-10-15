@@ -80,6 +80,7 @@ class ImuDelivery:
         e, h, p = num_envs, cfg.history, cfg.pending
         f = dict(device=self.device, dtype=dtype)
         self._sigma = torch.tensor([self.gyro_sigma] * 3 + [self.accel_sigma] * 3, **f)
+        self._nominal_sigma = self._sigma.clone()
         i64 = dict(device=self.device, dtype=torch.int64)
         # Errors (written by the plant's randomization).
         self.gyro_bias = torch.zeros(e, 3, **f)
@@ -125,6 +126,11 @@ class ImuDelivery:
             self._prev[env_ids] = value
 
     # -- stepping ---------------------------------------------------------------------------------
+
+    def set_noise(self, enabled: bool) -> None:
+        """White noise on (the configured densities) or off (an ideal sensor), from the next sample. In place, so
+        a captured step sees it."""
+        self._sigma.copy_(self._nominal_sigma if enabled else torch.zeros_like(self._sigma))
 
     def step(self, t_ns: int | torch.Tensor, gyro: torch.Tensor, specific_force: torch.Tensor, *,
              period_ns: int | None = None) -> None:

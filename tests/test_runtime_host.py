@@ -161,6 +161,8 @@ def test_prescribed_pose_with_floor_clearance_and_sole_truth(tmp_path):
 
 def test_detach_and_next_session(tmp_path):
     pytest.importorskip("isaaclab_newton")
+    import torch
+
     from humanoid_sim.runtime.host import EXIT_DETACHED, RuntimeHost
 
     out = asset_dir(Description.load(), load_profile("ethrc_v1"), REPO / "outputs" / "assets")
@@ -182,6 +184,10 @@ def test_detach_and_next_session(tmp_path):
         assert host._set_support({"support": "gantry", "tension_breakpoints_s_n": [[0, 300]],
                                   "attachment_local_m": [[0.0, 0.0, 0.3]]}) == "gantry"
         assert host._inject({"fault": "power_sag", "value": 0.5}) == "power_sag active"
+        assert host._set_fidelity({"imu": "ideal"}) == "imu ideal"
+        assert float(host.sim.imu._sigma.abs().max()) == 0.0
+        with pytest.raises(ValueError, match="ideal or real"):
+            host._set_fidelity({"imu": "minimal"})
         for _ in range(20):
             host.step()
 
@@ -196,6 +202,7 @@ def test_detach_and_next_session(tmp_path):
         assert second.state == abi.STATE_READY and second.session_id not in (0, first.session_id)
         assert int(second.regions["feedback"].read()[1]["step"]) == 0
         assert not host._faults and float(host.sim.plant.bank.torque_scale.min()) == 1.0
+        assert torch.equal(host.sim.imu._sigma, host.sim.imu._nominal_sigma)  # every session starts real
         assert int(host.sim.gantry.mode[0]) == 0
         _, truth = second.regions["truth"].read()
         standing = [host.desc.joints[j].standing_offset_rad for j in host.joints]

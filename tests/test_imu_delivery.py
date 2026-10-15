@@ -83,6 +83,28 @@ def test_errors_bias_misalignment_and_noise():
     assert torch.allclose(r.T @ r, torch.eye(3, dtype=torch.float64), atol=1e-12)
 
 
+def test_noise_off_gives_an_ideal_sensor_and_back():
+    cfg = ImuDeliveryCfg(**{**CFG.__dict__, "gyro_noise_density": 1e-3, "accel_noise_density": 1e-3})
+    imu = ImuDelivery(cfg, 1, dtype=torch.float64)
+    imu.reset(torch.arange(1), 0)
+    f = torch.tensor([[0.0, 0.0, 9.81]], dtype=torch.float64)
+    g = torch.zeros(1, 3, dtype=torch.float64)
+
+    def run(start):
+        for k in range(start, start + 60):
+            imu.step(k * STEP, g, f)
+        valid = imu.samples.stamp_ns[0] >= 0
+        return imu.samples.gyro[0][valid], imu.samples.specific_force[0][valid]
+
+    imu.step(0, g, f)
+    imu.set_noise(False)
+    gyro, acc = run(1)
+    assert gyro.abs().max().item() == 0.0 and torch.allclose(acc, f.expand_as(acc), atol=1e-12)
+    imu.set_noise(True)
+    gyro, _ = run(200)
+    assert gyro.std().item() > 0
+
+
 def test_reset_clears_an_env_only():
     imu = ImuDelivery(CFG, 2, dtype=torch.float64)
     imu.reset(torch.arange(2), 0, torch.zeros(2, 6, dtype=torch.float64))
