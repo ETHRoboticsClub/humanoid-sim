@@ -9,6 +9,9 @@
                                                    the Train-Time API scene (sensors, randomization)
     humanoid-sim fit-passive <exc-dir>... --num-envs N --generations G
                                                    fit upper-body passive joint parameters by batched replay
+    humanoid-sim serve --segment PATH [--support suspended|free]
+                                                   one robot in real time behind the runtime segment, for
+                                                   Controls' plant host
 """
 
 from __future__ import annotations
@@ -158,6 +161,33 @@ def cmd_fit_passive(args) -> int:
     return 0
 
 
+def _revision() -> str:
+    import subprocess
+
+    try:
+        return subprocess.run(["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def cmd_serve(args) -> int:
+    from humanoid_sim.runtime.host import RuntimeHost
+
+    host = RuntimeHost(args.segment, _usd(args), device=args.device, robot=args.robot, support=args.support,
+                       bus_period_ns=int(args.bus_period_us * 1000),
+                       client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
+                       sim_revision=_revision())
+    print(json.dumps({"segment": str(args.segment), "session_id": host.session_id, "ready": True}), flush=True)
+    try:
+        code = host.run(max_steps=args.max_steps)
+    finally:
+        status = host.status()
+        host.close()
+    print(json.dumps(status | {"exit": code}), flush=True)
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="humanoid-sim", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -213,6 +243,18 @@ def main(argv: list[str] | None = None) -> int:
     fp.add_argument("--bound", type=float, default=10.0, help="multipliers stay within [1/bound, bound]")
     fp.add_argument("--out", default="outputs/sysid")
     fp.set_defaults(func=cmd_fit_passive)
+
+    sv = sub.add_parser("serve", help="one robot in real time behind the runtime segment")
+    sv.add_argument("--segment", required=True, help="segment file (on a volume shared with the plant host)")
+    sv.add_argument("--support", choices=("suspended", "free"), default="suspended",
+                    help="suspended welds the base to the world; free stands it on the ground (gantry by command)")
+    sv.add_argument("--device", default="cuda:0")
+    sv.add_argument("--bus-period-us", type=float, default=1500.0, help="the client's bus cycle (informational)")
+    sv.add_argument("--client-timeout-ms", type=float, default=500.0,
+                    help="end the session when an attached client's demands are this old")
+    sv.add_argument("--max-steps", type=int, default=None)
+    sv.add_argument("--seed", type=int, default=0)
+    sv.set_defaults(func=cmd_serve)
 
     args = p.parse_args(argv)
     if args.command is None:

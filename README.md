@@ -22,7 +22,13 @@ humanoid-sim replay <exc-dir>             # drive-level replay, the base turning
 humanoid-sim view-replay <replay-dir> --save replay.rrd
 humanoid-sim bench --num-envs 4096 [--train]
 humanoid-sim fit-passive <exc-dir>... --holdout <exc-dir> --num-envs 512   # upper-body passive parameters
+humanoid-sim serve --segment /run/hsim/plant --support suspended   # one robot in real time, for Controls
 ```
+
+`serve` publishes the runtime segment, a shared-memory file a client (Controls' plant host) attaches to:
+drive demands in, physical drive feedback and raw IMU samples out, a mailbox for reset, pause, supports,
+disturbances, faults and prescribed poses, and a truth region for tests. The layout and protocol are in
+`src/humanoid_sim/runtime/abi/plant_abi.py` and `plant_abi.h`, which a client vendors unchanged.
 
 Train-Time API, from a manager-based Isaac Lab environment config:
 

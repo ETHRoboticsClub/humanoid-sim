@@ -1,0 +1,130 @@
+"""The real-time host end to end: `humanoid-sim serve` on Warp's CPU device, this test as the client.
+
+On the CPU the host runs far below real time; the protocol does not depend on it. Runs in the Isaac Lab image.
+"""
+
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from humanoid_sim.model.asset import asset_dir, load_profile
+from humanoid_sim.model.description import Description
+from humanoid_sim.runtime.abi import plant_abi as abi
+
+REPO = Path(__file__).resolve().parents[1]
+pytestmark = pytest.mark.physics
+
+
+def _feedback(seg):
+    got = seg.regions["feedback"].read()
+    assert got is not None
+    return got[1]
+
+
+def _wait(cond, timeout_s, what):
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if cond():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+def test_serve_round_trip(tmp_path):
+    pytest.importorskip("isaaclab_newton")
+    out = asset_dir(Description.load(), load_profile("ethrc_v1"), REPO / "outputs" / "assets")
+    if not (out / "asset.json").exists():
+        pytest.skip("robot asset not built; run `humanoid-sim build-asset` in the Isaac Lab image")
+    path, log = tmp_path / "plant", tmp_path / "serve.log"
+    proc = subprocess.Popen([sys.executable, "-m", "humanoid_sim", "serve", "--segment", str(path), "--device", "cpu",
+                             "--support", "suspended", "--client-timeout-ms", "1500"],
+                            cwd=REPO, stdout=log.open("w"), stderr=subprocess.STDOUT, text=True)
+    try:
+        seg = abi.Segment.open(path, robot_id="ethrc_v1", description_digest=Description.load().digest, wait_s=180)
+        desc = seg.descriptor()
+        drives = desc["drives"]
+        assert len(drives) == seg.num_drives == 22 and desc["physics"]["engine"] == "isaaclab/mjwarp"
+
+        # Hold the pose it starts in at the baseline gains.
+        hold = _feedback(seg)["drive"]["position_rad"][:22].copy()
+        d = Description.load()
+        gains = d.table["baseline_position_gains"]
+        n = len(drives)
+        demand = {"torque_enabled": np.ones(n), "mode": np.full(n, -64), "homing_hold": np.zeros(n),
+                  "target_position_rad": hold, "target_velocity_rad_s": np.zeros(n),
+                  "feedforward_torque_nm": np.zeros(n), "i_gain_raw": np.zeros(n), "max_torque_mnm": np.zeros(n),
+                  "p_gain_raw": np.array([round(gains[x]["stiffness"] * 1000) for x in drives]),
+                  "d_gain_raw": np.array([round(gains[x]["damping"] * 1000) for x in drives])}
+        cycle = 0
+
+        def send_demands():
+            nonlocal cycle
+            cycle += 1
+            seg.regions["demands"].write(abi.demands_record(demand, cycle=cycle, session_id=seg.session_id))
+
+        def serve_for(seconds):
+            end = time.monotonic() + seconds
+            while time.monotonic() < end:
+                send_demands()
+                time.sleep(0.005)
+
+        deadline = time.monotonic() + 300  # the first CPU steps compile kernels
+        while int(_feedback(seg)["step"]) < 2 and time.monotonic() < deadline:
+            serve_for(0.1)
+        step0 = int(_feedback(seg)["step"])
+        serve_for(4.0)
+        fb = _feedback(seg)
+        assert int(fb["step"]) > step0 + 10
+        pos = fb["drive"]["position_rad"][:n]
+        assert np.abs(pos - hold).max() < 0.03  # held at baseline gains
+        assert np.abs(fb["drive"]["applied_torque_nm"][:n]).max() > 0.1  # gravity on the limbs
+        assert int(fb["imu_total"]) > 0 and int(fb["imu_count"]) > 0
+        imu = fb["imu"][: int(fb["imu_count"])]
+        assert (np.diff(imu["seq"].astype(np.int64)) == -1).all()  # newest first, consecutive
+        assert abs(np.linalg.norm(imu["specific_force_m_s2"][0]) - 9.81) < 0.3
+        _, truth = seg.regions["truth"].read()
+        assert int(truth["num_joints"]) == 22 and float(truth["mass_kg"]) == pytest.approx(58.68, abs=0.05)
+
+        def command(code, args):
+            seq = seg.send(code, args)
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:  # keep the client alive while the host works
+                send_demands()
+                try:
+                    return seg.wait_ack(seq, timeout_s=0.05)
+                except TimeoutError:
+                    pass
+            raise AssertionError(f"no ack for command {code}")
+
+        assert command(abi.CMD_PAUSE, {})[0] == abi.ACK_OK
+        serve_for(0.5)
+        paused_step = int(_feedback(seg)["step"])
+        serve_for(1.0)
+        assert int(_feedback(seg)["step"]) == paused_step and int(_feedback(seg)["paused"]) == 1
+        assert command(abi.CMD_RESUME, {})[0] == abi.ACK_OK
+        assert command(abi.CMD_SET_SUPPORT, {"support": "gantry", "tension_breakpoints_s_n": [[0, 100]]})[0] \
+            == abi.ACK_REJECTED  # the base is welded in a suspended session
+        assert command(99, {})[0] == abi.ACK_UNKNOWN
+        drive = drives[0]
+        assert command(abi.CMD_INJECT_FAULT, {"fault": "encoder_freeze", "drive": drive, "value": 1})[0] == abi.ACK_OK
+        before = _feedback(seg)["drive"]["position_rad"][:n].copy()
+        demand["target_position_rad"] = hold + 0.1  # move every drive
+        serve_for(2.0)
+        moved = _feedback(seg)["drive"]["position_rad"][:n] - before
+        assert moved[0] == 0.0 and np.abs(moved[1:]).max() > 0.02  # drive 0 reports its frozen reading
+        assert command(abi.CMD_RESET, {"pose": "standing"})[0] == abi.ACK_OK
+
+        # Client goes away: the host ends the session.
+        _wait(lambda: proc.poll() is not None, 120, "the host to end the session")
+        assert proc.returncode == 3, log.read_text()[-3000:]
+        assert seg.state == abi.STATE_ENDED
+        last = json.loads(log.read_text().strip().splitlines()[-1])
+        assert last["exit"] == 3 and last["attached"]
+    finally:
+        if proc.poll() is None:
+            proc.kill()
