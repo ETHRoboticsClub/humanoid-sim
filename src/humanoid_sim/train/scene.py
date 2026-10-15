@@ -17,14 +17,13 @@ the profile. humanoid-learning builds its environment config from these and step
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.joint_properties import JointProperties
+from humanoid_sim.physics.isaaclab import contact_sensor_cfg, imu_sensor_cfg
 
-ROBOT_PRIM = "{ENV_REGEX_NS}/Robot"
 STANDING_CLEARANCE_M = 0.001  # spawn the soles just above the ground
 
 
@@ -36,29 +35,6 @@ def plant_joint_properties(robot: str = "ethrc_v1") -> JointProperties:
     desc = Description.load(robot)
     joints = list(desc.joints)
     return joint_properties(PlantCore(desc, joints, 1, PlantCfg(robot=robot)), joints)
-
-
-def _quat_xyzw(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
-    """Quaternion of URDF rpy (``R = Rz(yaw) Ry(pitch) Rx(roll)``)."""
-    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
-    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
-    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
-    return (sr * cp * cy - cr * sp * sy, cr * sp * cy + sr * cp * sy, cr * cp * sy - sr * sp * cy,
-            cr * cp * cy + sr * sp * sy)
-
-
-def imu_sensor_cfg(robot: str = "ethrc_v1"):
-    from isaaclab.sensors import ImuCfg
-
-    parent, xyz, rpy = Description.load(robot).imu_mount()
-    return ImuCfg(prim_path=f"{ROBOT_PRIM}/Geometry/{parent}",
-                  offset=ImuCfg.OffsetCfg(pos=tuple(xyz), rot=_quat_xyzw(*rpy)))
-
-
-def contact_sensor_cfg(history: int = 3):
-    from isaaclab.sensors import ContactSensorCfg
-
-    return ContactSensorCfg(prim_path=f"{ROBOT_PRIM}/Geometry/.*", history_length=history, track_air_time=True)
 
 
 def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_spacing: float = 2.5,

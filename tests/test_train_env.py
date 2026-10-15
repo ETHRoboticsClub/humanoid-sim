@@ -111,7 +111,7 @@ def _rotation(q_xyzw):
 
 
 def test_manager_based_env_steps_the_plant():
-    from humanoid_sim.train.scene import _quat_xyzw
+    from humanoid_sim.physics.isaaclab import _quat_xyzw
 
     env = _env()
     try:

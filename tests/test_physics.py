@@ -81,3 +81,21 @@ def test_base_joints_follow_prescribed_yaw(request):
     assert bq[0, yaw].item() == pytest.approx(rate * 0.4, abs=2e-4)
     q1, _ = sim.joint_state()
     assert (q1 - q).abs().max().item() < 0.02  # the robot holds its pose while the base turns
+
+
+@pytest.mark.physics
+def test_imu_delivers_raw_samples_on_a_fixed_base(usd, request):
+    pytest.importorskip("isaaclab_newton")
+    from humanoid_sim.sim import SimCore
+
+    sim = SimCore(usd, device="cpu", fixed_base=True, imu=True, contacts=True)
+    request.addfinalizer(sim.close)
+    for _ in range(50):  # 0.2 s: ~73 samples at ~365/s, in bursts
+        sim.step()
+    s = sim.imu.samples
+    n = int(s.count[0])
+    assert 50 <= n <= 90
+    assert s.specific_force[0, 0].norm().item() == pytest.approx(9.81, abs=0.1)  # at rest: gravity only
+    assert s.gyro[0, 0].norm().item() < 0.01
+    assert (s.stamp_ns[0, :8] >= s.sample_ns[0, :8]).all()
+    assert sim.backend.contacts is not None

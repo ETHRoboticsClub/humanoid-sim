@@ -8,6 +8,10 @@ orientation as yaw, pitch and roll (``R = Rz Ry Rx``) and their rates, held thro
 
 ``gantry`` (:class:`~humanoid_sim.world.supports.Gantry`) hangs the robot from a rope from the next step on;
 ``fixed_base`` suspends it (the base welded to the world).
+
+With ``imu``, :attr:`SimCore.imu` produces the raw IMU samples as the robot's host receives them
+(:class:`~humanoid_sim.sensors.imu.ImuDelivery`, sampled at every step start); with ``contacts``, the scene has a
+contact sensor on every body (``backend.contacts``).
 """
 
 from __future__ import annotations
@@ -28,7 +32,8 @@ class SimCore:
     def __init__(self, usd_path: Path, *, device: str, num_envs: int = 1, robot: str = "ethrc_v1",
                  period_ns: int | None = None, fixed_base: bool = False, base_height_m: float = 1.0,
                  integrator: str | None = None, rerun: bool = False, rerun_rrd: str | None = None,
-                 self_collision: bool | None = None, base_joints: bool = False):
+                 self_collision: bool | None = None, base_joints: bool = False, imu: bool = False,
+                 contacts: bool = False, seed: int = 0):
         self.desc = Description.load(robot)
         self.profile = load_profile(robot)
         phys = self.profile["physics"]
@@ -49,7 +54,7 @@ class SimCore:
             njmax=phys["njmax"], nconmax=phys["nconmax"],
             self_collision=phys["self_collision"] if self_collision is None else self_collision,
             base_joints=base_joints, ground_friction=self.profile["model"]["ground_friction"],
-            rerun=rerun, rerun_rrd=rerun_rrd), props=props)
+            imu=imu, contacts=contacts, rerun=rerun, rerun_rrd=rerun_rrd), props=props)
         order = [self.backend.joint_names.index(n) for n in joints]
         self._to_plant = torch.tensor(order, device=self.plant.cfg.device)
         self._base = (torch.tensor([self.backend.joint_names.index(n) for n, _ in BASE_JOINTS],
@@ -60,6 +65,13 @@ class SimCore:
         self.gantry = Gantry(self.backend.robot)
         self.t_ns = 0
         self.feedback: DriveFeedback | None = None
+        self.imu = None
+        if imu:
+            from humanoid_sim.sensors.imu import ImuDelivery, ImuDeliveryCfg
+
+            self.imu = ImuDelivery(ImuDeliveryCfg.from_profile(self.profile["sensors"]["imu"]), num_envs,
+                                   device=device, seed=seed)
+            self.imu.reset(torch.arange(num_envs, device=device), 0)
 
     def joint_state(self) -> tuple[torch.Tensor, torch.Tensor]:
         q, qd = self.backend.joint_state()
@@ -89,6 +101,9 @@ class SimCore:
             self.backend.write_state(bq, bqd)
 
     def step(self) -> DriveFeedback:
+        if self.imu is not None:
+            data = self.backend.imu.data
+            self.imu.step(self.t_ns, data.ang_vel_b.torch, data.lin_acc_b.torch)
         q, qd = self.joint_state()
         target = self.plant.pre_physics(self.t_ns, q, qd)
         bt, _ = self.backend.joint_state()

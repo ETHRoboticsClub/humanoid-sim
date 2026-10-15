@@ -13,6 +13,7 @@ position and velocity targets on the three base joints, through a stiff PD.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +28,8 @@ from humanoid_sim.model.urdf import BASE_JOINTS
 # limit 4 I / dt² at 4 ms; the damping is implicit (implicitfast) and near critical.
 BASE_JOINT_STIFFNESS = 1e5
 BASE_JOINT_DAMPING = 2e3
+
+ROBOT_PRIM = "{ENV_REGEX_NS}/Robot"
 
 
 @dataclass
@@ -46,6 +49,8 @@ class IsaacLabCfg:
     self_collision: bool = True
     base_joints: bool = False
     ground_friction: float = 1.0
+    imu: bool = False  # the IMU sensor at the description's mount
+    contacts: bool = False  # a contact sensor on every body
     rerun: bool = False
     rerun_rrd: str | None = None
 
@@ -79,7 +84,7 @@ def articulation_cfg(usd_path: Path, props: JointProperties, *, fixed_base: bool
             damping=BASE_JOINT_DAMPING, armature=0.0, friction=0.0)
         joint_pos |= {f"^{n}$": 0.0 for n in names}
     return ArticulationCfg(
-        prim_path="{ENV_REGEX_NS}/Robot",
+        prim_path=ROBOT_PRIM,
         spawn=sim_utils.UsdFileCfg(
             usd_path=str(usd_path), fix_root_link=fixed_base or base_joints,
             activate_contact_sensors=contact_sensors,
@@ -88,6 +93,31 @@ def articulation_cfg(usd_path: Path, props: JointProperties, *, fixed_base: bool
             pos=(0.0, 0.0, base_height_m), joint_pos=joint_pos, joint_vel={".*": 0.0}),
         actuators=actuators,
     )
+
+
+def _quat_xyzw(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
+    """Quaternion of URDF rpy (``R = Rz(yaw) Ry(pitch) Rx(roll)``)."""
+    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+    return (sr * cp * cy - cr * sp * sy, cr * sp * cy + sr * cp * sy, cr * cp * sy - sr * sp * cy,
+            cr * cp * cy + sr * sp * sy)
+
+
+def imu_sensor_cfg(robot: str = "ethrc_v1"):
+    """Isaac Lab's IMU sensor at the description's mount (``imu_joint``): raw sensor-frame values."""
+    from isaaclab.sensors import ImuCfg
+
+    parent, xyz, rpy = Description.load(robot).imu_mount()
+    return ImuCfg(prim_path=f"{ROBOT_PRIM}/Geometry/{parent}",
+                  offset=ImuCfg.OffsetCfg(pos=tuple(xyz), rot=_quat_xyzw(*rpy)))
+
+
+def contact_sensor_cfg(history: int = 3):
+    """Contact sensor on every body: net forces with history, air time."""
+    from isaaclab.sensors import ContactSensorCfg
+
+    return ContactSensorCfg(prim_path=f"{ROBOT_PRIM}/Geometry/.*", history_length=history, track_air_time=True)
 
 
 def ground_cfg(friction: float):
@@ -132,7 +162,12 @@ class IsaacLabRobot:
         scene_cfg = SceneCfg(num_envs=cfg.num_envs, env_spacing=cfg.env_spacing_m, replicate_physics=True)
         scene_cfg.ground = ground_cfg(cfg.ground_friction)
         scene_cfg.robot = articulation_cfg(usd_path, props, fixed_base=cfg.fixed_base, base_joints=cfg.base_joints,
-                                           self_collision=cfg.self_collision, base_height_m=cfg.base_height_m)
+                                           self_collision=cfg.self_collision, base_height_m=cfg.base_height_m,
+                                           contact_sensors=cfg.contacts)
+        if cfg.imu:
+            scene_cfg.imu = imu_sensor_cfg(desc.robot)
+        if cfg.contacts:
+            scene_cfg.contacts = contact_sensor_cfg()
         visualizers = []
         if cfg.rerun:
             from isaaclab_visualizers.rerun import RerunVisualizerCfg
@@ -145,6 +180,8 @@ class IsaacLabRobot:
         self.scene = instantiate(scene_cfg)
         self.sim.reset()
         self.robot = self.scene["robot"]
+        self.imu = self.scene["imu"] if cfg.imu else None
+        self.contacts = self.scene["contacts"] if cfg.contacts else None
         # Start every env at the articulation's default (standing) joint state.
         default = self.robot.data.default_joint_pos.torch.clone()
         self.robot.write_joint_position_to_sim_index(position=default)
