@@ -1,6 +1,6 @@
 # Plant modeling choices for humanoid-v1 (ETHRC V1). Robot facts are NOT here: they come from
-# third_party/humanoid-urdf. The `model` block below holds facts that live only in Controls code;
-# each names its source.
+# third_party/humanoid-urdf. The `model` and `devices` blocks below hold facts that live only in Controls
+# code; each names its source.
 schema: humanoid-sim-profile/v1
 robot: ethrc_v1
 
@@ -41,6 +41,15 @@ model:
     pairs: all
   # Ground contact (Controls urdf/scene.xml floor: friction 1, condim 3).
   ground_friction: 1.0
+
+devices:
+  # Output encoder resolution per drive family: the counts every reported position is in (Controls
+  # ethercat_device_configurator bus_config/device_configurations/maxon*.yaml
+  # Hardware.position_encoder_resolution @ 447b4acb).
+  encoders:
+    HEJ90-48-140: {counts_per_revolution: 4096}
+    HEJ70-48-50: {counts_per_revolution: 16384}
+    HEJ50-48-30: {counts_per_revolution: 16384}
 
 physics:
   period_ns: 4000000          # 250 Hz

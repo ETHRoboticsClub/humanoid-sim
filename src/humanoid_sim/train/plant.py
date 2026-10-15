@@ -7,9 +7,11 @@ sits between demands and the solver:
   takes effect one bus and drive latency later (per env and drive, randomized);
 * :meth:`RobotPlant.pre_physics`, once before every physics step (an action term's ``apply_actions``): samples
   the sensors at the step start, runs the drive bank over the step and writes the solver PD targets;
-* :meth:`RobotPlant.measured` is what the robot's host would read: drive feedback with the drive's position
-  offset, a short per-step history of it, and the raw IMU samples received so far (sensor frame, receipt
-  stamps). :meth:`RobotPlant.truth` is everything else, for critics and rewards;
+* :meth:`RobotPlant.measured` is what the robot's host would read: drive feedback as the drive reports it (its
+  position offset included, in whole encoder counts with ±1 count of jitter, velocity per controller sample;
+  :class:`~humanoid_sim.devices.reporting.DriveReporting`), a short per-step history of it, and the raw IMU
+  samples received so far (sensor frame, receipt stamps). :meth:`RobotPlant.truth` is everything else, for
+  critics and rewards;
 * :meth:`RobotPlant.reset` writes the state of the envs being reset and redraws their device parameters;
   :meth:`RobotPlant.set_level` redraws everything at a new randomization level (solver writes: rare).
 
@@ -39,12 +41,13 @@ class TrainPlantCfg:
     level: float = 1.0
     seed: int = 0
     feedback_history: int = 16  # physics steps of drive feedback kept for :meth:`RobotPlant.measured`
+    reporting: bool = True  # measured drive feedback quantized as the drive reports it
     queue_capacity: int = 8  # demands in flight per env: ≥ max latency / demand period + 1
 
 
 @dataclass
 class Measured:
-    drive: DriveFeedback  # [E, D], position includes the drive's position offset
+    drive: DriveFeedback  # [E, D] as reported: offset included, quantized (TrainPlantCfg.reporting)
     history: DriveFeedback  # [E, H, D], newest first, one per physics step
     history_ns: torch.Tensor  # [E, H] time of each history entry (-1: none yet)
     imu: ImuSamples | None
@@ -92,6 +95,12 @@ class RobotPlant:
         self._hist = DriveFeedback(z.clone(), z.clone(), z.clone(), z.clone())
         self._hist_ns = torch.full((e, h), -1, dtype=torch.int64, device=self.device)
 
+        self.reporting = None
+        if cfg.reporting:
+            from humanoid_sim.devices.reporting import DriveReporting
+
+            self.reporting = DriveReporting.for_drives(self.desc, self.drives, self.profile, device=self.device,
+                                                       seed=cfg.seed + 2)
         self.imu = None
         if imu is not None:
             self.imu = ImuDelivery(ImuDeliveryCfg.from_profile(self.profile["sensors"]["imu"]), e,
@@ -237,9 +246,11 @@ class RobotPlant:
     def measured(self) -> Measured:
         q, qd = self.joint_state()
         offset = self.core.bank.position_offset
-        return Measured(self._with_offset(self.core.feedback(q, qd), offset),
-                        self._with_offset(self._hist, offset.unsqueeze(1)), self._hist_ns,
-                        self.imu.samples if self.imu is not None else None)
+        drive = self._with_offset(self.core.feedback(q, qd), offset)
+        history = self._with_offset(self._hist, offset.unsqueeze(1))
+        if self.reporting is not None:
+            drive, history = self.reporting.report(drive), self.reporting.report(history)
+        return Measured(drive, history, self._hist_ns, self.imu.samples if self.imu is not None else None)
 
     def truth(self) -> Truth:
         q, qd = self.joint_state()
