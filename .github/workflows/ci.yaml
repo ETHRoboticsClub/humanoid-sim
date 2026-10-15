@@ -34,3 +34,28 @@ jobs:
           docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci build-asset --base-joints
           docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci \
             bash -c "uv pip install -q --python /opt/isaaclab-venv/bin/python pytest && pytest -m physics"
+  controls-pins:
+    # humanoid-urdf and ankle_kinematics must be at the commits Controls pins on CONTROLS_REF (a repository
+    # variable; default master).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ secrets.SUBMODULES_TOKEN }}
+          CONTROLS_REF: ${{ vars.CONTROLS_REF || 'master' }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "::warning::no SUBMODULES_TOKEN: Controls' pins not checked"; exit 0; fi
+          fail=0
+          check() {  # our submodule, Controls' path to the same repository
+            ours=$(git ls-tree HEAD "$1" | awk '{print $3}')
+            theirs=$(gh api "repos/ETHRoboticsClub/ETHRC-Humanoid-Controls/contents/$2?ref=$CONTROLS_REF" --jq .sha)
+            if [ "$ours" = "$theirs" ]; then
+              echo "$1 = $ours"
+            else
+              echo "::error::$1 is at $ours; Controls ($CONTROLS_REF) pins $theirs"
+              fail=1
+            fi
+          }
+          check third_party/humanoid-urdf ros2_ws/src/description/URDF_5_description
+          check third_party/ankle_kinematics ros2_ws/src/drivers/ankle_kinematics
+          exit $fail

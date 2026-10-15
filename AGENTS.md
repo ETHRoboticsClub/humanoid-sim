@@ -44,7 +44,8 @@ Spikes live in `spikes/` and are not imported by the package.
 - `uv sync --extra dev` then `uv run pytest -m "not physics"`. Kinematics tests need `--extra newton`; physics
   tests and `humanoid-sim build-asset` run only in the Isaac Lab image (`docker/Dockerfile`).
 - Submodules: `git submodule update --init --recursive`. humanoid-urdf and ankle_kinematics must stay at
-  the commits Controls pins.
+  the commits Controls pins; CI checks them against Controls' `CONTROLS_REF` (a repository variable, default
+  master).
 - Docs explain how the repo works and how to use it. Design proposals, ADRs, milestone reports and
   other records of how it was built stay out of the repo, as do references to them.
 - Preserve unrelated work. Commit completed, validated work in cohesive commits by concern; push only
