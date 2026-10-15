@@ -263,7 +263,7 @@ class RobotPlant:
         self.core.reset(env_ids, demand)
         self.randomizer.draw_reset(env_ids)
         self._write_device(env_ids)
-        self._hist_ns[env_ids] = -1
+        self._hist_ns.index_fill_(0, env_ids, -1)
         if self.imu is not None:
             self.imu.reset(env_ids, self.t_ns)
 

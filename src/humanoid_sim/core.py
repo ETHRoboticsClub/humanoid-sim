@@ -73,8 +73,7 @@ class PlantCore:
 
     def reset(self, env_ids: torch.Tensor, demand: DriveDemand | None = None) -> None:
         self.bank.reset(env_ids, demand)
-        self.gain_warnings[env_ids] = False
-
+        self.gain_warnings.index_fill_(0, env_ids, False)
     def submit(self, demand: DriveDemand, arrival_ns: torch.Tensor, env_mask: torch.Tensor | None = None):
         # The solver gains are the baseline drive gains, so shaping is stable up to twice those.
         self.gain_warnings |= outside_stable_region(

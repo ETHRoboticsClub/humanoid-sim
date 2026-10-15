@@ -60,9 +60,8 @@ class DriveBank:
         if demand is None:
             demand = DriveDemand.disabled(len(env_ids), self.num_drives, device=self.device, dtype=self.dtype)
         self.queue.reset(env_ids, demand.as_dict())
-        self.last_kind[env_ids] = OFF
-        self.fault[env_ids] = False
-
+        self.last_kind.index_fill_(0, env_ids, OFF)
+        self.fault.index_fill_(0, env_ids, False)
     def submit(self, demand: DriveDemand, arrival_ns: torch.Tensor, env_mask: torch.Tensor | None = None):
         """Queue a demand taking effect at ``arrival_ns`` ``[E]`` (or ``[E, D]``: per drive)."""
         self.queue.submit(demand.as_dict(), arrival_ns, env_mask)

@@ -39,8 +39,7 @@ class ForcePush:
     def reset(self, env_ids: torch.Tensor, t_ns: int) -> None:
         self.next_ns[env_ids] = t_ns + (self._uniform(len(env_ids), self.interval) * NS_PER_S).to(torch.int64)
         self.end_ns[env_ids] = t_ns
-        self.force[env_ids] = 0.0
-
+        self.force.index_fill_(0, env_ids, 0.0)
     def step(self, t_ns: int) -> None:
         start = self.next_ns <= t_ns
         heading = self._uniform(self.num_envs, (0.0, 2 * math.pi))

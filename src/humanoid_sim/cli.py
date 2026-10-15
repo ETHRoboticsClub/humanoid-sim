@@ -5,7 +5,8 @@
                                                    drive-level replay on MJWarp, scored against the capture;
                                                    base following the capture's IMU yaw (default), or fixed
     humanoid-sim view-replay <replay-dir> --save x.rrd   sim and real robot + every drive signal in Rerun
-    humanoid-sim bench --num-envs N                real-time factor / throughput (Isaac Lab / MJWarp)
+    humanoid-sim bench --num-envs N [--train]      real-time factor / throughput (Isaac Lab / MJWarp); --train runs
+                                                   the Train-Time API scene (sensors, randomization)
 """
 
 from __future__ import annotations
@@ -89,6 +90,11 @@ def cmd_view_replay(args) -> int:
 
 
 def cmd_bench(args) -> int:
+    if args.train:
+        from humanoid_sim.bench.train import run_train_bench
+
+        print(json.dumps(run_train_bench(args, _usd(args)), indent=1))
+        return 0
     from humanoid_sim.bench.runner import run_bench
 
     print(json.dumps(run_bench(args, _usd(args)), indent=1))
@@ -134,7 +140,9 @@ def main(argv: list[str] | None = None) -> int:
     be.add_argument("--device", default="cuda:0")
     be.add_argument("--integrator", default=None)
     be.add_argument("--no-self-collision", action="store_true")
+    be.add_argument("--train", action="store_true", help="Train-Time API scene: RobotPlant, IMU, contacts")
     be.set_defaults(func=cmd_bench)
+
 
     args = p.parse_args(argv)
     if args.command is None:

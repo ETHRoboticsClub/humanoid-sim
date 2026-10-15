@@ -52,10 +52,9 @@ class ArrivalQueue:
         """Clear the queue of ``env_ids`` and put ``record`` (rows for those envs) in force."""
         for k, v in record.items():
             self.active[k][env_ids] = v
-        self.arrival[env_ids] = _EMPTY
-        self.count[env_ids] = 0
-        self.overflows[env_ids] = 0
-
+        self.arrival.index_fill_(0, env_ids, _EMPTY)
+        self.count.index_fill_(0, env_ids, 0)
+        self.overflows.index_fill_(0, env_ids, 0)
     def submit(self, record: dict[str, torch.Tensor], arrival_ns: torch.Tensor,
                env_mask: torch.Tensor | None = None) -> None:
         """Queue one record per env (rows where ``env_mask`` is true) arriving at ``arrival_ns`` [E] (or

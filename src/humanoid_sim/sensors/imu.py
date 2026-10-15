@@ -78,6 +78,7 @@ class ImuDelivery:
         self.accel_sigma = cfg.accel_noise_density * math.sqrt(rate)
         e, h, p = num_envs, cfg.history, cfg.pending
         f = dict(device=self.device, dtype=dtype)
+        self._sigma = torch.tensor([self.gyro_sigma] * 3 + [self.accel_sigma] * 3, **f)
         i64 = dict(device=self.device, dtype=torch.int64)
         # Errors (written by the plant's randomization).
         self.gyro_bias = torch.zeros(e, 3, **f)
@@ -111,13 +112,13 @@ class ImuDelivery:
         n = len(env_ids)
         self.next_sample[env_ids] = t_ns + self._uniform_ns(n, 0, self.cfg.sample_period_ns)
         self.next_burst[env_ids] = t_ns + self._uniform_ns(n, 0, self.cfg.burst_period_ns[1])
-        self.seq[env_ids] = 0
-        self.pending_count[env_ids] = 0
+        self.seq.index_fill_(0, env_ids, 0)
+        self.pending_count.index_fill_(0, env_ids, 0)
         s = self.samples
-        s.stamp_ns[env_ids] = -1
-        s.sample_ns[env_ids] = -1
-        s.seq[env_ids] = 0
-        s.count[env_ids] = 0
+        s.stamp_ns.index_fill_(0, env_ids, -1)
+        s.sample_ns.index_fill_(0, env_ids, -1)
+        s.seq.index_fill_(0, env_ids, 0)
+        s.count.index_fill_(0, env_ids, 0)
         if value is not None:
             self._prev[env_ids] = value
 
@@ -150,8 +151,7 @@ class ImuDelivery:
         gyro = (r @ ideal[:, :3].unsqueeze(-1)).squeeze(-1) + self.gyro_bias
         acc = (r @ ideal[:, 3:].unsqueeze(-1)).squeeze(-1) + self.accel_bias
         noise = torch.randn(self.num_envs, 6, generator=self.generator, device=self.device, dtype=self.dtype)
-        sigma = torch.tensor([self.gyro_sigma] * 3 + [self.accel_sigma] * 3, device=self.device, dtype=self.dtype)
-        sample = torch.cat([gyro, acc], dim=1) + noise * sigma
+        sample = torch.cat([gyro, acc], dim=1) + noise * self._sigma
         self.seq = self.seq + due.long()
         full = due & (self.pending_count >= self.cfg.pending)
         self._drop_oldest_pending(full)

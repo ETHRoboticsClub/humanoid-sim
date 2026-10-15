@@ -59,7 +59,7 @@ class PlantAction(ActionTerm):
         if env_ids is None or isinstance(env_ids, slice):
             env_ids = torch.arange(self.num_envs, device=self.device)
         env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
-        self._raw[env_ids] = 0.0
+        self._raw.index_fill_(0, env_ids, 0.0)
         self.plant.reset(env_ids)
 
 
