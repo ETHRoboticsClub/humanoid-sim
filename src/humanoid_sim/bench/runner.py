@@ -1,5 +1,9 @@
 """Benchmarks on Isaac Lab / MJWarp: single-robot real-time factor and batched throughput.
 
+``run_runtime_bench``: the real-time host's whole step (commands, demands, the graphed plant and physics,
+publishing feedback and truth to the segment), unpaced, as fast as it goes: its real-time factor is the
+headroom the host has when paced.
+
 Workload: free base, standing on flat ground, every drive holding the standing pose at baseline gains,
 with a new demand every 20 ms (the policy period) carrying a small random target perturbation. Timing
 covers the full step (plant + solver), after a warm-up. On CUDA the steady-state loop runs under
@@ -75,3 +79,27 @@ def run_bench(args, usd: Path) -> dict:
         "fraction_envs_near_standing": upright,
         "self_collision": not getattr(args, "no_self_collision", False), "host_syncs": "none (torch sync debug mode)" if cuda else "n/a",
     }
+
+
+def run_runtime_bench(args, usd: Path) -> dict:
+    import tempfile
+
+    from humanoid_sim.runtime.host import RuntimeHost
+
+    with tempfile.TemporaryDirectory() as tmp:
+        host = RuntimeHost(Path(tmp) / "plant", usd, device=args.device, robot=args.robot, support="free")
+        try:
+            for _ in range(50):
+                host.step()
+            if str(args.device).startswith("cuda"):
+                torch.cuda.synchronize()
+            t = time.perf_counter()
+            for _ in range(args.steps):
+                host.step()
+            wall = time.perf_counter() - t
+        finally:
+            host.close()
+    step_s = wall / args.steps
+    return {"workload": "runtime host", "device": args.device, "steps": args.steps, "ms_per_step": step_s * 1e3,
+            "real_time_factor": host.period_ns / NS_PER_S / step_s, "cuda_graph": host.sim._graphs is not None}
+

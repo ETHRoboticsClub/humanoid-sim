@@ -5,7 +5,8 @@ Every physics period (4 ms), in order:
 1. handle a new mailbox command, if any, and acknowledge it;
 2. take the client's latest demands (if they changed) into the drive bank, in force from this step on;
 3. step the physics (unless paused), with the active gantry, disturbances and prescribed pose;
-4. publish feedback (physical drive feedback, the latest raw IMU samples, lateness) and truth; heartbeat.
+4. publish feedback (physical drive feedback, the latest raw IMU samples, lateness); every ``truth_every`` steps
+   (and after a command) the truth; heartbeat.
 
 Pacing is to ``CLOCK_MONOTONIC``: the host sleeps until each step's deadline. A step that starts more than a
 period late counts as late and the schedule restarts from now (plant time never jumps). ``keeping_up`` is
@@ -60,7 +61,7 @@ class _Disturbance:
 class RuntimeHost:
     def __init__(self, segment: str | Path, usd: Path, *, device: str = "cuda:0", robot: str = "ethrc_v1",
                  support: str = "suspended", bus_period_ns: int = 1_500_000, client_timeout_ns: int = 500_000_000,
-                 seed: int = 0, sim_revision: str = "unknown"):
+                 seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True):
         from humanoid_sim.model.asset import asset_meta
         from humanoid_sim.model.kinematics import standing_base_height
         from humanoid_sim.sim import SimCore
@@ -75,8 +76,10 @@ class RuntimeHost:
         meta = asset_meta(usd)
         self.standing_height_m = standing_base_height(usd, desc, meta["sole_boxes"]) + STANDING_CLEARANCE_M
         height = self.standing_height_m + (0.3 if support == "suspended" else 0.0)
+        cuda = str(device).startswith("cuda")
         self.sim = SimCore(usd, device=device, robot=robot, fixed_base=support == "suspended",
-                           base_height_m=height, imu=True, contacts=True, seed=seed)
+                           base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
+                           compile=compile and cuda)
         self.device = torch.device(device)
         self.desc = self.sim.desc
         self.robot = self.sim.backend.robot
@@ -84,6 +87,8 @@ class RuntimeHost:
         self.drives = self.sim.plant.map.drive_names
         self.joints = list(self.desc.joints)
         self.client_timeout_ns = client_timeout_ns
+        self.truth_every = truth_every
+        self._truth_due = True
         self._soles = self._sole_geometry(meta["sole_boxes"])
         contacts = self.sim.backend.contacts
         names = [n.rsplit("/", 1)[-1] for n in contacts.sensor_names]
@@ -183,6 +188,7 @@ class RuntimeHost:
             self.seg.ack(seq, abi.ACK_FAILED, str(e))
             return
         self.seg.ack(seq, abi.ACK_OK, message)
+        self._truth_due = True
 
     def _joint_vector(self, joint_pos: dict) -> torch.Tensor:
         q, _ = self.sim.joint_state()
@@ -399,42 +405,30 @@ class RuntimeHost:
         self._publish()
 
     def _publish(self) -> None:
-        sim, n, nj = self.sim, len(self.drives), len(self.joints)
-        q, qd = sim.joint_state()
-        fb = sim.feedback if sim.feedback is not None else sim.plant.feedback(q, qd)
-        data = self.robot.data
-        root = data.root_link_pose_w.torch[0]
-        vel = data.root_link_vel_w.torch[0]
-        com = (self._mass[:, None] * data.body_com_pos_w.torch[0]).sum(0) / self._mass.sum()
-        soles = []
-        normal = self.sim.backend.contacts.data.net_forces_w.torch[0, self._sole_contacts, 2]
-        for k, s in enumerate(self._soles):
-            pose = data.body_link_pose_w.torch[0, s["id"]]
-            corners = pose[:3] + _quat_rotate(pose[3:].expand(8, 4), s["corners"])
-            soles.append(torch.cat([pose, corners[:, 2].min().view(1), normal[k].view(1)]))
+        """Feedback every step; truth every ``truth_every`` steps (its ``sim_time_ns`` says when)."""
+        self._publish_feedback()
+        if self.step_count % self.truth_every == 0 or self._truth_due:
+            self._publish_truth()
+            self._truth_due = False
+        self.seg.heartbeat()
+
+    def _publish_feedback(self) -> None:
+        sim, n = self.sim, len(self.drives)
+        fb = sim.feedback if sim.feedback is not None else sim.plant.feedback(*sim.joint_state())
         imu = sim.imu.samples
-        flat = torch.cat([
-            fb.position_rad[0], fb.velocity_rad_s[0], fb.applied_torque_nm[0], fb.demanded_torque_nm[0],
-            root, vel, com, q[0], qd[0], sim.gantry.tension_n[:1], self._mass.sum().view(1), *soles,
-            imu.gyro[0].reshape(-1), imu.specific_force[0].reshape(-1),
-        ]).to(torch.float64).cpu().numpy()
-        ints = torch.cat([imu.seq[0], imu.sample_ns[0], imu.stamp_ns[0], imu.count[:1]]).cpu().numpy()
-        drive = flat[: 4 * n].reshape(4, n)
+        h = imu.gyro.shape[1]
+        # One transfer: the integer fields travel bit-for-bit as float64.
+        ints = torch.cat([imu.seq[0], imu.sample_ns[0], imu.stamp_ns[0], imu.count[:1]]).view(torch.float64)
+        flat = torch.cat([fb.position_rad[0], fb.velocity_rad_s[0], fb.applied_torque_nm[0],
+                          fb.demanded_torque_nm[0], imu.gyro[0].reshape(-1), imu.specific_force[0].reshape(-1),
+                          ]).to(torch.float64)
+        host = torch.cat([flat, ints]).cpu().numpy()
+        drive = host[: 4 * n].reshape(4, n)
         for (position, velocity), d in self._frozen_encoders():
             drive[0, d], drive[1, d] = position, velocity
-        i = 4 * n
-
-        def take(k):
-            nonlocal i
-            out = flat[i:i + k]
-            i += k
-            return out
-
-        root_np, vel_np, com_np, q_np, qd_np = take(7), take(6), take(3), take(nj), take(nj)
-        tension, mass = take(1)[0], take(1)[0]
-        sole_np = [take(9) for _ in soles]
-        h = imu.gyro.shape[1]
-        gyro, accel = take(3 * h).reshape(h, 3), take(3 * h).reshape(h, 3)
+        gyro = host[4 * n: 4 * n + 3 * h].reshape(h, 3)
+        accel = host[4 * n + 3 * h: 4 * n + 6 * h].reshape(h, 3)
+        ints = host[4 * n + 6 * h:].view(np.int64)
         seqs, sample_ns, stamp_ns, total = ints[:h], ints[h:2 * h], ints[2 * h:3 * h], int(ints[3 * h])
 
         now = abi.mono_ns()
@@ -453,17 +447,42 @@ class RuntimeHost:
         imu_rec["gyro_rad_s"][:valid], imu_rec["specific_force_m_s2"][:valid] = gyro[:valid], accel[:valid]
         self.seg.regions["feedback"].write(rec)
 
+    def _publish_truth(self) -> None:
+        sim, nj = self.sim, len(self.joints)
+        q, qd = sim.joint_state()
+        data = self.robot.data
+        root = data.root_link_pose_w.torch[0]
+        vel = data.root_link_vel_w.torch[0]
+        com = (self._mass[:, None] * data.body_com_pos_w.torch[0]).sum(0) / self._mass.sum()
+        soles = []
+        normal = self.sim.backend.contacts.data.net_forces_w.torch[0, self._sole_contacts, 2]
+        for k, s in enumerate(self._soles):
+            pose = data.body_link_pose_w.torch[0, s["id"]]
+            corners = pose[:3] + _quat_rotate(pose[3:].expand(8, 4), s["corners"])
+            soles.append(torch.cat([pose, corners[:, 2].min().view(1), normal[k].view(1)]))
+        flat = torch.cat([root, vel, com, q[0], qd[0], sim.gantry.tension_n[:1], self._mass.sum().view(1),
+                          *soles]).to(torch.float64).cpu().numpy()
+        i = 0
+
+        def take(k):
+            nonlocal i
+            out = flat[i:i + k]
+            i += k
+            return out
+
+        root_np, vel_np, com_np, q_np, qd_np = take(7), take(6), take(3), take(nj), take(nj)
+        tension, mass = take(1)[0], take(1)[0]
         t = np.zeros((), abi.TRUTH)
         t["sim_time_ns"] = sim.t_ns
         t["base_position_m"], t["base_quat_xyzw"] = root_np[:3], root_np[3:]
         t["base_lin_vel_m_s"], t["base_ang_vel_rad_s"], t["com_m"] = vel_np[:3], vel_np[3:], com_np
         t["gantry_tension_n"], t["mass_kg"], t["num_joints"] = tension, mass, nj
         t["joint_pos_rad"][:nj], t["joint_vel_rad_s"][:nj] = q_np, qd_np
-        for k, s in enumerate(sole_np):
+        for k in range(len(soles)):
+            s = take(9)
             t["sole"]["position_m"][k], t["sole"]["quat_xyzw"][k] = s[:3], s[3:7]
             t["sole"]["lowest_z_m"][k], t["sole"]["normal_force_n"][k] = s[7], s[8]
         self.seg.regions["truth"].write(t)
-        self.seg.heartbeat()
 
     def _frozen_encoders(self):
         for (fault, d), (_, held) in self._faults.items():

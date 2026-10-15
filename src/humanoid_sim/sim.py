@@ -12,6 +12,12 @@ orientation as yaw, pitch and roll (``R = Rz Ry Rx``) and their rates, held thro
 With ``imu``, :attr:`SimCore.imu` produces the raw IMU samples as the robot's host receives them
 (:class:`~humanoid_sim.sensors.imu.ImuDelivery`, sampled at every step start); with ``contacts``, the scene has a
 contact sensor on every body (``backend.contacts``).
+
+With ``cuda_graph`` (CUDA only) the plant's work around the solver step runs as two captured CUDA graphs, one
+before the step (IMU sampling, drive bank, target shaping) and one after (drive feedback): one launch each instead
+of hundreds of small kernels, which is what bounds a single robot's step time. ``compile`` also fuses those
+kernels with ``torch.compile`` first (about a minute at construction, then roughly half the GPU time). The
+feedback it returns is then a set of static buffers, overwritten by the next step: copy what you keep.
 """
 
 from __future__ import annotations
@@ -33,7 +39,7 @@ class SimCore:
                  period_ns: int | None = None, fixed_base: bool = False, base_height_m: float = 1.0,
                  integrator: str | None = None, rerun: bool = False, rerun_rrd: str | None = None,
                  self_collision: bool | None = None, base_joints: bool = False, imu: bool = False,
-                 contacts: bool = False, seed: int = 0):
+                 contacts: bool = False, seed: int = 0, cuda_graph: bool = False, compile: bool = False):
         self.desc = Description.load(robot)
         self.profile = load_profile(robot)
         phys = self.profile["physics"]
@@ -65,6 +71,7 @@ class SimCore:
         self.gantry = Gantry(self.backend.robot)
         self.t_ns = 0
         self.feedback: DriveFeedback | None = None
+        self._state_written = True  # joint state changed outside a step: the plant's post-step state is stale
         self.imu = None
         if imu:
             from humanoid_sim.sensors.imu import ImuDelivery, ImuDeliveryCfg
@@ -72,6 +79,9 @@ class SimCore:
             self.imu = ImuDelivery(ImuDeliveryCfg.from_profile(self.profile["sensors"]["imu"]), num_envs,
                                    device=device, seed=seed)
             self.imu.reset(torch.arange(num_envs, device=device), 0)
+        if cuda_graph and not str(device).startswith("cuda"):
+            raise ValueError("cuda_graph needs a CUDA device")
+        self._graphs = _StepGraphs(self, compile=compile) if cuda_graph else None
 
     def joint_state(self) -> tuple[torch.Tensor, torch.Tensor]:
         q, qd = self.backend.joint_state()
@@ -83,6 +93,7 @@ class SimCore:
         bq[:, self._to_plant] = q.to(bq.dtype)
         bqd[:, self._to_plant] = qd.to(bqd.dtype)
         self.backend.write_state(bq, bqd)
+        self._state_written = True
 
     def close(self) -> None:
         self.backend.close()
@@ -99,13 +110,18 @@ class SimCore:
             bq[:, self._base] = angles.to(bq.dtype)
             bqd[:, self._base] = rates.to(bqd.dtype)
             self.backend.write_state(bq, bqd)
+            self._state_written = True
 
     def step(self) -> DriveFeedback:
-        if self.imu is not None:
-            data = self.backend.imu.data
-            self.imu.step(self.t_ns, data.ang_vel_b.torch, data.lin_acc_b.torch)
         q, qd = self.joint_state()
-        target = self.plant.pre_physics(self.t_ns, q, qd)
+        if self._graphs is not None:
+            target = self._graphs.pre(q, qd, refresh=self._state_written)
+        else:
+            if self.imu is not None:
+                data = self.backend.imu.data
+                self.imu.step(self.t_ns, data.ang_vel_b.torch, data.lin_acc_b.torch)
+            state = None if self._state_written else self.plant.post_state
+            target = self.plant.pre_physics(self.t_ns, q, qd, state)
         bt, _ = self.backend.joint_state()
         bt = bt.clone()
         bt[:, self._to_plant] = target.to(bt.dtype)
@@ -120,5 +136,72 @@ class SimCore:
         self.backend.step()
         self.t_ns += self.period_ns
         q, qd = self.joint_state()
-        self.feedback = self.plant.feedback(q, qd)
+        self.feedback = self._graphs.post(q, qd) if self._graphs is not None else self.plant.feedback(q, qd)
+        self._state_written = False
+        return self.feedback
+
+
+class _StepGraphs:
+    """The plant's per-step work as two CUDA graphs over static buffers: ``pre`` (IMU sampling at the step start,
+    drive bank, target shaping) and ``post`` (drive feedback and the drive-frame state ``pre`` reuses). State lives
+    in the plant's tensors, updated in place; the step time is a device scalar; the IMU's generator is registered
+    with the graph so each replay draws new noise and burst times."""
+
+    def __init__(self, sim: SimCore, warmup: int = 3, compile: bool = False):
+        self.sim = sim
+        if compile:
+            self._post = torch.compile(self._post, dynamic=False)
+            self._pre = torch.compile(self._pre, dynamic=False)
+        p = sim.plant
+        q, qd = sim.joint_state()
+        self.q, self.qd = q.clone(), qd.clone()
+        self.t = torch.zeros((), dtype=torch.int64, device=q.device)
+        e = q.shape[0]
+        self.gyro = torch.zeros(e, 3, device=q.device)
+        self.acc = torch.zeros(e, 3, device=q.device)
+        p.feedback(self.q, self.qd)  # a post-step state for pre to start from
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(warmup):
+                self._post()
+                self._pre()
+        torch.cuda.current_stream().wait_stream(side)
+        generators = [sim.imu.generator] if sim.imu is not None else []
+        self.g_post, self.g_pre = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
+        for g in (self.g_post, self.g_pre):
+            for gen in generators:
+                g.register_generator_state(gen)
+        with torch.cuda.graph(self.g_post):
+            self.feedback = self._post()
+        with torch.cuda.graph(self.g_pre):
+            self.target = self._pre()
+
+    def _post(self) -> DriveFeedback:
+        return self.sim.plant.feedback(self.q, self.qd)
+
+    def _pre(self) -> torch.Tensor:
+        sim = self.sim
+        if sim.imu is not None:
+            sim.imu.step(self.t, self.gyro, self.acc, period_ns=sim.period_ns)
+        return sim.plant.pre_physics(self.t, self.q, self.qd, sim.plant.post_state)
+
+    def pre(self, q: torch.Tensor, qd: torch.Tensor, *, refresh: bool) -> torch.Tensor:
+        sim = self.sim
+        if refresh:  # the joint state was written: convert it again before the step
+            self.q.copy_(q)
+            self.qd.copy_(qd)
+            self.g_post.replay()
+        if sim.imu is not None:
+            data = sim.backend.imu.data
+            self.gyro.copy_(data.ang_vel_b.torch)
+            self.acc.copy_(data.lin_acc_b.torch)
+        self.t.fill_(sim.t_ns)
+        self.g_pre.replay()
+        return self.target
+
+    def post(self, q: torch.Tensor, qd: torch.Tensor) -> DriveFeedback:
+        self.q.copy_(q)
+        self.qd.copy_(qd)
+        self.g_post.replay()
         return self.feedback

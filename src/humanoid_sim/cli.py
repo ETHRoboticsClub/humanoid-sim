@@ -6,7 +6,8 @@
                                                    base following the capture's IMU yaw (default), or fixed
     humanoid-sim view-replay <replay-dir> --save x.rrd   sim and real robot + every drive signal in Rerun
     humanoid-sim bench --num-envs N [--train]      real-time factor / throughput (Isaac Lab / MJWarp); --train runs
-                                                   the Train-Time API scene (sensors, randomization)
+                                                   the Train-Time API scene (sensors, randomization); --runtime
+                                                   the real-time host's step
     humanoid-sim fit-passive <exc-dir>... --num-envs N --generations G
                                                    fit upper-body passive joint parameters by batched replay
     humanoid-sim serve --segment PATH [--support suspended|free]
@@ -95,6 +96,11 @@ def cmd_view_replay(args) -> int:
 
 
 def cmd_bench(args) -> int:
+    if args.runtime:
+        from humanoid_sim.bench.runner import run_runtime_bench
+
+        print(json.dumps(run_runtime_bench(args, _usd(args)), indent=1))
+        return 0
     if args.train:
         from humanoid_sim.bench.train import run_train_bench
 
@@ -228,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
     be.add_argument("--integrator", default=None)
     be.add_argument("--no-self-collision", action="store_true")
     be.add_argument("--train", action="store_true", help="Train-Time API scene: RobotPlant, IMU, contacts")
+    be.add_argument("--runtime", action="store_true", help="the real-time host's whole step, unpaced")
     be.set_defaults(func=cmd_bench)
 
     fp = sub.add_parser("fit-passive", help="fit upper-body passive joint parameters to captures")

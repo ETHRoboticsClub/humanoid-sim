@@ -113,11 +113,11 @@ def imu_sensor_cfg(robot: str = "ethrc_v1"):
                   offset=ImuCfg.OffsetCfg(pos=tuple(xyz), rot=_quat_xyzw(*rpy)))
 
 
-def contact_sensor_cfg(history: int = 3):
+def contact_sensor_cfg(history: int = 3, air_time: bool = True):
     """Contact sensor on every body: net forces with history, air time."""
     from isaaclab.sensors import ContactSensorCfg
 
-    return ContactSensorCfg(prim_path=f"{ROBOT_PRIM}/Geometry/.*", history_length=history, track_air_time=True)
+    return ContactSensorCfg(prim_path=f"{ROBOT_PRIM}/Geometry/.*", history_length=history, track_air_time=air_time)
 
 
 def ground_cfg(friction: float):
@@ -167,7 +167,7 @@ class IsaacLabRobot:
         if cfg.imu:
             scene_cfg.imu = imu_sensor_cfg(desc.robot)
         if cfg.contacts:
-            scene_cfg.contacts = contact_sensor_cfg()
+            scene_cfg.contacts = contact_sensor_cfg(history=1, air_time=False)  # net forces now: the truth
         visualizers = []
         if cfg.rerun:
             from isaaclab_visualizers.rerun import RerunVisualizerCfg

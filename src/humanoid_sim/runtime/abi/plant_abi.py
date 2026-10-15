@@ -67,13 +67,27 @@ CMD_NONE = 0
 CMD_RESET = 1  # {"pose": "standing" | "current"} or {"joint_pos": {name: rad}, "base_pose": [x,y,z,qx,qy,qz,qw]}
 CMD_PAUSE = 2  # {}: physics stops, feedback keeps being written
 CMD_RESUME = 3  # {}
-CMD_SET_SUPPORT = 4  # {"support": "free"} | {"support": "gantry", ...Gantry.hang_tension/hang_cable arguments}
-CMD_APPLY_DISTURBANCE = 5  # {"body": name, "force_n": [x,y,z], "torque_nm": [x,y,z], "duration_s": s}
-CMD_INJECT_FAULT = 6  # {"fault": name, "drive": name | null, "value": number, "duration_s": s | null}
-CMD_PRESCRIBE_POSE = 7  # {"joint_pos": {...}, "base_pose": [...] | null}: hold a pose; {"release": true}
-COMMANDS = {CMD_RESET: "reset", CMD_PAUSE: "pause", CMD_RESUME: "resume", CMD_SET_SUPPORT: "set_support",
-            CMD_APPLY_DISTURBANCE: "apply_disturbance", CMD_INJECT_FAULT: "inject_fault",
-            CMD_PRESCRIBE_POSE: "prescribe_pose"}
+CMD_SET_SUPPORT = (
+    4  # {"support": "free"} | {"support": "gantry", ...Gantry.hang_tension/hang_cable arguments}
+)
+CMD_APPLY_DISTURBANCE = (
+    5  # {"body": name, "force_n": [x,y,z], "torque_nm": [x,y,z], "duration_s": s}
+)
+CMD_INJECT_FAULT = (
+    6  # {"fault": name, "drive": name | null, "value": number, "duration_s": s | null}
+)
+CMD_PRESCRIBE_POSE = (
+    7  # {"joint_pos": {...}, "base_pose": [...] | null}: hold a pose; {"release": true}
+)
+COMMANDS = {
+    CMD_RESET: "reset",
+    CMD_PAUSE: "pause",
+    CMD_RESUME: "resume",
+    CMD_SET_SUPPORT: "set_support",
+    CMD_APPLY_DISTURBANCE: "apply_disturbance",
+    CMD_INJECT_FAULT: "inject_fault",
+    CMD_PRESCRIBE_POSE: "prescribe_pose",
+}
 
 # Ack results.
 ACK_OK = 0
@@ -89,54 +103,133 @@ def _region(*fields) -> np.dtype:
     return np.dtype([("seq", "<u8"), ("crc", "<u4"), ("_pad0", "<u4"), *fields], align=True)
 
 
-HEADER = np.dtype([
-    ("magic", "S8"), ("abi_major", "<u2"), ("abi_minor", "<u2"), ("header_bytes", "<u4"),
-    ("layout_hash", "<u8"), ("segment_bytes", "<u8"), ("session_id", "<u8"),
-    ("state", "<u4"), ("num_drives", "<u4"), ("num_joints", "<u4"), ("imu_samples", "<u4"),
-    ("physics_period_ns", "<u8"), ("bus_period_ns", "<u8"), ("heartbeat_mono_ns", "<u8"),
-    ("robot_id", "S32"), ("description_digest", "S64"), ("sim_revision", "S48"),
-    ("offsets", "<u8", (6,)),  # descriptor, demands, feedback, mailbox, ack, truth
-], align=True)
+HEADER = np.dtype(
+    [
+        ("magic", "S8"),
+        ("abi_major", "<u2"),
+        ("abi_minor", "<u2"),
+        ("header_bytes", "<u4"),
+        ("layout_hash", "<u8"),
+        ("segment_bytes", "<u8"),
+        ("session_id", "<u8"),
+        ("state", "<u4"),
+        ("num_drives", "<u4"),
+        ("num_joints", "<u4"),
+        ("imu_samples", "<u4"),
+        ("physics_period_ns", "<u8"),
+        ("bus_period_ns", "<u8"),
+        ("heartbeat_mono_ns", "<u8"),
+        ("robot_id", "S32"),
+        ("description_digest", "S64"),
+        ("sim_revision", "S48"),
+        ("offsets", "<u8", (6,)),  # descriptor, demands, feedback, mailbox, ack, truth
+    ],
+    align=True,
+)
 
-DRIVE_DEMAND = np.dtype([
-    ("torque_enabled", "<i4"), ("mode", "i1"), ("homing_hold", "u1"), ("_pad0", "u1", (2,)),
-    ("target_position_rad", "<f8"), ("target_velocity_rad_s", "<f8"), ("feedforward_torque_nm", "<f8"),
-    ("p_gain_raw", "<u4"), ("i_gain_raw", "<u4"), ("d_gain_raw", "<u4"), ("max_torque_mnm", "<u4"),
-], align=True)
+DRIVE_DEMAND = np.dtype(
+    [
+        ("torque_enabled", "<i4"),
+        ("mode", "i1"),
+        ("homing_hold", "u1"),
+        ("_pad0", "u1", (2,)),
+        ("target_position_rad", "<f8"),
+        ("target_velocity_rad_s", "<f8"),
+        ("feedforward_torque_nm", "<f8"),
+        ("p_gain_raw", "<u4"),
+        ("i_gain_raw", "<u4"),
+        ("d_gain_raw", "<u4"),
+        ("max_torque_mnm", "<u4"),
+    ],
+    align=True,
+)
 
-DRIVE_FEEDBACK = np.dtype([
-    ("position_rad", "<f8"), ("velocity_rad_s", "<f8"), ("applied_torque_nm", "<f8"),
-    ("demanded_torque_nm", "<f8"),
-], align=True)
+DRIVE_FEEDBACK = np.dtype(
+    [
+        ("position_rad", "<f8"),
+        ("velocity_rad_s", "<f8"),
+        ("applied_torque_nm", "<f8"),
+        ("demanded_torque_nm", "<f8"),
+    ],
+    align=True,
+)
 
-IMU_SAMPLE = np.dtype([
-    ("seq", "<u8"), ("sample_ns", "<i8"), ("stamp_ns", "<i8"),
-    ("gyro_rad_s", "<f8", (3,)), ("specific_force_m_s2", "<f8", (3,)),
-], align=True)
+IMU_SAMPLE = np.dtype(
+    [
+        ("seq", "<u8"),
+        ("sample_ns", "<i8"),
+        ("stamp_ns", "<i8"),
+        ("gyro_rad_s", "<f8", (3,)),
+        ("specific_force_m_s2", "<f8", (3,)),
+    ],
+    align=True,
+)
 
-SOLE = np.dtype([
-    ("position_m", "<f8", (3,)), ("quat_xyzw", "<f8", (4,)), ("lowest_z_m", "<f8"), ("normal_force_n", "<f8"),
-], align=True)
+SOLE = np.dtype(
+    [
+        ("position_m", "<f8", (3,)),
+        ("quat_xyzw", "<f8", (4,)),
+        ("lowest_z_m", "<f8"),
+        ("normal_force_n", "<f8"),
+    ],
+    align=True,
+)
 
 DESCRIPTOR = _region(("length", "<u4"), ("_pad1", "<u4"), ("json", "u1", (DESCRIPTOR_BYTES,)))
 DEMANDS = _region(
-    ("cycle", "<u8"), ("written_mono_ns", "<u8"), ("session_id", "<u8"), ("num_drives", "<u4"), ("_pad1", "<u4"),
-    ("drive", DRIVE_DEMAND, (MAX_DRIVES,)))
+    ("cycle", "<u8"),
+    ("written_mono_ns", "<u8"),
+    ("session_id", "<u8"),
+    ("num_drives", "<u4"),
+    ("_pad1", "<u4"),
+    ("drive", DRIVE_DEMAND, (MAX_DRIVES,)),
+)
 FEEDBACK = _region(
-    ("step", "<u8"), ("sim_time_ns", "<i8"), ("written_mono_ns", "<u8"), ("late_steps", "<u8"),
-    ("keeping_up", "<u4"), ("paused", "<u4"), ("num_drives", "<u4"), ("imu_count", "<u4"),
-    ("imu_total", "<u8"), ("drive", DRIVE_FEEDBACK, (MAX_DRIVES,)), ("imu", IMU_SAMPLE, (IMU_SAMPLES,)))
-MAILBOX = _region(("command", "<u4"), ("length", "<u4"), ("written_mono_ns", "<u8"),
-                  ("args", "u1", (MAILBOX_BYTES,)))
-ACK = _region(("acked", "<u8"), ("result", "<i4"), ("_pad1", "<u4"), ("message", "S%d" % ACK_MESSAGE_BYTES))
+    ("step", "<u8"),
+    ("sim_time_ns", "<i8"),
+    ("written_mono_ns", "<u8"),
+    ("late_steps", "<u8"),
+    ("keeping_up", "<u4"),
+    ("paused", "<u4"),
+    ("num_drives", "<u4"),
+    ("imu_count", "<u4"),
+    ("imu_total", "<u8"),
+    ("drive", DRIVE_FEEDBACK, (MAX_DRIVES,)),
+    ("imu", IMU_SAMPLE, (IMU_SAMPLES,)),
+)
+MAILBOX = _region(
+    ("command", "<u4"),
+    ("length", "<u4"),
+    ("written_mono_ns", "<u8"),
+    ("args", "u1", (MAILBOX_BYTES,)),
+)
+ACK = _region(
+    ("acked", "<u8"), ("result", "<i4"), ("_pad1", "<u4"), ("message", f"S{ACK_MESSAGE_BYTES}")
+)
 TRUTH = _region(
-    ("sim_time_ns", "<i8"), ("base_position_m", "<f8", (3,)), ("base_quat_xyzw", "<f8", (4,)),
-    ("base_lin_vel_m_s", "<f8", (3,)), ("base_ang_vel_rad_s", "<f8", (3,)), ("com_m", "<f8", (3,)),
-    ("gantry_tension_n", "<f8"), ("mass_kg", "<f8"), ("num_joints", "<u4"), ("_pad1", "<u4"),
-    ("joint_pos_rad", "<f8", (MAX_JOINTS,)), ("joint_vel_rad_s", "<f8", (MAX_JOINTS,)), ("sole", SOLE, (SOLES,)))
+    ("sim_time_ns", "<i8"),
+    ("base_position_m", "<f8", (3,)),
+    ("base_quat_xyzw", "<f8", (4,)),
+    ("base_lin_vel_m_s", "<f8", (3,)),
+    ("base_ang_vel_rad_s", "<f8", (3,)),
+    ("com_m", "<f8", (3,)),
+    ("gantry_tension_n", "<f8"),
+    ("mass_kg", "<f8"),
+    ("num_joints", "<u4"),
+    ("_pad1", "<u4"),
+    ("joint_pos_rad", "<f8", (MAX_JOINTS,)),
+    ("joint_vel_rad_s", "<f8", (MAX_JOINTS,)),
+    ("sole", SOLE, (SOLES,)),
+)
 
-REGIONS = (("descriptor", DESCRIPTOR), ("demands", DEMANDS), ("feedback", FEEDBACK), ("mailbox", MAILBOX),
-           ("ack", ACK), ("truth", TRUTH))
+REGIONS = (
+    ("descriptor", DESCRIPTOR),
+    ("demands", DEMANDS),
+    ("feedback", FEEDBACK),
+    ("mailbox", MAILBOX),
+    ("ack", ACK),
+    ("truth", TRUTH),
+)
 
 
 def _aligned(n: int) -> int:
@@ -165,8 +258,13 @@ def _describe(dtype: np.dtype) -> list:
 
 def layout_hash() -> int:
     """64-bit hash of every field's name, offset, type and shape, and the region offsets."""
-    spec = {"header": _describe(HEADER), "regions": {n: [OFFSETS[n], _describe(d)] for n, d in REGIONS}}
-    return int.from_bytes(hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).digest()[:8], "little")
+    spec = {
+        "header": _describe(HEADER),
+        "regions": {n: [OFFSETS[n], _describe(d)] for n, d in REGIONS},
+    }
+    return int.from_bytes(
+        hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).digest()[:8], "little"
+    )
 
 
 LAYOUT_HASH = layout_hash()
@@ -251,16 +349,32 @@ class Segment:
     def __init__(self, path: Path, mm: mmap.mmap, fd: int):
         self.path, self._mm, self._fd = path, mm, fd
         self.buf = np.frombuffer(mm, dtype=np.uint8)
-        self.header = self.buf[:HEADER.itemsize].view(HEADER)  # shape (1,): field writes go to the file
-        self.regions = {name: Region(name, dtype, self.buf[OFFSETS[name]:OFFSETS[name] + dtype.itemsize])
-                        for name, dtype in REGIONS}
+        self.header = self.buf[: HEADER.itemsize].view(
+            HEADER
+        )  # shape (1,): field writes go to the file
+        self.regions = {
+            name: Region(name, dtype, self.buf[OFFSETS[name] : OFFSETS[name] + dtype.itemsize])
+            for name, dtype in REGIONS
+        }
 
     # -- lifecycle --------------------------------------------------------------------------------
 
     @classmethod
-    def create(cls, path: str | Path, *, robot_id: str, description_digest: str, sim_revision: str,
-               num_drives: int, num_joints: int, physics_period_ns: int, bus_period_ns: int,
-               descriptor: dict, session_id: int | None = None, ready: bool = True) -> Segment:
+    def create(
+        cls,
+        path: str | Path,
+        *,
+        robot_id: str,
+        description_digest: str,
+        sim_revision: str,
+        num_drives: int,
+        num_joints: int,
+        physics_period_ns: int,
+        bus_period_ns: int,
+        descriptor: dict,
+        session_id: int | None = None,
+        ready: bool = True,
+    ) -> Segment:
         """Create (replacing any old file) and fill the header and descriptor. With ``ready=False`` the writer
         publishes its first records before calling :meth:`mark_ready`, so a client never sees empty regions."""
         if num_drives > MAX_DRIVES or num_joints > MAX_JOINTS:
@@ -274,7 +388,9 @@ class Segment:
         h = seg.header
         h["abi_major"], h["abi_minor"], h["header_bytes"] = ABI_MAJOR, ABI_MINOR, HEADER.itemsize
         h["layout_hash"], h["segment_bytes"] = LAYOUT_HASH, SEGMENT_BYTES
-        h["session_id"] = session_id if session_id is not None else int.from_bytes(os.urandom(8), "little") or 1
+        h["session_id"] = (
+            session_id if session_id is not None else int.from_bytes(os.urandom(8), "little") or 1
+        )
         h["state"] = STATE_CREATING
         h["num_drives"], h["num_joints"], h["imu_samples"] = num_drives, num_joints, IMU_SAMPLES
         h["physics_period_ns"], h["bus_period_ns"] = physics_period_ns, bus_period_ns
@@ -291,8 +407,14 @@ class Segment:
         return seg
 
     @classmethod
-    def open(cls, path: str | Path, *, robot_id: str | None = None, description_digest: str | None = None,
-             wait_s: float = 0.0) -> Segment:
+    def open(
+        cls,
+        path: str | Path,
+        *,
+        robot_id: str | None = None,
+        description_digest: str | None = None,
+        wait_s: float = 0.0,
+    ) -> Segment:
         """Attach to a ready segment, checking magic, ABI major, layout hash, size and the expected identity."""
         path = Path(path)
         deadline = time.monotonic() + wait_s
@@ -313,9 +435,14 @@ class Segment:
         if robot_id is not None and h["robot_id"][0].decode() != robot_id:
             seg.close()
             raise AbiError(f"robot id {h['robot_id'][0].decode()!r} != expected {robot_id!r}")
-        if description_digest is not None and h["description_digest"][0].decode() != description_digest:
+        if (
+            description_digest is not None
+            and h["description_digest"][0].decode() != description_digest
+        ):
             seg.close()
-            raise AbiError("description digest differs: the sim and the client read different descriptions")
+            raise AbiError(
+                "description digest differs: the sim and the client read different descriptions"
+            )
         return seg
 
     @classmethod
@@ -444,7 +571,12 @@ def demands_record(demand: dict[str, np.ndarray], *, cycle: int, session_id: int
     """Build a demands record from per-drive arrays named as :data:`DRIVE_DEMAND`'s fields."""
     n = len(demand["mode"])
     rec = np.zeros((), DEMANDS)
-    rec["cycle"], rec["written_mono_ns"], rec["session_id"], rec["num_drives"] = cycle, mono_ns(), session_id, n
+    rec["cycle"], rec["written_mono_ns"], rec["session_id"], rec["num_drives"] = (
+        cycle,
+        mono_ns(),
+        session_id,
+        n,
+    )
     for name in DRIVE_DEMAND.names:
         if not name.startswith("_"):
             rec["drive"][name][:n] = demand[name]
