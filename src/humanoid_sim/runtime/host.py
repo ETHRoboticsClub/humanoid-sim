@@ -21,6 +21,11 @@ client attaches, a session holds the robot in its start pose (standing; the base
 starts when the client does, as a plant started with its client would: a robot left hanging with idle drives
 between clients would sag to its rest pose first.
 
+A disabled drive is back-driven through its gearbox: while a 1:1 drive is off (torque disabled, or a mode it does
+not run), its joint's Coulomb friction is the family's ``backdrive_torque`` instead of the enabled-drive friction,
+as in Controls' MuJoCo plant (the ankle joints keep theirs: the cranks have no joint-space figure). The friction is
+written when a drive turns on or off, not every step.
+
 IMU sample times (``sample_ns``, ``stamp_ns``) are plant time; the feedback region's ``sim_time_ns`` and
 ``written_mono_ns`` map them to the host clock.
 """
@@ -36,7 +41,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from humanoid_sim.devices.demand import DriveDemand
+from humanoid_sim.devices.demand import MODE_FREEZE, MODE_HOMING, MODE_JVPT, DriveDemand
 from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.supports import _quat_rotate
@@ -44,6 +49,8 @@ from humanoid_sim.world.supports import _quat_rotate
 EXIT_DONE = 0  # max steps or a stop request
 EXIT_CLIENT_LOST = 3
 EXIT_DETACHED = 4
+
+RUNNING_MODES = (MODE_JVPT, MODE_FREEZE, MODE_HOMING)  # 0x6061 modes a drive acts in (homing holds)
 
 KEEPING_UP_WINDOW_NS = NS_PER_S
 SPIN_NS = 300_000  # sleep until this close to a deadline, then spin
@@ -153,6 +160,16 @@ class RuntimeHost:
         names = [n.rsplit("/", 1)[-1] for n in contacts.sensor_names]
         self._sole_contacts = torch.tensor([names.index(s["body"]) for s in self._soles], device=self.device)
         self._mass = self.robot.data.body_mass.torch[0]
+        # Back-drive friction: the 1:1 drives' joints, their friction enabled and disabled.
+        one_to_one = [(k, self.joints.index(d.joints[0])) for k, d in
+                      enumerate(self.desc.drives[n] for n in self.drives) if d.crank is None]
+        self._backdrive_drives = np.array([k for k, _ in one_to_one])
+        self._backdrive_joint_ids = [self.robot.joint_names.index(self.joints[j]) for _, j in one_to_one]
+        self._friction_on = torch.tensor([[self.desc.joints[self.joints[j]].friction for _, j in one_to_one]],
+                                         device=self.device)
+        self._friction_off = torch.tensor([[float(self.desc.family(self.desc.drives[self.drives[k]].family)[
+            "backdrive_torque"]) for k, _ in one_to_one]], device=self.device)
+        self._drive_off: np.ndarray | None = None
         self._segment_args = dict(
             path=segment, robot_id=robot, description_digest=self.desc.digest, sim_revision=sim_revision,
             num_drives=len(self.drives), num_joints=len(self.joints), physics_period_ns=self.period_ns,
@@ -181,6 +198,7 @@ class RuntimeHost:
         self._command_seq = 0
         self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = self._standing()  # until attached
         self._write_pose(*self._prescribed)
+        self._set_drives_off(np.ones(len(self.drives), dtype=bool))  # no client, no demands
         self._truth_due = True
         self._publish()
         self.seg.mark_ready()
@@ -503,7 +521,21 @@ class RuntimeHost:
             self.attached = True
             self._prescribed = None  # the start pose is released when the client arrives
         self._client_mono_ns = int(rec["written_mono_ns"])
-        self._intake(rec["drive"][:len(self.drives)], self.sim.t_ns)
+        drive = rec["drive"][:len(self.drives)]
+        self._intake(drive, self.sim.t_ns)
+        running = (drive["torque_enabled"] != 0) & (drive["i_gain_raw"] == 0) & np.isin(drive["mode"], RUNNING_MODES)
+        self._set_drives_off(~running)
+
+    def _set_drives_off(self, off: np.ndarray) -> None:
+        """Back-drive friction on the joints of the 1:1 drives that are off; written only on a change."""
+        off = off[self._backdrive_drives]
+        if self._drive_off is not None and np.array_equal(off, self._drive_off):
+            return
+        self._drive_off = off.copy()
+        mask = torch.from_numpy(off).to(self.device).unsqueeze(0)
+        self.robot.write_joint_friction_coefficient_to_sim_index(
+            joint_friction_coeff=torch.where(mask, self._friction_off, self._friction_on),
+            joint_ids=self._backdrive_joint_ids)
 
     def _client_lost(self) -> bool:
         return self.attached and abi.mono_ns() - self._client_mono_ns > self.client_timeout_ns

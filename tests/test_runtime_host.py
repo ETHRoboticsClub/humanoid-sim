@@ -328,3 +328,41 @@ def test_joint_disturbance_deflects_a_held_joint_and_clears(tmp_path):
         client.close()
     finally:
         host.close()
+
+
+def test_a_disabled_drive_is_back_driven_through_its_gearbox(tmp_path):
+    pytest.importorskip("isaaclab_newton")
+    from humanoid_sim.runtime.host import RuntimeHost
+
+    out = asset_dir(Description.load(), load_profile("ethrc_v1"), REPO / "outputs" / "assets")
+    if not (out / "asset.json").exists():
+        pytest.skip("robot asset not built; run `humanoid-sim build-asset` in the Isaac Lab image")
+    usd = out / json.loads((out / "asset.json").read_text())["usd"]
+    path = tmp_path / "plant"
+    host = RuntimeHost(path, usd, device="cpu", support="suspended", compile=False)
+    try:
+        desc = Description.load()
+        knee = host.robot.joint_names.index("knee_r")
+        ankle = host.robot.joint_names.index("foot_pitch_r")
+
+        def friction(j):
+            return float(host.robot.data.joint_friction_coeff.torch[0, j])
+
+        backdrive = float(desc.family("HEJ90-48-140")["backdrive_torque"])
+        assert friction(knee) == pytest.approx(backdrive)  # no client: every drive off
+        assert friction(ankle) == pytest.approx(desc.joints["foot_pitch_r"].friction)  # cranks keep theirs
+        client = abi.Segment.open(path, wait_s=1)
+        n = client.num_drives
+        demand = {name: np.zeros(n) for name in abi.DRIVE_DEMAND.names if not name.startswith("_")}
+        demand |= {"torque_enabled": np.ones(n), "mode": np.full(n, -64),
+                   "target_position_rad": client.regions["feedback"].read()[1]["drive"]["position_rad"][:n].copy(),
+                   "p_gain_raw": np.full(n, 100_000), "d_gain_raw": np.full(n, 5_000)}
+        for cycle, enabled in enumerate((1, 0), start=1):
+            demand["torque_enabled"][:] = enabled
+            client.regions["demands"].write(abi.demands_record(demand, cycle=cycle, session_id=client.session_id))
+            host.step()
+            expected = desc.joints["knee_r"].friction if enabled else backdrive
+            assert friction(knee) == pytest.approx(expected)
+        client.close()
+    finally:
+        host.close()
