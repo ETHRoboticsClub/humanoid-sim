@@ -28,7 +28,9 @@ humanoid-sim serve --segment /run/hsim/plant --support suspended   # one robot i
 `serve` publishes the runtime segment, a shared-memory file a client (Controls' plant host) attaches to:
 drive demands in, physical drive feedback and raw IMU samples out, a mailbox for reset, pause, supports,
 disturbances, faults and prescribed poses, and a truth region for tests. The layout and protocol are in
-`src/humanoid_sim/runtime/abi/plant_abi.py` and `plant_abi.h`, which a client vendors unchanged.
+`src/humanoid_sim/runtime/abi/plant_abi.py` and `plant_abi.h`, which a client vendors unchanged. On CUDA the
+host captures and compiles the plant's step at startup (about a minute) and then runs about 2.6x real time on an
+A10G (`humanoid-sim bench --runtime`); on Warp's CPU device it runs below real time.
 
 Train-Time API, from a manager-based Isaac Lab environment config:
 
