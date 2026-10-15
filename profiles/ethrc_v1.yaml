@@ -56,4 +56,15 @@ physics:
   nconmax: 64
   self_collision: true
 
+sensors:
+  imu:
+    # Mount: the description's imu_joint. Delivery as /rt/imu shows it on the exc-* captures: ~365 samples/s,
+    # received in bursts every 13.9-17.6 ms (p1-p99), stamped 13 us apart.
+    sample_period_ns: 2740000
+    burst_period_ns: [13900000, 17600000]
+    in_burst_spacing_ns: 13000
+    # MTi-610 white noise (Controls ethrc_ssot/imu_sensors.py MTI_610 @ 447b4acb): 0.007 deg/s/sqrt(Hz), 60 ug/sqrt(Hz).
+    gyro_noise_density_rad_s_sqrt_hz: 1.2217e-4
+    accel_noise_density_m_s2_sqrt_hz: 5.884e-4
+
 solver_gains: baseline        # constant per-episode PD = humanoid-urdf baseline_position_gains (ankles via J at standing)
