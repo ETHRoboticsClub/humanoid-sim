@@ -114,6 +114,8 @@ UPPER_BODY_GROUPS = {
 
 
 def cmd_fit_passive(args) -> int:
+    import math
+
     import numpy as np
 
     from humanoid_sim.replay.exc import ExcitationCapture
@@ -123,7 +125,8 @@ def cmd_fit_passive(args) -> int:
     moving = args.base != "fixed"
     sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, num_envs=args.num_envs,
                   fixed_base=not moving, base_joints=moving)
-    space = FitSpace([Group(name, joints) for name, joints in UPPER_BODY_GROUPS.items()])
+    space = FitSpace([Group(name, joints) for name, joints in UPPER_BODY_GROUPS.items()],
+                     log_bound=math.log(args.bound))
     drives = sim.plant.map.drive_names
     scored = sorted({drives.index(sim.desc.joints[j].device) for g in space.groups for j in g.joints})
     captures = [ExcitationCapture(Path(c)) for c in args.captures]
@@ -132,6 +135,7 @@ def cmd_fit_passive(args) -> int:
     result = fit(sim, captures, space, scored, generations=args.generations, base_motion=base,
                  duration_s=args.duration, seed=args.seed)
     result |= {"captures": [c.dataset_id for c in captures], "base": args.base, "num_envs": args.num_envs,
+               "bound": args.bound,
                "wall_s": time.time() - t, "drives": drives, "scored": [drives[i] for i in scored],
                **sim.desc.identity()}
     m = dict(zip(space.names, result["multipliers"], strict=True))
@@ -198,13 +202,15 @@ def main(argv: list[str] | None = None) -> int:
 
     fp = sub.add_parser("fit-passive", help="fit upper-body passive joint parameters to captures")
     fp.add_argument("captures", nargs="+")
-    fp.add_argument("--holdout", nargs="*", default=[])
+    fp.add_argument("--holdout", nargs="*", default=[],
+                    help="captures to score the fit on; use a different excitation profile than the fitted ones")
     fp.add_argument("--num-envs", type=int, default=256, help="CMA-ES population + 1 (env 0 keeps the best)")
     fp.add_argument("--generations", type=int, default=15)
     fp.add_argument("--duration", type=float, default=None, help="replay only the first seconds of each capture")
     fp.add_argument("--base", choices=("yaw", "orientation", "fixed"), default="yaw")
     fp.add_argument("--device", default="cuda:0")
     fp.add_argument("--seed", type=int, default=0)
+    fp.add_argument("--bound", type=float, default=10.0, help="multipliers stay within [1/bound, bound]")
     fp.add_argument("--out", default="outputs/sysid")
     fp.set_defaults(func=cmd_fit_passive)
 
