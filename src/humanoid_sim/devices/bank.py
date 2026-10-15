@@ -74,7 +74,8 @@ class DriveBank:
         kind = torch.where(enabled & ((mode == MODE_FREEZE) | (mode == MODE_HOMING)), FREEZE, kind)
         return kind.to(torch.int8)
 
-    def compute(self, t0_ns: int, t1_ns: int, q: torch.Tensor, v: torch.Tensor) -> DriveOutput:
+    def compute(self, t0_ns: int | torch.Tensor, t1_ns: int | torch.Tensor, q: torch.Tensor,
+                v: torch.Tensor) -> DriveOutput:
         """Torques for the step ``[t0, t1)`` from drive-frame state ``q, v`` [E, D] at its start."""
         w = self.queue.weights(t0_ns, t1_ns).to(self.dtype)  # [E, R, D]
         rec = self.queue.records()  # [E, R, D]
@@ -84,7 +85,7 @@ class DriveBank:
         # The drive acts on its own reading. Freeze latches it when a drive enters freeze.
         q = q + self.position_offset
         entering = (kind == FREEZE).any(dim=1) & (self.last_kind != FREEZE)
-        self.frozen = torch.where(entering, q, self.frozen)
+        self.frozen.copy_(torch.where(entering, q, self.frozen))
 
         qe, ve = q.unsqueeze(1), v.unsqueeze(1)
         kp = rec["p_gain_raw"].to(self.dtype) / JVPT_PER_SI_GAIN * self.p_scale.unsqueeze(1)
@@ -109,5 +110,5 @@ class DriveBank:
             target_velocity=(vel * (kind == JVPT) * wk).sum(1),
         )
         self.queue.advance(t1_ns)
-        self.last_kind = self._kind(self.queue.active)
+        self.last_kind.copy_(self._kind(self.queue.active))
         return out

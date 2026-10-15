@@ -12,7 +12,8 @@ samples, newest first, each with its measurement time and its host-receipt stamp
   (uniform per burst), stamped on receipt ``in_burst_spacing_ns`` apart. A consumer that reads "the latest
   sample" sees it up to one burst period late.
 
-Everything is batched over envs on the device; the step loop has a fixed trip count, so no host syncs.
+Everything is batched over envs on the device; the step loop has a fixed trip count, so no host syncs. State is
+updated in place and the step time may be a device tensor, so a step can be captured in a CUDA graph.
 """
 
 from __future__ import annotations
@@ -97,7 +98,8 @@ class ImuDelivery:
                                   torch.full((e, h), -1, **i64), torch.full((e, h), -1, **i64),
                                   torch.zeros(e, h, **i64), torch.zeros(e, **i64))
         self._prev = torch.zeros(e, 6, **f)
-        self._prev_ns = 0
+        self._prev_ns = torch.zeros((), **i64)  # the previous step boundary, on the device
+        self._prev_host = 0  # and on the host, for steps given as ints
         self._slots = torch.arange(p, device=self.device)
         self._hslots = torch.arange(h, device=self.device)
 
@@ -124,43 +126,55 @@ class ImuDelivery:
 
     # -- stepping ---------------------------------------------------------------------------------
 
-    def step(self, t_ns: int, gyro: torch.Tensor, specific_force: torch.Tensor) -> None:
+    def step(self, t_ns: int | torch.Tensor, gyro: torch.Tensor, specific_force: torch.Tensor, *,
+             period_ns: int | None = None) -> None:
         """Ideal sensor-frame values ``[E, 3]`` at step boundary ``t_ns``: measure every sample due in
-        ``(previous boundary, t_ns]``, then deliver every burst due by ``t_ns``."""
+        ``(previous boundary, t_ns]``, then deliver every burst due by ``t_ns``.
+
+        ``t_ns`` is an int, or a 0-d int64 device tensor with ``period_ns`` (the step length, an int) giving the
+        loops' trip counts."""
         value = torch.cat([gyro, specific_force], dim=1).to(self.dtype)
-        t0, t1 = self._prev_ns, t_ns
-        if t1 > t0:
-            per_step = -(-(t1 - t0) // self.cfg.sample_period_ns) + 1
-            for _ in range(per_step):
+        on_device = isinstance(t_ns, torch.Tensor)
+        if on_device and period_ns is None:
+            raise ValueError("a device-tensor step time needs period_ns")
+        t0, t1 = (self._prev_ns, t_ns) if on_device else (self._prev_host, t_ns)
+        span = period_ns if on_device else t1 - t0
+        if span > 0:
+            dt = (t1 - t0).clamp(min=1).to(torch.float64) if on_device else float(span)
+            rotation = rotvec_matrix(self.misalignment)
+            for _ in range(-(-span // self.cfg.sample_period_ns) + 1):
                 due = self.next_sample <= t1
-                frac = ((self.next_sample - t0).clamp(min=0).to(torch.float64) / (t1 - t0)).to(self.dtype)
+                frac = ((self.next_sample - t0).clamp(min=0).to(torch.float64) / dt).to(self.dtype)
                 v = self._prev + frac.unsqueeze(1) * (value - self._prev)
-                self._measure(due, self.next_sample.clone(), v)
-                self.next_sample = torch.where(due, self.next_sample + self.cfg.sample_period_ns, self.next_sample)
-            bursts = -(-(t1 - t0) // self.cfg.burst_period_ns[0]) + 1
-            for _ in range(bursts):
+                self._measure(due, self.next_sample.clone(), v, rotation)
+                self.next_sample.copy_(torch.where(due, self.next_sample + self.cfg.sample_period_ns,
+                                                   self.next_sample))
+            for _ in range(-(-span // self.cfg.burst_period_ns[0]) + 1):
                 due = self.next_burst <= t1
                 self._deliver(due, self.next_burst.clone())
                 step = self._uniform_ns(self.num_envs, *self.cfg.burst_period_ns)
-                self.next_burst = torch.where(due, self.next_burst + step, self.next_burst)
-        self._prev = value
-        self._prev_ns = t1
+                self.next_burst.copy_(torch.where(due, self.next_burst + step, self.next_burst))
+        self._prev.copy_(value)
+        if on_device:
+            self._prev_ns.copy_(t1)
+        else:
+            self._prev_host = t1
+            self._prev_ns.fill_(t1)
 
-    def _measure(self, due: torch.Tensor, at_ns: torch.Tensor, ideal: torch.Tensor) -> None:
-        r = rotvec_matrix(self.misalignment)
+    def _measure(self, due: torch.Tensor, at_ns: torch.Tensor, ideal: torch.Tensor, r: torch.Tensor) -> None:
         gyro = (r @ ideal[:, :3].unsqueeze(-1)).squeeze(-1) + self.gyro_bias
         acc = (r @ ideal[:, 3:].unsqueeze(-1)).squeeze(-1) + self.accel_bias
         noise = torch.randn(self.num_envs, 6, generator=self.generator, device=self.device, dtype=self.dtype)
         sample = torch.cat([gyro, acc], dim=1) + noise * self._sigma
-        self.seq = self.seq + due.long()
+        self.seq.add_(due.long())
         full = due & (self.pending_count >= self.cfg.pending)
         self._drop_oldest_pending(full)
         slot = self.pending_count.clamp(max=self.cfg.pending - 1)
         write = due.unsqueeze(1) & (self._slots.unsqueeze(0) == slot.unsqueeze(1))
-        self.pending_values = torch.where(write.unsqueeze(-1), sample.unsqueeze(1), self.pending_values)
-        self.pending_ns = torch.where(write, at_ns.unsqueeze(1), self.pending_ns)
-        self.pending_seq = torch.where(write, self.seq.unsqueeze(1), self.pending_seq)
-        self.pending_count = (self.pending_count + due.long()).clamp(max=self.cfg.pending)
+        self.pending_values.copy_(torch.where(write.unsqueeze(-1), sample.unsqueeze(1), self.pending_values))
+        self.pending_ns.copy_(torch.where(write, at_ns.unsqueeze(1), self.pending_ns))
+        self.pending_seq.copy_(torch.where(write, self.seq.unsqueeze(1), self.pending_seq))
+        self.pending_count.copy_((self.pending_count + due.long()).clamp(max=self.cfg.pending))
 
     def _drop_oldest_pending(self, mask: torch.Tensor) -> None:
         self._shift_pending(mask.long())
@@ -168,10 +182,10 @@ class ImuDelivery:
     def _shift_pending(self, n: torch.Tensor) -> None:
         """Drop the ``n[e]`` oldest pending samples of each env."""
         src = (self._slots.unsqueeze(0) + n.unsqueeze(1)).clamp(max=self.cfg.pending - 1)
-        self.pending_values = self.pending_values.gather(1, src.unsqueeze(-1).expand(-1, -1, 6))
-        self.pending_ns = self.pending_ns.gather(1, src)
-        self.pending_seq = self.pending_seq.gather(1, src)
-        self.pending_count = self.pending_count - n
+        self.pending_values.copy_(self.pending_values.gather(1, src.unsqueeze(-1).expand(-1, -1, 6)))
+        self.pending_ns.copy_(self.pending_ns.gather(1, src))
+        self.pending_seq.copy_(self.pending_seq.gather(1, src))
+        self.pending_count.sub_(n)
 
     def _deliver(self, due: torch.Tensor, at_ns: torch.Tensor) -> None:
         """Deliver, for the ``due`` envs, every pending sample measured by ``at_ns``: to the front of the
@@ -193,11 +207,12 @@ class ImuDelivery:
             hv = torch.where((h_off < h).reshape(h_off.shape + extra), hv, torch.full_like(hv, empty))
             return torch.where(fresh.reshape(fresh.shape + extra), pv, hv)
 
-        s.gyro = merge(s.gyro, self.pending_values[..., :3], 0.0)
-        s.specific_force = merge(s.specific_force, self.pending_values[..., 3:], 0.0)
-        s.sample_ns = merge(s.sample_ns, self.pending_ns, -1)
-        s.seq = merge(s.seq, self.pending_seq, 0)
         stamps = at_ns.unsqueeze(1) + p_idx * self.cfg.in_burst_spacing_ns
-        s.stamp_ns = torch.where(fresh, stamps, merge(s.stamp_ns, self.pending_ns, -1))
-        s.count = s.count + n
+        stamp_ns = torch.where(fresh, stamps, merge(s.stamp_ns, self.pending_ns, -1))
+        s.gyro.copy_(merge(s.gyro, self.pending_values[..., :3], 0.0))
+        s.specific_force.copy_(merge(s.specific_force, self.pending_values[..., 3:], 0.0))
+        s.sample_ns.copy_(merge(s.sample_ns, self.pending_ns, -1))
+        s.seq.copy_(merge(s.seq, self.pending_seq, 0))
+        s.stamp_ns.copy_(stamp_ns)
+        s.count.add_(n)
         self._shift_pending(n)

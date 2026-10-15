@@ -10,7 +10,8 @@ With ``lanes`` > 1 every field is ``[E, lanes, ...]`` and each lane has its own 
 latency), so lane ``l`` of a record takes effect at ``arrival[e, k, l]``. A record stays queued until it has
 arrived on every lane; a lane where it arrived already gives it the time from the step start.
 
-Everything is batched over envs and stays on the device: no host syncs.
+Everything is batched over envs and stays on the device: no host syncs. State is updated in place and times
+may be device tensors, so a step can be captured in a CUDA graph.
 """
 
 from __future__ import annotations
@@ -77,25 +78,27 @@ class ArrivalQueue:
         arrival = torch.maximum(arrival_ns, last)
         slot = self.count.clamp(max=self.capacity - 1)
         write = env_mask.unsqueeze(1) & (self._slots.unsqueeze(0) == slot.unsqueeze(1))
-        self.arrival = torch.where(write.unsqueeze(2), arrival.unsqueeze(1), self.arrival)
+        self.arrival.copy_(torch.where(write.unsqueeze(2), arrival.unsqueeze(1), self.arrival))
         for k, v in record.items():
             mask = write.reshape(write.shape + (1,) * (v.dim() - 1))
-            self.pending[k] = torch.where(mask, v.unsqueeze(1), self.pending[k])
-        self.count = self.count + env_mask.long()
+            self.pending[k].copy_(torch.where(mask, v.unsqueeze(1), self.pending[k]))
+        self.count.add_(env_mask.long())
 
-    def weights(self, t0_ns: int, t1_ns: int) -> torch.Tensor:
-        """Fraction of ``[t0, t1)`` covered by the active record and each pending slot, ``[E, 1 + K, lanes]``."""
-        if t1_ns <= t0_ns:
+    def weights(self, t0_ns: int | torch.Tensor, t1_ns: int | torch.Tensor) -> torch.Tensor:
+        """Fraction of ``[t0, t1)`` covered by the active record and each pending slot, ``[E, 1 + K, lanes]``.
+        Times are ints or 0-d int64 device tensors."""
+        if isinstance(t0_ns, int) and isinstance(t1_ns, int) and t1_ns <= t0_ns:
             raise ValueError("empty step")
         c = self.arrival.clamp(min=t0_ns, max=t1_ns)
-        edges = torch.cat([torch.full_like(c[:, :1], t0_ns), c, torch.full_like(c[:, :1], t1_ns)], dim=1)
-        return (edges[:, 1:] - edges[:, :-1]).to(torch.float64).div(t1_ns - t0_ns)
+        zero = torch.zeros_like(c[:, :1])
+        edges = torch.cat([zero + t0_ns, c, zero + t1_ns], dim=1)
+        return (edges[:, 1:] - edges[:, :-1]).to(torch.float64) / (t1_ns - t0_ns)
 
     def records(self) -> dict[str, torch.Tensor]:
         """Active record followed by the pending slots, ``{field: [E, 1 + K, ...]}``, matching ``weights``."""
         return {k: torch.cat([self.active[k].unsqueeze(1), self.pending[k]], dim=1) for k in self.active}
 
-    def advance(self, t1_ns: int) -> None:
+    def advance(self, t1_ns: int | torch.Tensor) -> None:
         """Put every record that arrived by ``t1`` in force (per lane); drop those arrived on every lane."""
         arrived = (self.arrival <= t1_ns).sum(dim=1)  # [E, lanes]; arrivals ascend along the queue
         took = arrived > 0
@@ -110,7 +113,7 @@ class ArrivalQueue:
                     -1, 1, -1, *v.shape[3:])
                 src = v.gather(1, idx).squeeze(1)
                 mask = took.reshape(took.shape + (1,) * (src.dim() - 2))
-            self.active[k] = torch.where(mask, src, self.active[k])
+            self.active[k].copy_(torch.where(mask, src, self.active[k]))
         self._shift(arrived.min(dim=1).values)
 
     def blend(self, values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
@@ -126,9 +129,9 @@ class ArrivalQueue:
         valid = src < self.capacity
         src = src.clamp(max=self.capacity - 1)
         lane_src = src.unsqueeze(2).expand(-1, -1, self.lanes)
-        self.arrival = torch.where(valid.unsqueeze(2), self.arrival.gather(1, lane_src),
-                                   torch.full_like(self.arrival, _EMPTY))
-        for k, v in self.pending.items():
+        self.arrival.copy_(torch.where(valid.unsqueeze(2), self.arrival.gather(1, lane_src),
+                                       torch.full_like(self.arrival, _EMPTY)))
+        for v in self.pending.values():
             idx = src.reshape(src.shape + (1,) * (v.dim() - 2)).expand_as(v)
-            self.pending[k] = v.gather(1, idx)
-        self.count = (self.count - n).clamp(min=0)
+            v.copy_(v.gather(1, idx))
+        self.count.copy_((self.count - n).clamp(min=0))

@@ -209,7 +209,7 @@ class RobotPlant:
         if self.imu is not None:
             data = self.imu_sensor.data
             self.imu.step(self.t_ns, data.ang_vel_b.torch, data.lin_acc_b.torch)
-        target = self.core.pre_physics(self.t_ns, q, qd)
+        target = self.core.pre_physics(self.t_ns, q, qd, self.core.post_state)  # feedback converted q above
         self._targets[:, self.joint_ids] = target.to(self._targets.dtype)
         tc = self.robot.actuators.target_command
         tc.set_position_index(value=self._targets)
