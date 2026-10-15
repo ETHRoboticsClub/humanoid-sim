@@ -25,7 +25,9 @@ reads of ``seq`` and accepts it only if its CRC matches. The CRC makes a torn co
 on memory ordering, which Python does not give. Values are little-endian, at natural alignment; every region
 starts on a 64-byte boundary.
 
-Time: ``*_ns`` fields named ``mono`` are ``CLOCK_MONOTONIC`` of the writing process; ``sim_time_ns`` is plant time.
+Time: ``*_mono_ns`` fields are ``CLOCK_MONOTONIC`` of the writing process; ``sim_time_ns`` and the IMU samples'
+``sample_ns`` and ``stamp_ns`` are plant time. The feedback region maps plant time ``t`` to the sim host's clock:
+``written_mono_ns - (sim_time_ns - t)``. Identity: the description digest is :func:`description_digest`.
 Physical quantities are SI in the physical drive-output frame (crank angle for the ankle cranks), as Controls'
 ``fake_bank_feedback`` takes them.
 """
@@ -176,6 +178,16 @@ class AbiError(RuntimeError):
 
 class StaleRead(RuntimeError):
     """A region kept changing (or failed its CRC) for every attempt: the writer is mid-write or stalled."""
+
+
+def description_digest(urdf: str | Path, actuators: str | Path) -> str:
+    """sha256 (hex) over the robot description: the URDF and ``actuators.yaml``, each as its file name and bytes.
+    Both sides compute it from their own checkout of humanoid-urdf; equal digests mean the same description."""
+    h = hashlib.sha256()
+    for path in (Path(urdf), Path(actuators)):
+        h.update(path.name.encode())
+        h.update(path.read_bytes())
+    return h.hexdigest()
 
 
 def mono_ns() -> int:

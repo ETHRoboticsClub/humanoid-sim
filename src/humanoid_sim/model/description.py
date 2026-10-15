@@ -7,7 +7,6 @@ result can be traced to the exact description.
 
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import os
 import subprocess
@@ -88,12 +87,11 @@ class Description:
 
     @cached_property
     def digest(self) -> str:
-        """sha256 over the URDF and actuators.yaml bytes (meshes are covered by the git revision)."""
-        h = hashlib.sha256()
-        for path in (self.urdf_path, self.actuators_path):
-            h.update(path.name.encode())
-            h.update(path.read_bytes())
-        return h.hexdigest()
+        """sha256 over the URDF and actuators.yaml (meshes are covered by the git revision); the runtime
+        segment's definition, so a client can check it from its own checkout."""
+        from humanoid_sim.runtime.abi.plant_abi import description_digest
+
+        return description_digest(self.urdf_path, self.actuators_path)
 
     @cached_property
     def revision(self) -> str | None:
