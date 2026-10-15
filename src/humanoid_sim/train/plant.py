@@ -117,6 +117,7 @@ class RobotPlant:
         out = {
             "body_mass": data.body_mass.torch.clone(),
             "body_com": torch.zeros_like(data.body_com_pos_b.torch),
+            "body_inertia": torch.ones_like(data.body_mass.torch),
             "joint_armature": data.joint_armature.torch[:, ids].clone(),
             "joint_friction": data.joint_friction_coeff.torch[:, ids].clone(),
             "joint_damping": data.joint_viscous_friction_coeff.torch[:, ids].clone(),
@@ -147,8 +148,13 @@ class RobotPlant:
         v, r = self.randomizer.values, self.robot
         if "body_mass" in v:
             r.set_masses_index(masses=v["body_mass"])
-            scale = (v["body_mass"] / self._nominal_physics["body_mass"].clamp(min=1e-9)).unsqueeze(-1)
-            r.set_inertias_index(inertias=self._inertia0 * scale)
+        if "body_mass" in v or "body_inertia" in v:
+            scale = torch.ones_like(self._nominal_physics["body_mass"])
+            if "body_mass" in v:
+                scale = v["body_mass"] / self._nominal_physics["body_mass"].clamp(min=1e-9)
+            if "body_inertia" in v:
+                scale = scale * v["body_inertia"]
+            r.set_inertias_index(inertias=self._inertia0 * scale.unsqueeze(-1))
         if "body_com" in v:
             r.set_coms_index(coms=self._com0 + v["body_com"])
         if "joint_armature" in v:

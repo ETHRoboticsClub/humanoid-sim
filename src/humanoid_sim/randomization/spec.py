@@ -42,6 +42,7 @@ class Param:
 PARAMS: dict[str, Param] = {
     "body_mass": Param("physics", "body", unit="kg", doc="body mass; inertia scales with it"),
     "body_com": Param("physics", "body", 3, "m", "centre-of-mass offset in the body frame"),
+    "body_inertia": Param("physics", "body", doc="scale of the rotational inertia beyond the mass's"),
     "joint_armature": Param("physics", "joint", unit="kg m²", doc="reflected rotor inertia"),
     "joint_friction": Param("physics", "joint", unit="N m", doc="Coulomb friction (MJWarp frictionloss)"),
     "joint_damping": Param("physics", "joint", unit="N m s/rad", doc="passive viscous damping"),

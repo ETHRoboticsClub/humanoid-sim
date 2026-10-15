@@ -99,6 +99,7 @@ def _env(num_envs=2):
     cfg.actions.drives.plant = TrainPlantCfg(randomization=[
         {"param": "friction", "dist": "uniform", "range": [0.5, 1.0], "op": "set"},
         {"param": "latency", "dist": "uniform", "range": [0.010, 0.020], "op": "set", "per_target": False},
+        {"param": "body_inertia", "dist": "uniform", "range": [0.8, 1.2], "op": "scale"},
     ])
     return ManagerBasedRLEnv(cfg)
 
@@ -139,6 +140,10 @@ def test_manager_based_env_steps_the_plant():
         assert torch.allclose(latest[rest], sensor[rest], atol=0.05)
         lat = plant.params()["latency"]
         assert ((lat >= 0.010) & (lat <= 0.020)).all()
+        scale = plant.params()["body_inertia"]
+        diagonal = [0, 4, 8]  # of the row-major 3x3 inertia; near-zero products of inertia get revalidated
+        written = plant.robot.data.body_inertia.torch[..., diagonal] / plant._inertia0[..., diagonal]
+        assert torch.allclose(written, scale.unsqueeze(-1).expand_as(written), rtol=1e-4)
         # Episode end at 3 s: the reset envs start again, IMU delivery restarts from zero.
         dones = 0
         for _ in range(11):
