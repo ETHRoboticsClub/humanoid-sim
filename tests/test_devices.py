@@ -99,3 +99,18 @@ def test_plant_core_on_description(desc):
     # Ankle solver gains are the crank gains through J at standing (pitch ~ 480/0.96^2 per crank pair).
     i = joints.index("foot_pitch_l")
     assert 700 < plant.k0[0, i].item() < 1100
+
+
+def test_drive_deviations_and_per_drive_arrival():
+    env = TorqueSpeedEnvelope([HEJ90, HEJ90], dtype=D64)
+    bank = DriveBank(env, 1, 2, dtype=D64)
+    bank.p_scale[:] = torch.tensor([[1.1, 1.0]], dtype=D64)
+    bank.position_offset[:] = torch.tensor([[0.0, 0.02]], dtype=D64)  # drive 1 reads 0.02 rad high
+    bank.torque_scale[:] = torch.tensor([[1.0, 0.5]], dtype=D64)
+    demand = DriveDemand.jvpt(torch.tensor([[0.1, 2.0]], dtype=D64), 320.0, 12.0)
+    bank.submit(demand, torch.tensor([[0, STEP // 2]]))  # drive 1 arrives half way through the step
+    out = bank.compute(0, STEP, torch.zeros(1, 2, dtype=D64), torch.zeros(1, 2, dtype=D64))
+    assert out.demanded[0, 0].item() == pytest.approx(1.1 * 320.0 * 0.1)
+    # Drive 1: off for the first half, then 320 * (2.0 - 0.02) demanded, capped at half the 140 Nm peak.
+    assert out.demanded[0, 1].item() == pytest.approx(0.5 * 320.0 * 1.98)
+    assert out.applied[0, 1].item() == pytest.approx(0.5 * 70.0)

@@ -20,7 +20,7 @@ def test_record_landing_inside_step_is_time_weighted():
     q = _queue()
     q.submit({"x": torch.ones(2, 2)}, torch.tensor([1 * NS_PER_MS, 4 * NS_PER_MS]))
     w, out = _step_blend(q, 0)
-    assert torch.allclose(w.sum(1), torch.ones(2, dtype=torch.float64))
+    assert torch.allclose(w.sum(1), torch.ones(2, 1, dtype=torch.float64))
     assert torch.allclose(out[0], torch.full((2,), 0.75))  # in force for 3 of 4 ms
     assert torch.allclose(out[1], torch.zeros(2))  # arrives exactly at t1: next step
     _, out = _step_blend(q, STEP)
@@ -41,7 +41,7 @@ def test_arrival_never_overtakes_earlier_record():
     q = _queue(envs=1)
     q.submit({"x": torch.full((1, 2), 1.0)}, torch.tensor([10 * NS_PER_MS]))
     q.submit({"x": torch.full((1, 2), 2.0)}, torch.tensor([2 * NS_PER_MS]))  # clamped to 10 ms
-    assert q.arrival[0, :2].tolist() == [10 * NS_PER_MS, 10 * NS_PER_MS]
+    assert q.arrival[0, :2, 0].tolist() == [10 * NS_PER_MS, 10 * NS_PER_MS]
 
 
 def test_overflow_drops_oldest_and_counts():
@@ -59,3 +59,19 @@ def test_masked_submit_and_reset():
     assert q.active["x"][:, 0].tolist() == [1.0, 0.0]
     q.reset(torch.tensor([0]), {"x": torch.full((1, 2), 5.0)})
     assert q.active["x"][0, 0].item() == 5.0 and int(q.count[0]) == 0
+
+
+def test_lanes_arrive_at_their_own_times():
+    q = ArrivalQueue({"x": torch.zeros(1, 2)}, 3, lanes=2)
+    q.submit({"x": torch.ones(1, 2)}, torch.tensor([[1 * NS_PER_MS, 6 * NS_PER_MS]]))
+    w = q.weights(0, STEP)
+    out = q.blend(q.records()["x"], w)
+    assert out[0].tolist() == [0.75, 0.0]
+    q.advance(STEP)
+    assert q.active["x"][0].tolist() == [1.0, 0.0] and int(q.count[0]) == 1  # lane 1 still pending
+    q.submit({"x": torch.full((1, 2), 2.0)}, torch.tensor([[5 * NS_PER_MS, 10 * NS_PER_MS]]))
+    w = q.weights(STEP, 2 * STEP)
+    out = q.blend(q.records()["x"], w)
+    assert torch.allclose(out[0], torch.tensor([1.0 * 0.25 + 2.0 * 0.75, 0.5 * 0 + 0.5 * 1.0], dtype=out.dtype))
+    q.advance(2 * STEP)
+    assert q.active["x"][0].tolist() == [2.0, 1.0] and int(q.count[0]) == 1
