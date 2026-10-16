@@ -5,27 +5,53 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "humanoid-sim"
 version = "0.1.0"
-description = "Batched HEJ device models and an Isaac Lab Newton integration"
+description = "ETHRC humanoid plant: drives, ankle mechanism and body below Controls, on Isaac Lab 3.0 / Newton"
 requires-python = ">=3.12,<3.13"
-dependencies = ["torch==2.11.0", "PyYAML>=6.0.3,<7"]
+dependencies = [
+    "numpy>=2",
+    "torch==2.11.0",
+    "PyYAML>=6.0.3,<7",
+]
 
 [project.optional-dependencies]
-dev = ["pytest>=9,<10", "ruff>=0.17,<0.18", "build>=1.4,<2"]
+# Newton on the host for kinematics only (viewers, model checks); physics runs only through Isaac Lab /
+# MJWarp in the Isaac Lab image. Pins match Isaac Lab release/3.0.0. usd-core provides pxr outside the
+# image; the image gets pxr from usd-exchange and installs this package with --no-deps.
+newton = [
+    "newton[sim]==1.6.1",
+    "warp-lang==1.17.0",
+    "newton-usd-schemas>=0.5.0",
+    "usd-core>=25.5",
+    "trimesh>=4.6.8",
+    "scipy>=1.11",
+    "pycollada>=0.9",
+    "resolve-robotics-uri-py>=0.4.0",
+]
+viz = ["rerun-sdk>=0.29.0", "pyarrow>=23"]
+# MuJoCo only for the kinematics cross-check against Controls' MJCF (never for physics).
+kinematics-check = ["mujoco>=3.3"]
+dev = ["pytest>=9,<10", "ruff>=0.17,<0.18"]
 
 [project.scripts]
 humanoid-sim = "humanoid_sim.cli:main"
 
-[tool.setuptools]
-packages = ["humanoid_sim"]
-package-dir = {humanoid_sim = "src"}
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"humanoid_sim.runtime.abi" = ["plant_abi.h"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    "physics: steps physics through Isaac Lab / MJWarp (run in the Isaac Lab image)",
+    "data: needs datasets/humanoid-v1 exc-* captures (HUMANOID_SIM_DATASETS)",
+]
 
 [tool.ruff]
 target-version = "py312"
 line-length = 110
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F"]
+select = ["E4", "E7", "E9", "F", "I"]

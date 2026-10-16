@@ -1,0 +1,84 @@
+# Plant modeling choices for humanoid-v1 (ETHRC V1). Robot facts are NOT here: they come from
+# third_party/humanoid-urdf. The `model` and `devices` blocks below hold facts that live only in Controls
+# code; each names its source.
+schema: humanoid-sim-profile/v1
+robot: ethrc_v1
+
+model:
+  # The variant Controls' CMake builds its MJCF from (58.68 kg): ORCA hands, welded at zero.
+  urdf: urdf/URDF_5_orca_hands.urdf
+  # Movable URDF joints without an actuators.yaml entry are welded at zero (Controls --fixed-orca-hands).
+  weld_unlisted_joints: true
+  # Sole contact primitive (Controls build_mjcf.py SOLE_JOINTS / SOLE_BOX_THICKNESS_M / SOLE_FACE_DEPTH_M
+  # @ 447b4acb): a box on the body carrying each foot_roll joint, fitted to the face of that body's
+  # lowest collision mesh, which then stops colliding.
+  sole:
+    joints: {l: foot_roll_l, r: foot_roll_r}
+    box_thickness_m: 0.005
+    face_depth_m: 0.001
+  # Self-contact excludes (Controls build_mjcf.py REST_EXCLUDES + ORCA_REST_EXCLUDES @ 447b4acb), as
+  # merged-body names. Bodies overlapping at rest by construction of convex-hull collision.
+  contact_excludes:
+    - [Component171_1, base_link]
+    - [Component171_1, hej90_hip_abduction_1]
+    - [base_link, hej90_hip_abduction_1]
+    - [bottom_universal_joint_l_1, new_upperl_leg_1]
+    - [bottom_universal_joint_l_Mirror__1, new_upperl_leg_Mirror__1]
+    - [hej90_hip_abduction_1, hej90_leg_abduction_l_1]
+    - [hej90_hip_abduction_1, hej90_leg_abduction_r_1]
+    - [hej50_arm_rotation_l_1, shoulder_connector_l_1]
+    - [hej50_arm_rotation_r_1, shoulder_connector_r_1]
+  # One convex hull per body (see model/urdf.py): the hands' 17 finger links and every bracket become
+  # part of their body's hull. `per_mesh` makes one hull per URDF collision mesh: 120 hulls instead of 23.
+  collision_hulls: per_body
+  # Which bodies collide with each other. A set is every body at or below its joint; the bodies in no
+  # set (base, hip carrier, torso) are `rest`. `pairs` lists the set pairs that collide, or `all`.
+  # Every pair collides: on an L40S at 4096-16384 envs, colliding only legs with legs and arms with the
+  # trunk and their own leg ran no faster.
+  self_collision:
+    sets: {leg_l: leg_flexion_l, leg_r: leg_flexion_r, arm_l: shoulder_flexion_l, arm_r: shoulder_flexion_r}
+    rest: trunk
+    pairs: all
+  # Ground contact (Controls urdf/scene.xml floor: friction 1, condim 3).
+  ground_friction: 1.0
+
+devices:
+  # Output encoder resolution per drive family: the counts every reported position is in (Controls
+  # ethercat_device_configurator bus_config/device_configurations/maxon*.yaml
+  # Hardware.position_encoder_resolution @ 447b4acb).
+  encoders:
+    HEJ90-48-140: {counts_per_revolution: 4096}
+    HEJ70-48-50: {counts_per_revolution: 16384}
+    HEJ50-48-30: {counts_per_revolution: 16384}
+
+physics:
+  period_ns: 4000000          # 250 Hz
+  solver: mjwarp
+  integrator: implicitfast    # implicit in the damping: stable with the stiff ankle-crank PD at 4 ms
+  cone: pyramidal
+  iterations: 100
+  ls_iterations: 50
+  # MJWarp buffers. nconmax is a per-world average (the contact pool is shared by all worlds), njmax a
+  # per-world maximum. With per-body hulls a standing robot needs about 30 contacts, a fallen one up to
+  # about 390 constraint rows. MJWarp prints an overflow warning when either runs out.
+  njmax: 400
+  nconmax: 64
+  self_collision: true
+  # Joint stops: MuJoCo's own limit constraint (solref 0.02 s, damping ratio 1), as Controls' MJCF has it.
+  # Newton's force-space default (1e4 Nm/rad) is softer for the legs: 40 Nm on the hip abduction sinks 11 mrad
+  # past its stop (under 2 mrad here), and Controls' range survey found that stop 4 mrad out. The real stops'
+  # stiffness is not measured (modeled).
+  joint_limits: mujoco
+
+sensors:
+  imu:
+    # Mount: the description's imu_joint. Delivery as /rt/imu shows it on the exc-* captures: ~365 samples/s,
+    # received in bursts every 13.9-17.6 ms (p1-p99), stamped 13 us apart.
+    sample_period_ns: 2740000
+    burst_period_ns: [13900000, 17600000]
+    in_burst_spacing_ns: 13000
+    # MTi-610 white noise (Controls ethrc_ssot/imu_sensors.py MTI_610 @ 447b4acb): 0.007 deg/s/sqrt(Hz), 60 ug/sqrt(Hz).
+    gyro_noise_density_rad_s_sqrt_hz: 1.2217e-4
+    accel_noise_density_m_s2_sqrt_hz: 5.884e-4
+
+solver_gains: baseline        # constant per-episode PD = humanoid-urdf baseline_position_gains (ankles via J at standing)

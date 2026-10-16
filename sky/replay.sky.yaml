@@ -1,0 +1,45 @@
+# Drive-level replays of the exc-* captures on Isaac Lab / MJWarp (the only physics in humanoid-sim).
+#   sky launch -y -c hsim-bench -i 10 sky/replay.sky.yaml       (autostop: stop, not down)
+#   rsync -avz hsim-bench:sky_workdir/outputs/replay-mjwarp/ outputs/replay-mjwarp/
+name: humanoid-sim-replay
+workdir: .
+
+resources:
+  cloud: aws
+  accelerators: L40S:1
+  cpus: 8+
+  memory: 32+
+  disk_size: 200
+
+file_mounts:
+  /data/exc-3a498000fc114f2db2b0655d5d87280c: ../datasets/humanoid-v1/exc-3a498000fc114f2db2b0655d5d87280c
+  /data/exc-503fc128aaf14405a0c2418d63ff9a60: ../datasets/humanoid-v1/exc-503fc128aaf14405a0c2418d63ff9a60
+  /data/exc-ece46c33aacc4ec5bbdf538aaa7f297a: ../datasets/humanoid-v1/exc-ece46c33aacc4ec5bbdf538aaa7f297a
+
+envs:
+  ISAACLAB_COMMIT: 32712682b69edd488eea26689da6905c48d31037
+  UV_VERSION: 0.13.1
+  # period_ms:integrator pairs, run for every capture
+  RUNS: "4:implicitfast 4:euler 1:implicitfast"
+
+setup: bash sky/setup.sh
+
+run: |
+  set -euo pipefail
+  export PATH="$HOME/.local/bin:$HOME/il-venv/bin:$PATH"
+  cd "$HOME/sky_workdir"
+  mkdir -p outputs/replay-mjwarp
+  humanoid-sim build-asset | tail -1
+  humanoid-sim build-asset --base-joints | tail -1  # replays turn the base with the capture's IMU yaw
+  # One process per capture in parallel: a single env leaves the GPU mostly idle.
+  for cap in /data/exc-*; do
+    (
+      for r in $RUNS; do
+        humanoid-sim replay "$cap" --device cuda:0 --period-ms "${r%%:*}" --integrator "${r##*:}" \
+          --out outputs/replay-mjwarp > "outputs/replay-mjwarp/$(basename "$cap")_${r/:/_}.log" 2>&1 \
+          || echo "FAILED $cap $r"
+      done
+    ) &
+  done
+  wait
+  grep -h '^{' outputs/replay-mjwarp/*.log

@@ -1,0 +1,47 @@
+# Fit the upper body's passive joint parameters by batched replay (CMA-ES, one candidate per env), with
+# the base turning as the capture's IMU yaw, validated across frequency bands: fit on the low-band capture
+# and score the high-band ones, then fit on a high-band capture and score the low-band one. (The two
+# high-band captures run the same profile, so one does not validate a fit on the other.)
+#   sky launch -y -c hsim-bench -i 10 sky/sysid.sky.yaml       (autostop: stop, not down)
+#   rsync -avz hsim-bench:sky_workdir/outputs/sysid/ outputs/sysid/
+name: humanoid-sim-sysid
+workdir: .
+
+resources:
+  cloud: aws
+  accelerators: L40S:1
+  cpus: 8+
+  memory: 32+
+  disk_size: 200
+
+file_mounts:
+  /data/exc-3a498000fc114f2db2b0655d5d87280c: ../datasets/humanoid-v1/exc-3a498000fc114f2db2b0655d5d87280c
+  /data/exc-503fc128aaf14405a0c2418d63ff9a60: ../datasets/humanoid-v1/exc-503fc128aaf14405a0c2418d63ff9a60
+  /data/exc-ece46c33aacc4ec5bbdf538aaa7f297a: ../datasets/humanoid-v1/exc-ece46c33aacc4ec5bbdf538aaa7f297a
+
+envs:
+  ISAACLAB_COMMIT: 32712682b69edd488eea26689da6905c48d31037
+  UV_VERSION: 0.13.1
+  NUM_ENVS: "512"
+  GENERATIONS: "20"
+  DURATION: "20"   # seconds of the fitted capture per generation; validation captures run in full
+  BOUND: "100"     # multipliers on the description's values stay within [1/BOUND, BOUND]
+
+setup: bash sky/setup.sh
+run: |
+  set -euo pipefail
+  export PATH="$HOME/.local/bin:$HOME/il-venv/bin:$PATH"
+  cd "$HOME/sky_workdir"
+  low=/data/exc-503fc128aaf14405a0c2418d63ff9a60
+  high=/data/exc-3a498000fc114f2db2b0655d5d87280c
+  high2=/data/exc-ece46c33aacc4ec5bbdf538aaa7f297a
+  humanoid-sim build-asset --base-joints | tail -1
+  fit() {  # name, fitted capture, validation captures...
+    local name=$1 capture=$2; shift 2
+    mkdir -p "outputs/sysid/$name"
+    humanoid-sim fit-passive "$capture" --holdout "$@" --num-envs "$NUM_ENVS" --generations "$GENERATIONS" \
+      --duration "$DURATION" --bound "$BOUND" --device cuda:0 --out "outputs/sysid/$name" 2>&1 \
+      | tee "outputs/sysid/$name/fit-passive.log" | grep -E '^gen|^\{|^[0-9]'
+  }
+  fit fit-on-low "$low" "$high" "$high2"
+  fit fit-on-high "$high" "$low"
