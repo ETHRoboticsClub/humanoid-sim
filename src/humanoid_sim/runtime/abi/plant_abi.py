@@ -109,8 +109,9 @@ ACK_REJECTED = 1  # malformed or not allowed now; message says why
 ACK_UNKNOWN = 2  # unknown command code
 ACK_FAILED = 3  # accepted but failed while applying
 
-# Physical faults the sim can inject (bus and protocol faults belong to Controls' fake bank).
-FAULTS = ("encoder_freeze", "encoder_dropout", "imu_spike", "imu_bias", "power_sag")
+# Physical faults the sim can inject. Bus and protocol faults belong to Controls' fake bank, and so does a drive
+# whose encoder stops reporting (on an EPOS4 that is a drive fault, not a plant state).
+FAULTS = ("encoder_freeze", "imu_spike", "imu_bias", "power_sag")
 
 
 def _region(*fields) -> np.dtype:

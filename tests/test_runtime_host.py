@@ -111,6 +111,7 @@ def test_serve_round_trip(tmp_path):
             == abi.ACK_REJECTED  # the base is welded in a suspended session
         assert command(99, {})[0] == abi.ACK_UNKNOWN
         drive = drives[0]
+        assert command(abi.CMD_INJECT_FAULT, {"fault": "encoder_dropout", "drive": drive})[0] == abi.ACK_REJECTED
         assert command(abi.CMD_INJECT_FAULT, {"fault": "encoder_freeze", "drive": drive, "value": 1})[0] == abi.ACK_OK
         before = _feedback(seg)["drive"]["position_rad"][:n].copy()
         demand["target_position_rad"] = hold + 0.1  # move every drive
