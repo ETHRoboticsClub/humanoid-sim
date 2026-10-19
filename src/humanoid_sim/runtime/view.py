@@ -3,7 +3,8 @@ feedback, IMU, soles, gantry and lateness as time series.
 
 It only reads the segment (seqlock reads of the descriptor, feedback and truth regions); it never writes
 demands or commands, so it can watch a session a client such as Controls is driving. Time is the sim's
-``sim_time_ns``. Entity paths: ``/world/robot/<body>``, ``/sim/0/drives/<drive>/{position,velocity,applied_torque,
+``sim_time_ns``. Entity paths: ``/world/robot/<body>``, ``/world/scene`` (the host's static boxes, when its scene
+file is readable here), ``/sim/0/drives/<drive>/{position,velocity,applied_torque,
 demanded_torque}``, ``/sim/0/imu/{gyro,specific_force}/{x,y,z}``, ``/sim/0/soles/<side>/normal_force``,
 ``/sim/0/base/height``, ``/sim/0/gantry/tension``, ``/sim/0/host/{late_steps,keeping_up}``.
 """
@@ -19,6 +20,7 @@ import torch
 from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.signals.log import SignalLog
 from humanoid_sim.signals.robot import RobotMeshes
+from humanoid_sim.signals.scene import log_boxes
 
 ROBOT_COLOR = (190, 190, 200, 255)
 
@@ -81,6 +83,7 @@ class RuntimeView:
         desc = self.seg.descriptor()
         self.drives, self.joints = desc["drives"], desc["joints"]
         self.soles = desc.get("soles", [])
+        self.scene = desc.get("scene")
         self.kin = RobotKinematics(usd, self.joints, base_height_m=0.0)
         self.meshes = RobotMeshes(self.kin.model)
         self.log, self.rr = log, log.rr
@@ -92,12 +95,24 @@ class RuntimeView:
     def log_static(self) -> None:
         rr = self.rr
         self.meshes.log_static("/world/robot", ROBOT_COLOR)
+        boxes = self._scene_boxes()
+        if boxes is not None:
+            log_boxes(rr, "/world/scene", boxes.corners(), boxes.rgb)
         for d in self.drives:
             for name in ("position", "velocity", "applied_torque", "demanded_torque"):
                 rr.log(f"/sim/0/drives/{d}/{name}", rr.SeriesLines(names=[d]), static=True)
         for group in ("gyro", "specific_force"):
             for axis, color in zip("xyz", ((220, 80, 80), (80, 180, 80), (80, 120, 220))):
                 rr.log(f"/sim/0/imu/{group}/{axis}", rr.SeriesLines(names=[axis], colors=[color]), static=True)
+
+    def _scene_boxes(self):
+        """The host's static boxes, when its scene file is readable here with the same digest."""
+        from humanoid_sim.world.boxes import StaticBoxes
+
+        if not self.scene or not Path(self.scene["file"]).is_file():
+            return None
+        boxes = StaticBoxes.load(self.scene["file"], self.scene["spawn_m"])
+        return boxes if boxes.sha256 == self.scene["sha256"] else None
 
     def _read(self, region: str):
         try:
