@@ -75,3 +75,16 @@ def test_lanes_arrive_at_their_own_times():
     assert torch.allclose(out[0], torch.tensor([1.0 * 0.25 + 2.0 * 0.75, 0.5 * 0 + 0.5 * 1.0], dtype=out.dtype))
     q.advance(2 * STEP)
     assert q.active["x"][0].tolist() == [2.0, 1.0] and int(q.count[0]) == 1
+
+
+def test_a_reset_queue_does_not_depend_on_what_was_queued_before():
+    """Reset empties the slots to the record put in force, as on a fresh queue: a queue that held demands before
+    (the runtime's graph warm-up queues some) and one that never did compare equal after the same reset."""
+    used, fresh = _queue(), _queue()
+    for i in range(3):
+        used.submit({"x": torch.full((2, 2), float(i + 1))}, torch.tensor([(10 + i) * NS_PER_MS] * 2))
+    for q in (used, fresh):
+        q.reset(torch.tensor([0, 1]), {"x": torch.full((2, 2), 7.0)})
+    for k in fresh.pending:
+        assert torch.equal(used.pending[k], fresh.pending[k]) and (used.pending[k] == 7.0).all()
+    assert torch.equal(used.arrival, fresh.arrival) and torch.equal(used.count, fresh.count)
