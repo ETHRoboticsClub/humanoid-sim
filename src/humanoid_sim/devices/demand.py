@@ -54,7 +54,10 @@ class DriveDemand:
         zeros = torch.zeros_like(position)
 
         def full(x):
-            return torch.as_tensor(x, device=position.device, dtype=position.dtype).expand(position.shape).clone()
+            # A number is filled in on the device: as_tensor would copy it from the host, a sync on CUDA.
+            if isinstance(x, torch.Tensor):
+                return x.to(device=position.device, dtype=position.dtype).expand(position.shape).clone()
+            return torch.full(position.shape, float(x), device=position.device, dtype=position.dtype)
 
         return cls(
             law=torch.full_like(position, law, dtype=torch.int8),
