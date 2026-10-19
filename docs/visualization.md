@@ -19,7 +19,7 @@ uv run rerun outputs/replay.rrd        # open a recording
 uv run rerun                           # or start an empty viewer that recordings can stream into
 ```
 
-The viewer must be at least as new as the SDK that wrote the file. Recordings made in the Isaac Lab image (Rerun 0.31) open in a newer local viewer.
+Open a recording with the viewer of the Rerun version that wrote it. The Isaac Lab image writes with Rerun 0.31, so open those files with `uvx --from rerun-sdk==0.31.4 rerun <file>.rrd`. A newer viewer does not read them faithfully: Rerun 0.38 draws every robot body at the origin and leaves the plots empty.
 
 ## Replays: the sim next to the real robot
 

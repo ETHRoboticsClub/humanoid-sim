@@ -87,6 +87,7 @@ class SceneRecorder:
         self.envs = list(range(self.robot.num_instances)) if envs is None else list(envs)
         rr.init(app_id)
         if rrd:
+            Path(rrd).parent.mkdir(parents=True, exist_ok=True)
             rr.save(rrd)
         elif connect:
             rr.connect_grpc(connect)
