@@ -28,11 +28,25 @@ ASSET_SCHEMA = "humanoid-sim-asset/v1"
 
 
 def load_profile(robot: str, root: Path | None = None) -> dict:
+    """The robot's profile: ``profiles/defaults.yaml`` with ``profiles/<robot>.yaml`` merged over it (mappings merge
+    key by key, anything else is replaced). A robot without a profile file runs on the defaults."""
     root = root or Path(__file__).resolve().parents[3] / "profiles"
-    profile = yaml.safe_load((root / f"{robot}.yaml").read_text())
-    if profile.get("robot") != robot:
-        raise ValueError(f"profile robot {profile.get('robot')!r} != {robot!r}")
+    profile = yaml.safe_load((root / "defaults.yaml").read_text())
+    path = root / f"{robot}.yaml"
+    if path.is_file():
+        own = yaml.safe_load(path.read_text())
+        if own.get("robot") != robot:
+            raise ValueError(f"profile robot {own.get('robot')!r} != {robot!r}")
+        profile = _merged(profile, own)
+    profile["robot"] = robot
     return profile
+
+
+def _merged(base: dict, over: dict) -> dict:
+    out = dict(base)
+    for key, value in over.items():
+        out[key] = _merged(out[key], value) if isinstance(value, dict) and isinstance(out.get(key), dict) else value
+    return out
 
 
 def asset_key(desc: Description, profile: dict, prepared: PreparedUrdf) -> str:

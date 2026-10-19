@@ -1,6 +1,6 @@
 # Real-time runtime
 
-`humanoid-sim serve` runs one robot against the wall clock and publishes the runtime segment, a shared-memory file that one client attaches to. Every bus cycle (one exchange of the EtherCAT master with its drives, 1.5 ms on the robot) the client writes one demand per EtherCAT drive (the 22 drives, ankle cranks included) and reads back the physical drive feedback and the raw IMU samples. A mailbox carries commands for reset, pause, supports, disturbances, faults, prescribed poses and the IMU's fidelity, and a truth region gives tests the robot's true state. The usual client is Controls' plant host; see [controls-integration.md](controls-integration.md). The smallest working client is `examples/runtime_client.py` (see [Writing a client](#writing-a-client)), and `humanoid-sim view-runtime` shows a running host in Rerun (see [Watching a host](#watching-a-host-view-runtime)).
+`humanoid-sim serve` runs one robot against the wall clock and publishes the runtime segment, a shared-memory file that one client attaches to. Every bus cycle (one exchange of the robot's host with its drives: 1.5 ms over EtherCAT on the ETHRC V1, 2 ms over `LowCmd` on the G1) the client writes one demand per drive (the V1's 22 EPOS4 drives, ankle cranks included, or the G1's 29 motors) and reads back the physical drive feedback and the raw IMU samples. A mailbox carries commands for reset, pause, supports, disturbances, faults, prescribed poses and the IMU's fidelity, and a truth region gives tests the robot's true state. The usual client is Controls' plant host; see [controls-integration.md](controls-integration.md). The smallest working client is `examples/runtime_client.py` (see [Writing a client](#writing-a-client)), and `humanoid-sim view-runtime` shows a running host in Rerun (see [Watching a host](#watching-a-host-view-runtime)).
 
 | What | Where |
 |---|---|
@@ -102,19 +102,19 @@ While paused, physics, plant time and the step counter stop. Commands and demand
 
 ## The segment
 
-The segment is one file of 27,840 bytes: a 272-byte header and six regions. Values are little-endian at natural alignment, and every region starts on a 64-byte boundary. Each region has one writer.
+The segment is one file of 30,912 bytes: a 272-byte header and six regions. Values are little-endian at natural alignment, and every region starts on a 64-byte boundary. Each region has one writer.
 
 | Region | Offset | Bytes | Writer | Contents |
 |---|---|---|---|---|
 | header | 0 | 272 | sim | Identity, sizes, session, state, periods, heartbeat |
 | descriptor | 320 | 16,408 | sim | JSON: names, units, identity, commands, faults, fidelity gaps |
-| demands | 16,768 | 1,584 | client | Bus cycle, client clock, session echo, one demand per drive |
-| feedback | 18,368 | 3,400 | sim | Plant time, lateness, physical drive feedback, the latest raw IMU samples |
-| mailbox | 21,824 | 4,128 | client | One command: code and JSON arguments |
-| ack | 25,984 | 288 | sim | The last command handled: its number, a result code, a message |
-| truth | 26,304 | 1,536 | sim | Base pose and twist, centre of mass, joint state, gantry tension, sole plates |
+| demands | 16,768 | 3,632 | client | Bus cycle, client clock, session echo, one SI drive demand per drive |
+| feedback | 20,416 | 4,424 | sim | Plant time, lateness, physical drive feedback, the latest raw IMU samples |
+| mailbox | 24,896 | 4,128 | client | One command: code and JSON arguments |
+| ack | 29,056 | 288 | sim | The last command handled: its number, a result code, a message |
+| truth | 29,376 | 1,536 | sim | Base pose and twist, centre of mass, joint state, gantry tension, sole plates |
 
-`MAX_DRIVES` (32) and `MAX_JOINTS` (64) size the arrays. A robot with more drives or joints needs a new major ABI version. Only one client may write the demands and mailbox regions: a second writer would break the protocol below.
+`MAX_DRIVES` (64) and `MAX_JOINTS` (64) size the arrays. A robot with more drives or joints needs a new major ABI version. Only one client may write the demands and mailbox regions: a second writer would break the protocol below.
 
 ### Header
 
@@ -123,10 +123,10 @@ The header is written when the file is created; afterwards only `state` and `hea
 | Field | Type | Meaning |
 |---|---|---|
 | `magic` | char[8] | `HSIMPLNT`, written last when the file is filled |
-| `abi_major`, `abi_minor` | u16 | 1, 1 |
+| `abi_major`, `abi_minor` | u16 | 2, 0 |
 | `header_bytes` | u32 | 272 |
 | `layout_hash` | u64 | Hash of the layout (see [Validating a segment](#validating-a-segment)) |
-| `segment_bytes` | u64 | 27,840 |
+| `segment_bytes` | u64 | 30,912 |
 | `session_id` | u64 | This session |
 | `state` | u32 | 0 creating, 1 ready, 2 ended |
 | `num_drives`, `num_joints` | u32 | 22 and 22 for `ethrc_v1` |
@@ -167,15 +167,15 @@ A reader repeats three steps, up to 1000 times (`attempts`):
 
 | Check | Expected |
 |---|---|
-| File size | `SEGMENT_BYTES` (27,840) |
+| File size | `SEGMENT_BYTES` (30,912) |
 | `magic` | `HSIMPLNT` |
 | `abi_major` | This side's `ABI_MAJOR` (1) |
 | `layout_hash` | This side's `LAYOUT_HASH` |
 | `state` | Ready |
 
-While the file is missing or one of these fails it retries every 10 ms until `wait_s` has passed, then raises `FileNotFoundError` or `AbiError`. Once the segment is ready it compares `robot_id` and `description_digest` with the values given and raises `AbiError` on a mismatch. A different `abi_minor` is accepted: the commands marked "ABI 1.1" in `plant_abi.py` (`DETACH`, `SET_FIDELITY`) need a 1.1 sim.
+While the file is missing or one of these fails it retries every 10 ms until `wait_s` has passed, then raises `FileNotFoundError` or `AbiError`. Once the segment is ready it compares `robot_id` and `description_digest` with the values given and raises `AbiError` on a mismatch. A different `abi_minor` is accepted.
 
-The layout hash (`layout_hash()`) is the first 8 bytes, little-endian, of a SHA-256 over every field's name, offset, type and shape and the region offsets. Any change to the layout changes it. `plant_abi.h` carries the same value as `HSIM_PLANT_LAYOUT_HASH` (`0x8b55fa9a7f94d7f2`), and `tests/test_runtime_abi.py` compiles the header and checks every struct size, field offset, region offset and the hash against the Python layout.
+The layout hash (`layout_hash()`) is the first 8 bytes, little-endian, of a SHA-256 over every field's name, offset, type and shape and the region offsets. Any change to the layout changes it. `plant_abi.h` carries the same value as `HSIM_PLANT_LAYOUT_HASH` (`0xfb475e58737ea4a4`), and `tests/test_runtime_abi.py` compiles the header and checks every struct size, field offset, region offset and the hash against the Python layout.
 
 The description digest (`description_digest(urdf, actuators)`) is the SHA-256 over the URDF and `actuators.yaml` of the robot description in `third_party/humanoid-urdf`, each as its file name followed by its bytes. The sim writes `Description.digest`. A client computes the digest from its own checkout of humanoid-urdf and passes it to `Segment.open`: equal digests mean both sides run the same description.
 
@@ -216,22 +216,21 @@ The client writes the demands region every bus cycle.
 | `written_mono_ns` | u64 | The client's `CLOCK_MONOTONIC` when it wrote the record; the client timeout runs from it |
 | `session_id` | u64 | Must equal the header's |
 | `num_drives` | u32 | Drives filled in (the host reads as many entries as the header's `num_drives`) |
-| `drive` | `HsimDriveDemand[32]` | One demand per drive, in descriptor order |
+| `drive` | `HsimDriveDemand[64]` | One demand per drive, in descriptor order |
 
-Each drive's demand mirrors Controls' `FakeDriveDemand` (`fake_bank.h`), the demand an `Epos4Slave` reports to the plant:
+Each drive's demand is vendor-neutral and in SI units, the `DriveDemand` of Controls' `docs/sim-learning-api-plan.md` (§1.2). The client converts its device's command at its own boundary (an EPOS4's CiA-402 mode and raw JVPT gains, a Unitree motor's `LowCmd` entry; [drives.md](drives.md#the-demand) lists both mappings):
 
 | Field | Type | Meaning |
 |---|---|---|
-| `torque_enabled` | i32 | Non-zero when the drive's power stage is enabled |
-| `mode` | i8 | Mode of operation (0x6061): -64 JVPT, -62 freeze, 6 homing, 0 none |
-| `homing_hold` | u8 | Carried for an exact mirror; not used |
+| `law` | u8 | `LAW_DISABLED` (0), `LAW_PD` (1) or `LAW_FREEZE` (2); any other value is disabled |
 | `target_position_rad` | f64 | Physical drive-output frame (crank angle for the ankle cranks) |
 | `target_velocity_rad_s` | f64 | rad/s |
 | `feedforward_torque_nm` | f64 | Nm |
-| `p_gain_raw`, `i_gain_raw`, `d_gain_raw` | u32 | Raw JVPT gains (0x34C6:01 to 03), 1000 counts per Nm/rad or Nm s/rad |
-| `max_torque_mnm` | u32 | Torque cap 0x34C6:04 in mNm; 0 means unset |
+| `stiffness_nm_per_rad` | f64 | P gain |
+| `damping_nm_s_per_rad` | f64 | D gain |
+| `torque_limit_nm` | f64 | Cap on the applied torque; `inf` for none |
 
-JVPT is the EPOS4's cyclic mode in which the drive tracks the position and velocity targets with its own P and D gains and adds the feed-forward torque. A drive acts when `torque_enabled` is set, `i_gain_raw` is 0 and `mode` is JVPT, freeze or homing. Any other demand leaves it off: it applies no torque and its joint, for a 1:1 drive, takes the drive family's back-drive friction. A non-zero I gain is refused, as Controls' MuJoCo plant refuses it. [drives.md](drives.md) gives the drive law, the envelope and the frames. `demands_record(demand, cycle=..., session_id=...)` builds a record from a dict of per-drive arrays named as the fields above.
+PD tracks the position and velocity targets with the demand's gains and adds the feed-forward torque; freeze holds the position the drive read when it entered the law. A disabled drive applies no torque and its joint, for a 1:1 drive, takes the drive family's back-drive friction. [drives.md](drives.md) gives the drive law, the envelope and the frames. `pd_demand(target, stiffness, damping, *, law=LAW_PD, **fields)` gives every drive's fields as arrays, with no torque limit unless one is passed, and `demands_record(demand, cycle=..., session_id=...)` builds a record from them.
 
 ### Feedback
 
@@ -422,7 +421,7 @@ A complete client follows these steps:
 5. Post commands one at a time, and keep writing demands until each is acked.
 6. Send `DETACH` and close the segment when leaving.
 
-The client below holds the robot where it starts in JVPT at the description's baseline gains, takes the new IMU samples each cycle, switches the IMU to ideal, reads the truth and detaches. It imports `Description` from humanoid-sim for the digest and the gains; a vendored client computes the digest with `plant_abi.description_digest(urdf_path, actuators_path)` from its own humanoid-urdf checkout.
+The client below holds the robot where it starts with a PD law at the description's baseline gains, takes the new IMU samples each cycle, switches the IMU to ideal, reads the truth and detaches. It imports `Description` from humanoid-sim for the digest and the gains; a vendored client computes the digest with `plant_abi.description_digest(urdf_path, actuators_path)` from its own humanoid-urdf checkout.
 
 ```python
 import time
@@ -442,16 +441,12 @@ class Client:
         self.drives = self.seg.descriptor()["drives"]
         n = self.n = self.seg.num_drives
         _, self.fb = self.seg.regions["feedback"].read()
-        # JVPT at the start pose and the baseline gains (1000 raw counts per Nm/rad and per Nm s/rad).
-        gains = desc.table["baseline_position_gains"]
-        self.demand = {name: np.zeros(n) for name in abi.DRIVE_DEMAND.names if not name.startswith("_")}
-        self.demand |= {
-            "torque_enabled": np.ones(n),
-            "mode": np.full(n, -64),
-            "target_position_rad": self.fb["drive"]["position_rad"][:n].copy(),
-            "p_gain_raw": np.array([round(gains[d]["stiffness"] * 1000) for d in self.drives]),
-            "d_gain_raw": np.array([round(gains[d]["damping"] * 1000) for d in self.drives]),
-        }
+        # PD about the start pose at the baseline gains (Nm/rad, Nm s/rad).
+        self.demand = abi.pd_demand(
+            self.fb["drive"]["position_rad"][:n],
+            [desc.drives[d].baseline_stiffness for d in self.drives],
+            [desc.drives[d].baseline_damping for d in self.drives],
+        )
         self.cycle = 0
         self.imu_seq = 0
 

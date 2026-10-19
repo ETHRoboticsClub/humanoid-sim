@@ -12,7 +12,7 @@ Streams used for drive-level replay (``pdo_feedback.csv``, ~200 Hz per drive):
 (orientation from the Madgwick filter, angular velocity, specific force), stamped on host receipt.
 
 Times are ``t_source_ros_ns`` (ROS epoch, integer ns). ``t_recv_runtime_ns`` is a different clock and is
-never mixed in. ``gains.json`` holds the drive gains in force (raw JVPT counts and SI).
+never mixed in. ``gains.json`` holds the drive gains in force, in SI (the replay uses these) and as the drives' raw JVPT counts.
 """
 
 from __future__ import annotations

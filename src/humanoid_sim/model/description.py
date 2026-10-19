@@ -1,8 +1,14 @@
 """Robot description: humanoid-urdf, read hash-verified, never copied.
 
 Every robot fact this package uses comes through here: URDF, ``actuators.yaml`` (drives, signs, gains,
-envelopes, ankle geometry) and the home pose. The digest covers the URDF and ``actuators.yaml``; it and the
-description's git revision are recorded with every output so a result can be traced to the exact description.
+envelopes, linkage geometry) and the named poses the description records. The digest covers the URDF and
+``actuators.yaml``; it and the description's git revision are recorded with every output so a result can be traced
+to the exact description.
+
+A robot is a directory of the description root that holds an ``actuators.yaml``; its id is the directory name
+(``ethrc_v1``, ``g1_29dof_rev_1_0``). The ament package is the subdirectory holding the URDF that ``actuators.yaml``
+names. Both actuator layouts in humanoid-urdf load: drives named by EtherCAT device with a gain table and crank
+linkages (ETHRC), and one motor per joint with gains on the joint and passive terms on the motor family (Unitree).
 """
 
 from __future__ import annotations
@@ -21,29 +27,32 @@ from humanoid_sim.transmissions.ankle import AnkleTransmission, mirror_right
 
 ACTUATORS_SCHEMA = "ethrc-actuators/v1"
 
-# Robot id → directory in humanoid-urdf, the ament package inside it, and the table that rebases the CAD export to
-# the URDF's zero (the source of the home pose, see Description.home_pose).
-ROBOTS = {
-    "ethrc_v1": ("ethrc_v1", "URDF_6_description", "tools/urdf6_zero_rebase.json"),
-}
 REBASE_SCHEMA = "ethrc-urdf-zero-rebase/v1"
+PRESETS_SCHEMA = "ethrc-position-presets/v1"
+
+
+def robots(root: Path | None = None) -> list[str]:
+    """Robot ids under a description root: its directories that hold an ``actuators.yaml``."""
+    root = Path(root) if root else Description.default_root()
+    return sorted(d.name for d in root.iterdir() if (d / "actuators.yaml").is_file())
 
 
 @dataclass(frozen=True)
 class Drive:
-    """One EtherCAT drive. ``joints`` are the URDF joints it moves (two for an ankle crank)."""
+    """One drive (an EtherCAT drive, a Unitree motor). ``joints`` are the URDF joints it moves (two for a crank)."""
 
-    name: str  # EtherCAT device name
+    name: str  # EtherCAT device name, or the joint name for a robot whose motors have no device names
     family: str
     joints: tuple[str, ...]
     sign: int  # device = sign * URDF joint (1:1 drives); +1 for cranks (crank frame is the device frame)
-    crank: str | None  # "upper" | "lower" for ankle cranks
+    crank: str | None  # "upper" | "lower" for linkage cranks
     effort_peak: float  # Nm at the drive output
-    effort_nominal: float
-    velocity: float  # rad/s no-load at 48 V
+    effort_nominal: float | None
+    velocity: float  # rad/s no-load
     position_limit_device: tuple[float, float] | None  # device frame, cranks only (joints: see Joint)
     baseline_stiffness: float  # Nm/rad at the drive output
     baseline_damping: float
+    motor_index: int | None = None  # slot in the backend's motor array (Unitree LowCmd), when it has one
 
 
 @dataclass(frozen=True)
@@ -54,27 +63,39 @@ class Joint:
     sign: int
     standing_offset_rad: float
     armature: float  # joint-space value (armature_joint for the ankle hinges)
-    damping: float  # passive viscous, Nm s/rad
-    friction: float  # passive Coulomb, Nm
+    damping: float  # passive viscous, Nm s/rad (the joint's, else its motor family's)
+    friction: float  # passive Coulomb, Nm (the joint's, else its motor family's)
     effort_peak: float
     velocity: float
 
 
+@dataclass(frozen=True)
+class Linkage:
+    """Two crank drives that move two hinges together (an ETHRC ankle)."""
+
+    side: str  # "l" | "r"
+    upper: str  # crank drive names
+    lower: str
+    joints: tuple[str, str]  # (pitch, roll) hinges
+
+
 class Description:
     def __init__(self, robot: str, root: Path):
-        if robot not in ROBOTS:
-            raise ValueError(f"unknown robot {robot!r}; known: {sorted(ROBOTS)}")
         self.robot = robot
         self.root = root
-        directory, package, rebase = ROBOTS[robot]
-        self.robot_dir = root / directory
-        self.package_dir = self.robot_dir / package
+        self.robot_dir = root / robot
         self.actuators_path = self.robot_dir / "actuators.yaml"
-        self.rebase_path = self.robot_dir / rebase
+        if not self.actuators_path.is_file():
+            raise ValueError(f"unknown robot {robot!r}; known: {robots(root)}")
         self.table = yaml.safe_load(self.actuators_path.read_text())
         if self.table.get("schema") != ACTUATORS_SCHEMA:
             raise ValueError(f"{self.actuators_path}: schema {self.table.get('schema')!r} != {ACTUATORS_SCHEMA}")
-        self.urdf_path = self.package_dir / self.table["urdf"]
+        rel = self.table["urdf"]
+        packages = [d for d in sorted(self.robot_dir.iterdir()) if d.is_dir() and (d / rel).is_file()]
+        if len(packages) != 1:
+            raise ValueError(f"{robot}: {len(packages)} packages hold {rel}, expected one")
+        self.package_dir = packages[0]
+        self.urdf_path = self.package_dir / rel
 
     @staticmethod
     def default_root() -> Path:
@@ -113,57 +134,123 @@ class Description:
     @cached_property
     def joints(self) -> dict[str, Joint]:
         out = {}
+        families = self.table.get("families", {})
         for name, j in self.table["joints"].items():
+            family = families.get(j.get("family"), {})
+
+            def value(key, j=j, family=family, name=name):
+                v = j.get(key, family.get(key))
+                if v is None:
+                    raise ValueError(f"{name}: no {key!r} on the joint or its family")
+                return float(v)
+
             out[name] = Joint(
-                name=name, region=j["region"], device=j.get("device"), sign=int(j["sign"]),
+                name=name, region=j["region"], device=j.get("device", name), sign=int(j["sign"]),
                 standing_offset_rad=float(j["standing_offset_rad"]),
-                armature=float(j.get("armature_joint", j["armature"])),
-                damping=float(j["damping"]), friction=float(j["friction"]),
+                armature=float(j["armature_joint"]) if "armature_joint" in j else value("armature"),
+                damping=value("damping"), friction=value("friction"),
                 effort_peak=float(j["effort"]), velocity=float(j["velocity"]),
             )
         return out
 
-    @cached_property
-    def home_pose(self) -> dict[str, float]:
-        """URDF joint positions (rad) of the home pose: the pose the CAD is exported in, legs straight and both
-        soles level. The URDF's zero is the calibration pose instead; humanoid-urdf rebases the export to it and
-        records each joint's export angle at the calibration pose (``q_star_rad``), so home is its negative."""
-        table = json.loads(self.rebase_path.read_text())
-        if table.get("schema") != REBASE_SCHEMA or table.get("coordinates") != "source_urdf_joint_radians":
-            raise ValueError(f"{self.rebase_path}: expected a {REBASE_SCHEMA} table in source URDF joint radians")
-        missing = sorted(set(self.joints) - set(table["joints"]))
+    def export_pose(self, table: str) -> dict[str, float]:
+        """URDF joint positions (rad) of the pose a CAD export was made in. humanoid-urdf rebases the export so the
+        URDF's zero is the calibration pose and records, in ``table`` (relative to the robot directory), each joint's
+        export angle at the calibration pose (``q_star_rad``); the export pose is its negative."""
+        path = self.robot_dir / table
+        data = json.loads(path.read_text())
+        if data.get("schema") != REBASE_SCHEMA or data.get("coordinates") != "source_urdf_joint_radians":
+            raise ValueError(f"{path}: expected a {REBASE_SCHEMA} table in source URDF joint radians")
+        missing = sorted(set(self.joints) - set(data["joints"]))
         if missing:
-            raise ValueError(f"{self.rebase_path} lacks joints {missing}")
-        return {n: -float(table["joints"][n]["q_star_rad"]) for n in self.joints}
+            raise ValueError(f"{path} lacks joints {missing}")
+        return {n: -float(data["joints"][n]["q_star_rad"]) for n in self.joints}
+
+    def preset_pose(self, preset_id: str) -> dict[str, float]:
+        """URDF joint positions (rad) of a named preset in the robot's ``position-presets.yaml``; joints the preset
+        does not list stay at zero (its ``base: zero``)."""
+        path = self.robot_dir / "position-presets.yaml"
+        data = yaml.safe_load(path.read_text())
+        if data.get("schema") != PRESETS_SCHEMA:
+            raise ValueError(f"{path}: schema {data.get('schema')!r} != {PRESETS_SCHEMA}")
+        preset = next((p for p in data["presets"] if p["preset_id"] == preset_id), None)
+        if preset is None:
+            raise ValueError(f"{path} has no preset {preset_id!r}")
+        if preset.get("base", "zero") != "zero":
+            raise ValueError(f"{preset_id}: only presets based on zero are supported")
+        unknown = sorted(set(preset["positions_rad"]) - set(self.joints))
+        if unknown:
+            raise ValueError(f"{preset_id} names joints the description lacks: {unknown}")
+        return {n: float(preset["positions_rad"].get(n, 0.0)) for n in self.joints}
 
     @cached_property
     def drives(self) -> dict[str, Drive]:
-        """All EtherCAT drives: the 1:1 joint drives, then the ankle cranks (description order)."""
-        gains = self.table["baseline_position_gains"]
+        """All drives: the 1:1 joint drives in joint order, then the linkage cranks (description order).
+
+        A joint with a ``device`` field is driven by that EtherCAT device (``device: null``: by linkage cranks
+        under ``drives:``); a joint without one has its own motor, named after the joint. Baseline gains come from
+        ``baseline_position_gains`` (by device) when the description has that table, else from the joint."""
+        gains = self.table.get("baseline_position_gains")
+
+        def gain(device, entry):
+            if gains is not None:
+                if device not in gains:
+                    raise ValueError(f"no baseline_position_gains for {device}")
+                return float(gains[device]["stiffness"]), float(gains[device]["damping"])
+            return float(entry["baseline_stiffness"]), float(entry["baseline_damping"])
+
         out = {}
         for name, j in self.table["joints"].items():
-            device = j.get("device")
+            device = j.get("device", name)
             if device is None:
                 continue
+            k, d = gain(device, j)
             out[device] = Drive(
                 name=device, family=j["family"], joints=(name,), sign=int(j["sign"]), crank=None,
-                effort_peak=float(j["effort"]), effort_nominal=float(j["effort_nominal"]),
-                velocity=float(j["velocity"]), position_limit_device=None,
-                baseline_stiffness=float(gains[device]["stiffness"]),
-                baseline_damping=float(gains[device]["damping"]),
+                effort_peak=float(j["effort"]),
+                effort_nominal=float(j["effort_nominal"]) if "effort_nominal" in j else None,
+                velocity=float(j["velocity"]), position_limit_device=None, baseline_stiffness=k, baseline_damping=d,
+                motor_index=int(j["motor_index"]) if "motor_index" in j else None,
             )
-        for device, d in self.table["drives"].items():
+        for device, d in self.table.get("drives", {}).items():
+            k, dmp = gain(device, d)
             out[device] = Drive(
                 name=device, family=d["family"], joints=tuple(d["joints"]), sign=1, crank=d["crank"],
-                effort_peak=float(d["effort"]), effort_nominal=float(d["effort_nominal"]),
+                effort_peak=float(d["effort"]),
+                effort_nominal=float(d["effort_nominal"]) if "effort_nominal" in d else None,
                 velocity=float(d["velocity"]), position_limit_device=tuple(d["position_limit"]),
-                baseline_stiffness=float(gains[device]["stiffness"]),
-                baseline_damping=float(gains[device]["damping"]),
+                baseline_stiffness=k, baseline_damping=dmp,
             )
-        missing = set(gains) - set(out)
+        missing = set(gains or ()) - set(out)
         if missing:
             raise ValueError(f"baseline gains for unknown drives: {sorted(missing)}")
         return out
+
+    @cached_property
+    def linkages(self) -> list[Linkage]:
+        """The crank linkages, one per pair of hinges: the ETHRC ankles (left first); empty for a robot without."""
+        out = []
+        for side in ("l", "r"):
+            joints = (f"foot_pitch_{side}", f"foot_roll_{side}")
+            by_crank = {d.crank: d.name for d in self.drives.values() if d.crank and set(d.joints) == set(joints)}
+            if by_crank:
+                if set(by_crank) != {"upper", "lower"}:
+                    raise ValueError(f"linkage {side}: cranks {sorted(by_crank)}, expected upper and lower")
+                out.append(Linkage(side, by_crank["upper"], by_crank["lower"], joints))
+        cranks = {d.name for d in self.drives.values() if d.crank}
+        if cranks != {c for lk in out for c in (lk.upper, lk.lower)}:
+            raise ValueError(f"crank drives outside an ankle linkage: {sorted(cranks)}")
+        return out
+
+    def braking_limit(self, drive: str) -> float:
+        """The torque a drive holds against the motion: its family's ``braking_peak`` where the description states
+        one, never above the drive's ``effort`` (Controls' ``ethrc_ssot.torque_envelope.braking_limit``)."""
+        d = self.drives[drive]
+        return min(float(self.family_value(d.family, "braking_peak", d.effort_peak)), d.effort_peak)
+
+    def family_value(self, family: str, key: str, default=None):
+        """A motor family's ``key``, or ``default`` when the family does not record it."""
+        return self.table.get("families", {}).get(family, {}).get(key, default)
 
     def calibration_travel(self, name: str) -> tuple[float, float]:
         """Simulated travel in URDF (calibration) radians: the recorded mechanical stop where there is one,
@@ -216,9 +303,10 @@ class Description:
 
     def ankle_cranks(self, side: str) -> tuple[str, str]:
         """(upper, lower) crank drive names of one side."""
-        joints = {f"foot_pitch_{side}", f"foot_roll_{side}"}
-        by_crank = {d.crank: d.name for d in self.drives.values() if d.crank and set(d.joints) == joints}
-        return by_crank["upper"], by_crank["lower"]
+        linkage = next((lk for lk in self.linkages if lk.side == side), None)
+        if linkage is None:
+            raise ValueError(f"{self.robot} has no ankle linkage on side {side!r}")
+        return linkage.upper, linkage.lower
 
     def ankle_model_module(self):
         """humanoid-urdf's own ``ankle_model`` module (numpy reference), loaded from the submodule."""

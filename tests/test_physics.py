@@ -44,8 +44,8 @@ def test_home_pose_levels_both_soles_at_one_height(usd):
     import numpy as np
 
     from humanoid_sim.model.asset import asset_meta
-    from humanoid_sim.model.kinematics import RobotKinematics, _rotate, _sole_corners, standing_base_height
-    from humanoid_sim.model.poses import initial_pose
+    from humanoid_sim.model.kinematics import RobotKinematics, _rotate, _sole_corners, lowest_collision_z
+    from humanoid_sim.model.poses import home_pose, initial_pose
 
     desc = Description.load()
     soles = asset_meta(usd)["sole_boxes"]
@@ -63,12 +63,13 @@ def test_home_pose_levels_both_soles_at_one_height(usd):
         return out
 
     q, height = initial_pose(usd, pose="home")
-    assert q.tolist() == pytest.approx([desc.home_pose[n] for n in joints])
+    home = home_pose(desc, load_profile("ethrc_v1"))
+    assert q.tolist() == pytest.approx([home[n] for n in joints])
     (n_l, z_l), (n_r, z_r) = soles_at(q)
     assert min(n_l, n_r) > np.cos(np.radians(0.1))  # level
     assert abs(z_l - z_r) < 5e-4
-    assert height == pytest.approx(-min(z_l, z_r), abs=1e-6)
-    assert height == pytest.approx(standing_base_height(usd, desc, soles, q))
+    assert height == pytest.approx(-min(z_l, z_r), abs=1e-4)  # the soles are the lowest collision shapes
+    assert height == pytest.approx(-lowest_collision_z(kin, kin.body_poses(q.reshape(1, -1))))
     for c, name in enumerate(joints):
         lo, hi = desc.calibration_travel(name)
         assert lo <= float(q[c]) <= hi, name
@@ -87,7 +88,7 @@ def test_holds_standing_on_fixed_base(usd, request, solver):
     q, qd = sim.joint_state()
     p = sim.plant
     qdrv, _, _ = p.map.drive_state(q, qd)
-    p.submit(DriveDemand.jvpt(qdrv, p.drive_stiffness.expand(1, -1), p.drive_damping.expand(1, -1)),
+    p.submit(DriveDemand.pd(qdrv, p.drive_stiffness.expand(1, -1), p.drive_damping.expand(1, -1)),
              torch.zeros(1, dtype=torch.long))
     for _ in range(100):
         fb = sim.step()
@@ -108,7 +109,7 @@ def test_base_joints_follow_prescribed_yaw(request):
     q, qd = sim.joint_state()
     p = sim.plant
     qdrv, _, _ = p.map.drive_state(q, qd)
-    p.submit(DriveDemand.jvpt(qdrv, p.drive_stiffness.expand(1, -1), p.drive_damping.expand(1, -1)),
+    p.submit(DriveDemand.pd(qdrv, p.drive_stiffness.expand(1, -1), p.drive_damping.expand(1, -1)),
              torch.zeros(1, dtype=torch.long))
     names = sim.backend.joint_names
     yaw = names.index(BASE_JOINTS[0][0])
@@ -159,7 +160,7 @@ def test_cuda_graph_step_matches_eager(usd):
             out = []
             for k in range(60):
                 if k % 5 == 0:  # a new demand every 20 ms, mid-step arrival
-                    p.submit(DriveDemand.jvpt(stand + 0.02 * (k % 3), p.drive_stiffness.expand(1, -1),
+                    p.submit(DriveDemand.pd(stand + 0.02 * (k % 3), p.drive_stiffness.expand(1, -1),
                                               p.drive_damping.expand(1, -1)),
                              torch.full((1,), sim.t_ns + 1_500_000, dtype=torch.long, device=q.device))
                 fb = sim.step()

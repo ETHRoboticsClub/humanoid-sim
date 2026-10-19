@@ -14,6 +14,7 @@ import pytest
 
 from humanoid_sim.model.asset import asset_dir, load_profile
 from humanoid_sim.model.description import Description
+from humanoid_sim.model.poses import home_pose
 from humanoid_sim.runtime.abi import plant_abi as abi
 
 REPO = Path(__file__).resolve().parents[1]
@@ -52,14 +53,9 @@ def test_serve_round_trip(tmp_path):
 
         # Hold the pose it starts in at the baseline gains.
         hold = _feedback(seg)["drive"]["position_rad"][:22].copy()
-        d = Description.load()
-        gains = d.table["baseline_position_gains"]
-        n = len(drives)
-        demand = {"torque_enabled": np.ones(n), "mode": np.full(n, -64), "homing_hold": np.zeros(n),
-                  "target_position_rad": hold, "target_velocity_rad_s": np.zeros(n),
-                  "feedforward_torque_nm": np.zeros(n), "i_gain_raw": np.zeros(n), "max_torque_mnm": np.zeros(n),
-                  "p_gain_raw": np.array([round(gains[x]["stiffness"] * 1000) for x in drives]),
-                  "d_gain_raw": np.array([round(gains[x]["damping"] * 1000) for x in drives])}
+        d, n = Description.load(), len(drives)
+        demand = abi.pd_demand(hold, [d.drives[x].baseline_stiffness for x in drives],
+                               [d.drives[x].baseline_damping for x in drives])
         cycle = 0
 
         def send_demands():
@@ -181,10 +177,7 @@ def test_detach_and_next_session(tmp_path):
     try:
         first = abi.Segment.open(path, wait_s=1)
         n = first.num_drives
-        demand = {"torque_enabled": np.zeros(n), "mode": np.zeros(n), "homing_hold": np.zeros(n),
-                  "target_position_rad": np.zeros(n), "target_velocity_rad_s": np.zeros(n),
-                  "feedforward_torque_nm": np.zeros(n), "i_gain_raw": np.zeros(n), "max_torque_mnm": np.zeros(n),
-                  "p_gain_raw": np.zeros(n), "d_gain_raw": np.zeros(n)}
+        demand = abi.pd_demand(np.zeros(n), 0.0, 0.0, law=abi.LAW_DISABLED)
         first.regions["demands"].write(abi.demands_record(demand, cycle=1, session_id=first.session_id))
         host.step()
         assert host.attached
@@ -212,7 +205,8 @@ def test_detach_and_next_session(tmp_path):
         assert torch.equal(host.sim.imu._sigma, host.sim.imu._nominal_sigma)  # every session starts real
         assert int(host.sim.gantry.mode[0]) == 0
         _, truth = second.regions["truth"].read()
-        home = [host.desc.home_pose[j] for j in host.joints]  # the start pose
+        home_q = home_pose(host.desc, load_profile("ethrc_v1"))
+        home = [home_q[j] for j in host.joints]  # the start pose
         assert np.allclose(truth["joint_pos_rad"][: len(home)], home, atol=1e-4)
         assert float(truth["base_position_m"][2]) == pytest.approx(host._poses["home"][1] + 0.001, abs=1e-3)
 
@@ -247,12 +241,13 @@ def test_demand_intake_queues_what_the_record_says(tmp_path):
         p, n = sim.plant, len(sim.plant.map.drive_names)
         rng = np.random.default_rng(0)
         rec = np.zeros(n, abi.DRIVE_DEMAND)
-        rec["torque_enabled"], rec["mode"], rec["homing_hold"] = rng.integers(0, 2, n), -64, rng.integers(0, 2, n)
-        rec["mode"][:3] = [6, -62, 0]
+        rec["law"] = rng.integers(0, 3, n)
+        rec["law"][:2] = [7, 255]  # unknown laws: DISABLED
         for name in ("target_position_rad", "target_velocity_rad_s", "feedforward_torque_nm"):
             rec[name] = rng.normal(size=n)
-        for name in ("p_gain_raw", "d_gain_raw", "max_torque_mnm"):
-            rec[name] = rng.integers(0, 2**32 - 1, n)
+        for name in ("stiffness_nm_per_rad", "damping_nm_s_per_rad"):
+            rec[name] = rng.uniform(0, 500, n)
+        rec["torque_limit_nm"] = np.where(rng.integers(0, 2, n) == 1, np.inf, rng.uniform(0, 100, n))
         env = torch.tensor([0], device=device)
 
         def queued():
@@ -265,13 +260,14 @@ def test_demand_intake_queues_what_the_record_says(tmp_path):
 
         dt = p.cfg.dtype
         p.reset(env)
-        p.submit(DriveDemand(torque_enabled=t("torque_enabled", torch.bool), mode=t("mode", torch.int8),
+        law = t("law", torch.int16)
+        p.submit(DriveDemand(law=torch.where(law <= 2, law, torch.zeros_like(law)).to(torch.int8),
                              target_position_rad=t("target_position_rad", dt),
                              target_velocity_rad_s=t("target_velocity_rad_s", dt),
                              feedforward_torque_nm=t("feedforward_torque_nm", dt),
-                             p_gain_raw=t("p_gain_raw", torch.int64), i_gain_raw=t("i_gain_raw", torch.int64),
-                             d_gain_raw=t("d_gain_raw", torch.int64), max_torque_mnm=t("max_torque_mnm", torch.int64),
-                             homing_hold=t("homing_hold", torch.bool)),
+                             stiffness_nm_per_rad=t("stiffness_nm_per_rad", dt),
+                             damping_nm_s_per_rad=t("damping_nm_s_per_rad", dt),
+                             torque_limit_nm=t("torque_limit_nm", dt)),
                  torch.tensor([123_456_789], device=device))
         expected = queued()
         cuda = device.startswith("cuda")
@@ -300,12 +296,10 @@ def test_joint_disturbance_deflects_a_held_joint_and_clears(tmp_path):
         client = abi.Segment.open(path, wait_s=1)
         drives = client.descriptor()["drives"]
         n = len(drives)
-        gains = Description.load().table["baseline_position_gains"]
+        d = Description.load()
         hold = client.regions["feedback"].read()[1]["drive"]["position_rad"][:n].copy()
-        demand = {name: np.zeros(n) for name in abi.DRIVE_DEMAND.names if not name.startswith("_")}
-        demand |= {"torque_enabled": np.ones(n), "mode": np.full(n, -64), "target_position_rad": hold,
-                   "p_gain_raw": np.array([round(gains[d]["stiffness"] * 1000) for d in drives]),
-                   "d_gain_raw": np.array([round(gains[d]["damping"] * 1000) for d in drives])}
+        demand = abi.pd_demand(hold, [d.drives[x].baseline_stiffness for x in drives],
+                               [d.drives[x].baseline_damping for x in drives])
         client.regions["demands"].write(abi.demands_record(demand, cycle=1, session_id=client.session_id))
         j = host.joints.index("elbow_flexion_r")
 
@@ -360,16 +354,59 @@ def test_a_disabled_drive_is_back_driven_through_its_gearbox(tmp_path):
         assert friction(ankle) == pytest.approx(desc.joints["foot_pitch_r"].friction)  # cranks keep theirs
         client = abi.Segment.open(path, wait_s=1)
         n = client.num_drives
-        demand = {name: np.zeros(n) for name in abi.DRIVE_DEMAND.names if not name.startswith("_")}
-        demand |= {"torque_enabled": np.ones(n), "mode": np.full(n, -64),
-                   "target_position_rad": client.regions["feedback"].read()[1]["drive"]["position_rad"][:n].copy(),
-                   "p_gain_raw": np.full(n, 100_000), "d_gain_raw": np.full(n, 5_000)}
+        demand = abi.pd_demand(client.regions["feedback"].read()[1]["drive"]["position_rad"][:n].copy(), 100.0, 5.0)
         for cycle, enabled in enumerate((1, 0), start=1):
-            demand["torque_enabled"][:] = enabled
+            demand["law"][:] = abi.LAW_PD if enabled else abi.LAW_DISABLED
             client.regions["demands"].write(abi.demands_record(demand, cycle=cycle, session_id=client.session_id))
             host.step()
             expected = desc.joints["knee_r"].friction if enabled else backdrive
             assert friction(knee) == pytest.approx(expected)
+        client.close()
+    finally:
+        host.close()
+
+
+def test_the_host_serves_the_g1(tmp_path):
+    """Another robot in humanoid-urdf serves the same way: the G1's 29 motors take SI demands and the truth reports
+    its soles (the boxes bounding its contact spheres)."""
+    pytest.importorskip("isaaclab_newton")
+    import torch
+
+    from humanoid_sim.runtime.host import RuntimeHost
+
+    robot = "g1_29dof_with_hand_rev_1_0"
+    desc = Description.load(robot)
+    out = asset_dir(desc, load_profile(robot), REPO / "outputs" / "assets")
+    if not (out / "asset.json").exists():
+        pytest.skip(f"robot asset not built; run `humanoid-sim --robot {robot} build-asset` in the Isaac Lab image")
+    usd = out / json.loads((out / "asset.json").read_text())["usd"]
+    path = tmp_path / "plant"
+    host = RuntimeHost(path, usd, device="cpu", robot=robot, support="suspended", compile=False, truth_every=1)
+    try:
+        client = abi.Segment.open(path, robot_id=robot, description_digest=desc.digest, wait_s=1)
+        info = client.descriptor()
+        drives = info["drives"]
+        assert len(drives) == client.num_drives == 29
+        assert info["soles"] == ["left_ankle_roll_link", "right_ankle_roll_link"]
+        q, _ = host._named_pose("home")
+        hold = host.sim.plant.map.drive_state(q.to(host.sim.plant.cfg.dtype), torch.zeros_like(q))[0][0].numpy()
+        demand = abi.pd_demand(hold, [desc.drives[d].baseline_stiffness for d in drives],
+                               [desc.drives[d].baseline_damping for d in drives])
+        for cycle in range(1, 51):
+            client.regions["demands"].write(abi.demands_record(demand, cycle=cycle, session_id=client.session_id))
+            host.step()
+        assert host.attached
+        fb = _feedback(client)["drive"]
+        assert np.abs(fb["position_rad"][:29] - hold).max() < 0.1  # hanging, at the deploy gains
+        assert np.abs(fb["applied_torque_nm"][:29]).max() > 0.1
+        _, truth = client.regions["truth"].read()
+        soles = truth["sole"]
+        assert (soles["lowest_z_m"] > 0.2).all() and (soles["normal_force_n"] == 0).all()  # hung 0.3 m up
+        assert soles["position_m"][0][1] > soles["position_m"][1][1]  # left at +y: the G1 faces +x
+        demand["law"][:] = abi.LAW_DISABLED
+        client.regions["demands"].write(abi.demands_record(demand, cycle=51, session_id=client.session_id))
+        host.step()
+        assert np.abs(_feedback(client)["drive"]["demanded_torque_nm"][:29]).max() == 0.0
         client.close()
     finally:
         host.close()

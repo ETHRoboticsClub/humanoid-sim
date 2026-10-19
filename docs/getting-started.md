@@ -156,6 +156,12 @@ This runs on the CPU and needs no GPU. Each command prints the path of the USD i
 
 The `--base-joints` variant adds yaw, pitch and roll joints above the base so a replay can turn the robot the way the capture's IMU says it turned. [robot-model.md](robot-model.md) explains the build.
 
+The commands above build the ETHRC V1. Another robot of the description is selected with `--robot` before the subcommand, for every command, for example the Unitree G1 that Controls runs:
+
+```bash
+hsim --robot g1_29dof_with_hand_rev_1_0 build-asset
+```
+
 ## A first replay
 
 A replay feeds the drive demands recorded in a capture to the simulated drives and compares the simulated drive feedback with the recorded one. With the captures mounted, replay the first five seconds of one capture on Warp's CPU device:

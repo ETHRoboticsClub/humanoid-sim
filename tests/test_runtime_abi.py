@@ -111,15 +111,21 @@ def test_demands_record_round_trip(tmp_path):
     sim = _create(path)
     client = abi.Segment.open(path)
     n = 22
-    demand = {"torque_enabled": np.ones(n), "mode": np.full(n, -64), "homing_hold": np.zeros(n),
-              "target_position_rad": np.linspace(-1, 1, n), "target_velocity_rad_s": np.zeros(n),
-              "feedforward_torque_nm": np.zeros(n), "p_gain_raw": np.full(n, 320000), "i_gain_raw": np.zeros(n),
-              "d_gain_raw": np.full(n, 12000), "max_torque_mnm": np.zeros(n)}
+    demand = abi.pd_demand(np.linspace(-1, 1, n), 320.0, 12.0, torque_limit_nm=np.full(n, 40.0))
+    demand["law"][0] = abi.LAW_FREEZE
     client.regions["demands"].write(abi.demands_record(demand, cycle=5, session_id=client.session_id))
     _, rec = sim.regions["demands"].read()
     assert int(rec["cycle"]) == 5 and int(rec["session_id"]) == sim.session_id and int(rec["num_drives"]) == n
     np.testing.assert_array_equal(rec["drive"]["target_position_rad"][:n], demand["target_position_rad"])
-    assert int(rec["drive"]["mode"][0]) == -64 and int(rec["drive"]["p_gain_raw"][n - 1]) == 320000
+    assert int(rec["drive"]["law"][0]) == abi.LAW_FREEZE and int(rec["drive"]["law"][1]) == abi.LAW_PD
+    assert float(rec["drive"]["stiffness_nm_per_rad"][n - 1]) == 320.0
+    assert float(rec["drive"]["torque_limit_nm"][n - 1]) == 40.0
+
+
+def test_a_pd_demand_has_no_torque_limit():
+    demand = abi.pd_demand(np.zeros(3), [1.0, 2.0, 3.0], 0.5)
+    assert (demand["law"] == abi.LAW_PD).all() and np.isinf(demand["torque_limit_nm"]).all()
+    assert demand["stiffness_nm_per_rad"].tolist() == [1.0, 2.0, 3.0] and demand["damping_nm_s_per_rad"][2] == 0.5
 
 
 def _writer(path, n, ready):

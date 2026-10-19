@@ -1,4 +1,5 @@
-"""Runtime segment ABI: the shared-memory file between humanoid-sim's real-time host and Controls' plant host.
+"""Runtime segment ABI: the shared-memory file between humanoid-sim's real-time host and a client that plays the
+robot's devices (Controls' fake EtherCAT bank for the ETHRC V1, its fake Unitree board for the G1).
 
 Self-contained (Python >= 3.10, NumPy only) so Controls can vendor it unchanged next to ``plant_abi.h``, which
 declares the same layout for C and C++.
@@ -11,7 +12,7 @@ region      writer  contents
 header      sim     magic, ABI version, layout hash, sizes, session id, robot id, digests, periods, state,
                     heartbeat
 descriptor  sim     JSON: drive and joint names, units, profile, revisions, fidelity notes
-demands     client  bus cycle, client clock, session echo, one ``FakeDriveDemand`` mirror per drive
+demands     client  bus cycle, client clock, session echo, one SI ``DriveDemand`` per drive (law, targets, gains)
 feedback    sim     sim time, physical drive feedback per drive, lateness, the latest raw IMU samples
 mailbox     client  one command at a time: sequence number, command code, JSON arguments
 ack         sim     the last command handled: its sequence number, a result code and a message
@@ -34,8 +35,9 @@ the new session.
 Time: ``*_mono_ns`` fields are ``CLOCK_MONOTONIC`` of the writing process; ``sim_time_ns`` and the IMU samples'
 ``sample_ns`` and ``stamp_ns`` are plant time. The feedback region maps plant time ``t`` to the sim host's clock:
 ``written_mono_ns - (sim_time_ns - t)``. Identity: the description digest is :func:`description_digest`.
-Physical quantities are SI in the physical drive-output frame (crank angle for the ankle cranks), as Controls'
-``fake_bank_feedback`` takes them.
+Physical quantities are SI in the physical drive-output frame (crank angle for the ankle cranks). Demands are
+vendor-neutral: a client converts its device's command (an EPOS4's CiA-402 mode and raw JVPT gains, a Unitree
+motor's LowCmd entry) into a law with SI targets and gains at its own boundary (ABI 2.0).
 """
 
 from __future__ import annotations
@@ -51,13 +53,13 @@ from pathlib import Path
 
 import numpy as np
 
-ABI_MAJOR = 1
-ABI_MINOR = 1
+ABI_MAJOR = 2
+ABI_MINOR = 0
 MAGIC = b"HSIMPLNT"
 ALIGN = 64
 
 # Sizes fixed by the ABI (a robot with more drives or joints needs a new major version).
-MAX_DRIVES = 32
+MAX_DRIVES = 64
 MAX_JOINTS = 64
 IMU_SAMPLES = 32  # latest delivered samples kept in the feedback region, newest first
 DESCRIPTOR_BYTES = 16384
@@ -81,9 +83,9 @@ STATE_CREATING, STATE_READY, STATE_ENDED = 0, 1, 2
 # INJECT_FAULT     {"fault": name, "drive": name | null, "value": number, "duration_s": s | null}
 # PRESCRIBE_POSE   {"joint_pos": {...}, "base_pose": [...] | null, "floor_clearance_m": m | null}: hold a pose
 #                  (the base dropped so its lowest sole corner sits that far above the floor); {"release": true}
-# DETACH           {}: the client is leaving; the sim acks and ends the session (ABI 1.1)
+# DETACH           {}: the client is leaving; the sim acks and ends the session
 # SET_FIDELITY     {"imu": "ideal" | "real"}: the IMU without or with its white noise, for this session; every
-#                  session starts real (ABI 1.1)
+#                  session starts real
 CMD_NONE = 0
 CMD_RESET = 1
 CMD_PAUSE = 2
@@ -145,19 +147,21 @@ HEADER = np.dtype(
     align=True,
 )
 
+# Drive laws (DriveDemand.law).
+LAW_DISABLED = 0  # no torque
+LAW_PD = 1  # kp (target - q) + kd (target_velocity - v) + feedforward
+LAW_FREEZE = 2  # PD about the position the drive reads when it enters FREEZE, no velocity target or feedforward
+
 DRIVE_DEMAND = np.dtype(
     [
-        ("torque_enabled", "<i4"),
-        ("mode", "i1"),
-        ("homing_hold", "u1"),
-        ("_pad0", "u1", (2,)),
+        ("law", "u1"),
+        ("_pad0", "u1", (7,)),
         ("target_position_rad", "<f8"),
         ("target_velocity_rad_s", "<f8"),
         ("feedforward_torque_nm", "<f8"),
-        ("p_gain_raw", "<u4"),
-        ("i_gain_raw", "<u4"),
-        ("d_gain_raw", "<u4"),
-        ("max_torque_mnm", "<u4"),
+        ("stiffness_nm_per_rad", "<f8"),
+        ("damping_nm_s_per_rad", "<f8"),
+        ("torque_limit_nm", "<f8"),  # a cap on the applied torque; inf: none
     ],
     align=True,
 )
@@ -405,7 +409,8 @@ class Segment:
         path = Path(path)
         tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
         fd = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o660)
-        os.fchmod(fd, 0o660)  # owner and group read-write whatever the umask, so a client in the group can attach
+        # Owner and group read-write whatever the umask, so a client in the group can attach.
+        os.fchmod(fd, 0o660)
         os.ftruncate(fd, SEGMENT_BYTES)
         mm = mmap.mmap(fd, SEGMENT_BYTES)
         seg = cls(path, mm, fd)
@@ -597,9 +602,27 @@ class Segment:
         raise TimeoutError(f"no ack for command {seq} within {timeout_s} s")
 
 
+def pd_demand(
+    target_position_rad, stiffness_nm_per_rad, damping_nm_s_per_rad, *, law: int = LAW_PD, **fields
+) -> dict[str, np.ndarray]:
+    """Per-drive arrays for :func:`demands_record`: every drive on ``law`` about its target at the given gains, no
+    velocity target, feed-forward or torque limit unless ``fields`` names them."""
+    target = np.asarray(target_position_rad, dtype=np.float64)
+    n = len(target)
+    demand = {name: np.zeros(n) for name in DRIVE_DEMAND.names if not name.startswith("_")}
+    demand |= {
+        "law": np.full(n, law),
+        "target_position_rad": target.copy(),
+        "torque_limit_nm": np.full(n, np.inf),
+        "stiffness_nm_per_rad": np.broadcast_to(stiffness_nm_per_rad, n).astype(np.float64),
+        "damping_nm_s_per_rad": np.broadcast_to(damping_nm_s_per_rad, n).astype(np.float64),
+    }
+    return demand | {k: np.broadcast_to(v, n).copy() for k, v in fields.items()}
+
+
 def demands_record(demand: dict[str, np.ndarray], *, cycle: int, session_id: int) -> np.ndarray:
     """Build a demands record from per-drive arrays named as :data:`DRIVE_DEMAND`'s fields."""
-    n = len(demand["mode"])
+    n = len(demand["law"])
     rec = np.zeros((), DEMANDS)
     rec["cycle"], rec["written_mono_ns"], rec["session_id"], rec["num_drives"] = (
         cycle,

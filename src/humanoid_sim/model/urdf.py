@@ -3,9 +3,11 @@
 Applied, in order:
 1. weld every movable joint that has no actuators.yaml entry (the ORCA hands; Controls ``--fixed-orca-hands``);
 2. joint ranges: the description's calibration travel (Controls ``ethrc_ssot/joint_travel.py`` rule);
-3. sole boxes: on the body carrying each ``foot_roll`` joint, fit a thin box to the face of its lowest
-   collision mesh (including meshes of fixed-joint children), add the box, drop that mesh's collision.
-   Algorithm: Controls ``build_mjcf.py`` ``sole_plate`` @ 447b4acb, unchanged;
+3. sole boxes: on the child body of each profile ``sole.joints`` joint, fit a thin box to the face of its
+   lowest collision mesh (including meshes of fixed-joint children), add the box, drop that mesh's collision.
+   Algorithm: Controls ``build_mjcf.py`` ``sole_plate`` @ 447b4acb, unchanged. With ``sole.fit: bounds`` (a
+   robot whose feet carry their own contact shapes, as the G1's four spheres) the box bounds those shapes
+   instead and only describes the sole: the collision geometry stays as it is;
 4. one hull per body (profile ``collision_hulls: per_body``): every remaining collision mesh of a
    body and of its fixed-joint children becomes one mesh in the body frame, so the converter makes one
    convex hull per body. Against the ground plane the hull of the union reaches exactly as far as the
@@ -38,7 +40,7 @@ from humanoid_sim.model.description import Description
 class SoleBox:
     side: str
     body: str
-    mesh: str  # file name of the plate mesh it replaces
+    mesh: str | None  # file name of the plate mesh it replaces (None: it bounds the foot's own shapes)
     center: np.ndarray  # in the body frame (m)
     rotation: np.ndarray  # 3x3, box axes in the body frame (z up into the plate)
     half_extents: np.ndarray  # (m)
@@ -129,7 +131,7 @@ class PreparedUrdf:
     def __init__(self, desc: Description, profile: dict):
         self.desc = desc
         self.model_cfg = profile["model"]
-        self.source = desc.package_dir / self.model_cfg["urdf"]
+        self.source = desc.package_dir / self.model_cfg.get("urdf", desc.table["urdf"])
         self.tree = ET.parse(self.source)
         self.root = self.tree.getroot()
         self.welded: list[str] = []
@@ -190,10 +192,18 @@ class PreparedUrdf:
                 yield from self._fixed_subtree(j.find("child").get("link"), tf @ _origin(j.find("origin")))
 
     def add_sole_boxes(self) -> None:
-        sole = self.model_cfg["sole"]
+        sole = self.model_cfg.get("sole")
+        if sole is None:
+            return
+        fit = sole.get("fit", "plate")
+        if fit not in ("plate", "bounds"):
+            raise ValueError(f"sole fit {fit!r}: plate or bounds")
         for side, joint_name in sole["joints"].items():
             joint = next(j for j in self._joints if j.get("name") == joint_name)
             body = joint.find("child").get("link")
+            if fit == "bounds":
+                self.soles.append(self._bounding_sole(side, body))
+                continue
             candidates = []
             for link_name, tf in self._fixed_subtree(body, np.eye(4)):
                 for col in self._links[link_name].findall("collision"):
@@ -212,6 +222,39 @@ class PreparedUrdf:
             geom = ET.SubElement(box, "geometry")
             ET.SubElement(geom, "box", {"size": " ".join(f"{2 * v:.9g}" for v in half)})
             self.soles.append(SoleBox(side, body, Path(mesh.get("filename")).name, center, rot, half))
+
+    def _bounding_sole(self, side: str, body: str) -> SoleBox:
+        """The box, in the body frame and along its axes, bounding the collision shapes of ``body`` and its
+        fixed-joint children."""
+        pts = []
+        for link_name, tf in self._fixed_subtree(body, np.eye(4)):
+            for col in self._links[link_name].findall("collision"):
+                pts.append(self._collision_extent(col, tf))
+        if not pts:
+            raise RuntimeError(f"sole body {body} has no collision shapes")
+        pts = np.concatenate(pts)
+        lo, hi = pts.min(axis=0), pts.max(axis=0)
+        return SoleBox(side, body, None, (lo + hi) / 2, np.eye(3), (hi - lo) / 2)
+
+    def _collision_extent(self, col, tf: np.ndarray) -> np.ndarray:
+        """Points whose bounding box is the collision element's, in the frame ``tf`` maps its link into."""
+        mesh = self._mesh_vertices(col, tf)
+        if mesh is not None:
+            return mesh
+        t = tf @ _origin(col.find("origin"))
+        geom = col.find("geometry")[0]
+        if geom.tag == "sphere":
+            r = float(geom.get("radius"))
+            return t[:3, 3] + np.vstack([np.eye(3) * r, -np.eye(3) * r])
+        if geom.tag == "box":
+            half = np.array([float(v) for v in geom.get("size").split()]) / 2
+        elif geom.tag in ("cylinder", "capsule"):
+            r, length = float(geom.get("radius")), float(geom.get("length"))
+            half = np.array([r, r, length / 2 + (r if geom.tag == "capsule" else 0.0)])
+        else:
+            raise ValueError(f"collision geometry {geom.tag!r}")
+        corners = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]) * half
+        return corners @ t[:3, :3].T + t[:3, 3]
 
     def _mesh_vertices(self, col, tf: np.ndarray) -> np.ndarray | None:
         """Vertices of a mesh collision element in the frame ``tf`` maps its link into (None: primitive)."""

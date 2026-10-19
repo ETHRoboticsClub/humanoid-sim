@@ -21,7 +21,7 @@ from dataclasses import dataclass, fields
 import torch
 
 from humanoid_sim.devices.bank import DriveBank, DriveOutput
-from humanoid_sim.devices.demand import JVPT_PER_SI_GAIN, DriveDemand
+from humanoid_sim.devices.demand import LAW_DISABLED, DriveDemand
 from humanoid_sim.devices.envelope import TorqueSpeedEnvelope
 from humanoid_sim.devices.feedback import DriveFeedback
 from humanoid_sim.devices.shaping import outside_stable_region, shaped_position_target
@@ -47,7 +47,8 @@ class PlantCore:
         dev, dt = cfg.device, cfg.dtype
         self.map = DriveJointMap(desc, joint_names, device=dev, dtype=dt)
         drives = [desc.drives[n] for n in self.map.drive_names]
-        self.envelope = TorqueSpeedEnvelope([desc.torque_speed(d.family) for d in drives], device=dev, dtype=dt)
+        self.envelope = TorqueSpeedEnvelope([desc.torque_speed(d.family) for d in drives],
+                                            braking=[desc.braking_limit(d.name) for d in drives], device=dev, dtype=dt)
         self.bank = DriveBank(self.envelope, num_envs, self.map.num_drives, queue_capacity=cfg.queue_capacity,
                               device=dev, dtype=dt)
         self.drive_stiffness = torch.tensor([d.baseline_stiffness for d in drives], device=dev, dtype=dt)
@@ -79,9 +80,8 @@ class PlantCore:
         # the realized gains (randomized scales included) of the envs this demand reaches.
         bank = self.bank
         flagged = outside_stable_region(
-            demand.p_gain_raw.to(self.cfg.dtype) / JVPT_PER_SI_GAIN * bank.p_scale,
-            demand.d_gain_raw.to(self.cfg.dtype) / JVPT_PER_SI_GAIN * bank.d_scale,
-            self.drive_stiffness, self.drive_damping) & demand.torque_enabled
+            demand.stiffness_nm_per_rad * bank.p_scale, demand.damping_nm_s_per_rad * bank.d_scale,
+            self.drive_stiffness, self.drive_damping) & (demand.law != LAW_DISABLED)
         if env_mask is not None:
             flagged &= env_mask.unsqueeze(1)
         self.gain_warnings |= flagged

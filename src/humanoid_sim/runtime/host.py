@@ -21,10 +21,10 @@ client attaches, a session holds the robot in its start pose (home; the base too
 starts when the client does, as a plant started with its client would: a robot left hanging with idle drives
 between clients would sag to its rest pose first.
 
-A disabled drive is back-driven through its gearbox: while a 1:1 drive is off (torque disabled, or a mode it does
-not run), its joint's Coulomb friction is the family's ``backdrive_torque`` instead of the enabled-drive friction,
-as in Controls' MuJoCo plant (the ankle joints keep theirs: the cranks have no joint-space figure). The friction is
-written when a drive turns on or off, not every step.
+A disabled drive is back-driven through its gearbox: while a 1:1 drive's law is DISABLED, its joint's Coulomb
+friction is the family's ``backdrive_torque`` (the joint's own friction when the family has none) instead of the
+enabled-drive friction, as in Controls' MuJoCo plant (the ankle joints keep theirs: the cranks have no joint-space
+figure). The friction is written when a drive turns on or off, not every step.
 
 IMU sample times (``sample_ns``, ``stamp_ns``) are plant time; the feedback region's ``sim_time_ns`` and
 ``written_mono_ns`` map them to the host clock.
@@ -41,7 +41,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from humanoid_sim.devices.demand import MODE_FREEZE, MODE_HOMING, MODE_JVPT, DriveDemand
+from humanoid_sim.devices.demand import LAW_FREEZE, DriveDemand
 from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.supports import _quat_rotate
@@ -50,7 +50,6 @@ EXIT_DONE = 0  # max steps or a stop request
 EXIT_CLIENT_LOST = 3
 EXIT_DETACHED = 4
 
-RUNNING_MODES = (MODE_JVPT, MODE_FREEZE, MODE_HOMING)  # 0x6061 modes a drive acts in (homing holds)
 
 KEEPING_UP_WINDOW_NS = NS_PER_S
 SPIN_NS = 100_000  # sleep until this close to a deadline, then spin
@@ -69,8 +68,8 @@ class _DemandIntake:
     copied to the device in one transfer; unpacking and queueing run there, as a CUDA graph on CUDA (otherwise a
     new demand every bus cycle costs more than the physics). The arrival time travels in the same buffer."""
 
-    FIELDS = ("torque_enabled", "mode", "target_position_rad", "target_velocity_rad_s", "feedforward_torque_nm",
-              "p_gain_raw", "i_gain_raw", "d_gain_raw", "max_torque_mnm", "homing_hold")
+    FIELDS = ("law", "target_position_rad", "target_velocity_rad_s", "feedforward_torque_nm", "stiffness_nm_per_rad",
+              "damping_nm_s_per_rad", "torque_limit_nm")
 
     def __init__(self, plant, num_drives: int, device: torch.device, *, cuda_graph: bool, compile: bool,
                  warmup: int = 3):
@@ -95,11 +94,11 @@ class _DemandIntake:
     def _unpack_and_submit(self) -> None:
         f = self.dev[:-1].view(len(self.FIELDS), 1, self.n)
         dt = self.plant.cfg.dtype
-        demand = DriveDemand(torque_enabled=f[0] != 0, mode=f[1].to(torch.int8), target_position_rad=f[2].to(dt),
-                             target_velocity_rad_s=f[3].to(dt), feedforward_torque_nm=f[4].to(dt),
-                             p_gain_raw=f[5].to(torch.int64), i_gain_raw=f[6].to(torch.int64),
-                             d_gain_raw=f[7].to(torch.int64), max_torque_mnm=f[8].to(torch.int64),
-                             homing_hold=f[9] != 0)
+        law = f[0].to(torch.int16)  # u1 on the wire: 0 to 255
+        law = torch.where(law <= LAW_FREEZE, law, torch.zeros_like(law)).to(torch.int8)  # unknown: DISABLED
+        demand = DriveDemand(law=law, target_position_rad=f[1].to(dt), target_velocity_rad_s=f[2].to(dt),
+                             feedforward_torque_nm=f[3].to(dt), stiffness_nm_per_rad=f[4].to(dt),
+                             damping_nm_s_per_rad=f[5].to(dt), torque_limit_nm=f[6].to(dt))
         self.plant.submit(demand, self.dev[-1:].view(torch.int64))
 
     def __call__(self, drive: np.ndarray, arrival_ns: int) -> None:
@@ -168,8 +167,10 @@ class RuntimeHost:
         self._backdrive_joint_ids = [self.robot.joint_names.index(self.joints[j]) for _, j in one_to_one]
         self._friction_on = torch.tensor([[self.desc.joints[self.joints[j]].friction for _, j in one_to_one]],
                                          device=self.device)
-        self._friction_off = torch.tensor([[float(self.desc.family(self.desc.drives[self.drives[k]].family)[
-            "backdrive_torque"]) for k, _ in one_to_one]], device=self.device)
+        # A family without a recorded backdrive_torque keeps the enabled friction.
+        self._friction_off = torch.tensor([[float(self.desc.family_value(
+            self.desc.drives[self.drives[k]].family, "backdrive_torque",
+            self.desc.joints[self.joints[j]].friction)) for k, j in one_to_one]], device=self.device)
         self._drive_off: np.ndarray | None = None
         # Device-to-host copies: into pinned buffers, waited for on a blocking event (the host thread sleeps
         # instead of spinning while the GPU finishes: it shares the machine with Controls).
@@ -537,7 +538,7 @@ class RuntimeHost:
         self._client_mono_ns = int(rec["written_mono_ns"])
         drive = rec["drive"][:len(self.drives)]
         self._intake(drive, self.sim.t_ns)
-        running = (drive["torque_enabled"] != 0) & (drive["i_gain_raw"] == 0) & np.isin(drive["mode"], RUNNING_MODES)
+        running = drive["law"] != abi.LAW_DISABLED
         self._set_drives_off(~running)
 
     def _set_drives_off(self, off: np.ndarray) -> None:

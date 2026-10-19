@@ -46,7 +46,7 @@ def _env(num_envs=2):
             q = q.expand(self.num_envs, -1)
             stand, _, _ = p.map.drive_state(q, torch.zeros_like(q))
             n = self.num_envs
-            return (DriveDemand.jvpt(stand + actions, p.drive_stiffness.expand(n, -1), p.drive_damping.expand(n, -1)),
+            return (DriveDemand.pd(stand + actions, p.drive_stiffness.expand(n, -1), p.drive_damping.expand(n, -1)),
                     torch.full((n,), self.plant.t_ns, device=self.device))
 
     def drive_position(env):

@@ -3,7 +3,7 @@
 The environment owns the scene (:func:`~humanoid_sim.train.scene.robot_scene_cfg`) and the stepping; the plant
 sits between demands and the solver:
 
-* :meth:`RobotPlant.submit` queues one ``FakeDriveDemand`` mirror per env and drive, sent at ``sent_ns``; it
+* :meth:`RobotPlant.submit` queues one SI ``DriveDemand`` per env and drive, sent at ``sent_ns``; it
   takes effect one bus and drive latency later (per env and drive, randomized);
 * :meth:`RobotPlant.pre_physics`, once before every physics step (an action term's ``apply_actions``): samples
   the sensors at the step start, runs the drive bank over the step and writes the solver PD targets;
@@ -100,7 +100,7 @@ class RobotPlant:
         self._hist_ns = torch.full((e, h), -1, dtype=torch.int64, device=self.device)
 
         self.reporting = None
-        if cfg.reporting:
+        if cfg.reporting and self.profile.get("devices", {}).get("encoders"):  # else exact values
             from humanoid_sim.devices.reporting import DriveReporting
 
             self.reporting = DriveReporting.for_drives(self.desc, self.drives, self.profile, device=self.device,

@@ -1,4 +1,4 @@
-"""A training scene on the Train-Time API: many robots on rough terrain, each holding the home pose at the
+"""A training scene on the Train-Time API: many robots on bumpy heightfield terrain, each holding the home pose at the
 baseline gains while it waves its arms, with randomized friction, base mass and drive latency, and random pushes.
 Optionally recorded to Rerun with `humanoid_sim.signals.scene.SceneRecorder`.
 
@@ -33,13 +33,14 @@ def make_env(num_envs: int, device: str, *, flat: bool):
         RewardTermCfg,
         TerminationTermCfg,
     )
+    from isaaclab.terrains.height_field import HfRandomUniformTerrainCfg
     from isaaclab.utils import configclass
 
     from humanoid_sim.devices.demand import DriveDemand
     from humanoid_sim.train import TrainPlantCfg
     from humanoid_sim.train.isaaclab import PlantAction, PlantActionCfg
     from humanoid_sim.train.scene import robot_scene_cfg, robot_sim_cfg
-    from humanoid_sim.world.terrain import rough_terrain_cfg
+    from humanoid_sim.world.terrain import heightfield_terrain_cfg
 
     class ScriptedDrives(PlantAction):
         """The scene's default pose (the home pose) at the baseline gains, plus an arm wave with a phase per
@@ -57,7 +58,7 @@ def make_env(num_envs: int, device: str, *, flat: bool):
             wave = 0.5 * (1 - torch.cos(2 * math.pi * 0.5 * t + phase)).unsqueeze(1)
             q = stand + amp * wave
             drive_q, _, _ = core.map.drive_state(q, torch.zeros_like(q))
-            demand = DriveDemand.jvpt(drive_q, core.drive_stiffness.expand(n, -1), core.drive_damping.expand(n, -1))
+            demand = DriveDemand.pd(drive_q, core.drive_stiffness.expand(n, -1), core.drive_damping.expand(n, -1))
             return demand, torch.full((n,), self.plant.t_ns, device=self.device)
 
     def base_height(env):
@@ -102,9 +103,11 @@ def make_env(num_envs: int, device: str, *, flat: bool):
         events = Events()
 
     cfg = SceneCfg()
-    # One row of 2.5 m tiles, one per robot: Isaac Lab spawns envs that share a tile on the same spot.
-    terrain = None if flat else rough_terrain_cfg(friction=0.0, rows=1, cols=num_envs, size_m=2.5, border_m=3.0,
-                                                  curriculum=False)
+    # One row of 2.5 m tiles, one per robot: Isaac Lab spawns envs that share a tile on the same spot. The tile mix
+    # is this example's; a task takes its terrain from its own generator (humanoid-learning).
+    bumps = {"bumps": HfRandomUniformTerrainCfg(proportion=1.0, noise_range=(0.0, 0.025), noise_step=0.005)}
+    terrain = None if flat else heightfield_terrain_cfg(bumps, friction=0.0, rows=1, cols=num_envs, size_m=2.5,
+                                                        border_m=3.0, curriculum=False)
     cfg.scene = robot_scene_cfg(num_envs, robot_usd(), terrain=terrain, ground_friction=0.0 if flat else None,
                                 env_spacing=2.0)
     cfg.sim = robot_sim_cfg(device=device)
@@ -127,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--rrd", default=None, help="record the scene to this Rerun file")
     p.add_argument("--record-every", type=int, default=2, help="record every this many policy steps")
-    p.add_argument("--flat", action="store_true", help="a flat ground plane instead of rough terrain")
+    p.add_argument("--flat", action="store_true", help="a flat ground plane instead of the bumpy terrain")
     args = p.parse_args(argv)
 
     from humanoid_sim.world.disturbances import ForcePush

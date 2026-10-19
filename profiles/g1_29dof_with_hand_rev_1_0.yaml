@@ -1,0 +1,21 @@
+# Plant modeling choices for the Unitree G1 29-DoF rev 1.0 with hands (the G1 Controls launches), merged over
+# profiles/defaults.yaml. Robot facts are NOT here: they come from third_party/humanoid-urdf/g1_29dof_with_hand_rev_1_0.
+schema: humanoid-sim-profile/v1
+robot: g1_29dof_with_hand_rev_1_0
+
+# home: Unitree's deploy standing pose, slightly bent knees (position-presets.yaml standing-init-v1, which
+# Controls' ethrc_ssot/standing_pose.py also uses).
+model:
+  # Each foot touches the ground with four 5 mm spheres of the URDF. The sole box bounds them (it describes the
+  # sole for the runtime truth and adds no collision).
+  sole:
+    joints: {l: left_ankle_roll_joint, r: right_ankle_roll_joint}
+    fit: bounds
+
+poses:
+  home: {preset: standing-init-v1}
+
+physics:
+  # Self-collision off, as Isaac Lab's own G1 articulations have it (isaaclab_assets robots/unitree.py,
+  # G1_29DOF_CFG: enabled_self_collisions=False). The URDF's convex hulls of neighbouring links overlap at rest.
+  self_collision: false

@@ -3,6 +3,7 @@ push the left forearm, then detach.
 
     humanoid-sim serve --segment /tmp/hsim/plant --device cuda:0 &
     python examples/runtime_client.py /tmp/hsim/plant --seconds 20
+    # any robot in humanoid-urdf: pass --robot to both, e.g. --robot g1_29dof_with_hand_rev_1_0
     humanoid-sim view-runtime /tmp/hsim/plant          # in another shell, to watch
 
 Controls' plant host does the same job in production: it writes one demand record per bus cycle and reads the
@@ -22,35 +23,34 @@ from humanoid_sim.model.description import Description
 from humanoid_sim.runtime.abi import plant_abi as abi
 
 BUS_PERIOD_S = 0.0015  # Controls' EtherCAT cycle
-WAVE = {"shoulder_flexion_l": -0.6, "shoulder_flexion_r": 0.6, "elbow_flexion_l": 0.5, "elbow_flexion_r": 0.5}
+WAVE = {"shoulder_flexion_l": -0.6, "shoulder_flexion_r": 0.6, "elbow_flexion_l": 0.5, "elbow_flexion_r": 0.5,
+        "left_shoulder_pitch_joint": -0.6, "right_shoulder_pitch_joint": -0.6,
+        "left_elbow_joint": 0.5, "right_elbow_joint": 0.5}
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("segment")
+    p.add_argument("--robot", default="ethrc_v1", help="the robot the server runs")
     p.add_argument("--seconds", type=float, default=20.0)
     p.add_argument("--wave-hz", type=float, default=0.4)
     p.add_argument("--push-at", type=float, default=8.0, help="seconds after attaching (negative: no push)")
     args = p.parse_args(argv)
 
-    desc = Description.load()
+    desc = Description.load(args.robot)
     seg = abi.Segment.open(args.segment, robot_id=desc.robot, description_digest=desc.digest, wait_s=300)
     info = seg.descriptor()
     drives, bodies = info["drives"], info["bodies"]
     n = len(drives)
     # Push a forearm: on a suspended robot (serve's default support) the base doesn't move.
-    pushed_body = next((b for b in bodies if "elbow" in b and b.endswith("l_1")), bodies[0])
+    pushed_body = next((b for b in bodies if "elbow" in b and (b.startswith("left") or b.endswith("l_1"))), bodies[0])
     joint_of = {d: desc.drives[d].joints[0] for d in drives}
 
-    # Start from where the robot is, at the description's baseline gains (raw JVPT units: 1000 per SI unit).
+    # Start from where the robot is, at the description's baseline gains (SI: N m/rad, N m s/rad).
     _, fb = seg.regions["feedback"].read()
     hold = fb["drive"]["position_rad"][:n].copy()
-    gains = desc.table["baseline_position_gains"]
-    demand = {"torque_enabled": np.ones(n), "mode": np.full(n, -64), "homing_hold": np.zeros(n),
-              "target_position_rad": hold.copy(), "target_velocity_rad_s": np.zeros(n),
-              "feedforward_torque_nm": np.zeros(n), "i_gain_raw": np.zeros(n), "max_torque_mnm": np.zeros(n),
-              "p_gain_raw": np.array([round(gains[d]["stiffness"] * 1000) for d in drives]),
-              "d_gain_raw": np.array([round(gains[d]["damping"] * 1000) for d in drives])}
+    demand = abi.pd_demand(hold, [desc.drives[d].baseline_stiffness for d in drives],
+                           [desc.drives[d].baseline_damping for d in drives])
     # Drive frame = sign * joint angle; the description gives each direct drive's sign.
     wave = np.zeros(n)
     for i, d in enumerate(drives):

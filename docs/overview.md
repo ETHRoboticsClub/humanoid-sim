@@ -1,6 +1,6 @@
 # How humanoid-sim fits together
 
-humanoid-sim simulates the ETHRC humanoid from the EtherCAT drives down: the 22 drives, the ankle linkage and the body, with physics on Isaac Lab 3.0 and Newton's MJWarp solver. Everything above the drives (the controller, the policy, the IMU filter, safety logic) belongs to Controls and is not part of this repo. The sim takes what the master would send each drive and returns what each drive and the IMU would report.
+humanoid-sim simulates humanoids from the drives down, with physics on Isaac Lab 3.0 and Newton (MJWarp or Kamino): the ETHRC humanoid's 22 EtherCAT drives, ankle linkage and body, and any other robot in humanoid-urdf, such as the Unitree G1 ([robot-model.md](robot-model.md#robots)). Everything above the drives (the controller, the policy, the IMU filter, safety logic) belongs to Controls and is not part of this repo. The sim takes what the robot's host would send each drive, as a vendor-neutral SI drive demand, and returns what each drive and the IMU would report.
 
 The same plant code serves three uses:
 
@@ -18,7 +18,7 @@ The same plant code serves three uses:
 flowchart TB
     rl["humanoid-learning<br/>tasks, rewards, curriculum"]
     controls["ETHRC-Humanoid-Controls<br/>production runtime"]
-    adapter["Runtime adapter<br/>simulated devices and sensors<br/>(Controls' plant host and fake EtherCAT bank,<br/>this repo's runtime/ host and segment)"]
+    adapter["Runtime adapter<br/>simulated devices and sensors<br/>(Controls' plant hosts: fake EtherCAT bank, fake G1 board;<br/>this repo's runtime/ host and segment)"]
     sim["humanoid-sim<br/>robot, world, actuator and sensor models"]
     physics["Isaac Lab 3.0<br/>Newton: MJWarp or Kamino"]
     urdf["humanoid-urdf<br/>robot facts"]
@@ -32,11 +32,21 @@ flowchart TB
 
 Each repo owns one layer:
 
-- humanoid-learning (`ETHRoboticsClub/humanoid-learning`, with this repo as a submodule) owns tasks, observations, rewards, terminations, curricula and policies. humanoid-sim offers the knobs a curriculum turns, such as the terrain's difficulty rows (`rough_terrain_cfg(curriculum=...)`) and a randomization level (`Randomizer.set_level`), but never decides when to turn them. The example environments in `examples/` and [training.md](training.md) only show how a task uses the API.
+- humanoid-learning (`ETHRoboticsClub/humanoid-learning`, with this repo as a submodule) owns tasks, observations, rewards, terminations, terrain generators, curricula, policies and every evaluation of a policy. humanoid-sim offers the mechanisms and the knobs a task turns, such as a heightfield terrain built from the tiles and grid the task gives (`heightfield_terrain_cfg`) and a randomization level (`Randomizer.set_level`), but never chooses them or decides when to turn them. The example environments in `examples/` and [training.md](training.md) only show how a task uses the API.
 - humanoid-sim owns the models: the robot (`model/`), the world (`world/`), the actuators (`timing/`, `devices/`, `transmissions/`), the sensors (`sensors/`), and the randomization of their parameters, whose ranges the task chooses. Training reaches them through the Train-Time API, batched torch tensors over `[envs, ...]`.
-- Controls owns the production runtime. It drives the simulated robot the way it drives the real one: Controls' plant host and fake EtherCAT bank present simulated drives and an IMU to the rest of Controls, and exchange demands and feedback with this repo's runtime host (`runtime/`) through a shared-memory segment. Nothing here imports Controls; Controls copies one file, the segment's ABI (`runtime/abi/plant_abi.py`).
+- Controls owns the production runtime. It drives the simulated robot the way it drives the real one: Controls' plant host and its device peer (the fake EtherCAT bank for the ETHRC V1, the fake motor board for the G1) present simulated drives and an IMU to the rest of Controls, convert each device command into an SI drive demand, and exchange demands and feedback with this repo's runtime host (`runtime/`) through a shared-memory segment. Nothing here imports Controls; Controls copies the segment's ABI (`runtime/abi/plant_abi.py` and `plant_abi.h`).
 - Physics runs on Isaac Lab 3.0 with a Newton solver, MJWarp by default or Kamino (beta, `--solver kamino`), without Isaac Sim's Kit app or PhysX. `physics/` is the only place that talks to it.
 - humanoid-urdf holds the robot facts both sides read, pinned at the same commit by Controls and by this repo.
+
+Between humanoid-sim and humanoid-learning the line is mechanism against choice: humanoid-sim makes something possible and models it faithfully, humanoid-learning decides what to use, how much and when, and judges the policy.
+
+| Concern | humanoid-sim: the mechanism | humanoid-learning: the choice |
+|---|---|---|
+| Terrain | `heightfield_terrain_cfg`: a terrain the physics can collide with, from the tiles and grid the caller gives | Terrain generators: tile mixes, sizes and difficulty, and the curriculum that moves envs between rows |
+| Disturbances | `ForcePush`, a push process with the caller's ranges; joint torques; the runtime's `APPLY_DISTURBANCE` | Which pushes a task trains and is tested against, and their schedule |
+| Randomization | Models of the randomized parameters, their distributions as specs, a level knob | Which parameters, their ranges, and when the level moves |
+| Sensors | Sensor models and their knobs (the IMU's noise and delivery timing; cameras, lighting and LIDAR are not modeled yet, and come as knobs here when they are: a light's intensity, a sensor switched off) | Which sensors a policy reads, and ablations over them |
+| Evaluation | Checks of the sim itself: replays and system identification against robot captures, physics and model tests, benchmarks | Every evaluation of a policy: scenarios, metrics, robustness sweeps (terrain, pushes, latency, lighting) and sensor ablations (the LIDAR removed, vision only) |
 
 Inside humanoid-sim, dependencies point down. The front ends (`train/`, `runtime/`, `replay/`) use the plant and the models but not each other, and the models never import a front end. The one exception is the description digest, which the segment ABI defines so that Controls can compute it from its own checkout.
 
@@ -45,7 +55,7 @@ Inside humanoid-sim, dependencies point down. The front ends (`train/`, `runtime
 ```mermaid
 flowchart TB
     urdf["humanoid-urdf<br/>(robot facts: URDF, actuators.yaml)"] --> model["model/<br/>prepared URDF, USD asset, kinematics"]
-    profile["profiles/ethrc_v1.yaml<br/>(modeling choices)"] --> model
+    profile["profiles/<br/>(modeling choices, one file per robot)"] --> model
     model --> phys["physics/isaaclab.py<br/>Isaac Lab articulation on MJWarp"]
     subgraph plant["The plant (core.py)"]
         direction TB
@@ -61,7 +71,7 @@ flowchart TB
 ```
 
 1. Robot facts come from the `third_party/humanoid-urdf` submodule: the URDF (`URDF_6.urdf`), `actuators.yaml` with the drive inventory, signs, standing offsets, limits, gains and ankle geometry, and the home pose the robot spawns in. No robot constant is typed into this repo. [robot-model.md](robot-model.md) explains the files and how the USD asset is built from them.
-2. Modeling choices live in `profiles/ethrc_v1.yaml`: physics period (4 ms), solver settings, contact excludes, IMU delivery timing. Each Controls-derived value names its source.
+2. Modeling choices live in `profiles/<robot>.yaml` over `profiles/defaults.yaml`: physics period (4 ms), solver settings, contact excludes, IMU delivery timing, the home pose. Each Controls-derived value names its source.
 3. The plant (`PlantCore` in `src/humanoid_sim/core.py`) is batched torch code over `[envs, drives]`. Per physics step it takes the drive demands that have arrived, evaluates each drive's control law and torque limits, maps drive quantities to joint quantities through the transmissions (most joints have their own drive; at each ankle two crank drives move the pitch and roll hinges together through a linkage), and writes a position target for the solver. [drives.md](drives.md) covers this in detail.
 4. Physics is an Isaac Lab articulation stepped by a Newton solver (MJWarp, or Kamino when selected), on CUDA. Warp's CPU device runs the same code for tests, slowly.
 5. Sensors turn the physical state into what the robot reports: positions quantized to encoder counts, torques to mNm, and IMU samples delivered in bursts with noise. See [sensors.md](sensors.md).

@@ -12,7 +12,7 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 | `test_arrival.py` | The arrival queue: a demand acts from its arrival time, time-weighted inside a step, in order, with overflow counted | |
 | `test_base_motion.py` | Base motion from an IMU trace: Euler angles and rates, burst sample times | |
 | `test_delay.py` | Demand-delay scan: drive regions, and a replay with each env's demands shifted by its own delay | 1 test `physics` and `data` |
-| `test_devices.py` | The drive bank: the JVPT law against Controls' plant, envelope clipping, freeze (the held position latched when the freeze demand arrives), refused I gain, target shaping, arrival | |
+| `test_devices.py` | The drive bank: the PD law against Controls' plant, envelope clipping, freeze (the held position latched when the freeze demand arrives), a disabled drive, target shaping, arrival | |
 | `test_envelope.py` | Torque-speed envelope interpolation in all four quadrants | |
 | `test_exc_reader.py` | The capture reader: sampling helpers, captures that match the description, the bursty base-frame IMU stream | 2 tests `data` |
 | `test_imu_delivery.py` | IMU sampling on the sensor clock, burst delivery, bias, misalignment and noise, per-env reset | |
@@ -29,7 +29,7 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 | `test_supports.py` | Gantry programs, and rope tension and cable length on the robot | 2 tests `physics` |
 | `test_sysid.py` | The passive-fit search space and CMA-ES | |
 | `test_train_env.py` | The Train-Time API in a manager-based Isaac Lab environment with two robots | `physics` |
-| `test_world.py` | Rough terrain under the feet, force pushes, and a robot holding the home pose standing on flat ground | `physics` |
+| `test_world.py` | A heightfield terrain under the feet, force pushes, and a robot holding the home pose standing on flat ground | `physics` |
 
 A test skips when something it needs is missing: Isaac Lab (`isaaclab_newton`), Newton, the Rerun SDK, scipy, the built robot asset, the captures, CUDA or a C compiler. The skip reason names it, and pytest prints every reason at the end of the run (`-ra` is set in `pyproject.toml`). A physics run without the built assets therefore passes with most tests skipped; read the skip summary after a physics run.
 

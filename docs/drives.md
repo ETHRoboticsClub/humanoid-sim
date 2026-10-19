@@ -70,37 +70,32 @@ In training a drive can read its position with an offset from the truth: `DriveB
 
 ## The demand
 
-`DriveDemand` in `src/humanoid_sim/devices/demand.py` is a batched mirror of Controls' `FakeDriveDemand` (`ros2_ws/src/sim/ethrc_fake_ethercat/include/ethrc_fake_ethercat/fake_bank.h` in ETHRC-Humanoid-Controls). Every field is `[E, D]`.
+`DriveDemand` in `src/humanoid_sim/devices/demand.py` tells each drive which control law to run and with what targets and gains, in SI units and with nothing vendor-specific in it. It is the record of Controls' `docs/sim-learning-api-plan.md` (§1.2). Every field is `[E, D]`.
 
 | Field | dtype | Unit | Meaning |
 |---|---|---|---|
-| `torque_enabled` | bool | | The drive is enabled. When false the drive produces no torque, whatever the mode. |
-| `mode` | int8 | | Mode of operation, CiA-402 object 0x6061 (CiA-402 is the CANopen drive profile the maxon EPOS4 firmware implements). |
-| `target_position_rad` | float | rad | Position target, drive-output frame. JVPT only. |
-| `target_velocity_rad_s` | float | rad/s | Velocity target. JVPT only. |
-| `feedforward_torque_nm` | float | Nm | Feed-forward torque. JVPT only. |
-| `p_gain_raw` | int64 (uint32 value) | 1 count = 0.001 Nm/rad | P gain, object 0x34C6:01. |
-| `i_gain_raw` | int64 (uint32 value) | | I gain, 0x34C6:02. Must be 0 (see below). |
-| `d_gain_raw` | int64 (uint32 value) | 1 count = 0.001 Nm·s/rad | D gain, 0x34C6:03. |
-| `max_torque_mnm` | int64 (uint32 value) | mNm | Torque cap, 0x34C6:04. 0 means no cap. |
-| `homing_hold` | bool | | Kept so the mirror is exact. Nothing in the drive model reads it, and neither does Controls' plant host. |
+| `law` | int8 | | `LAW_DISABLED` (0), `LAW_PD` (1) or `LAW_FREEZE` (2). |
+| `target_position_rad` | float | rad | Position target, drive-output frame. PD only. |
+| `target_velocity_rad_s` | float | rad/s | Velocity target. PD only. |
+| `feedforward_torque_nm` | float | Nm | Feed-forward torque. PD only. |
+| `stiffness_nm_per_rad` | float | Nm/rad | P gain. |
+| `damping_nm_s_per_rad` | float | Nm·s/rad | D gain. |
+| `torque_limit_nm` | float | Nm | Cap on the applied torque; `inf` for none. |
 
-Modes:
+Laws:
 
-| Mode | 0x6061 value | What the drive does |
-|---|---|---|
-| [JVPT](glossary.md#jvpt) | -64 | Tracks the position and velocity targets with its own P and D gains plus the feed-forward torque. Controls calls it `CyclicJVPTMode`. |
-| Freeze | -62 | Holds the position it read when it entered the mode. |
-| Homing | 6 | Holds like freeze. |
-| None | 0 | Off. Any other value is also off. |
+| Law | What the drive does |
+|---|---|
+| Disabled | No torque. |
+| PD | Tracks the position and velocity targets with the demand's gains plus the feed-forward torque. |
+| Freeze | Holds the position it read when it entered the law. |
 
-Raw gains convert to SI with `JVPT_PER_SI_GAIN = 1000.0`: `kp = p_gain_raw / 1000` in Nm/rad and `kd = d_gain_raw / 1000` in Nm·s/rad. The constant mirrors Controls' `ethrc_ssot/drive_gains.py` and is labelled modeled in the code.
+A client converts its own device command into this at its boundary. For the ETHRC V1's maxon EPOS4 drives, Controls' plant host maps the CiA-402 mode of operation (object 0x6061): [JVPT](glossary.md#jvpt) (-64) is PD, freeze (-62) and homing (6) are freeze, anything else or a disabled power stage is disabled; the raw JVPT gains are divided by 1000 and a torque cap of 0 becomes `inf`. For a Unitree motor, `LowCmd` mode 1 is PD with the command's `kp`, `kd`, `q`, `dq` and `tau`, and mode 0 is disabled.
 
 Helper constructors:
 
-- `DriveDemand.disabled(num_envs, num_drives, device=..., dtype=...)` sets every field to zero: torque disabled, mode 0. Drives start with this demand, and an env reset puts it in force unless another demand is passed to `reset`.
-- `DriveDemand.jvpt(position, stiffness, damping, *, velocity=None, feedforward=None, max_torque_nm=None)` builds an enabled JVPT demand from SI quantities. `position` is `[E, D]` in rad; `stiffness` (Nm/rad) and `damping` (Nm·s/rad) may be scalars, `[D]` or `[E, D]` and are rounded to raw counts as Controls rounds them. The I gain is
-  0. `max_torque_nm`, if given, is a tensor in Nm, rounded to whole mNm.
+- `DriveDemand.disabled(num_envs, num_drives, device=..., dtype=...)` disables every drive, with no torque limit. Drives start with this demand, and an env reset puts it in force unless another demand is passed to `reset`.
+- `DriveDemand.pd(position, stiffness, damping, *, velocity=None, feedforward=None, torque_limit_nm=None, law=LAW_PD)` builds an enabled demand. `position` is `[E, D]` in rad; `stiffness` (Nm/rad), `damping` (Nm·s/rad) and `torque_limit_nm` may be scalars, `[D]` or `[E, D]`. Pass `law=LAW_FREEZE` for a freeze demand.
 - `as_dict()` and `DriveDemand.from_dict(d)` convert to and from a dict of tensors.
 
 ```python
@@ -116,8 +111,8 @@ standing = torch.tensor([[desc.joints[n].standing_offset_rad for n in joints]])
 q_drive, _, _ = plant.map.drive_state(standing, torch.zeros_like(standing))
 
 # 0.05 rad past standing on every drive, at the baseline gains (humanoid-urdf baseline_position_gains).
-demand = DriveDemand.jvpt(q_drive + 0.05, plant.drive_stiffness, plant.drive_damping)
-print(demand.p_gain_raw[0, :3])  # tensor([320000, 320000, 320000]): 320 Nm/rad
+demand = DriveDemand.pd(q_drive + 0.05, plant.drive_stiffness, plant.drive_damping)
+print(demand.stiffness_nm_per_rad[0, :3])  # tensor([320., 320., 320.]) Nm/rad
 
 plant.submit(demand, torch.tensor([1_000_000]))  # in force 1 ms into the first step
 plant.pre_physics(0, standing, torch.zeros_like(standing))
@@ -152,21 +147,11 @@ Other queue rules:
 
 ## The drive law
 
-`DriveBank` in `src/humanoid_sim/devices/bank.py` follows Controls' MuJoCo plant (`ethrc_sim/plant.py` `Plant.step` and `plant_host.references_from_demands`). Each record in force is first classified (`DriveBank._kind`):
+`DriveBank` in `src/humanoid_sim/devices/bank.py` follows Controls' MuJoCo plant (`ethrc_sim/plant.py` `Plant.step`). With `q̃ = q + position_offset` (the drive's reading) and `v` the drive velocity at the step start, each record in force gives:
 
-| Condition | Kind |
-|---|---|
-| `torque_enabled`, `i_gain_raw == 0`, mode -64 | JVPT |
-| `torque_enabled`, `i_gain_raw == 0`, mode -62 or 6 | Hold |
-| anything else | Off |
-
-With `q̃ = q + position_offset` (the drive's reading) and `v` the drive velocity at the step start:
-
-- JVPT: `τ = kp (target_position - q̃) + kd (target_velocity - v) + feedforward`, with `kp = p_gain_raw / 1000 · p_scale` and `kd = d_gain_raw / 1000 · d_scale`.
-- Hold: the same law with the target latched to `q̃` when the drive enters the hold, velocity target 0 and no feed-forward. The latch happens when the hold demand arrives at the drive: the target is the reading at the start of the step in which the hold demand first has a share of the step. A hold demand that is queued but has not arrived latches nothing, and the drive keeps following the demand in force (`test_freeze_latches_when_it_arrives_not_when_queued` in `tests/test_devices.py`). Further hold demands while the drive holds keep the latched target. The gains are those carried by the hold demand, so a freeze demand with zero gains holds nothing. Homing holds the same way; any frame change a real drive makes while homing is outside the plant.
-- Off: zero torque, demanded and applied.
-
-A record with torque enabled and a non-zero I gain is treated as off, and `DriveBank.fault[e, d]` latches true from the first step it is in force until the env is reset. Controls' plant raises on it, since neither plant has an integral term.
+- PD: `τ = kp (target_position - q̃) + kd (target_velocity - v) + feedforward`, with `kp = stiffness · p_scale` and `kd = damping · d_scale`.
+- Freeze: the same law with the target latched to `q̃` when the drive enters the freeze, velocity target 0 and no feed-forward. The latch happens when the freeze demand arrives at the drive: the target is the reading at the start of the step in which the freeze demand first has a share of the step. A freeze demand that is queued but has not arrived latches nothing, and the drive keeps following the demand in force (`test_freeze_latches_when_it_arrives_not_when_queued` in `tests/test_devices.py`). Further freeze demands while the drive is frozen keep the latched target. The gains are those carried by the freeze demand, so a freeze demand with zero gains holds nothing.
+- Disabled: zero torque, demanded and applied.
 
 The bank returns a `DriveOutput`, kept as `PlantCore.last`. Each field is `[E, D]` and time-weighted over the step:
 
@@ -174,8 +159,8 @@ The bank returns a `DriveOutput`, kept as `PlantCore.last`. Each field is `[E, D
 |---|---|---|
 | `demanded` | Nm | Control-law output before any clip |
 | `applied` | Nm | After the torque-speed envelope and the torque cap |
-| `enabled_fraction` | | Fraction of the step the drive was not off |
-| `target_velocity` | rad/s | Velocity target (0 when off or holding) |
+| `enabled_fraction` | | Fraction of the step the drive was not disabled |
+| `target_velocity` | rad/s | Velocity target (0 when disabled or frozen) |
 
 ## Torque-speed envelope and torque cap
 
@@ -192,7 +177,7 @@ The bank returns a `DriveOutput`, kept as `PlantCore.last`. Each field is `[E, D
 
 The nominal (continuous) torque is `effort_nominal` in actuators.yaml. Nothing clips to it and there is no thermal derating, so a drive can hold its peak indefinitely.
 
-When `max_torque_mnm > 0`, the applied torque is then clipped to `±max_torque_mnm / 1000` Nm. Both the envelope and the cap are multiplied by the drive's `torque_scale`. The demanded torque is never clipped.
+A finite `torque_limit_nm` then clips the applied torque to `±torque_limit_nm`. Both the envelope and the limit are multiplied by the drive's `torque_scale`. The demanded torque is never clipped.
 
 ```python
 import torch
@@ -273,7 +258,7 @@ They run without Isaac Lab: `uv run pytest tests/test_ankle_transmission.py` (ne
 
 ## Disabled drives: back-drive friction
 
-A disabled drive is back-driven through its gearbox. Only the runtime host models this (`RuntimeHost._set_drives_off` in `src/humanoid_sim/runtime/host.py`). When a 1:1 drive is off in the latest demand record (torque disabled, an I gain set, or a mode other than -64, -62 or 6), the host sets its joint's Coulomb friction to the family's `backdrive_torque` in place of the enabled-drive friction from actuators.yaml. It writes the friction only when the on/off pattern changes. Before a client attaches every drive is off.
+A disabled drive is back-driven through its gearbox. Only the runtime host models this (`RuntimeHost._set_drives_off` in `src/humanoid_sim/runtime/host.py`). When a 1:1 drive's law is disabled in the latest demand record, the host sets its joint's Coulomb friction to the family's `backdrive_torque` in place of the enabled-drive friction from actuators.yaml (a family without one keeps the joint's friction). It writes the friction only when the on/off pattern changes. Before a client attaches every drive is disabled.
 
 | Family | `backdrive_torque` | Datasheet figure |
 |---|---|---|

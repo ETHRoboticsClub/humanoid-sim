@@ -1,7 +1,7 @@
 <h1 align="center">humanoid-sim</h1>
 
 <p align="center">
-  The ETHRC humanoid from the EtherCAT drives down: 22 drives, the ankle linkage and the body,<br/> simulated on Isaac Lab 3.0 and Newton's MJWarp solver, for training, for Controls and for checking against the robot.
+  Humanoids from the drives down: the ETHRC humanoid's 22 drives and ankle linkage, the Unitree G1's 29 motors, and their bodies,<br/> simulated on Isaac Lab 3.0 and Newton, for training, for Controls and for checking against the robot.
 </p>
 
 <p align="center">
@@ -14,7 +14,7 @@
 
 ![Six simulated robots on rough terrain, each holding its pose while waving its arms](docs/images/scene-hero.png)
 
-The sim stops where Controls starts. It takes what the EtherCAT master sends each drive and returns what each drive and the IMU report back, with the drives' own control law, torque limits, latency, encoder resolution and IMU burst timing in between. Robot facts come from the `humanoid-urdf` description that Controls pins, so the sim and the controller always describe the same robot.
+The sim stops where Controls starts. It takes what the robot's host sends each drive, a control law with its targets and gains in SI units, and returns what each drive and the IMU report back, with the drives' own control law, torque limits, latency, encoder resolution and IMU burst timing in between. Robot facts come from the `humanoid-urdf` description that Controls pins, so the sim and the controller always describe the same robot, and any robot in it runs with `--robot` ([docs/robot-model.md](docs/robot-model.md#robots)).
 
 <table>
   <tr>
@@ -44,7 +44,7 @@ flowchart TB
     sim --> physics["Isaac Lab 3.0 on Newton (MJWarp or Kamino)"]
 ```
 
-Policies are trained in humanoid-learning against the same drive and sensor models that Controls runs against in real time. [docs/overview.md](docs/overview.md#where-it-sits-among-the-repos) says which repo owns what.
+Policies are trained in humanoid-learning against the same drive and sensor models that Controls runs against in real time. humanoid-sim provides the mechanisms and knobs; terrain generators, curricula and every evaluation of a policy live in humanoid-learning. [docs/overview.md](docs/overview.md#where-it-sits-among-the-repos) says which repo owns what.
 
 ## See it
 
@@ -101,13 +101,12 @@ The plant is an Isaac Lab action term. A task turns its policy's actions into dr
 from humanoid_sim.train import TrainPlantCfg
 from humanoid_sim.train.isaaclab import PlantAction, PlantActionCfg
 from humanoid_sim.train.scene import robot_scene_cfg, robot_sim_cfg
-from humanoid_sim.world.terrain import rough_terrain_cfg
 
 class Drives(PlantAction):
-    def demands(self, actions):  # -> DriveDemand [envs, 22] and the time [envs] (ns) it leaves the master
+    def demands(self, actions):  # -> DriveDemand [envs, drives] and the time [envs] (ns) it leaves the host
         ...
 
-cfg.scene = robot_scene_cfg(4096, usd, terrain=rough_terrain_cfg(friction=0.0))  # spawns in the home pose
+cfg.scene = robot_scene_cfg(4096, usd, terrain=terrain)  # spawns in the home pose; terrain: the task's
 cfg.sim = robot_sim_cfg(device="cuda:0")
 cfg.decimation = 5  # 4 ms physics, 20 ms policy period
 cfg.actions.drives = PlantActionCfg(class_type=Drives, action_dim=22, plant=TrainPlantCfg(randomization=[
@@ -120,7 +119,7 @@ cfg.actions.drives = PlantActionCfg(class_type=Drives, action_dim=22, plant=Trai
 #   plant.truth()     joint state, base pose and twist, contact forces
 ```
 
-Robots spawn in the CAD's home pose: legs straight, both soles flat on the ground. `pose="standing"` uses the standing pose captured on the robot instead, whose soles are pitched by 10 and 17 degrees under an upright base. [docs/training.md](docs/training.md) has the full API.
+`terrain` is the task's: humanoid-learning's generators build it with `heightfield_terrain_cfg`, which accepts only terrain the physics can collide with. Robots spawn in the CAD's home pose: legs straight, both soles flat on the ground. `pose="standing"` uses the standing pose captured on the robot instead, whose soles are pitched by 10 and 17 degrees under an upright base. [docs/training.md](docs/training.md) has the full API.
 
 ## How it is built
 

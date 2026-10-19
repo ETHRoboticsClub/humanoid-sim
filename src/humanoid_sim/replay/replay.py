@@ -1,8 +1,8 @@
 """Drive-level replay of an excitation capture.
 
 Each drive is fed its recorded position demand (0x6062, linearly interpolated from the ~200 Hz PDO
-samples, arriving without added latency: it is already what the drive used) at the recorded gains, JVPT
-mode, no feed-forward or target velocity (as in the capture). The sim's drive-frame position, velocity
+samples, arriving without added latency: it is already what the drive used) at the recorded gains, PD
+law, no feed-forward or target velocity (as in the capture). The sim's drive-frame position, velocity
 and applied torque are scored against the drive's own measurements at the same times.
 
 Base: the capture was taken on a gantry that lets the base swing, mostly in yaw (tens of degrees, IMU
@@ -18,7 +18,7 @@ import numpy as np
 import torch
 
 from humanoid_sim.core import PlantCore
-from humanoid_sim.devices.demand import JVPT_PER_SI_GAIN, DriveDemand
+from humanoid_sim.devices.demand import DriveDemand
 from humanoid_sim.replay.base import BaseMotion
 from humanoid_sim.replay.exc import ExcitationCapture, sample_linear
 from humanoid_sim.sim import SimCore
@@ -112,8 +112,8 @@ def _run(capture: ExcitationCapture, sim: SimCore, run: _Run, on_step) -> None:
     plant = sim.plant
     drives, e, dev, dt = plant.map.drive_names, plant.num_envs, plant.cfg.device, plant.cfg.dtype
     gains = capture.gains()
-    kp = torch.tensor([[gains[d].p_gain_raw for d in drives]], dtype=torch.int64, device=dev).expand(e, -1)
-    kd = torch.tensor([[gains[d].d_gain_raw for d in drives]], dtype=torch.int64, device=dev).expand(e, -1)
+    kp = torch.tensor([[gains[d].stiffness for d in drives]], dtype=dt, device=dev).expand(e, -1)
+    kd = torch.tensor([[gains[d].damping for d in drives]], dtype=dt, device=dev).expand(e, -1)
     pdo = capture.pdo()
     native0 = np.array([sample_linear(pdo[d].t_ns, pdo[d]["native_position_rad"], run.t_grid[:1])[0] for d in drives])
     q0 = initial_joint_state(plant, native0).expand(e, -1)
@@ -128,8 +128,7 @@ def _run(capture: ExcitationCapture, sim: SimCore, run: _Run, on_step) -> None:
     sim.t_ns = 0
     for k in range(len(run.t_grid)):
         target = demand[k] if demand.dim() == 3 else demand[k].expand(e, -1)
-        d = DriveDemand.jvpt(target, kp.to(dt) / JVPT_PER_SI_GAIN, kd.to(dt) / JVPT_PER_SI_GAIN)
-        d.p_gain_raw, d.d_gain_raw = kp.clone(), kd.clone()
+        d = DriveDemand.pd(target, kp, kd)
         plant.submit(d, torch.full((e,), sim.t_ns, dtype=torch.int64, device=dev))
         if angles is not None:
             sim.set_base(angles[k].expand(e, -1), rates[k].expand(e, -1))
