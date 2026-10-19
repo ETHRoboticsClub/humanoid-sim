@@ -5,6 +5,13 @@ robot: g1_29dof_with_hand_rev_1_0
 
 # home: Unitree's deploy standing pose, slightly bent knees (position-presets.yaml standing-init-v1, which
 # Controls' ethrc_ssot/standing_pose.py also uses).
+model:
+  # Each foot touches the ground with four 5 mm spheres of the URDF. The sole box bounds them (it describes the
+  # sole for the runtime truth and adds no collision).
+  sole:
+    joints: {l: left_ankle_roll_joint, r: right_ankle_roll_joint}
+    fit: bounds
+
 poses:
   home: {preset: standing-init-v1}
 

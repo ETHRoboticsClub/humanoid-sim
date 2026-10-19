@@ -61,6 +61,26 @@ def test_the_prepared_urdf_limits_every_joint(robot):
 
 
 @pytest.mark.parametrize("robot", ROBOTS)
+def test_each_foot_has_a_sole_box(robot):
+    p = PreparedUrdf(Description.load(robot), load_profile(robot)).build()
+    assert sorted(s.side for s in p.soles) == ["l", "r"]
+    for s in p.soles:
+        assert s.half_extents[0] > 0.05 and s.half_extents[1] > 0.02  # a foot's footprint, not a point
+
+
+def test_the_g1_sole_box_bounds_its_contact_spheres():
+    p = PreparedUrdf(Description.load("g1_29dof_with_hand_rev_1_0"), load_profile("g1_29dof_with_hand_rev_1_0"))
+    p.build()
+    for s in p.soles:
+        assert s.mesh is None  # describes the sole, replaces nothing
+        bottom = s.center[2] - s.half_extents[2]
+        assert bottom == pytest.approx(-0.035)  # sphere centers at z -0.03, radius 5 mm
+        assert s.center[0] - s.half_extents[0] == pytest.approx(-0.055)
+        assert s.center[0] + s.half_extents[0] == pytest.approx(0.125)
+    assert not p.root.findall(".//collision[@name='sole_box_l']")
+
+
+@pytest.mark.parametrize("robot", ROBOTS)
 def test_the_mirror_map_pairs_left_with_right(robot):
     m = mirror_map(Description.load(robot))
     for i, name in enumerate(m.joint_names):

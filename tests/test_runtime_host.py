@@ -365,3 +365,48 @@ def test_a_disabled_drive_is_back_driven_through_its_gearbox(tmp_path):
     finally:
         host.close()
 
+
+def test_the_host_serves_the_g1(tmp_path):
+    """Another robot in humanoid-urdf serves the same way: the G1's 29 motors take SI demands and the truth reports
+    its soles (the boxes bounding its contact spheres)."""
+    pytest.importorskip("isaaclab_newton")
+    import torch
+
+    from humanoid_sim.runtime.host import RuntimeHost
+
+    robot = "g1_29dof_with_hand_rev_1_0"
+    desc = Description.load(robot)
+    out = asset_dir(desc, load_profile(robot), REPO / "outputs" / "assets")
+    if not (out / "asset.json").exists():
+        pytest.skip(f"robot asset not built; run `humanoid-sim --robot {robot} build-asset` in the Isaac Lab image")
+    usd = out / json.loads((out / "asset.json").read_text())["usd"]
+    path = tmp_path / "plant"
+    host = RuntimeHost(path, usd, device="cpu", robot=robot, support="suspended", compile=False, truth_every=1)
+    try:
+        client = abi.Segment.open(path, robot_id=robot, description_digest=desc.digest, wait_s=1)
+        info = client.descriptor()
+        drives = info["drives"]
+        assert len(drives) == client.num_drives == 29
+        assert info["soles"] == ["left_ankle_roll_link", "right_ankle_roll_link"]
+        q, _ = host._named_pose("home")
+        hold = host.sim.plant.map.drive_state(q.to(host.sim.plant.cfg.dtype), torch.zeros_like(q))[0][0].numpy()
+        demand = abi.pd_demand(hold, [desc.drives[d].baseline_stiffness for d in drives],
+                               [desc.drives[d].baseline_damping for d in drives])
+        for cycle in range(1, 51):
+            client.regions["demands"].write(abi.demands_record(demand, cycle=cycle, session_id=client.session_id))
+            host.step()
+        assert host.attached
+        fb = _feedback(client)["drive"]
+        assert np.abs(fb["position_rad"][:29] - hold).max() < 0.1  # hanging, at the deploy gains
+        assert np.abs(fb["applied_torque_nm"][:29]).max() > 0.1
+        _, truth = client.regions["truth"].read()
+        soles = truth["sole"]
+        assert (soles["lowest_z_m"] > 0.2).all() and (soles["normal_force_n"] == 0).all()  # hung 0.3 m up
+        assert soles["position_m"][0][1] > soles["position_m"][1][1]  # left at +y: the G1 faces +x
+        demand["law"][:] = abi.LAW_DISABLED
+        client.regions["demands"].write(abi.demands_record(demand, cycle=51, session_id=client.session_id))
+        host.step()
+        assert np.abs(_feedback(client)["drive"]["demanded_torque_nm"][:29]).max() == 0.0
+        client.close()
+    finally:
+        host.close()

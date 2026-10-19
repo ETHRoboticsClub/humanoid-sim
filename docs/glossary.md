@@ -172,7 +172,7 @@ One client's use of a segment, from attach to detach. A new session gets a new s
 
 ### Sole box
 
-The thin box on each foot that touches the ground. The asset build fits it to the foot's lowest collision face and records it in `asset.json` (`sole_boxes`).
+The thin box on each foot that touches the ground. For the ETHRC V1 the asset build fits it to the foot's lowest collision face and replaces that face with it; for a robot whose feet carry their own contact shapes (the G1's four spheres per foot) it is the box bounding them and adds no collision. Either way it is recorded in `asset.json` (`sole_boxes`), and the runtime truth reports the soles from it.
 
 ### Solver gains
 
