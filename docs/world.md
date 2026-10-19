@@ -132,7 +132,47 @@ python examples/scene_stand.py --scene <controls>/ros2_ws/src/sim/ethrc_sim/envi
 
 ![The V1 standing at the hangar's spawn point among its boxes](images/world-hangar.png)
 
-`SceneRecorder` draws the boxes as one mesh at `/world/scene` and sizes the ground square to reach 2 m beyond them. `view-runtime` draws a host's boxes too, when the descriptor's file is readable where the viewer runs and has the same digest.
+`SceneRecorder` draws the boxes as one mesh at `/world/scene/boxes` and sizes the ground square to reach 2 m beyond them. `view-runtime` draws a host's boxes too, when the descriptor's file is readable where the viewer runs and has the same digest. For a scanned room, the viewers can draw the scan instead (next section).
+
+### The scan, for viewers
+
+A scanned room can come with its look: the photo-textured mesh of the scan and a flat textured floor. They are drawn in Rerun, never collided: the robot collides with the boxes. The code is in `src/humanoid_sim/world/scan.py`.
+
+Controls' hangar has these next to its boxes, in the same folder and also in git-lfs: `hangar_visual.obj` (832k triangles, every corner with its own texture coordinate, the scan's own floor cut out), its texture `hangar_visual.png` (7740 by 7740 pixels, the light baked in) and `hangar_floor.png`, the floor seen from above. As with the boxes, humanoid-sim does not copy them: `ScanFiles.of(mesh, texture, floor_texture)` names them and records their SHA-256 digests, and `StaticBoxes.load(path, spawn_m, scan=...)` attaches them to the scene.
+
+They are drawn as Controls' MuJoCo `hangar_scan` environment draws them (`ethrc_sim/environments.py` at 44353e2b):
+
+- The mesh moves by `-spawn_m`, like the boxes, without rotation or scale.
+- Its texture sits on it as MuJoCo puts it: MuJoCo flips an OBJ's v coordinate (the OBJ's origin is the image's bottom left) and keeps the image's first row at v = 0, so each corner shows the texel at (u, 1 - v) from the image's top left, which is how Rerun reads a texture coordinate.
+- The floor is a quad over the boxes file's `floor_corners`, 1 mm above the ground the boxes stand on, its texture's corners (0, 0), (1, 0), (1, 1) and (0, 1) on the four corners in order.
+- The ground plane is not drawn, the sky is a neutral grey, and the scan is not lit: its texture holds the light. Controls gives every OBJ normal +z and tints the texture to 70 % for MuJoCo's lights to the same end; Rerun draws a mesh without normals unlit, so neither is needed.
+
+`tests/test_scan.py` builds a scan and its floor into a MuJoCo world as Controls does and checks every face corner's position and the texel it shows against what humanoid-sim logs.
+
+![The V1 at the hangar's spawn point, in the photo-textured scan](images/world-hangar-scan.png)
+
+The scan comes at two levels of detail:
+
+| Detail | Scan | Floor texture | Hangar, in a recording | For |
+|---|---|---|---|---|
+| `full` | every triangle with its texture coordinates, and the whole texture | 1691 by 1065 | 150 MB | recordings to a file |
+| `live` | vertices merged on a 0.15 m grid (93k vertices, 164k triangles), each coloured with the texture averaged over the face corners merged into it | at most 512 across | 3 MB | viewers that stream |
+
+The texture packs every triangle on its own patch, so a decimated mesh cannot keep texture coordinates; the live detail carries the texture as vertex colours instead. Building either takes about 3 s, most of it reading the OBJ. The boxes alone add about 0.1 MB.
+
+| Where | How |
+|---|---|
+| `SceneRecorder(env, usd, ..., scene=boxes)` | Draws the scene's scan with its floor in place of the ground (`draw="boxes"` keeps the boxes), at `detail` (`full` into a file, `live` when streaming, unless given), and gives the recording a default layout against the neutral sky. Entities `/world/scene/scan` and `/world/scene/floor`. |
+| `serve --scene ... --scan-mesh OBJ --scan-texture PNG --scan-floor-texture PNG` | The descriptor names the files and their digests, for viewers |
+| `view-runtime --draw scan\|boxes --detail full\|live` | Draws the host's scan when its files are readable here with the same digests |
+| `examples/scene_stand.py --scan-mesh ... --draw ... --detail ...` | A robot standing in the scan |
+
+```bash
+H=<controls>/ros2_ws/src/sim/ethrc_sim/environments/hangar
+python examples/scene_stand.py --scene $H/hangar_proxy.npz --spawn -4.42 3.48 --scan-mesh $H/hangar_visual.obj \
+  --scan-texture $H/hangar_visual.png --scan-floor-texture $H/hangar_floor.png --seconds 6 --device cuda:0 \
+  --rrd outputs/hangar_v1_scan.rrd
+```
 
 ### What the boxes cost
 
@@ -281,7 +321,7 @@ A `RESET` command clears all active disturbances. Faults (`INJECT_FAULT`: encode
 
 ## What is not modeled
 
-- A room is boxes only. The scan itself (Controls' textured mesh and its Gaussian splat) is not drawn or collided, and there are no other static shapes (cylinders, meshes).
+- A room collides as boxes only. Its scan is drawn as a textured mesh but never collided, the Gaussian splat of the hangar is not drawn, and there are no other static shapes (cylinders, meshes).
 - Static boxes stand on the flat ground; they cannot be combined with a heightfield terrain, and every environment of a scene with boxes starts at the spawn point.
 - There is no triangle-mesh terrain (stairs with vertical risers, mesh obstacles), for the collision reason above.
 - Replays and the runtime have no terrain; they always use the flat ground at the profile's friction.

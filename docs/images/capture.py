@@ -121,6 +121,13 @@ SHOTS = [
                                   background=rrb.Background(color=(232, 236, 240)))), size="1800x900",
          note="python examples/scene_stand.py --scene <controls hangar_proxy.npz> --spawn -4.42 3.48 --seconds 10 "
               "--device cuda:0 --rrd outputs/shots/hangar_v1.rrd"),
+    Shot("world-hangar-scan", "hangar_v1_scan.rrd", 4.0,
+         panels(rrb.Spatial3DView(name="The V1 in the scan of Controls' hangar", origin="/world",
+                                  eye_controls=eye((-4.5, -6.0, 4.0), (1.0, 2.0, 0.6)),
+                                  background=rrb.Background(color=(199, 196, 189)))), size="1800x900",
+         note="python examples/scene_stand.py --scene <hangar_proxy.npz> --spawn -4.42 3.48 --scan-mesh "
+              "<hangar_visual.obj> --scan-texture <hangar_visual.png> --scan-floor-texture <hangar_floor.png> "
+              "--seconds 6 --device cuda:0 --rrd outputs/shots/hangar_v1_scan.rrd"),
     Shot("replay-overlay", "replay.rrd", 12.0, replay_blueprint("maxonHEJ70AL1", "shoulder_flexion_l"),
          note="humanoid-sim replay <exc> --base yaw --out outputs/replay; "
               "humanoid-sim view-replay outputs/replay --save outputs/shots/replay.rrd"),
