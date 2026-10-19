@@ -11,10 +11,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import PARTS, PHYSICS_ROBOTS, built_usd, gravity_torque, urdf_mass_kg
 
 from humanoid_sim.model.asset import asset_dir, load_profile
 from humanoid_sim.model.description import Description
-from humanoid_sim.model.poses import pose_joint_positions
+from humanoid_sim.model.poses import pose_joint_positions, start_pose
 from humanoid_sim.runtime.abi import plant_abi as abi
 
 REPO = Path(__file__).resolve().parents[1]
@@ -36,26 +37,35 @@ def _wait(cond, timeout_s, what):
     raise AssertionError(f"timed out waiting for {what}")
 
 
-def test_serve_round_trip(tmp_path):
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+def test_serve_round_trip(tmp_path, robot):
     pytest.importorskip("isaaclab_newton")
-    out = asset_dir(Description.load(), load_profile("ethrc_v1"), REPO / "outputs" / "assets")
-    if not (out / "asset.json").exists():
-        pytest.skip("robot asset not built; run `humanoid-sim build-asset` in the Isaac Lab image")
+    import torch
+
+    usd = built_usd(robot)
+    d = Description.load(robot)
     path, log = tmp_path / "plant", tmp_path / "serve.log"
-    proc = subprocess.Popen([sys.executable, "-m", "humanoid_sim", "serve", "--segment", str(path), "--device", "cpu",
-                             "--support", "suspended", "--client-timeout-ms", "1500"],
+    proc = subprocess.Popen([sys.executable, "-m", "humanoid_sim", "--robot", robot, "serve", "--segment", str(path),
+                             "--device", "cpu", "--support", "suspended", "--client-timeout-ms", "1500"],
                             cwd=REPO, stdout=log.open("w"), stderr=subprocess.STDOUT, text=True)
     try:
-        seg = abi.Segment.open(path, robot_id="ethrc_v1", description_digest=Description.load().digest, wait_s=180)
+        seg = abi.Segment.open(path, robot_id=robot, description_digest=d.digest, wait_s=180)
         desc = seg.descriptor()
         drives = desc["drives"]
-        assert len(drives) == seg.num_drives == 22 and desc["physics"]["engine"] == "isaaclab/mjwarp"
+        n = len(d.drives)
+        assert len(drives) == seg.num_drives == n and desc["physics"]["engine"] == "isaaclab/mjwarp"
 
         # Hold the pose it starts in at the baseline gains.
-        hold = _feedback(seg)["drive"]["position_rad"][:22].copy()
-        d, n = Description.load(), len(drives)
+        hold = _feedback(seg)["drive"]["position_rad"][:n].copy()
         demand = abi.pd_demand(hold, [d.drives[x].baseline_stiffness for x in drives],
                                [d.drives[x].baseline_damping for x in drives])
+        # How far each joint sags at those gains, hanging: its gravity torque over its stiffness (cranks: 2 cm).
+        joints = list(d.joints)
+        start = pose_joint_positions(d, load_profile(robot), start_pose(load_profile(robot)))
+        tau = gravity_torque(usd, joints, torch.tensor([start[j] for j in joints], dtype=torch.float64), 1.0)
+        sag = {x: (abs(tau[joints.index(d.drives[x].joints[0])]) / d.drives[x].baseline_stiffness
+                   if d.drives[x].crank is None else 0.02) for x in drives}
+        allowed = np.array([1.2 * sag[x] + 0.01 for x in drives])
         cycle = 0
 
         def send_demands():
@@ -77,14 +87,15 @@ def test_serve_round_trip(tmp_path):
         fb = _feedback(seg)
         assert int(fb["step"]) > step0 + 10
         pos = fb["drive"]["position_rad"][:n]
-        assert np.abs(pos - hold).max() < 0.03  # held at baseline gains
+        assert (np.abs(pos - hold) < allowed).all()  # held at baseline gains, sagging by gravity
         assert np.abs(fb["drive"]["applied_torque_nm"][:n]).max() > 0.1  # gravity on the limbs
         assert int(fb["imu_total"]) > 0 and int(fb["imu_count"]) > 0
         imu = fb["imu"][: int(fb["imu_count"])]
         assert (np.diff(imu["seq"].astype(np.int64)) == -1).all()  # newest first, consecutive
         assert abs(np.linalg.norm(imu["specific_force_m_s2"][0]) - 9.81) < 0.3
         _, truth = seg.regions["truth"].read()
-        assert int(truth["num_joints"]) == 22 and float(truth["mass_kg"]) == pytest.approx(60.15, abs=0.05)
+        assert int(truth["num_joints"]) == len(joints)
+        assert float(truth["mass_kg"]) == pytest.approx(urdf_mass_kg(robot), abs=0.05)
 
         def command(code, args):
             seq = seg.send(code, args)
@@ -114,7 +125,7 @@ def test_serve_round_trip(tmp_path):
         serve_for(2.0)
         moved = _feedback(seg)["drive"]["position_rad"][:n] - before
         assert moved[0] == 0.0 and np.abs(moved[1:]).max() > 0.02  # drive 0 reports its frozen reading
-        assert command(abi.CMD_RESET, {"pose": "standing"})[0] == abi.ACK_OK
+        assert command(abi.CMD_RESET, {"pose": start_pose(load_profile(robot))})[0] == abi.ACK_OK
 
         # Client goes away: the host ends the session.
         _wait(lambda: proc.poll() is not None, 120, "the host to end the session")
@@ -127,15 +138,12 @@ def test_serve_round_trip(tmp_path):
             proc.kill()
 
 
-def test_prescribed_pose_with_floor_clearance_and_sole_truth(tmp_path):
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+def test_prescribed_pose_with_floor_clearance_and_sole_truth(tmp_path, robot):
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.runtime.host import RuntimeHost
 
-    out = asset_dir(Description.load(), load_profile("ethrc_v1"), REPO / "outputs" / "assets")
-    if not (out / "asset.json").exists():
-        pytest.skip("robot asset not built; run `humanoid-sim build-asset` in the Isaac Lab image")
-    usd = out / json.loads((out / "asset.json").read_text())["usd"]
-    host = RuntimeHost(tmp_path / "plant", usd, device="cpu", support="free", compile=False)
+    host = RuntimeHost(tmp_path / "plant", built_usd(robot), device="cpu", robot=robot, support="free", compile=False)
     try:
         tilt = [0.0, 0.0871557, 0.0, 0.9961947]  # 10 degrees about y
         result = host._prescribe({"joint_pos": {}, "base_pose": [0.0, 0.0, 1.5, *tilt], "floor_clearance_m": 0.002})
@@ -162,18 +170,15 @@ def test_prescribed_pose_with_floor_clearance_and_sole_truth(tmp_path):
         host.close()
 
 
-def test_detach_and_next_session(tmp_path):
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+def test_detach_and_next_session(tmp_path, robot):
     pytest.importorskip("isaaclab_newton")
     import torch
 
     from humanoid_sim.runtime.host import EXIT_DETACHED, RuntimeHost
 
-    out = asset_dir(Description.load(), load_profile("ethrc_v1"), REPO / "outputs" / "assets")
-    if not (out / "asset.json").exists():
-        pytest.skip("robot asset not built; run `humanoid-sim build-asset` in the Isaac Lab image")
-    usd = out / json.loads((out / "asset.json").read_text())["usd"]
     path = tmp_path / "plant"
-    host = RuntimeHost(path, usd, device="cpu", support="free", compile=False)
+    host = RuntimeHost(path, built_usd(robot), device="cpu", robot=robot, support="free", compile=False)
     try:
         first = abi.Segment.open(path, wait_s=1)
         n = first.num_drives
@@ -205,11 +210,12 @@ def test_detach_and_next_session(tmp_path):
         assert torch.equal(host.sim.imu._sigma, host.sim.imu._nominal_sigma)  # every session starts real
         assert int(host.sim.gantry.mode[0]) == 0
         _, truth = second.regions["truth"].read()
-        assert host.start_pose == "standing"  # the V1 profile's poses.start
-        start_q = pose_joint_positions(host.desc, load_profile("ethrc_v1"), "standing")
+        profile = load_profile(robot)
+        assert host.start_pose == start_pose(profile)  # the profile's poses.start
+        start_q = pose_joint_positions(host.desc, profile, host.start_pose)
         start = [start_q[j] for j in host.joints]
         assert np.allclose(truth["joint_pos_rad"][: len(start)], start, atol=1e-4)
-        assert float(truth["base_position_m"][2]) == pytest.approx(host._poses["standing"][1] + 0.001, abs=1e-3)
+        assert float(truth["base_position_m"][2]) == pytest.approx(host._poses[host.start_pose][1] + 0.001, abs=1e-3)
 
         first.regions["demands"].write(abi.demands_record(demand, cycle=2, session_id=first.session_id))
         host.step()
@@ -223,7 +229,8 @@ def test_detach_and_next_session(tmp_path):
         host.close()
 
 
-def test_demand_intake_queues_what_the_record_says(tmp_path):
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+def test_demand_intake_queues_what_the_record_says(tmp_path, robot):
     """The packed, graphed intake queues exactly the demand built field by field from the record."""
     pytest.importorskip("isaaclab_newton")
     import torch
@@ -232,12 +239,8 @@ def test_demand_intake_queues_what_the_record_says(tmp_path):
     from humanoid_sim.runtime.host import _DemandIntake
     from humanoid_sim.sim import SimCore
 
-    out = asset_dir(Description.load(), load_profile("ethrc_v1"), REPO / "outputs" / "assets")
-    if not (out / "asset.json").exists():
-        pytest.skip("robot asset not built; run `humanoid-sim build-asset` in the Isaac Lab image")
-    usd = out / json.loads((out / "asset.json").read_text())["usd"]
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    sim = SimCore(usd, device=device, fixed_base=True)
+    sim = SimCore(built_usd(robot), device=device, robot=robot, fixed_base=True)
     try:
         p, n = sim.plant, len(sim.plant.map.drive_names)
         rng = np.random.default_rng(0)
@@ -283,26 +286,25 @@ def test_demand_intake_queues_what_the_record_says(tmp_path):
         sim.close()
 
 
-def test_joint_disturbance_deflects_a_held_joint_and_clears(tmp_path):
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+def test_joint_disturbance_deflects_a_held_joint_and_clears(tmp_path, robot):
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.runtime.host import RuntimeHost
 
-    out = asset_dir(Description.load(), load_profile("ethrc_v1"), REPO / "outputs" / "assets")
-    if not (out / "asset.json").exists():
-        pytest.skip("robot asset not built; run `humanoid-sim build-asset` in the Isaac Lab image")
-    usd = out / json.loads((out / "asset.json").read_text())["usd"]
     path = tmp_path / "plant"
-    host = RuntimeHost(path, usd, device="cpu", support="suspended", compile=False)
+    host = RuntimeHost(path, built_usd(robot), device="cpu", robot=robot, support="suspended", compile=False)
     try:
         client = abi.Segment.open(path, wait_s=1)
         drives = client.descriptor()["drives"]
         n = len(drives)
-        d = Description.load()
+        d = Description.load(robot)
         hold = client.regions["feedback"].read()[1]["drive"]["position_rad"][:n].copy()
         demand = abi.pd_demand(hold, [d.drives[x].baseline_stiffness for x in drives],
                                [d.drives[x].baseline_damping for x in drives])
         client.regions["demands"].write(abi.demands_record(demand, cycle=1, session_id=client.session_id))
-        j = host.joints.index("elbow_flexion_r")
+        elbow = PARTS[robot]["elbow"]
+        drive = next(x for x, dr in d.drives.items() if dr.joints == (elbow,))
+        j = host.joints.index(elbow)
 
         def settle(steps=60):
             for _ in range(steps):
@@ -310,49 +312,57 @@ def test_joint_disturbance_deflects_a_held_joint_and_clears(tmp_path):
             return float(host.sim.joint_state()[0][0, j])
 
         reference = settle()
-        assert host._disturb({"drive": "maxonHEJ50AR4", "torque_nm": 10.0, "duration_s": None}) \
-            == "elbow_flexion_r until cleared"
+        assert host._disturb({"drive": drive, "torque_nm": 10.0, "duration_s": None}) == f"{elbow} until cleared"
         deflected = settle()
         assert float(host.sim.plant.external_torque[0, j]) == 10.0
-        assert deflected - reference == pytest.approx(10.0 / 50.0, rel=0.35)  # against the drive's 50 Nm/rad
-        assert host._disturb({"joint": "elbow_flexion_r", "torque_nm": 0.0}) == "cleared"
-        assert abs(settle() - reference) < 0.02
+        # Against the drive's stiffness (the elbow's drive and joint frames agree in sign).
+        assert deflected - reference == pytest.approx(10.0 / d.drives[drive].baseline_stiffness, rel=0.35)
+        assert host._disturb({"joint": elbow, "torque_nm": 0.0}) == "cleared"
+        # Back to where it was: friction holds the joint anywhere within friction / stiffness of where the drive
+        # and gravity balance, on either side, before and after.
+        band = d.joints[elbow].friction / d.drives[drive].baseline_stiffness
+        assert abs(settle() - reference) < 2 * band + 0.005
         assert float(host.sim.plant.external_torque.abs().max()) == 0.0
-        host._disturb({"joint": "elbow_flexion_r", "torque_nm": 4.0, "frequency_hz": 5.0, "duration_s": 0.04})
+        host._disturb({"joint": elbow, "torque_nm": 4.0, "frequency_hz": 5.0, "duration_s": 0.04})
         host.step()
         t = host.sim.t_ns - host.period_ns  # the step just taken started here
         assert float(host.sim.plant.external_torque[0, j]) == pytest.approx(4.0 * np.sin(2 * np.pi * 5.0 * t / 1e9),
                                                                          abs=1e-5)
         settle(12)
         assert float(host.sim.plant.external_torque.abs().max()) == 0.0  # expired
-        with pytest.raises(ValueError, match="1:1 drive"):
-            host._disturb({"drive": "maxonHEJ50L_ANK1", "torque_nm": 1.0})
+        cranks = [x for x, dr in d.drives.items() if dr.crank is not None]
+        if cranks:
+            with pytest.raises(ValueError, match="1:1 drive"):
+                host._disturb({"drive": cranks[0], "torque_nm": 1.0})
         client.close()
     finally:
         host.close()
 
 
-def test_a_disabled_drive_is_back_driven_through_its_gearbox(tmp_path):
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+def test_a_disabled_drive_is_back_driven_through_its_gearbox(tmp_path, robot):
+    """A disabled 1:1 drive's joint takes its family's backdrive torque as friction (the joint's own friction when
+    the description records none, as for the G1's motors); crank-driven joints keep theirs."""
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.runtime.host import RuntimeHost
 
-    out = asset_dir(Description.load(), load_profile("ethrc_v1"), REPO / "outputs" / "assets")
-    if not (out / "asset.json").exists():
-        pytest.skip("robot asset not built; run `humanoid-sim build-asset` in the Isaac Lab image")
-    usd = out / json.loads((out / "asset.json").read_text())["usd"]
     path = tmp_path / "plant"
-    host = RuntimeHost(path, usd, device="cpu", support="suspended", compile=False)
+    host = RuntimeHost(path, built_usd(robot), device="cpu", robot=robot, support="suspended", compile=False)
     try:
-        desc = Description.load()
-        knee = host.robot.joint_names.index("knee_r")
-        ankle = host.robot.joint_names.index("foot_pitch_r")
+        desc = Description.load(robot)
+        knee_drive = next(x for x, dr in desc.drives.items() if dr.crank is None and "knee" in dr.joints[0])
+        knee_joint = desc.drives[knee_drive].joints[0]
+        knee = host.robot.joint_names.index(knee_joint)
 
         def friction(j):
             return float(host.robot.data.joint_friction_coeff.torch[0, j])
 
-        backdrive = float(desc.family("HEJ90-48-140")["backdrive_torque"])
+        recorded = desc.family_value(desc.drives[knee_drive].family, "backdrive_torque")
+        backdrive = desc.joints[knee_joint].friction if recorded is None else float(recorded)
         assert friction(knee) == pytest.approx(backdrive)  # no client: every drive off
-        assert friction(ankle) == pytest.approx(desc.joints["foot_pitch_r"].friction)  # cranks keep theirs
+        for lk in desc.linkages:  # cranks keep theirs
+            for name in lk.joints:
+                assert friction(host.robot.joint_names.index(name)) == pytest.approx(desc.joints[name].friction)
         client = abi.Segment.open(path, wait_s=1)
         n = client.num_drives
         demand = abi.pd_demand(client.regions["feedback"].read()[1]["drive"]["position_rad"][:n].copy(), 100.0, 5.0)
@@ -360,7 +370,7 @@ def test_a_disabled_drive_is_back_driven_through_its_gearbox(tmp_path):
             demand["law"][:] = abi.LAW_PD if enabled else abi.LAW_DISABLED
             client.regions["demands"].write(abi.demands_record(demand, cycle=cycle, session_id=client.session_id))
             host.step()
-            expected = desc.joints["knee_r"].friction if enabled else backdrive
+            expected = desc.joints[knee_joint].friction if enabled else backdrive
             assert friction(knee) == pytest.approx(expected)
         client.close()
     finally:

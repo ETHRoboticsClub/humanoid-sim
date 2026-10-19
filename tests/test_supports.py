@@ -1,17 +1,11 @@
 """Gantry supports: programs (CPU) and ropes on the robot (Isaac Lab image)."""
 
-import json
-from pathlib import Path
-
 import pytest
 import torch
+from conftest import GRAVITY as G
+from conftest import PARTS, PHYSICS_ROBOTS, built_usd
 
-from humanoid_sim.model.asset import asset_dir, load_profile
-from humanoid_sim.model.description import Description
 from humanoid_sim.world.supports import interp_program
-
-ASSETS = Path(__file__).resolve().parents[1] / "outputs" / "assets"
-G = 9.81
 
 
 def test_program_is_linear_between_breakpoints_and_held_beyond():
@@ -23,19 +17,11 @@ def test_program_is_linear_between_breakpoints_and_held_beyond():
     assert at(5000).tolist() == [3.0, 7.0]
 
 
-@pytest.fixture(scope="module")
-def usd():
-    out = asset_dir(Description.load(), load_profile("ethrc_v1"), ASSETS)
-    if not (out / "asset.json").exists():
-        pytest.skip(f"robot asset not built ({out}); run `humanoid-sim build-asset` in the Isaac Lab image")
-    return out / json.loads((out / "asset.json").read_text())["usd"]
-
-
-def _sim(usd, request, height):
+def _sim(robot, request, height):
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.sim import SimCore
 
-    sim = SimCore(usd, device="cpu", base_height_m=height)
+    sim = SimCore(built_usd(robot), device="cpu", robot=robot, base_height_m=height)
     request.addfinalizer(sim.close)
     return sim
 
@@ -46,24 +32,26 @@ def _com(robot):
 
 
 @pytest.mark.physics
-def test_tension_equal_to_the_weight_holds_the_centre_of_mass(usd, request):
-    sim = _sim(usd, request, 2.5)  # in the air, drives off
-    robot = sim.backend.robot
-    com0, mass = _com(robot)
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+def test_tension_equal_to_the_weight_holds_the_centre_of_mass(request, robot):
+    sim = _sim(robot, request, 2.5)  # in the air, drives off
+    art = sim.backend.robot
+    com0, mass = _com(art)
     sim.gantry.hang_tension(torch.tensor([0]), sim.t_ns, [(0.0, mass * G)],
-                            attachment_bodies=["shoulder_connector_l_1", "shoulder_connector_r_1"])
+                            attachment_bodies=list(PARTS[robot]["shoulders"]))
     for _ in range(100):  # 0.4 s: free fall would drop 0.78 m
         sim.step()
-    com1, _ = _com(robot)
+    com1, _ = _com(art)
     assert sim.gantry.tension_n.item() == pytest.approx(mass * G)
     assert abs((com1 - com0)[2].item()) < 0.005
 
 
 @pytest.mark.physics
-def test_cable_carries_the_robot_at_its_stretched_length(usd, request):
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+def test_cable_carries_the_robot_at_its_stretched_length(request, robot):
     from humanoid_sim.devices.demand import DriveDemand
 
-    sim = _sim(usd, request, 2.5)
+    sim = _sim(robot, request, 2.5)
     p = sim.plant
     q, qd = sim.joint_state()
     stand, _, _ = p.map.drive_state(q, qd)

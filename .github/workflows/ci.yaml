@@ -21,7 +21,7 @@ jobs:
       - run: uv run ruff check src tests spikes examples docs
       - run: uv run pytest -m "not physics and not data"
   isaaclab-image:
-    # Builds the Isaac Lab image, the robot assets, and runs the physics tests on the CPU.
+    # Builds the Isaac Lab image, the V1's assets and both G1s', and runs the physics tests on the CPU.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +32,9 @@ jobs:
       - run: |
           docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci build-asset
           docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci build-asset --base-joints
+          for r in g1_29dof_rev_1_0 g1_29dof_with_hand_rev_1_0; do
+            docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci --robot "$r" build-asset
+          done
           docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci \
             pytest -m physics
   controls-pins:

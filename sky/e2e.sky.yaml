@@ -1,6 +1,7 @@
-# End-to-end check on one GPU: both assets, the whole test suite (CUDA and capture tests included), the runtime
-# host's step, the training plant at 4096 envs, a replay of every capture, and the examples: a training scene
-# recorded to Rerun, and a runtime session driven by examples/runtime_client.py and recorded by view-runtime.
+# End-to-end check on one GPU: the V1's assets and both G1s', the whole test suite (CUDA and capture tests included,
+# every robot), the runtime host's step and the training plant at 4096 envs for the V1 and the G1 Controls launches,
+# a replay of every capture, and the examples: a training scene recorded to Rerun, and a runtime session driven by
+# examples/runtime_client.py and recorded by view-runtime.
 #   sky launch -y -d -c hsim-e2e -i 10 sky/e2e.sky.yaml     (autostop stops the cluster after 10 idle minutes)
 #   sky logs hsim-e2e                                        (follow; the job keeps running if this drops)
 #   rsync -avz hsim-e2e:sky_workdir/outputs/e2e/ outputs/e2e-gpu/      (within 10 minutes of the job ending)
@@ -33,11 +34,15 @@ run: |
   out=outputs/e2e && rm -rf "$out" && mkdir -p "$out"
   humanoid-sim build-asset | tail -1
   humanoid-sim build-asset --base-joints | tail -1
+  for r in g1_29dof_rev_1_0 g1_29dof_with_hand_rev_1_0; do humanoid-sim --robot "$r" build-asset | tail -1; done
   pytest -q 2>&1 | tee "$out/pytest.log" | tail -15
-  humanoid-sim bench --runtime --device cuda:0 --steps 2000 > "$out/runtime.log" 2>&1
-  sed -n '/^{/,/^}/p' "$out/runtime.log" | tee "$out/runtime.json"
-  humanoid-sim bench --train --num-envs 4096 --device cuda:0 --steps 500 > "$out/train_4096.log" 2>&1
-  sed -n '/^{/,/^}/p' "$out/train_4096.log" | tee "$out/train_4096.json"
+  for r in ethrc_v1 g1_29dof_with_hand_rev_1_0; do
+    sfx=$([ "$r" = ethrc_v1 ] && echo "" || echo "_$r")
+    humanoid-sim --robot "$r" bench --runtime --device cuda:0 --steps 2000 > "$out/runtime$sfx.log" 2>&1
+    sed -n '/^{/,/^}/p' "$out/runtime$sfx.log" | tee "$out/runtime$sfx.json"
+    humanoid-sim --robot "$r" bench --train --num-envs 4096 --device cuda:0 --steps 500 > "$out/train_4096$sfx.log" 2>&1
+    sed -n '/^{/,/^}/p' "$out/train_4096$sfx.log" | tee "$out/train_4096$sfx.json"
+  done
   for c in /data/humanoid-v1/exc-*; do
     name=$(basename "$c")
     humanoid-sim replay "$c" --device cuda:0 --out "$out/replay/$name" > "$out/replay_$name.log" 2>&1

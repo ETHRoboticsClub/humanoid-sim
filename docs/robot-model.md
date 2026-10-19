@@ -34,8 +34,9 @@ Nothing in the code names a robot. What differs between them comes from the desc
 | Feet | a sole plate fitted to each foot's lowest face (`model.sole`) | four 5 mm spheres per foot, bounded by a sole box for the truth (`model.sole.fit: bounds`) |
 | Self-collision | on, with Controls' contact excludes | off, as Isaac Lab's own G1 has it |
 | IMU | the URDF's `imu_joint` | the URDF's `imu_joint`, on the pelvis |
+| Holding the home pose at the baseline gains | stands: its crank-driven ankles are about 4.6 times as stiff in pitch as the stiffness at which its body topples | tips over within about 1.3 s: its ankles (40 Nm/rad each) are about 0.4 times as stiff as that (about 210 Nm/rad), so the G1 needs a policy to stand |
 
-`tests/test_robots.py` runs over every robot `robots()` finds: inventory, profile merge, the prepared URDF, sole boxes, mirror pairs, the home pose inside the travel, and the plant at the home pose. `tests/test_runtime_host.py::test_the_host_serves_the_g1` serves the G1 through the runtime segment.
+`tests/test_robots.py` runs over every robot `robots()` finds: inventory, profile merge, the prepared URDF, sole boxes, mirror pairs, the home pose inside the travel, and the plant at the home pose. The physics, world, training, gantry, runtime and runtime-view tests run on the V1 and both G1s (`PHYSICS_ROBOTS` in `tests/conftest.py`); what they expect of each robot comes from its description, profile and host kinematics: mass and body count from the URDF, gravity sag from the drives' stiffness, the IMU rate from the profile, the joint-stop sink from MuJoCo's soft-limit law, the toppling stiffness from the centre of mass. `tests/test_runtime_host.py::test_the_host_serves_the_g1` also checks the G1's motor slots and soles through the runtime segment.
 
 ### Adding a robot
 
@@ -368,6 +369,7 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `physics.mjwarp.iterations`, `.ls_iterations` | `solver_cfg` | Solver and line-search iteration limits. |
 | `physics.mjwarp.njmax`, `.nconmax` | `solver_cfg` | MJWarp buffers: constraint rows per world (a maximum) and contacts per world (an average; the pool is shared by all worlds). |
 | `physics.mjwarp.joint_limits` | `apply_joint_limits` | `mujoco`: MuJoCo's own joint-limit constraint, as Controls' MJCF has it. `newton`: Newton's force-space default, softer for the legs. |
+| `physics.mjwarp.heightfield_base_m` | `apply_heightfield_base` | Depth of the solid base under a heightfield's lowest point, 1.0 m (see [world.md](world.md#the-heightfields-base)). |
 | `physics.kamino.integrator` | `solver_cfg` | `euler`, the only one allowed: `moreau` needs Kamino's own collision detector, which is not used here. |
 | `physics.kamino.iterations` | `solver_cfg` | Iteration limit of Kamino's P-ADMM dynamics solver. |
 | `physics.kamino.max_contacts_per_world` | `solver_cfg` | Contact buffer per world (128, an estimate); Newton drops contacts beyond it. |
