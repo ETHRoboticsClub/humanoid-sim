@@ -33,7 +33,7 @@ jobs:
           docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci build-asset
           docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci build-asset --base-joints
           docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci \
-            bash -c "uv pip install -q --python /opt/isaaclab-venv/bin/python pytest && pytest -m physics"
+            pytest -m physics
   controls-pins:
     # humanoid-urdf and ankle_kinematics must be at the commits Controls pins on CONTROLS_REF (a repository
     # variable; default master).

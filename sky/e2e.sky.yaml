@@ -1,0 +1,59 @@
+# End-to-end check on one GPU: both assets, the whole test suite (CUDA and capture tests included), the runtime
+# host's step, the training plant at 4096 envs, a replay of every capture, and the examples: a training scene
+# recorded to Rerun, and a runtime session driven by examples/runtime_client.py and recorded by view-runtime.
+#   sky launch -y -d -c hsim-e2e -i 10 sky/e2e.sky.yaml     (autostop stops the cluster after 10 idle minutes)
+#   sky logs hsim-e2e                                        (follow; the job keeps running if this drops)
+#   rsync -avz hsim-e2e:sky_workdir/outputs/e2e/ outputs/e2e-gpu/      (within 10 minutes of the job ending)
+name: humanoid-sim-e2e
+workdir: .
+
+resources:
+  cloud: aws
+  accelerators: {A10G:1, L4:1}   # whichever has capacity
+  cpus: 8+
+  memory: 32+
+  disk_size: 200
+
+file_mounts:
+  /data/humanoid-v1: ../datasets/humanoid-v1
+
+envs:
+  ISAACLAB_COMMIT: 32712682b69edd488eea26689da6905c48d31037
+  UV_VERSION: 0.13.1
+  HUMANOID_SIM_DATASETS: /data/humanoid-v1
+
+setup: |
+  bash sky/setup.sh
+  uv pip install -q --python "$HOME/il-venv/bin/python" "pytest>=9,<10"
+
+run: |
+  set -euo pipefail
+  export PATH="$HOME/.local/bin:$HOME/il-venv/bin:$PATH"
+  cd "$HOME/sky_workdir"
+  out=outputs/e2e && rm -rf "$out" && mkdir -p "$out"
+  humanoid-sim build-asset | tail -1
+  humanoid-sim build-asset --base-joints | tail -1
+  pytest -q 2>&1 | tee "$out/pytest.log" | tail -15
+  humanoid-sim bench --runtime --device cuda:0 --steps 5000 > "$out/runtime.log" 2>&1
+  sed -n '/^{/,/^}/p' "$out/runtime.log" | tee "$out/runtime.json"
+  humanoid-sim bench --train --num-envs 4096 --device cuda:0 --steps 500 > "$out/train_4096.log" 2>&1
+  sed -n '/^{/,/^}/p' "$out/train_4096.log" | tee "$out/train_4096.json"
+  for c in /data/humanoid-v1/exc-*; do
+    name=$(basename "$c")
+    humanoid-sim replay "$c" --device cuda:0 --out "$out/replay/$name" > "$out/replay_$name.log" 2>&1
+    echo "== $name"; tail -24 "$out/replay_$name.log"
+  done
+  mkdir -p "$out/shots"
+  for n in 24 6; do
+    python examples/train_scene.py --num-envs $n --seconds 8 --device cuda:0 --rrd "$out/shots/train_scene_$n.rrd" \
+      2>&1 | grep -v "height field collision overflow\|decrease the number of hfield" | tail -1
+  done
+  seg=/dev/shm/hsim-e2e/plant && mkdir -p "$(dirname "$seg")" && rm -f "$seg"
+  humanoid-sim serve --segment "$seg" --device cuda:0 > "$out/serve.log" 2>&1 &
+  serve_pid=$!
+  humanoid-sim view-runtime "$seg" --save "$out/shots/runtime.rrd" --wait 600 > "$out/view_runtime.log" 2>&1 &
+  view_pid=$!
+  python examples/runtime_client.py "$seg" --seconds 20 > "$out/runtime_client.log" 2>&1
+  wait "$serve_pid" "$view_pid"
+  tail -3 "$out/runtime_client.log"; tail -1 "$out/view_runtime.log"
+  grep -E "passed|failed|error" "$out/pytest.log" | tail -1

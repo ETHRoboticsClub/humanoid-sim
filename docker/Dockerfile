@@ -36,7 +36,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # The dev entrypoint swaps this copy for an editable install from /workspace/humanoid-sim.
 COPY pyproject.toml README.md /opt/humanoid-sim/
 COPY src/ /opt/humanoid-sim/src/
-RUN uv pip install -q --python "${VIRTUAL_ENV}/bin/python" --no-deps /opt/humanoid-sim
+RUN uv pip install -q --python "${VIRTUAL_ENV}/bin/python" --no-deps /opt/humanoid-sim \
+    && uv pip install -q --python "${VIRTUAL_ENV}/bin/python" "pytest>=9,<10"
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/humanoid-sim-entrypoint
 ENV WARP_CACHE_PATH=/cache/warp
 WORKDIR /workspace
