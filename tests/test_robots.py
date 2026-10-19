@@ -96,7 +96,7 @@ def test_the_plant_holds_the_home_pose(robot):
     q = torch.tensor([[home[n] for n in joints]] * 2)
     qd = torch.zeros_like(q)
     q_drive, _, _ = plant.map.drive_state(q, qd)
-    hold = DriveDemand.jvpt(q_drive, plant.drive_stiffness.expand(2, -1), plant.drive_damping.expand(2, -1))
+    hold = DriveDemand.pd(q_drive, plant.drive_stiffness.expand(2, -1), plant.drive_damping.expand(2, -1))
     plant.submit(hold, torch.zeros(2, dtype=torch.long))
     target = plant.pre_physics(0, q, qd)
     assert torch.isfinite(target).all()

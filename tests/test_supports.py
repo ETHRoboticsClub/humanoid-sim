@@ -67,7 +67,7 @@ def test_cable_carries_the_robot_at_its_stretched_length(usd, request):
     p = sim.plant
     q, qd = sim.joint_state()
     stand, _, _ = p.map.drive_state(q, qd)
-    p.submit(DriveDemand.jvpt(stand, p.drive_stiffness.expand(1, -1), p.drive_damping.expand(1, -1)),
+    p.submit(DriveDemand.pd(stand, p.drive_stiffness.expand(1, -1), p.drive_damping.expand(1, -1)),
              torch.zeros(1, dtype=torch.long))
     _, mass = _com(sim.backend.robot)
     k, length = 4e4, 0.5

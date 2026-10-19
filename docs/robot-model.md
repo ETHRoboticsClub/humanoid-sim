@@ -359,7 +359,7 @@ The repository rule is that robot facts live in humanoid-urdf. A few currently l
 | `sensors.imu.sample_period_ns`, `burst_period_ns`, `in_burst_spacing_ns` | How IMU samples reach the host | measured on the `exc-*` captures |
 | `sensors.imu.gyro_noise_density_rad_s_sqrt_hz`, `accel_noise_density_m_s2_sqrt_hz` | MTi-610 white noise | Controls `ethrc_ssot/imu_sensors.py` |
 
-The rest of `model` (the URDF variant, sole box parameters, contact excludes, ground friction) mirrors how Controls builds its MuJoCo model; those are modeling choices. One robot constant lives in code: `JVPT_PER_SI_GAIN` in `src/humanoid_sim/devices/demand.py`, the factor (1000) between SI gains and the raw gains a drive demand carries in JVPT, the drive mode (-64) that tracks position and velocity targets with the drive's own P and D gains (see [drives.md](drives.md)). humanoid-urdf records it only in a comment.
+The rest of `model` (the URDF variant, sole box parameters, contact excludes, ground friction) mirrors how Controls builds its MuJoCo model; those are modeling choices.
 
 ## Changing a robot fact
 

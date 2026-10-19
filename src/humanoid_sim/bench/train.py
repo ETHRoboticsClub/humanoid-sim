@@ -72,7 +72,7 @@ def run_train_bench(args, usd: Path) -> dict:
         plant.reset(ids, joint_pos=q[ids], joint_vel=torch.zeros_like(q[ids]), root_pose=root,
                     root_vel=torch.zeros(resets, 6, device=q.device))
         sent = torch.full((n,), plant.t_ns, dtype=torch.int64, device=q.device)
-        plant.submit(DriveDemand.jvpt(stand, stiff, damp), sent)
+        plant.submit(DriveDemand.pd(stand, stiff, damp), sent)
 
     def run(steps):
         for k in range(steps):

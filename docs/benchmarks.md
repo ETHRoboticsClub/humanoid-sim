@@ -40,7 +40,7 @@ The default and training workloads time their steps with torch's sync debug mode
 
 ## Physics benchmark (default)
 
-The default workload builds the simulation core with N robots, each with a free base, spawned upright on flat ground in the home pose ([robot-model.md](robot-model.md#standing-on-the-ground)), and every drive holds that pose at its baseline gains, so the robots stand. Every 20 ms (the policy period) each robot gets a new JVPT position demand ([drives.md](drives.md)) carrying a normally distributed offset with a standard deviation of 0.02 rad. The first 50 steps compile the kernels and are not timed; the next `--steps` steps are. The timing covers the whole step: the plant's drive and transmission math and the MJWarp solve.
+The default workload builds the simulation core with N robots, each with a free base, spawned upright on flat ground in the home pose ([robot-model.md](robot-model.md#standing-on-the-ground)), and every drive holds that pose at its baseline gains, so the robots stand. Every 20 ms (the policy period) each robot gets a new PD position demand ([drives.md](drives.md)) carrying a normally distributed offset with a standard deviation of 0.02 rad. The first 50 steps compile the kernels and are not timed; the next `--steps` steps are. The timing covers the whole step: the plant's drive and transmission math and the MJWarp solve.
 
 Isaac Lab captures its solver step as a CUDA graph (a recorded sequence of GPU kernels replayed with one launch); the plant's own work runs as ordinary kernel launches here, unlike in the runtime host, which captures it too.
 

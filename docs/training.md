@@ -35,7 +35,7 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `initial_pose`, `POSES` | `src/humanoid_sim/model/poses.py`, re-exported by `humanoid_sim.train.scene` | The joint positions and base height of a named initial pose |
 | `heightfield_terrain_cfg`, `rough_terrain_cfg` | `src/humanoid_sim/world/terrain.py` | Terrain-importer configs, described in [world.md](world.md) |
 | `ForcePush`, `Gantry` | `src/humanoid_sim/world/` | Pushes and gantry ropes a task applies, described in [world.md](world.md) |
-| `DriveDemand` | `src/humanoid_sim/devices/demand.py` | One demand per env and drive, a mirror of Controls' `FakeDriveDemand` |
+| `DriveDemand` | `src/humanoid_sim/devices/demand.py` | One SI demand per env and drive: law, targets, gains, torque limit |
 | `SceneRecorder` | `src/humanoid_sim/signals/scene.py` | Records many envs of a scene to one Rerun recording |
 
 `TrainPlantCfg` fields:
@@ -147,7 +147,7 @@ class PoseOffsets(PlantAction):
         self.kd = core.drive_damping.expand(n, -1)
 
     def demands(self, actions):
-        demand = DriveDemand.jvpt(self.pose + 0.1 * actions, self.kp, self.kd)
+        demand = DriveDemand.pd(self.pose + 0.1 * actions, self.kp, self.kd)
         sent_ns = torch.full((self.num_envs,), self.plant.t_ns, dtype=torch.int64, device=self.device)
         return demand, sent_ns
 
@@ -247,20 +247,18 @@ For the rsl-rl side, `tests/test_train_smoke.py` in [humanoid-learning](https://
 
 `demands(actions)` returns a pair `(demand, sent_ns)`.
 
-`demand` is a `DriveDemand` with every field `[E, 22]`, in the plant's drive order (`plant.drives`, the description's drive order). It mirrors Controls' `FakeDriveDemand` field for field:
+`demand` is a `DriveDemand` with every field `[E, D]` (D is 22 for the ETHRC V1, 29 for the G1), in the plant's drive order (`plant.drives`, the description's drive order). It is in SI units and names no vendor:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `torque_enabled` | bool | Drive powered |
-| `mode` | int8 | Mode of operation (object 0x6061): -64 JVPT, -62 freeze, 6 homing |
+| `law` | int8 | `LAW_DISABLED` (0), `LAW_PD` (1) or `LAW_FREEZE` (2) |
 | `target_position_rad` | float | Target in the physical drive-output frame (rad) |
 | `target_velocity_rad_s` | float | Velocity target (rad/s) |
 | `feedforward_torque_nm` | float | Feed-forward torque (Nm) |
-| `p_gain_raw`, `i_gain_raw`, `d_gain_raw` | int64 | Raw gain counts, 1000 per Nm/rad or Nm s/rad; a non-zero I gain faults the drive |
-| `max_torque_mnm` | int64 | Torque cap in mNm, 0 for none |
-| `homing_hold` | bool | Carried for an exact mirror; not read |
+| `stiffness_nm_per_rad`, `damping_nm_s_per_rad` | float | P and D gains |
+| `torque_limit_nm` | float | Cap on the applied torque, `inf` for none |
 
-In [JVPT](glossary.md#jvpt) mode an enabled drive applies `kp (target - q) + kd (v_target - v) + ff`, clipped by its torque-speed envelope and the cap. `DriveDemand.jvpt(position, stiffness, damping, *, velocity=None, feedforward=None, max_torque_nm=None)` builds an enabled JVPT demand from SI gains, rounding them to raw counts as Controls does; `DriveDemand.disabled(num_envs, num_drives, device=...)` turns every drive off. The modes are in [drives.md](drives.md).
+Under the PD law a drive applies `kp (target - q) + kd (v_target - v) + ff`, clipped by its torque-speed envelope and the limit. `DriveDemand.pd(position, stiffness, damping, *, velocity=None, feedforward=None, torque_limit_nm=None)` builds a PD demand; `DriveDemand.disabled(num_envs, num_drives, device=...)` disables every drive. The laws are in [drives.md](drives.md#the-demand).
 
 Positions are in the [drive frame](glossary.md#drive-frame). For a 1:1 drive that is the joint angle times a sign; for an ankle drive it is the crank angle, which is neither the foot pitch nor the foot roll. `plant.core.map.drive_state(q, qd)` maps joint positions in description order to drive positions through the ankle transmission, which is how `PoseOffsets` turns the default pose into drive targets. A policy that acts in foot pitch and roll converts them the same way inside `demands()`.
 
@@ -348,7 +346,7 @@ class HeldPoseOffsets(PoseOffsets):  # PoseOffsets from the minimal environment
         env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
         self.raw_actions[env_ids] = 0.0
         n = len(env_ids)
-        self.plant.reset(env_ids, demand=DriveDemand.jvpt(self.pose[env_ids], self.kp[:n], self.kd[:n]))
+        self.plant.reset(env_ids, demand=DriveDemand.pd(self.pose[env_ids], self.kp[:n], self.kd[:n]))
 ```
 
 ## Randomization

@@ -1,5 +1,5 @@
-// Runtime segment ABI between humanoid-sim's real-time host and Controls' plant host: the same layout as
-// plant_abi.py (which documents the protocol). Self-contained C11/C++17; vendored unchanged by Controls.
+// Runtime segment ABI between humanoid-sim's real-time host and a client that plays the robot's devices: the same
+// layout as plant_abi.py (which documents the protocol). Self-contained C11/C++17; vendored unchanged by Controls.
 //
 // Every region starts with seq (u64) and crc (u32). A writer makes seq odd, writes the payload (the bytes
 // after the 16-byte region head), stores the CRC-32 (zlib) of the payload and makes seq even again, with
@@ -14,13 +14,13 @@
 extern "C" {
 #endif
 
-#define HSIM_PLANT_ABI_MAJOR 1
-#define HSIM_PLANT_ABI_MINOR 1
+#define HSIM_PLANT_ABI_MAJOR 2
+#define HSIM_PLANT_ABI_MINOR 0
 #define HSIM_PLANT_MAGIC "HSIMPLNT"
-#define HSIM_PLANT_LAYOUT_HASH 0x8b55fa9a7f94d7f2ULL
-#define HSIM_PLANT_SEGMENT_BYTES 27840
+#define HSIM_PLANT_LAYOUT_HASH 0xfb475e58737ea4a4ULL
+#define HSIM_PLANT_SEGMENT_BYTES 30912
 
-#define HSIM_PLANT_MAX_DRIVES 32
+#define HSIM_PLANT_MAX_DRIVES 64
 #define HSIM_PLANT_MAX_JOINTS 64
 #define HSIM_PLANT_IMU_SAMPLES 32
 #define HSIM_PLANT_DESCRIPTOR_BYTES 16384
@@ -58,17 +58,21 @@ typedef struct {
   uint64_t offsets[6]; // descriptor, demands, feedback, mailbox, ack, truth
 } HsimHeader;
 
-// FakeDriveDemand (Controls fake_bank.h), at fixed widths.
+// Drive laws.
+#define HSIM_LAW_DISABLED 0u // no torque
+#define HSIM_LAW_PD 1u       // kp (target - q) + kd (target_velocity - v) + feedforward
+#define HSIM_LAW_FREEZE 2u   // PD about the position read on entering FREEZE, no velocity target or feedforward
+
+// A drive's demand, SI and vendor-neutral: a client converts its device's command at its own boundary.
 typedef struct {
-  int32_t torque_enabled;
-  int8_t mode; // 0x6061: 6 homing, -64 JVPT, -62 freeze, 0 none
-  uint8_t homing_hold;
-  uint8_t _pad0[2];
+  uint8_t law;
+  uint8_t _pad0[7];
   double target_position_rad, target_velocity_rad_s, feedforward_torque_nm;
-  uint32_t p_gain_raw, i_gain_raw, d_gain_raw, max_torque_mnm;
+  double stiffness_nm_per_rad, damping_nm_s_per_rad;
+  double torque_limit_nm; // a cap on the applied torque; INFINITY: none
 } HsimDriveDemand;
 
-// fake_bank_feedback's arguments.
+// Physical feedback at the drive output (what Controls' fake_bank_feedback takes for an EPOS4).
 typedef struct {
   double position_rad, velocity_rad_s, applied_torque_nm, demanded_torque_nm;
 } HsimDriveFeedback;
@@ -150,18 +154,20 @@ typedef struct {
 
 #define HSIM_OFFSET_DESCRIPTOR 320
 #define HSIM_OFFSET_DEMANDS 16768
-#define HSIM_OFFSET_FEEDBACK 18368
-#define HSIM_OFFSET_MAILBOX 21824
-#define HSIM_OFFSET_ACK 25984
-#define HSIM_OFFSET_TRUTH 26304
+#define HSIM_OFFSET_FEEDBACK 20416
+#define HSIM_OFFSET_MAILBOX 24896
+#define HSIM_OFFSET_ACK 29056
+#define HSIM_OFFSET_TRUTH 29376
 
 #ifdef __cplusplus
 static_assert(sizeof(HsimHeader) == 272, "header layout");
-static_assert(sizeof(HsimFeedback) == 3400, "feedback layout");
+static_assert(sizeof(HsimDemands) == 3632, "demands layout");
+static_assert(sizeof(HsimFeedback) == 4424, "feedback layout");
 static_assert(sizeof(HsimTruth) == 1536, "truth layout");
 #else
 _Static_assert(sizeof(HsimHeader) == 272, "header layout");
-_Static_assert(sizeof(HsimFeedback) == 3400, "feedback layout");
+_Static_assert(sizeof(HsimDemands) == 3632, "demands layout");
+_Static_assert(sizeof(HsimFeedback) == 4424, "feedback layout");
 _Static_assert(sizeof(HsimTruth) == 1536, "truth layout");
 #endif
 

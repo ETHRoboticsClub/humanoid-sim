@@ -50,7 +50,7 @@ def run_bench(args, usd: Path) -> dict:
         qdrv, _, _ = plant.map.drive_state(q0, torch.zeros_like(q0))
         noise = 0.02 * torch.randn(qdrv.shape, generator=gen, device=qdrv.device, dtype=qdrv.dtype)
         arrival = torch.full((args.num_envs,), sim.t_ns, dtype=torch.long, device=qdrv.device)
-        plant.submit(DriveDemand.jvpt(qdrv + noise, stiff, damp), arrival)
+        plant.submit(DriveDemand.pd(qdrv + noise, stiff, damp), arrival)
 
     def run(n):
         for k in range(n):
@@ -100,21 +100,18 @@ def run_runtime_bench(args, usd: Path) -> dict:
     from humanoid_sim.runtime.abi import plant_abi as abi
     from humanoid_sim.runtime.host import RuntimeHost
 
-    gains = Description.load(args.robot).table["baseline_position_gains"]
+    desc = Description.load(args.robot)
     with tempfile.TemporaryDirectory() as tmp:
         host = RuntimeHost(Path(tmp) / "plant", usd, device=args.device, robot=args.robot, solver=args.solver,
                            support="free")
         client = abi.Segment.open(Path(tmp) / "plant")
         try:
-            n = len(host.drives)
             host._reset({"pose": "home"})
             q, _ = host._named_pose("home")
             q = q.to(host.sim.plant.cfg.dtype)
             hold = host.sim.plant.map.drive_state(q, torch.zeros_like(q))[0][0].cpu().numpy()
-            demand = {name: np.zeros(n) for name in abi.DRIVE_DEMAND.names if not name.startswith("_")}
-            demand |= {"torque_enabled": np.ones(n), "mode": np.full(n, -64), "target_position_rad": hold,
-                       "p_gain_raw": np.array([round(gains[d]["stiffness"] * 1000) for d in host.drives]),
-                       "d_gain_raw": np.array([round(gains[d]["damping"] * 1000) for d in host.drives])}
+            demand = abi.pd_demand(hold, [desc.drives[d].baseline_stiffness for d in host.drives],
+                                   [desc.drives[d].baseline_damping for d in host.drives])
             cycle = 0
 
             def step():

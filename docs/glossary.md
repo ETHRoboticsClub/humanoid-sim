@@ -44,7 +44,7 @@ How many physics steps one policy step spans in an Isaac Lab environment. With t
 
 ### Demand
 
-What the master sends one drive per cycle: mode, enable flag, targets, gains and torque limit. The sim's record mirrors Controls' `FakeDriveDemand` field by field (`devices/demand.py`, `DriveDemand`).
+What a drive is told each cycle: its control law (disabled, PD or freeze), targets, gains and torque limit, in SI units and vendor-neutral (`devices/demand.py`, `DriveDemand`). Controls converts its drives' native commands into it.
 
 ### Description
 
@@ -72,7 +72,7 @@ Positions and torques as a drive reports them: the joint angle times the joint's
 
 ### Drive law
 
-What a drive does with its demand in each mode: JVPT tracks targets with its own gains, freeze and homing hold the position they entered with. Implemented in `devices/bank.py`.
+What a drive does with its demand under each law: PD tracks the targets with the demand's gains, freeze holds the position it entered with, disabled applies no torque. Implemented in `devices/bank.py`.
 
 ### Encoder counts
 
@@ -112,7 +112,7 @@ NVIDIA's robot learning framework. humanoid-sim uses version 3.0 without Omniver
 
 ### JVPT
 
-The drive mode Controls uses for control (mode -64): the drive tracks a position and velocity target with its own P and D gains and adds a feed-forward torque. Gains are sent as raw integers, 1000 per SI unit.
+The EPOS4 drive mode Controls uses for control on the ETHRC V1 (mode -64): the drive tracks a position and velocity target with its own P and D gains and adds a feed-forward torque. Gains are sent as raw integers, 1000 per SI unit. Controls' plant host turns it into the PD law of a [drive demand](drives.md#the-demand).
 
 ### Latency
 

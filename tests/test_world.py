@@ -112,7 +112,7 @@ def test_a_robot_holding_the_home_pose_stands(usd):
         q = default[:, [list(robot.joint_names).index(n) for n in plant.core.map.joint_names]]
         core = plant.core
         drive_q, _, _ = core.map.drive_state(q, torch.zeros_like(q))
-        hold = DriveDemand.jvpt(drive_q, core.drive_stiffness.expand(1, -1), core.drive_damping.expand(1, -1))
+        hold = DriveDemand.pd(drive_q, core.drive_stiffness.expand(1, -1), core.drive_damping.expand(1, -1))
         plant.reset(torch.arange(1), demand=hold)
         _step(sim, scene, plant, int(1.5e9 / plant.period_ns))
         pose = plant.truth().root_pose_w[0]

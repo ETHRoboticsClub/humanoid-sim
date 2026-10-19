@@ -57,7 +57,7 @@ def make_env(num_envs: int, device: str, *, flat: bool):
             wave = 0.5 * (1 - torch.cos(2 * math.pi * 0.5 * t + phase)).unsqueeze(1)
             q = stand + amp * wave
             drive_q, _, _ = core.map.drive_state(q, torch.zeros_like(q))
-            demand = DriveDemand.jvpt(drive_q, core.drive_stiffness.expand(n, -1), core.drive_damping.expand(n, -1))
+            demand = DriveDemand.pd(drive_q, core.drive_stiffness.expand(n, -1), core.drive_damping.expand(n, -1))
             return demand, torch.full((n,), self.plant.t_ns, device=self.device)
 
     def base_height(env):

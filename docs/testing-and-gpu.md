@@ -12,7 +12,7 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 | `test_arrival.py` | The arrival queue: a demand acts from its arrival time, time-weighted inside a step, in order, with overflow counted | |
 | `test_base_motion.py` | Base motion from an IMU trace: Euler angles and rates, burst sample times | |
 | `test_delay.py` | Demand-delay scan: drive regions, and a replay with each env's demands shifted by its own delay | 1 test `physics` and `data` |
-| `test_devices.py` | The drive bank: the JVPT law against Controls' plant, envelope clipping, freeze (the held position latched when the freeze demand arrives), refused I gain, target shaping, arrival | |
+| `test_devices.py` | The drive bank: the PD law against Controls' plant, envelope clipping, freeze (the held position latched when the freeze demand arrives), a disabled drive, target shaping, arrival | |
 | `test_envelope.py` | Torque-speed envelope interpolation in all four quadrants | |
 | `test_exc_reader.py` | The capture reader: sampling helpers, captures that match the description, the bursty base-frame IMU stream | 2 tests `data` |
 | `test_imu_delivery.py` | IMU sampling on the sensor clock, burst delivery, bias, misalignment and noise, per-env reset | |

@@ -43,7 +43,7 @@ Each drive is fed its own position demand, object 0x6062 of the drive's CiA 402 
 
 `ExcitationCapture.pdo()` groups `pdo_feedback.csv` by drive, sorts each drive's rows by `t_source_ros_ns` and drops rows with a repeated stamp. The replay interpolates linearly between the 200 Hz samples (`sample_linear`).
 
-`ExcitationCapture.gains()` reads the raw P and D gains from `gains.json`. The replay runs every drive in JVPT mode, the drive's PD position mode (operating mode -64, `MODE_JVPT` in `src/humanoid_sim/devices/demand.py`), at those raw gains, with zero target velocity and zero feed-forward torque, which is how the capture's commands were sent. [drives.md](drives.md) describes the drive model the demands go through.
+`ExcitationCapture.gains()` reads the P and D gains from `gains.json`, in SI (the raw JVPT counts it also holds are exactly 1000 times these). The replay runs every drive on the PD law at those gains, with zero target velocity and zero feed-forward torque, which is how the capture's commands were sent in [JVPT](glossary.md#jvpt) mode. [drives.md](drives.md) describes the drive model the demands go through.
 
 `imu.csv` provides the base motion for the `yaw` and `orientation` base modes.
 
