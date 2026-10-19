@@ -1,9 +1,10 @@
-"""Many envs of a training scene in one Rerun recording: the ground and any static boxes once, each visual mesh of
-the robot once, then every recorded env's body poses per frame as instance poses of those meshes.
+"""Many envs of a training scene in one Rerun recording: the ground and any static boxes (or the room's textured
+scan) once, each visual mesh of the robot once, then every recorded env's body poses per frame as instance poses of
+those meshes.
 
 A frame copies ``[envs, bodies, 7]`` poses from the GPU, so record at a low rate (every few policy steps) and for
 debugging or showcases, not inside a training loop that has to stay free of host syncs. Entity paths:
-``/world/ground``, ``/world/scene`` (the static boxes) and ``/world/robots/<body>/visual_<k>``. Quaternions are xyzw,
+``/world/ground``, ``/world/scene/{boxes,scan,floor}`` and ``/world/robots/<body>/visual_<k>``. Quaternions are xyzw,
 as Isaac Lab's.
 """
 
@@ -35,6 +36,53 @@ def ground_colors(verts: np.ndarray) -> np.ndarray:
     lo, hi = np.percentile(z, [1, 99])
     u = np.clip((z - lo) / max(float(hi - lo), 1e-3), 0.0, 1.0)
     return (GROUND_LOW + (GROUND_HIGH - GROUND_LOW) * u[:, None]).astype(np.uint8)
+
+
+DRAWS = ("scan", "boxes")
+
+
+def log_scene(rr, scene, *, draw: str | None = None, detail: str = "full",
+              path: str = "/world/scene") -> set[str]:
+    """Log ``scene`` (:class:`~humanoid_sim.world.boxes.StaticBoxes`) as static entities under ``path``: its scan
+    and the scan's floor (``draw="scan"``, the default when the scene has a scan, at ``detail``, see
+    :data:`~humanoid_sim.world.scan.DETAILS`) or its boxes (``"boxes"``). Returns the names logged: ``{"boxes"}``,
+    or ``{"scan"}`` with ``"floor"`` when the scan has a floor, which then stands for the ground."""
+    from humanoid_sim.world.scan import scan_meshes
+
+    draw = draw or ("scan" if scene.scan is not None else "boxes")
+    if draw not in DRAWS:
+        raise ValueError(f"draw {draw!r}: one of {DRAWS}")
+    if draw == "boxes" or scene.scan is None:
+        if draw == "scan":
+            raise ValueError(f"{scene.file}: the scene has no scan to draw")
+        log_boxes(rr, f"{path}/boxes", scene.corners(), scene.rgb)
+        return {"boxes"}
+    meshes = scan_meshes(scene.scan, scene.spawn_m, scene.floor_corners, detail=detail)
+    for name, mesh in meshes.items():
+        rr.log(f"{path}/{name}", scan_mesh3d(rr, mesh), static=True)
+    return set(meshes)
+
+
+def scan_mesh3d(rr, mesh):
+    """A :class:`~humanoid_sim.world.scan.ScanMesh` as an unlit ``Mesh3D``: no normals, its texture or colours."""
+    kw = {"vertex_positions": mesh.positions}
+    if mesh.triangles is not None:
+        kw["triangle_indices"] = mesh.triangles
+    if mesh.texture is not None:
+        kw |= {"vertex_texcoords": mesh.texcoords, "albedo_texture": mesh.texture}
+    if mesh.colors is not None:
+        kw["vertex_colors"] = mesh.colors
+    return rr.Mesh3D(**kw)
+
+
+def scan_blueprint(origin: str = "/world"):
+    """A default layout for a scan: the 3D view against the neutral sky, other views as Rerun picks them."""
+    import rerun.blueprint as rrb
+
+    from humanoid_sim.world.scan import SKY_RGB
+
+    sky = [round(255 * c) for c in SKY_RGB]
+    return rrb.Blueprint(rrb.Spatial3DView(origin=origin, background=rrb.Background(color=sky)), auto_views=True)
 
 
 def log_boxes(rr, path: str, corners: np.ndarray, colors: np.ndarray) -> None:
@@ -86,10 +134,16 @@ def ground_meshes(env) -> list[tuple[np.ndarray, np.ndarray]]:
 
 class SceneRecorder:
     """Records ``envs`` of ``env``'s robot (an Isaac Lab articulation named ``robot``) to ``rrd`` or a viewer at
-    ``connect``. Call :meth:`frame` with the plant time whenever a frame should be recorded."""
+    ``connect``. Call :meth:`frame` with the plant time whenever a frame should be recorded.
+
+    The static boxes on the stage are drawn. With ``scene`` (the :class:`~humanoid_sim.world.boxes.StaticBoxes` the
+    scene was built from) its scan is drawn instead, with its floor in place of the ground and a default layout
+    against the scan's sky (``draw="boxes"`` keeps the boxes), at ``detail``: ``full`` when recording to a file,
+    ``live`` when streaming, unless given."""
 
     def __init__(self, env, usd: Path, *, rrd: str | None = None, connect: str | None = None,
-                 envs: list[int] | None = None, app_id: str = "humanoid-sim scene"):
+                 envs: list[int] | None = None, app_id: str = "humanoid-sim scene", scene=None,
+                 draw: str | None = None, detail: str | None = None):
         import rerun as rr
 
         from humanoid_sim.model.kinematics import RobotKinematics
@@ -99,10 +153,13 @@ class SceneRecorder:
         self.robot = env.scene["robot"]
         self.envs = list(range(self.robot.num_instances)) if envs is None else list(envs)
         rr.init(app_id)
+        draw = draw or ("scan" if scene is not None and scene.scan is not None else "boxes")
+        # Given to the sink, not sent after it: Rerun 0.39 opened a file with the layout sent later as empty.
+        layout = scan_blueprint() if scene is not None and draw == "scan" else None
         if rrd:
-            rr.save(rrd)
+            rr.save(rrd, default_blueprint=layout)
         elif connect:
-            rr.connect_grpc(connect)
+            rr.connect_grpc(connect, default_blueprint=layout)
         names = list(self.robot.body_names)
         kin = RobotKinematics(usd, list(self.robot.joint_names))
         meshes = RobotMeshes(kin.model)
@@ -117,15 +174,20 @@ class SceneRecorder:
                                    vertex_normals=vertex_normals(local, tris), albedo_factor=ROBOT_COLOR),
                    static=True)
             self.visuals.append((names.index(body), path))
-        for i, (verts, tris) in enumerate(ground_meshes(env)):
-            rr.log(f"/world/ground/{i}", rr.Mesh3D(vertex_positions=verts, triangle_indices=tris,
-                                                   vertex_normals=vertex_normals(verts, tris),
-                                                   vertex_colors=ground_colors(verts)), static=True)
-        from humanoid_sim.world.boxes import stage_boxes
+        drawn = set()
+        if scene is not None:
+            drawn = log_scene(rr, scene, draw=draw, detail=detail or ("full" if rrd else "live"))
+        else:
+            from humanoid_sim.world.boxes import stage_boxes
 
-        corners, colors = stage_boxes()
-        if len(corners):
-            log_boxes(rr, "/world/scene", corners, colors)
+            corners, colors = stage_boxes()
+            if len(corners):
+                log_boxes(rr, "/world/scene/boxes", corners, colors)
+        if "floor" not in drawn:
+            for i, (verts, tris) in enumerate(ground_meshes(env)):
+                rr.log(f"/world/ground/{i}", rr.Mesh3D(vertex_positions=verts, triangle_indices=tris,
+                                                       vertex_normals=vertex_normals(verts, tris),
+                                                       vertex_colors=ground_colors(verts)), static=True)
         self._ids = None
 
     def frame(self, t_ns: int) -> None:

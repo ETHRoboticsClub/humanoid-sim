@@ -97,7 +97,8 @@ def cmd_view_runtime(args) -> int:
     from humanoid_sim.runtime.view import view_runtime
 
     frames = view_runtime(args.segment, _usd(args), rrd=args.save, connect=args.connect, fps=args.fps,
-                          seconds=args.seconds, wait_s=args.wait, robot=args.robot)
+                          seconds=args.seconds, wait_s=args.wait, robot=args.robot, draw=args.draw,
+                          detail=args.detail)
     print(f"{frames} frames" + (f" -> {args.save}" if args.save else ""))
     return 0
 
@@ -206,12 +207,19 @@ def _revision() -> str:
 def _scene(args):
     """The static boxes of ``--scene`` with ``--spawn`` at the world origin, or None."""
     if args.scene is None:
-        if args.spawn is not None:
-            raise SystemExit("--spawn places a --scene")
+        if args.spawn is not None or getattr(args, "scan_mesh", None) is not None:
+            raise SystemExit("--spawn and --scan-* go with a --scene")
         return None
     from humanoid_sim.world.boxes import StaticBoxes
+    from humanoid_sim.world.scan import ScanFiles
 
-    return StaticBoxes.load(args.scene, args.spawn or (0.0, 0.0))
+    scan = getattr(args, "scan_mesh", None)
+    if (scan is None) != (getattr(args, "scan_texture", None) is None):
+        raise SystemExit("--scan-mesh and --scan-texture go together")
+    if scan is None and getattr(args, "scan_floor_texture", None) is not None:
+        raise SystemExit("--scan-floor-texture comes with --scan-mesh and --scan-texture")
+    files = None if scan is None else ScanFiles.of(scan, args.scan_texture, args.scan_floor_texture)
+    return StaticBoxes.load(args.scene, args.spawn or (0.0, 0.0), scan=files)
 
 
 def _add_scene_args(parser) -> None:
@@ -312,6 +320,10 @@ def main(argv: list[str] | None = None) -> int:
     vr.add_argument("--wait", type=float, default=60.0,
                     help="seconds to wait for the segment to appear (the next session of a --persist host is "
                          "followed if it starts within 10 s)")
+    vr.add_argument("--draw", choices=("scan", "boxes"), default=None,
+                    help="the host's scene as its textured scan or its boxes (default: the scan when it has one)")
+    vr.add_argument("--detail", choices=("full", "live"), default=None,
+                    help="the scan's detail (default: full with --save, live otherwise)")
     vr.set_defaults(func=cmd_view_runtime)
 
     be = sub.add_parser("bench")
@@ -374,6 +386,11 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--max-steps", type=int, default=None, help="periods per session")
     sv.add_argument("--seed", type=int, default=0)
     _add_scene_args(sv)
+    sv.add_argument("--scan-mesh", default=None, help="with --scene: the room's textured scan (an OBJ), for viewers "
+                    "only; the descriptor names it and its digest")
+    sv.add_argument("--scan-texture", default=None, help="the scan's texture (PNG)")
+    sv.add_argument("--scan-floor-texture", default=None, help="the scan's floor seen from above (PNG), drawn over "
+                    "the scene file's floor_corners")
     sv.set_defaults(func=cmd_serve)
 
     args = p.parse_args(argv)

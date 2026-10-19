@@ -10,9 +10,11 @@ The file is an ``.npz``, in metres and radians, z up, the floor at z = 0:
 * ``half`` ``[N, 3]``: half extents along the box axes;
 * ``yaw``: rotation of each box about its centre's vertical axis, one value for every box or ``[N]``;
 * ``rgb`` ``[N, 3]`` (optional): colours in [0, 1], for drawing;
-* ``wall`` ``[N]`` (optional): which boxes are walls, for drawing.
+* ``wall`` ``[N]`` (optional): which boxes are walls, for drawing;
+* ``floor_corners`` ``[4, 2]`` (optional): the outline of a scan's floor, where its floor texture is drawn
+  (``world/scan.py``).
 
-Other arrays in the file (Controls' ``floor_corners``, its scan's floor outline) are ignored.
+Other arrays in the file are ignored. A scan's textured mesh can come with the boxes (``scan``), for drawing only.
 
 Controls' hangar proxy (``ros2_ws/src/sim/ethrc_sim/environments/hangar/hangar_proxy.npz``) is such a file, and
 :meth:`StaticBoxes.load` places it as Controls' MuJoCo scene does (``ethrc_sim/environments.py`` @ 44353e2b):
@@ -34,6 +36,8 @@ from pathlib import Path
 
 import numpy as np
 
+from humanoid_sim.world.scan import ScanFiles
+
 STATIC_BOXES_PRIM = "/World/StaticBoxes"
 WALL_RGB = (0.8, 0.78, 0.74)  # drawing only
 DEFAULT_RGB = (0.62, 0.6, 0.57)
@@ -50,10 +54,14 @@ class StaticBoxes:
     file: str
     sha256: str
     spawn_m: tuple[float, float]
+    floor_corners: np.ndarray | None = None  # [4, 2] the file's floor outline, in the file's frame
+    scan: ScanFiles | None = None  # the room's textured scan, for drawing
 
     @classmethod
-    def load(cls, path: str | Path, spawn_m: Sequence[float] = (0.0, 0.0)) -> StaticBoxes:
-        """The boxes of the file at ``path``, with the scene point ``spawn_m`` (x, y) at the world origin."""
+    def load(cls, path: str | Path, spawn_m: Sequence[float] = (0.0, 0.0), *, scan: ScanFiles | None = None
+             ) -> StaticBoxes:
+        """The boxes of the file at ``path``, with the scene point ``spawn_m`` (x, y) at the world origin, and the
+        room's ``scan`` for drawing."""
         path = Path(path)
         raw = path.read_bytes()
         if len(raw) < 1024 and raw.startswith(b"version https://git-lfs"):
@@ -72,6 +80,7 @@ class StaticBoxes:
                    else np.tile(DEFAULT_RGB, (n, 1)))
             if "wall" in data.files:
                 rgb = np.where(np.asarray(data["wall"], dtype=bool)[:, None], WALL_RGB, rgb)
+            floor = np.asarray(data["floor_corners"], dtype=np.float64) if "floor_corners" in data.files else None
         if center.shape != (n, 3) or half.shape != (n, 3) or rgb.shape != (n, 3):
             raise ValueError(f"{path}: center, half and rgb must be [N, 3] (N = {n})")
         if n == 0 or not (half > 0).all():
@@ -80,7 +89,8 @@ class StaticBoxes:
             raise ValueError(f"{path}: non-finite box values")
         offset = np.array([float(spawn_m[0]), float(spawn_m[1]), 0.0])
         return cls(center=center - offset, half=half, yaw=yaw, rgb=np.clip(rgb, 0.0, 1.0), file=str(path),
-                   sha256=hashlib.sha256(raw).hexdigest(), spawn_m=(float(spawn_m[0]), float(spawn_m[1])))
+                   sha256=hashlib.sha256(raw).hexdigest(), spawn_m=(float(spawn_m[0]), float(spawn_m[1])),
+                   floor_corners=floor, scan=scan)
 
     def __len__(self) -> int:
         return len(self.center)
@@ -106,7 +116,7 @@ class StaticBoxes:
     def describe(self) -> dict:
         """What a client needs to tell which scene it is in and where."""
         return {"file": self.file, "sha256": self.sha256, "boxes": len(self), "spawn_m": list(self.spawn_m),
-                "spawn_clearance_m": self.clearance_m()}
+                "spawn_clearance_m": self.clearance_m(), "scan": None if self.scan is None else self.scan.describe()}
 
 
 def box_corners(center: np.ndarray, half: np.ndarray, yaw: np.ndarray) -> np.ndarray:
