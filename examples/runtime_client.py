@@ -1,5 +1,5 @@
 """A minimal runtime client: attach to `humanoid-sim serve`, hold the robot at its baseline gains, wave the arms,
-push the torso, then detach.
+push the left forearm, then detach.
 
     humanoid-sim serve --segment /tmp/hsim/plant --device cuda:0 &
     python examples/runtime_client.py /tmp/hsim/plant --seconds 20

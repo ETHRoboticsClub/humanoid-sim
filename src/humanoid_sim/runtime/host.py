@@ -433,8 +433,9 @@ class RuntimeHost:
         force = torch.tensor(args.get("force_n", [0.0, 0.0, 0.0]), dtype=torch.float32, device=self.device)
         torque = torch.tensor(args.get("torque_nm", [0.0, 0.0, 0.0]), dtype=torch.float32, device=self.device)
         duration = float(args["duration_s"])
-        if force.shape != (3,) or torque.shape != (3,) or not (duration > 0):
-            raise ValueError("force_n and torque_nm are 3-vectors, duration_s positive")
+        if force.shape != (3,) or torque.shape != (3,) or not (0 < duration < math.inf) or not (
+                torch.isfinite(force).all() and torch.isfinite(torque).all()):
+            raise ValueError("force_n and torque_nm are finite 3-vectors, duration_s positive and finite")
         end = self.sim.t_ns + int(round(duration * NS_PER_S))
         self._disturbances.append(_Disturbance(body, force.view(1, 1, 3), torque.view(1, 1, 3), end))
         return f"until {end} ns"
@@ -454,7 +455,7 @@ class RuntimeHost:
         torque, frequency = float(args["torque_nm"]), float(args.get("frequency_hz", 0.0))
         duration = args.get("duration_s")
         if not (math.isfinite(torque) and math.isfinite(frequency) and frequency >= 0) or (
-                duration is not None and not float(duration) > 0):
+                duration is not None and not 0 < float(duration) < math.inf):
             raise ValueError("torque_nm finite, frequency_hz non-negative, duration_s positive or null")
         j = self.joints.index(name)
         if torque == 0.0:
@@ -476,6 +477,8 @@ class RuntimeHost:
                 raise ValueError(f"encoder_freeze needs a drive; known: {self.drives}")
             d = self.drives.index(drive)
         duration = args.get("duration_s")
+        if duration is not None and not 0 < float(duration) < math.inf:
+            raise ValueError("duration_s is positive and finite, or null (until cleared)")
         end = None if duration is None else self.sim.t_ns + int(round(float(duration) * NS_PER_S))
         if not math.isfinite(value):
             raise ValueError(f"{fault} value must be finite")

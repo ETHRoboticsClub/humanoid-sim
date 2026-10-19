@@ -95,7 +95,7 @@ def cmd_view_runtime(args) -> int:
     from humanoid_sim.runtime.view import view_runtime
 
     frames = view_runtime(args.segment, _usd(args), rrd=args.save, connect=args.connect, fps=args.fps,
-                          seconds=args.seconds, wait_s=args.wait)
+                          seconds=args.seconds, wait_s=args.wait, robot=args.robot)
     print(f"{frames} frames" + (f" -> {args.save}" if args.save else ""))
     return 0
 

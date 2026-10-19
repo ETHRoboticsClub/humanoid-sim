@@ -68,11 +68,16 @@ def _compose(base: np.ndarray, poses: np.ndarray) -> np.ndarray:
 class RuntimeView:
     """Reads one segment and logs what it shows, one frame per :meth:`frame` call."""
 
-    def __init__(self, segment: str | Path, usd: Path, log: SignalLog, *, wait_s: float = 60.0):
+    def __init__(self, segment: str | Path, usd: Path, log: SignalLog, *, wait_s: float = 60.0,
+                 robot: str = "ethrc_v1"):
+        from humanoid_sim.model.description import Description
         from humanoid_sim.model.kinematics import RobotKinematics
 
         self.path = Path(segment)
-        self.seg = abi.Segment.open(self.path, wait_s=wait_s)
+        desc = Description.load(robot)
+        # The sim must describe the robot this view draws: same robot id and description digest.
+        self._identity = {"robot_id": desc.robot, "description_digest": desc.digest}
+        self.seg = abi.Segment.open(self.path, wait_s=wait_s, **self._identity)
         desc = self.seg.descriptor()
         self.drives, self.joints = desc["drives"], desc["joints"]
         self.soles = desc.get("soles", [])
@@ -143,7 +148,7 @@ class RuntimeView:
         """Follow the next session at the same path (``serve --persist`` opens a new segment there); plant time
         runs on across sessions, so the recording continues on the same timeline."""
         self.seg.close()
-        self.seg = abi.Segment.open(self.path, wait_s=wait_s)
+        self.seg = abi.Segment.open(self.path, wait_s=wait_s, **self._identity)
         self.session_id = self.seg.session_id
         self._last_truth_seq = self._last_feedback_seq = -1
         self.rr.log("/sim/0/host/session", self.rr.TextLog(f"session {self.session_id:#x}"))
@@ -156,12 +161,13 @@ FOLLOW_S = 10.0  # how long to wait for the next session of a `serve --persist` 
 
 
 def view_runtime(segment: str | Path, usd: Path, *, rrd: str | None = None, connect: str | None = None,
-                 fps: float = 30.0, seconds: float | None = None, wait_s: float = 60.0) -> int:
+                 fps: float = 30.0, seconds: float | None = None, wait_s: float = 60.0,
+                 robot: str = "ethrc_v1") -> int:
     """Watch ``segment`` (waiting up to ``wait_s`` for it to appear) until its host is gone or for ``seconds``;
     a new session at the same path within ``FOLLOW_S`` of the last one ending is followed. Returns the number of
     robot frames logged. Writes to ``rrd``, streams to ``connect``, or spawns a viewer when neither is given."""
     log = SignalLog("humanoid-sim runtime", init=True)
-    view = RuntimeView(segment, usd, log, wait_s=wait_s)
+    view = RuntimeView(segment, usd, log, wait_s=wait_s, robot=robot)
     bp = blueprint(view.drives)
     if rrd:
         log.rr.save(rrd, default_blueprint=bp)
