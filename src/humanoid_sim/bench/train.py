@@ -2,9 +2,10 @@
 
 Workload: the training scene (robot, IMU, contacts, flat ground) with :class:`RobotPlant` and a randomization
 like a locomotion policy's (masses and payload, armature, friction, gain and torque scales, latency, encoder
-offsets, IMU bias). Every env holds the standing pose with a new demand every 20 ms (the policy period);
-reads ``measured()`` and ``truth()`` once per policy period; resets 1/50 of the envs per policy period (as
-episodes ending). The steady-state loop runs under ``torch.cuda.set_sync_debug_mode("error")`` on CUDA.
+offsets, IMU bias). Every env holds the flat-foot pose with a new demand every 20 ms (the policy period);
+reads ``measured()`` and ``truth()`` once per policy period; resets 1/50 of the envs per policy period to the
+default state (as episodes ending). ``fraction_envs_up`` is the share of robots whose base is above 0.7 m at the
+end. The steady-state loop runs under ``torch.cuda.set_sync_debug_mode("error")`` on CUDA.
 """
 
 from __future__ import annotations
@@ -45,12 +46,14 @@ def run_train_bench(args, usd: Path) -> dict:
 
     n = args.num_envs
     sim = sim_utils.SimulationContext(robot_sim_cfg(args.robot, device=args.device))
-    scene = instantiate(robot_scene_cfg(n, usd, robot=args.robot, ground_friction=0.0,
+    scene = instantiate(robot_scene_cfg(n, usd, robot=args.robot, ground_friction=0.0, pose="flat_feet",
                                         self_collision=False if args.no_self_collision else None))
     sim.reset()
     plant = RobotPlant(scene["robot"], TrainPlantCfg(robot=args.robot, randomization=RANDOMIZATION),
                        imu=scene["imu"], contacts=scene["contacts"], physics_manager=sim.physics_manager)
-    q, qd = plant.joint_state()
+    robot = scene["robot"]
+    q, qd = plant.joint_state()  # the scene's default pose: flat feet
+    q = q.clone()
     stand, _, _ = plant.core.map.drive_state(q, qd)
     stiff, damp = plant.core.drive_stiffness.expand(n, -1), plant.core.drive_damping.expand(n, -1)
     every = POLICY_PERIOD_NS // plant.period_ns
@@ -64,7 +67,10 @@ def run_train_bench(args, usd: Path) -> dict:
         m, t = plant.measured(), plant.truth()
         sink = sink + m.drive.position_rad.sum() + m.imu.gyro[:, 0].sum() + t.contact_forces_w[..., 2].sum()
         ids = torch.randint(0, n, (resets,), generator=gen, device=q.device)
-        plant.reset(ids)
+        root = robot.data.default_root_pose.torch[ids].clone()
+        root[:, :3] += scene.env_origins[ids]
+        plant.reset(ids, joint_pos=q[ids], joint_vel=torch.zeros_like(q[ids]), root_pose=root,
+                    root_vel=torch.zeros(resets, 6, device=q.device))
         sent = torch.full((n,), plant.t_ns, dtype=torch.int64, device=q.device)
         plant.submit(DriveDemand.jvpt(stand, stiff, damp), sent)
 
@@ -96,6 +102,8 @@ def run_train_bench(args, usd: Path) -> dict:
             torch.cuda.set_sync_debug_mode("default")
             torch.cuda.synchronize()
     wall = time.perf_counter() - t
+    height = robot.data.root_link_pose_w.torch[:, 2] - scene.env_origins[:, 2]
+    up = height.gt(0.7).float().mean().item()
     sim_utils.SimulationContext.clear_instance()
     if error:
         return {"error": "host sync in steady state", "detail": error}
@@ -103,4 +111,4 @@ def run_train_bench(args, usd: Path) -> dict:
     return {"workload": "train", "device": args.device, "num_envs": n, "steps": args.steps, "wall_s": wall,
             "env_steps_per_s": n * args.steps / wall, "sim_seconds_per_wall_second": n * sim_s / wall,
             "self_collision": not args.no_self_collision, "host_syncs": "none (torch sync debug mode)" if cuda else "n/a",
-            "checksum_finite": bool(torch.isfinite(sink).item())}
+            "checksum_finite": bool(torch.isfinite(sink).item()), "fraction_envs_up": up}
