@@ -1,9 +1,10 @@
-"""Many envs of a training scene in one Rerun recording: the ground once, each visual mesh of the robot once, then
-every recorded env's body poses per frame as instance poses of those meshes.
+"""Many envs of a training scene in one Rerun recording: the ground and any static boxes once, each visual mesh of
+the robot once, then every recorded env's body poses per frame as instance poses of those meshes.
 
 A frame copies ``[envs, bodies, 7]`` poses from the GPU, so record at a low rate (every few policy steps) and for
 debugging or showcases, not inside a training loop that has to stay free of host syncs. Entity paths:
-``/world/ground`` and ``/world/robots/<body>/visual_<k>``. Quaternions are xyzw, as Isaac Lab's.
+``/world/ground``, ``/world/scene`` (the static boxes) and ``/world/robots/<body>/visual_<k>``. Quaternions are xyzw,
+as Isaac Lab's.
 """
 
 from __future__ import annotations
@@ -36,6 +37,15 @@ def ground_colors(verts: np.ndarray) -> np.ndarray:
     return (GROUND_LOW + (GROUND_HIGH - GROUND_LOW) * u[:, None]).astype(np.uint8)
 
 
+def log_boxes(rr, path: str, corners: np.ndarray, colors: np.ndarray) -> None:
+    """Static boxes (corners ``[N, 8, 3]``, colours ``[N, 3]`` in [0, 1]) as one static mesh at ``path``."""
+    from humanoid_sim.world.boxes import box_mesh
+
+    verts, tris, normals, vcolors = box_mesh(corners, colors)
+    rr.log(path, rr.Mesh3D(vertex_positions=verts, triangle_indices=tris, vertex_normals=normals,
+                           vertex_colors=vcolors), static=True)
+
+
 def _rotate(quat_xyzw: np.ndarray, v: np.ndarray) -> np.ndarray:
     from scipy.spatial.transform import Rotation
 
@@ -44,10 +54,13 @@ def _rotate(quat_xyzw: np.ndarray, v: np.ndarray) -> np.ndarray:
 
 def ground_meshes(env) -> list[tuple[np.ndarray, np.ndarray]]:
     """The ground the scene collides with, as world-frame triangle meshes read from the USD stage (the generated
-    terrain), or a 40 m square at z = 0 for a ground plane."""
+    terrain), or for a ground plane a square at z = 0: 40 m, or 2 m beyond the static boxes."""
     terrain = getattr(env.scene, "terrain", None)
     if terrain is None:
-        s = 20.0
+        from humanoid_sim.world.boxes import stage_boxes
+
+        corners, _ = stage_boxes()
+        s = max(20.0, float(np.abs(corners[..., :2]).max()) + 2.0) if len(corners) else 20.0
         verts = np.array([[-s, -s, 0.0], [s, -s, 0.0], [s, s, 0.0], [-s, s, 0.0]])
         return [(verts, np.array([[0, 1, 2], [0, 2, 3]]))]
     import isaaclab.sim as sim_utils
@@ -108,6 +121,11 @@ class SceneRecorder:
             rr.log(f"/world/ground/{i}", rr.Mesh3D(vertex_positions=verts, triangle_indices=tris,
                                                    vertex_normals=vertex_normals(verts, tris),
                                                    vertex_colors=ground_colors(verts)), static=True)
+        from humanoid_sim.world.boxes import stage_boxes
+
+        corners, colors = stage_boxes()
+        if len(corners):
+            log_boxes(rr, "/world/scene", corners, colors)
         self._ids = None
 
     def frame(self, t_ns: int) -> None:
