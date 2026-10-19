@@ -106,6 +106,42 @@ def apply_joint_limits(physics: dict) -> None:
     NewtonManager.add_model_change(ModelFlags.JOINT_DOF_PROPERTIES)
 
 
+def apply_heightfield_base(physics: dict) -> None:
+    """Give every heightfield of the running MJWarp model a solid base ``heightfield_base_m`` deep below its lowest
+    point (the block's setting). Newton exports a heightfield to MuJoCo with a 0.1 mm base, and MuJoCo pushes a
+    shape that sinks deeper into a cell's prism than the prism is thick out through its bottom: a G1 foot sphere
+    (5 mm) landing on the lowest cells of a rough tile falls through the terrain. The base, the heightfield's
+    bounding box and its bounding radius are rewritten together. Kamino collides heightfields in Newton's own
+    pipeline and takes no setting."""
+    if running_solver() != "mjwarp":
+        return
+    import mujoco_warp
+    import numpy as np
+    from isaaclab_newton.physics import NewtonManager
+
+    solver = NewtonManager._solver
+    if solver is None or getattr(solver, "mjw_model", None) is None:
+        raise RuntimeError("no MJWarp model yet: apply the heightfield base after the simulation is reset")
+    m = solver.mjw_model
+    if m.hfield_size.shape[0] == 0:
+        return
+    base = float(physics["mjwarp"]["heightfield_base_m"])
+    size = m.hfield_size.numpy()
+    size[:, 3] = np.maximum(size[:, 3], base)
+    m.hfield_size.assign(size)
+    geoms = np.nonzero(m.geom_type.numpy() == int(mujoco_warp.GeomType.HFIELD))[0]
+    dataid, aabb, rbound = m.geom_dataid.numpy(), m.geom_aabb.numpy(), m.geom_rbound.numpy()
+    for g in geoms:
+        hx, hy, top, bottom = size[dataid[0, g]]
+        # MuJoCo's box around a heightfield in its frame: centre (0, 0, (top - bottom) / 2), half sizes
+        # (hx, hy, (top + bottom) / 2); its bounding sphere encloses the box's corners.
+        aabb[:, g, 0] = (0.0, 0.0, (top - bottom) / 2)
+        aabb[:, g, 1] = (hx, hy, (top + bottom) / 2)
+        rbound[:, g] = float(np.sqrt(hx**2 + hy**2 + max(top, bottom) ** 2))
+    m.geom_aabb.assign(aabb)
+    m.geom_rbound.assign(rbound)
+
+
 def _per_joint(names, values):
     return {f"^{n}$": float(v) for n, v in zip(names, values, strict=True)}
 
