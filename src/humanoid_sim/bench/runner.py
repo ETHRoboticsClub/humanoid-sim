@@ -3,10 +3,10 @@
 ``run_runtime_bench``: the real-time host's whole step (commands, demands, the graphed plant and physics,
 publishing feedback and truth to the segment), unpaced, as fast as it goes: its real-time factor is the
 headroom the host has when paced. A client in the same process writes new demands before every step (a bus
-cycle shorter than the physics period gives the host a new record every step), holding the flat-foot pose at
+cycle shorter than the physics period gives the host a new record every step), holding the home pose at
 the baseline gains on a free base.
 
-Workload: free base on flat ground, every drive holding the flat-foot pose at baseline gains, with a new
+Workload: free base on flat ground, every drive holding the home pose at baseline gains, with a new
 demand every 20 ms (the policy period) carrying a small random target perturbation. ``fraction_envs_up`` is the
 share of robots whose base is still above 0.7 m at the end: a fallen robot has more contacts and steps at a
 different cost. Timing
@@ -32,7 +32,7 @@ def run_bench(args, usd: Path) -> dict:
     from humanoid_sim.train.scene import STANDING_CLEARANCE_M, initial_pose
 
     device = args.device
-    pose, height = initial_pose(usd, args.robot, "flat_feet")
+    pose, height = initial_pose(usd, args.robot, "home")
     sim = SimCore(usd, device=device, robot=args.robot, num_envs=args.num_envs,
                   base_height_m=height + STANDING_CLEARANCE_M, integrator=args.integrator,
                   self_collision=False if getattr(args, "no_self_collision", False) else None)
@@ -105,8 +105,8 @@ def run_runtime_bench(args, usd: Path) -> dict:
         client = abi.Segment.open(Path(tmp) / "plant")
         try:
             n = len(host.drives)
-            host._reset({"pose": "flat_feet"})
-            q, _ = host._flat_feet()
+            host._reset({"pose": "home"})
+            q, _ = host._named_pose("home")
             q = q.to(host.sim.plant.cfg.dtype)
             hold = host.sim.plant.map.drive_state(q, torch.zeros_like(q))[0][0].cpu().numpy()
             demand = {name: np.zeros(n) for name in abi.DRIVE_DEMAND.names if not name.startswith("_")}

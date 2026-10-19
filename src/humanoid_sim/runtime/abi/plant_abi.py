@@ -69,7 +69,7 @@ SOLES = 2  # left, right
 STATE_CREATING, STATE_READY, STATE_ENDED = 0, 1, 2
 
 # Mailbox commands. Arguments are a JSON object:
-# RESET            {"pose": "standing" | "flat_feet" | "current"} or {"joint_pos": {name: rad}, "base_pose": [x,y,z,qx,qy,qz,qw]}
+# RESET            {"pose": "home" | "standing" | "current"} or {"joint_pos": {name: rad}, "base_pose": [x,y,z,qx,qy,qz,qw]}
 # PAUSE, RESUME    {}: while paused physics stops and feedback keeps being written
 # SET_SUPPORT      {"support": "free"}; {"support": "gantry", "tension_breakpoints_s_n": [[s, N], ...],
 #                  "attachment_local_m": [x,y,z] | null, "attachment_bodies": [name, ...] | null}; or a cable,

@@ -1,5 +1,7 @@
 """Model build contract: everything the prepared URDF changes, checked against the description."""
 
+import xml.etree.ElementTree as ET
+
 import numpy as np
 import pytest
 
@@ -23,7 +25,9 @@ def test_inventory(built):
 
 def test_unlisted_joints_welded_and_actuated_joints_limited(built):
     desc, p = built
-    assert len(p.welded) == 34  # ORCA hands, as Controls --fixed-orca-hands
+    source = ET.parse(desc.package_dir / load_profile("ethrc_v1")["model"]["urdf"]).getroot()
+    unlisted = {j.get("name") for j in source.findall("joint") if j.get("type") != "fixed"} - set(desc.joints)
+    assert set(p.welded) == unlisted  # URDF_6.urdf ships the ORCA hands fixed already
     movable = {j.get("name"): j for j in p.root.findall("joint") if j.get("type") != "fixed"}
     assert set(movable) == set(desc.joints)
     for name, j in movable.items():

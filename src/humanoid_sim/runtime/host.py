@@ -17,7 +17,7 @@ the session (:meth:`RuntimeHost.run` returns :data:`EXIT_DETACHED`), as do deman
 ``client_timeout_ns`` once attached (:data:`EXIT_CLIENT_LOST`); the segment's state becomes ended, and Controls'
 bank ends its side when this host's heartbeat stops. :meth:`RuntimeHost.new_session` then serves the next client
 on a new segment at the same path, the robot back in its start state, without recompiling the step. Until its
-client attaches, a session holds the robot in its start pose (standing; the base too when free), so the session
+client attaches, a session holds the robot in its start pose (home; the base too when free), so the session
 starts when the client does, as a plant started with its client would: a robot left hanging with idle drives
 between clients would sag to its rest pose first.
 
@@ -130,19 +130,17 @@ class RuntimeHost:
                  support: str = "suspended", bus_period_ns: int = 1_500_000, client_timeout_ns: int = 500_000_000,
                  seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True):
         from humanoid_sim.model.asset import asset_meta
-        from humanoid_sim.model.kinematics import standing_base_height
         from humanoid_sim.sim import SimCore
-        from humanoid_sim.train.scene import STANDING_CLEARANCE_M
+        from humanoid_sim.train.scene import POSES, STANDING_CLEARANCE_M, initial_pose
 
         if support not in ("suspended", "free"):
             raise ValueError(f"support {support!r}: start suspended or free (hang a gantry by command)")
         self.support = support
-        from humanoid_sim.model.description import Description
-
-        desc = Description.load(robot)
         meta = asset_meta(usd)
-        self.standing_height_m = standing_base_height(usd, desc, meta["sole_boxes"]) + STANDING_CLEARANCE_M
-        height = self.standing_height_m + (0.3 if support == "suspended" else 0.0)
+        # The named poses for RESET {"pose": ...}: joint positions (description order) and the upright base height
+        # at which the soles touch the ground. The session's start pose is home.
+        self._poses = {name: initial_pose(usd, robot, name) for name in POSES}
+        height = self._poses["home"][1] + STANDING_CLEARANCE_M + (0.3 if support == "suspended" else 0.0)
         cuda = str(device).startswith("cuda")
         self.sim = SimCore(usd, device=device, robot=robot, fixed_base=support == "suspended",
                            base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
@@ -152,10 +150,6 @@ class RuntimeHost:
                                      cuda_graph=cuda, compile=compile and cuda)
         self.desc = self.sim.desc
         self.robot = self.sim.backend.robot
-        from humanoid_sim.train.scene import initial_pose
-
-        # The flat-foot pose for RESET {"pose": "flat_feet"}: solved here (seconds on a CPU), not in the loop.
-        self._flat_feet_pose = initial_pose(usd, robot, "flat_feet")
         self.period_ns = self.sim.period_ns
         self.drives = self.sim.plant.map.drive_names
         self.joints = list(self.desc.joints)
@@ -206,7 +200,7 @@ class RuntimeHost:
         self._client_mono_ns = 0
         self._demand_seq = 0
         self._command_seq = 0
-        self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = self._standing()  # until attached
+        self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = self._named_pose("home")  # until attached
         self._write_pose(*self._prescribed)
         self._set_drives_off(np.ones(len(self.drives), dtype=bool))  # no client, no demands
         self._truth_due = True
@@ -223,7 +217,7 @@ class RuntimeHost:
             self._clear_fault(key)
         self.sim.gantry.release(torch.tensor([0], device=self.device))
         self.sim.imu.set_noise(True)
-        self._reset({"pose": "standing"})
+        self._reset({"pose": "home"})
         self._open_session()
 
     def _warm_up(self, steps: int = 3) -> None:
@@ -332,17 +326,10 @@ class RuntimeHost:
             raise ValueError("base_pose is [x, y, z, qx, qy, qz, qw] with a unit quaternion")
         return p
 
-    def _standing(self) -> tuple[torch.Tensor, torch.Tensor | None]:
-        q = torch.tensor([[self.desc.joints[n].standing_offset_rad for n in self.joints]], device=self.device)
-        base = None
-        if self.support != "suspended":
-            base = torch.tensor([[0.0, 0.0, self.standing_height_m, 0.0, 0.0, 0.0, 1.0]], device=self.device)
-        return q, base
-
-    def _flat_feet(self) -> tuple[torch.Tensor, torch.Tensor | None]:
+    def _named_pose(self, name: str) -> tuple[torch.Tensor, torch.Tensor | None]:
         from humanoid_sim.train.scene import STANDING_CLEARANCE_M
 
-        q_desc, height = self._flat_feet_pose
+        q_desc, height = self._poses[name]
         names = list(self.desc.joints)
         q = torch.tensor([[float(q_desc[names.index(n)]) for n in self.joints]], device=self.device)
         base = None
@@ -355,10 +342,8 @@ class RuntimeHost:
             q, base = self._joint_vector(args["joint_pos"]), None
             if args.get("base_pose") is not None:
                 base = self._base_pose(args["base_pose"])
-        elif args.get("pose", "standing") == "standing":
-            q, base = self._standing()
-        elif args["pose"] == "flat_feet":
-            q, base = self._flat_feet()
+        elif args.get("pose", "home") in self._poses:
+            q, base = self._named_pose(args.get("pose", "home"))
         elif args["pose"] == "current":
             q, base = self.sim.joint_state()[0], None
         else:

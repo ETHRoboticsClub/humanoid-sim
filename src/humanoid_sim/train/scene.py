@@ -11,11 +11,10 @@ The robot's default state is upright, its lowest sole corner on the ground
 (:func:`~humanoid_sim.model.kinematics.standing_base_height`), so ``reset_scene_to_default`` puts it on its feet,
 in one of two poses (``pose``):
 
-* ``"standing"``: the description's standing pose. Under an upright base its soles are not level (10° and 17°),
-  so a robot holding it rigidly tips over within about a second.
-* ``"flat_feet"``: :func:`~humanoid_sim.model.kinematics.flat_foot_pose`, the standing pose with both soles
-  level and at the same height. A robot holding it at the baseline gains stands for about 10 s on flat ground,
-  then leans over slowly: a held pose is not balance.
+* ``"home"`` (default): the description's home pose (:attr:`~humanoid_sim.model.description.Description.home_pose`),
+  the pose the CAD is exported in: legs straight, both soles level and at the same height.
+* ``"standing"``: the description's standing pose, the one captured on the robot. Under an upright base its soles
+  are not level (pitched by 10° and 17°), so a robot holding it rigidly tips over within about a second.
 
 The articulation's ``data.default_joint_pos`` holds the chosen pose, for a task's action offsets.
 
@@ -46,23 +45,23 @@ def plant_joint_properties(robot: str = "ethrc_v1") -> JointProperties:
     return joint_properties(PlantCore(desc, joints, 1, PlantCfg(robot=robot)), joints)
 
 
-POSES = ("standing", "flat_feet")
+POSES = ("home", "standing")
 
 
-def initial_pose(usd: Path, robot: str = "ethrc_v1", pose: str = "standing"):
+def initial_pose(usd: Path, robot: str = "ethrc_v1", pose: str = "home"):
     """Joint positions ``[J]`` (description order) of ``pose`` (see :data:`POSES`) and the upright base height at
     which its lowest sole corner touches the ground."""
     import torch
 
     from humanoid_sim.model.asset import asset_meta
-    from humanoid_sim.model.kinematics import flat_foot_pose, standing_base_height
+    from humanoid_sim.model.kinematics import standing_base_height
 
     desc = Description.load(robot)
     soles = asset_meta(usd)["sole_boxes"]
-    if pose == "standing":
+    if pose == "home":
+        q = torch.tensor([desc.home_pose[n] for n in desc.joints], dtype=torch.float64)
+    elif pose == "standing":
         q = torch.tensor([desc.joints[n].standing_offset_rad for n in desc.joints], dtype=torch.float64)
-    elif pose == "flat_feet":
-        q = flat_foot_pose(usd, desc, soles)
     else:
         raise ValueError(f"unknown pose {pose!r}; known: {POSES}")
     return q, standing_base_height(usd, desc, soles, q)
@@ -70,7 +69,7 @@ def initial_pose(usd: Path, robot: str = "ethrc_v1", pose: str = "standing"):
 
 def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_spacing: float = 2.5,
                     terrain=None, ground_friction: float | None = None, imu: bool = True, contacts: bool = True,
-                    self_collision: bool | None = None, pose: str = "standing"):
+                    self_collision: bool | None = None, pose: str = "home"):
     """Scene config with the robot, its sensors and the ground (or ``terrain``, an Isaac Lab
     ``TerrainImporterCfg``), the robot on its feet in ``pose`` (see :data:`POSES`). With robot friction
     randomized, pass ``ground_friction=0``: MJWarp takes the larger friction of the two shapes in contact."""

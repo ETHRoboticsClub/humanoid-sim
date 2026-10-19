@@ -2,7 +2,7 @@
 
 Workload: the training scene (robot, IMU, contacts, flat ground) with :class:`RobotPlant` and a randomization
 like a locomotion policy's (masses and payload, armature, friction, gain and torque scales, latency, encoder
-offsets, IMU bias). Every env holds the flat-foot pose with a new demand every 20 ms (the policy period);
+offsets, IMU bias). Every env holds the home pose with a new demand every 20 ms (the policy period);
 reads ``measured()`` and ``truth()`` once per policy period; resets 1/50 of the envs per policy period to the
 default state (as episodes ending). ``fraction_envs_up`` is the share of robots whose base is above 0.7 m at the
 end. The steady-state loop runs under ``torch.cuda.set_sync_debug_mode("error")`` on CUDA.
@@ -46,13 +46,13 @@ def run_train_bench(args, usd: Path) -> dict:
 
     n = args.num_envs
     sim = sim_utils.SimulationContext(robot_sim_cfg(args.robot, device=args.device))
-    scene = instantiate(robot_scene_cfg(n, usd, robot=args.robot, ground_friction=0.0, pose="flat_feet",
+    scene = instantiate(robot_scene_cfg(n, usd, robot=args.robot, ground_friction=0.0, pose="home",
                                         self_collision=False if args.no_self_collision else None))
     sim.reset()
     plant = RobotPlant(scene["robot"], TrainPlantCfg(robot=args.robot, randomization=RANDOMIZATION),
                        imu=scene["imu"], contacts=scene["contacts"], physics_manager=sim.physics_manager)
     robot = scene["robot"]
-    q, qd = plant.joint_state()  # the scene's default pose: flat feet
+    q, qd = plant.joint_state()  # the scene's default pose: home
     q = q.clone()
     stand, _, _ = plant.core.map.drive_state(q, qd)
     stiff, damp = plant.core.drive_stiffness.expand(n, -1), plant.core.drive_damping.expand(n, -1)

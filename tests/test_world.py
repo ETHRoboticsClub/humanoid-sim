@@ -96,15 +96,15 @@ def test_force_push_accelerates_the_robot_horizontally(usd):
         sim_utils.SimulationContext.clear_instance()
 
 
-def test_a_robot_holding_the_flat_foot_pose_stands(usd):
-    """The flat-foot pose at the baseline gains stands on flat ground; the description's standing pose, whose
-    soles are not level, does not (it tips over within about a second)."""
+def test_a_robot_holding_the_home_pose_stands(usd):
+    """The home pose at the baseline gains stands on flat ground; the description's standing pose, whose soles
+    are not level, does not (it tips over within about a second)."""
     import isaaclab.sim as sim_utils
 
     from humanoid_sim.devices.demand import DriveDemand
     from humanoid_sim.train.plant import RobotPlant
 
-    sim, scene = _scene(usd, 1, pose="flat_feet")
+    sim, scene = _scene(usd, 1)  # the default pose: home
     try:
         robot = scene["robot"]
         plant = RobotPlant(robot, imu=scene["imu"], contacts=scene["contacts"])

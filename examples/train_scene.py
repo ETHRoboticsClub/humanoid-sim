@@ -1,4 +1,4 @@
-"""A training scene on the Train-Time API: many robots on rough terrain, each holding the flat-foot pose at the
+"""A training scene on the Train-Time API: many robots on rough terrain, each holding the home pose at the
 baseline gains while it waves its arms, with randomized friction, base mass and drive latency, and random pushes.
 Optionally recorded to Rerun with `humanoid_sim.signals.scene.SceneRecorder`.
 
@@ -42,7 +42,7 @@ def make_env(num_envs: int, device: str, *, flat: bool):
     from humanoid_sim.world.terrain import rough_terrain_cfg
 
     class ScriptedDrives(PlantAction):
-        """The scene's default pose (the flat-foot pose) at the baseline gains, plus an arm wave with a phase per
+        """The scene's default pose (the home pose) at the baseline gains, plus an arm wave with a phase per
         env (rad, joint space)."""
 
         def demands(self, actions):
@@ -106,7 +106,7 @@ def make_env(num_envs: int, device: str, *, flat: bool):
     terrain = None if flat else rough_terrain_cfg(friction=0.0, rows=1, cols=num_envs, size_m=2.5, border_m=3.0,
                                                   curriculum=False)
     cfg.scene = robot_scene_cfg(num_envs, robot_usd(), terrain=terrain, ground_friction=0.0 if flat else None,
-                                env_spacing=2.0, pose="flat_feet")
+                                env_spacing=2.0)
     cfg.sim = robot_sim_cfg(device=device)
     return ManagerBasedRLEnv(cfg)
 

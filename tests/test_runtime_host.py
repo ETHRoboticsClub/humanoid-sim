@@ -88,7 +88,7 @@ def test_serve_round_trip(tmp_path):
         assert (np.diff(imu["seq"].astype(np.int64)) == -1).all()  # newest first, consecutive
         assert abs(np.linalg.norm(imu["specific_force_m_s2"][0]) - 9.81) < 0.3
         _, truth = seg.regions["truth"].read()
-        assert int(truth["num_joints"]) == 22 and float(truth["mass_kg"]) == pytest.approx(58.68, abs=0.05)
+        assert int(truth["num_joints"]) == 22 and float(truth["mass_kg"]) == pytest.approx(60.15, abs=0.05)
 
         def command(code, args):
             seq = seg.send(code, args)
@@ -157,7 +157,7 @@ def test_prescribed_pose_with_floor_clearance_and_sole_truth(tmp_path):
         with pytest.raises(ValueError, match="floor_clearance_m"):
             host._prescribe({"floor_clearance_m": 0.002})
         host._prescribe({"release": True})
-        assert host._reset({"pose": "flat_feet"}) is not None  # both soles level, on the ground
+        assert host._reset({"pose": "home"}) is not None  # both soles level, on the ground
         host._publish_truth()
         _, truth = host.seg.regions["truth"].read()
         assert (truth["sole"]["plate_face_height_span_m"] < 0.002).all()
@@ -212,9 +212,9 @@ def test_detach_and_next_session(tmp_path):
         assert torch.equal(host.sim.imu._sigma, host.sim.imu._nominal_sigma)  # every session starts real
         assert int(host.sim.gantry.mode[0]) == 0
         _, truth = second.regions["truth"].read()
-        standing = [host.desc.joints[j].standing_offset_rad for j in host.joints]
-        assert np.allclose(truth["joint_pos_rad"][: len(standing)], standing, atol=1e-4)
-        assert float(truth["base_position_m"][2]) == pytest.approx(host.standing_height_m, abs=1e-3)
+        home = [host.desc.home_pose[j] for j in host.joints]  # the start pose
+        assert np.allclose(truth["joint_pos_rad"][: len(home)], home, atol=1e-4)
+        assert float(truth["base_position_m"][2]) == pytest.approx(host._poses["home"][1] + 0.001, abs=1e-3)
 
         first.regions["demands"].write(abi.demands_record(demand, cycle=2, session_id=first.session_id))
         host.step()

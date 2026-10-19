@@ -5,8 +5,10 @@ schema: humanoid-sim-profile/v1
 robot: ethrc_v1
 
 model:
-  # The variant Controls' CMake builds its MJCF from (58.68 kg): ORCA hands, welded at zero.
-  urdf: urdf/URDF_5_orca_hands.urdf
+  # The URDF actuators.yaml names (60.15 kg, ORCA hands fixed at zero), so the description digest covers the
+  # simulated URDF. It equals URDF_6_orca_hands.urdf with the hands welded, as Controls builds its MJCF.
+  # Relative to URDF_6_description/.
+  urdf: urdf/URDF_6.urdf
   # Movable URDF joints without an actuators.yaml entry are welded at zero (Controls --fixed-orca-hands).
   weld_unlisted_joints: true
   # Sole contact primitive (Controls build_mjcf.py SOLE_JOINTS / SOLE_BOX_THICKNESS_M / SOLE_FACE_DEPTH_M
@@ -29,7 +31,7 @@ model:
     - [hej50_arm_rotation_l_1, shoulder_connector_l_1]
     - [hej50_arm_rotation_r_1, shoulder_connector_r_1]
   # One convex hull per body (see model/urdf.py): the hands' 17 finger links and every bracket become
-  # part of their body's hull. `per_mesh` makes one hull per URDF collision mesh: 120 hulls instead of 23.
+  # part of their body's hull. `per_mesh` makes one hull per URDF collision mesh: 118 hulls instead of 23.
   collision_hulls: per_body
   # Which bodies collide with each other. A set is every body at or below its joint; the bodies in no
   # set (base, hip carrier, torso) are `rest`. `pairs` lists the set pairs that collide, or `all`.
