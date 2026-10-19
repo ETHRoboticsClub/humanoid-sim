@@ -66,6 +66,12 @@ cfg.scene = robot_scene_cfg(4096, usd, terrain=terrain)
 
 `cfg` and `usd` are the env config and robot USD from [training.md](training.md#a-minimal-environment). When a terrain is given, the scene has no flat ground and `ground_friction` is ignored.
 
+### The heightfield's base
+
+MuJoCo collides a shape with a heightfield cell by cell, each cell a prism from the surface down to the heightfield's base, and pushes a shape that has sunk into a prism out the nearest way. Newton exports a heightfield to MuJoCo with a base 0.1 mm below its lowest point, so over the lowest cells a prism is thinner than a landing foot sinks into it (soft contact), and the foot is pushed out downwards, through the terrain. The G1's feet, four 5 mm spheres each, fell 1 to 2 cm into a bumpy tile on landing and kept falling; the V1's sole plates sank about 3 cm.
+
+`apply_heightfield_base` (`src/humanoid_sim/physics/isaaclab.py`, called by `RobotPlant`) therefore deepens every heightfield's base in the running MJWarp model to the profile's `physics.mjwarp.heightfield_base_m` (1.0 m), together with the heightfield's bounding box and radius. The surface is unchanged, and nothing lies under the terrain for the deeper base to touch. `tests/test_world.py::test_heightfield_terrain_carries_the_feet` drops each robot onto a bumpy tile and checks that its soles settle on top, within a few millimetres of soft contact. Kamino collides heightfields in Newton's own pipeline and is not affected.
+
 ### Heightfield collision overflow
 
 When a fallen robot lies on a heightfield, MJWarp prints this, often many times in one step (four robots down in `examples/train_scene.py` print it thousands of times per simulated second):
@@ -85,7 +91,7 @@ A support holds the robot up while it is tested, the way the real robot hangs in
 
 ### Free
 
-No support: the robot stands or falls on the ground. Training scenes are free (`robot_scene_cfg` has no fixed-base option). A training robot spawns upright in the pose that `robot_scene_cfg`'s `pose` names; held rigidly, the default home pose stands still on flat ground and the standing pose tips over within a second ([training.md](training.md#the-initial-pose)). In the runtime, `--support free` starts the robot standing on the ground; until a client attaches, the host holds it in its start pose, base included ([runtime.md](runtime.md)).
+No support: the robot stands or falls on the ground. Training scenes are free (`robot_scene_cfg` has no fixed-base option). A training robot spawns upright in the pose that `robot_scene_cfg`'s `pose` names; held rigidly, the V1's default home pose stands still on flat ground and its standing pose tips over within a second, and the G1 tips over from its home pose too, its ankles too soft at Unitree's deploy gains ([training.md](training.md#the-initial-pose)). In the runtime, `--support free` starts the robot standing on the ground; until a client attaches, the host holds it in its start pose, base included ([runtime.md](runtime.md)).
 
 ### Suspended (fixed base)
 

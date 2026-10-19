@@ -43,6 +43,10 @@ physics:
     # past its stop (under 2 mrad here), and Controls' range survey found that stop 4 mrad out. The real stops'
     # stiffness is not measured (modeled).
     joint_limits: mujoco
+    # Depth of the solid base under a heightfield's lowest point. Newton exports heightfields to MuJoCo with a
+    # 0.1 mm base, through which a shape sinking into the lowest cells is pushed out downwards (a G1 foot sphere
+    # landing on a rough tile falls through). Deeper than any shape sinks; nothing lies under the terrain.
+    heightfield_base_m: 1.0
   # Kamino (beta in Newton 1.6): maximal coordinates, hard joint-limit and contact constraints, P-ADMM forward
   # dynamics, contacts from Newton's collision pipeline. Contact friction mixes by the larger coefficient, as
   # MJWarp does. Not yet checked against MJWarp or the captures (modeled).
