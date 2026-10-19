@@ -2,11 +2,11 @@
 
 Streams used for drive-level replay (``pdo_feedback.csv``, ~200 Hz per drive):
 
-* ``position_demand_rad`` — 0x6062, the drive's position demand after master slew/blend and drive
+* ``position_demand_rad``: 0x6062, the drive's position demand after master slew/blend and drive
   interpolation, in the drive's native frame (cranks: crank angle). This is what the sim's drive bank
   is fed during replay.
-* ``native_position_rad``, ``velocity_rad_s``, ``torque_nm``, ``current_a``, ``current_demand_a`` — what the
-  drive measured; the replay is scored against these.
+* ``native_position_rad``, ``velocity_rad_s``, ``torque_nm``, ``current_a``, ``current_demand_a``: what the
+  drive measured. The replay is scored against position, velocity and torque; the currents are read but unused.
 
 ``imu.csv`` is Controls' ``/rt/imu``: the IMU relay's output, already rotated into the ``base_link`` frame
 (orientation from the Madgwick filter, angular velocity, specific force), stamped on host receipt.

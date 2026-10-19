@@ -266,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
 
     v = sub.add_parser("view-replay", help="Rerun recording of a replay: sim and real robot, all drive signals")
     v.add_argument("trace", help="replay output directory (trace.npz + summary.json)")
-    v.add_argument("--save", default=None, help="write an .rrd file instead of streaming")
+    v.add_argument("--save", default=None, help="write an .rrd file instead of spawning a viewer")
     v.add_argument("--connect", default=None, help="stream to a running viewer, e.g. rerun+http://127.0.0.1:9876/proxy")
     v.add_argument("--fps", type=float, default=50.0)
     v.set_defaults(func=cmd_view_replay)
@@ -306,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
     fd = sub.add_parser("fit-delay", help="scan the delay between recorded drive demands and the drive acting on "
                                           "them, by batched replay")
     fd.add_argument("captures", nargs="+")
-    fd.add_argument("--delays-ms", nargs=3, type=float, default=[-6.0, 10.0, 0.5], metavar=("FROM", "TO", "STEP"))
+    fd.add_argument("--delays-ms", nargs=3, type=float, default=[-10.0, 10.0, 0.5], metavar=("FROM", "TO", "STEP"))
     fd.add_argument("--duration", type=float, default=None)
     fd.add_argument("--base", choices=("yaw", "orientation", "fixed"), default="yaw")
     fd.add_argument("--device", default="cuda:0")

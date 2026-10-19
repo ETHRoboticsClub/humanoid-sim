@@ -3,8 +3,8 @@
 3D: ``/world/sim`` (opaque) and ``/world/real`` (translucent orange) on the same base (fixed, or turning as the
 replay prescribed it), so any disagreement shows as the ghost separating from the robot. Signals: ``/sim/0/drives/<drive>/{position,velocity,torque}``,
 ``/real/drives/<drive>/{position,velocity,torque}``, ``/demand/drives/<drive>/position`` and
-``/residual/0/drives/<drive>/position`` (sim − real). Written to an .rrd file (or streamed to a viewer the
-caller started); nothing here spawns a viewer.
+``/residual/0/drives/<drive>/position`` (sim − real). Written to an .rrd file, streamed to a viewer the
+caller started, or shown in a viewer spawned for it.
 """
 
 from __future__ import annotations
@@ -101,11 +101,14 @@ def view_replay(trace_dir: Path, usd: Path, rrd: str | None, *, fps: float = 50.
     joint_of = {d.name: (d.joints[0] if d.crank is None else f"{d.joints[0]}/{d.crank} crank")
                 for d in desc.drives.values()}
     bp = blueprint(drives, joint_of)
-    log = SignalLog(f"humanoid-sim replay {summary['name']}", rrd=None, init=True)
+    log = SignalLog("humanoid-sim replay", rrd=None, init=True)  # one app, so a saved layout applies to every replay
+    log.rr.send_recording_name(f"{summary['name']} ({summary['dataset_id']})")
     if rrd:
         log.rr.save(rrd, default_blueprint=bp)
-    if connect:
+    elif connect:
         log.rr.connect_grpc(connect, default_blueprint=bp)
+    else:
+        log.rr.spawn(default_blueprint=bp)
     rel = t_ns - t_ns[0]
     meshes = RobotMeshes(kin.model)
     meshes.log_static("/world/sim", SIM_COLOR)
