@@ -149,3 +149,20 @@ def test_the_plant_holds_the_home_pose(robot):
     target = plant.pre_physics(0, q, qd)
     assert torch.isfinite(target).all()
     assert torch.allclose(target, q, atol=1e-4)  # at the target already: no torque, the target stays put
+
+
+def test_a_built_asset_opens_only_for_its_robot(tmp_path):
+    import json
+
+    from humanoid_sim.model.asset import check_asset_robot
+
+    usd = tmp_path / "g1" / "usd" / "robot.usda"
+    usd.parent.mkdir(parents=True)
+    usd.write_text("#usda 1.0\n")
+    (tmp_path / "g1" / "asset.json").write_text(json.dumps({"robot": "g1_29dof_rev_1_0", "usd": "usd/robot.usda"}))
+    check_asset_robot(usd, "g1_29dof_rev_1_0")
+    with pytest.raises(ValueError, match="pass robot='g1_29dof_rev_1_0'"):
+        check_asset_robot(usd, "ethrc_v1")
+    loose = tmp_path / "loose.usda"
+    loose.write_text("#usda 1.0\n")
+    check_asset_robot(loose, "ethrc_v1")  # outside a built asset: not checked

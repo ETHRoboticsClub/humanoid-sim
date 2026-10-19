@@ -30,7 +30,7 @@ import torch
 
 from humanoid_sim.core import PlantCfg, PlantCore
 from humanoid_sim.devices.feedback import DriveFeedback
-from humanoid_sim.model.asset import load_profile
+from humanoid_sim.model.asset import check_asset_robot, load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.urdf import BASE_JOINTS
 from humanoid_sim.physics.joint_properties import joint_properties
@@ -44,6 +44,7 @@ class SimCore:
                  self_collision: bool | None = None, base_joints: bool = False, imu: bool = False,
                  contacts: bool = False, seed: int = 0, cuda_graph: bool = False, compile: bool = False,
                  imu_history: int | None = None):
+        check_asset_robot(usd_path, robot)
         self.desc = Description.load(robot)
         self.profile = load_profile(robot)
         phys = self.profile["physics"]
