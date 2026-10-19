@@ -42,13 +42,16 @@ def _step(sim, scene, plant, n):
         scene.update(plant.period_ns / 1e9)
 
 
-def test_rough_terrain_carries_the_feet(usd):
+def test_heightfield_terrain_carries_the_feet(usd):
     import isaaclab.sim as sim_utils
+    from isaaclab.terrains.height_field import HfRandomUniformTerrainCfg
 
     from humanoid_sim.train.plant import RobotPlant
-    from humanoid_sim.world.terrain import rough_terrain_cfg
+    from humanoid_sim.world.terrain import heightfield_terrain_cfg
 
-    sim, scene = _scene(usd, 2, terrain=rough_terrain_cfg(rows=1, cols=2, size_m=4.0, border_m=2.0, curriculum=False))
+    bumpy = {"bumps": HfRandomUniformTerrainCfg(proportion=1.0, noise_range=(0.0, 0.025), noise_step=0.005)}
+    terrain = heightfield_terrain_cfg(bumpy, rows=1, cols=2, size_m=4.0, border_m=2.0, curriculum=False)
+    sim, scene = _scene(usd, 2, terrain=terrain)
     try:
         robot = scene["robot"]
         plant = RobotPlant(robot, imu=scene["imu"], contacts=scene["contacts"])

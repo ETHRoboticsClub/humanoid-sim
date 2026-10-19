@@ -32,11 +32,21 @@ flowchart TB
 
 Each repo owns one layer:
 
-- humanoid-learning (`ETHRoboticsClub/humanoid-learning`, with this repo as a submodule) owns tasks, observations, rewards, terminations, curricula and policies. humanoid-sim offers the knobs a curriculum turns, such as the terrain's difficulty rows (`rough_terrain_cfg(curriculum=...)`) and a randomization level (`Randomizer.set_level`), but never decides when to turn them. The example environments in `examples/` and [training.md](training.md) only show how a task uses the API.
+- humanoid-learning (`ETHRoboticsClub/humanoid-learning`, with this repo as a submodule) owns tasks, observations, rewards, terminations, terrain generators, curricula, policies and every evaluation of a policy. humanoid-sim offers the mechanisms and the knobs a task turns, such as a heightfield terrain built from the tiles and grid the task gives (`heightfield_terrain_cfg`) and a randomization level (`Randomizer.set_level`), but never chooses them or decides when to turn them. The example environments in `examples/` and [training.md](training.md) only show how a task uses the API.
 - humanoid-sim owns the models: the robot (`model/`), the world (`world/`), the actuators (`timing/`, `devices/`, `transmissions/`), the sensors (`sensors/`), and the randomization of their parameters, whose ranges the task chooses. Training reaches them through the Train-Time API, batched torch tensors over `[envs, ...]`.
 - Controls owns the production runtime. It drives the simulated robot the way it drives the real one: Controls' plant host and its device peer (the fake EtherCAT bank for the ETHRC V1, the fake motor board for the G1) present simulated drives and an IMU to the rest of Controls, convert each device command into an SI drive demand, and exchange demands and feedback with this repo's runtime host (`runtime/`) through a shared-memory segment. Nothing here imports Controls; Controls copies the segment's ABI (`runtime/abi/plant_abi.py` and `plant_abi.h`).
 - Physics runs on Isaac Lab 3.0 with a Newton solver, MJWarp by default or Kamino (beta, `--solver kamino`), without Isaac Sim's Kit app or PhysX. `physics/` is the only place that talks to it.
 - humanoid-urdf holds the robot facts both sides read, pinned at the same commit by Controls and by this repo.
+
+Between humanoid-sim and humanoid-learning the line is mechanism against choice: humanoid-sim makes something possible and models it faithfully, humanoid-learning decides what to use, how much and when, and judges the policy.
+
+| Concern | humanoid-sim: the mechanism | humanoid-learning: the choice |
+|---|---|---|
+| Terrain | `heightfield_terrain_cfg`: a terrain the physics can collide with, from the tiles and grid the caller gives | Terrain generators: tile mixes, sizes and difficulty, and the curriculum that moves envs between rows |
+| Disturbances | `ForcePush`, a push process with the caller's ranges; joint torques; the runtime's `APPLY_DISTURBANCE` | Which pushes a task trains and is tested against, and their schedule |
+| Randomization | Models of the randomized parameters, their distributions as specs, a level knob | Which parameters, their ranges, and when the level moves |
+| Sensors | Sensor models and their knobs (the IMU's noise and delivery timing; cameras, lighting and LIDAR are not modeled yet, and come as knobs here when they are: a light's intensity, a sensor switched off) | Which sensors a policy reads, and ablations over them |
+| Evaluation | Checks of the sim itself: replays and system identification against robot captures, physics and model tests, benchmarks | Every evaluation of a policy: scenarios, metrics, robustness sweeps (terrain, pushes, latency, lighting) and sensor ablations (the LIDAR removed, vision only) |
 
 Inside humanoid-sim, dependencies point down. The front ends (`train/`, `runtime/`, `replay/`) use the plant and the models but not each other, and the models never import a front end. The one exception is the description digest, which the segment ABI defines so that Controls can compute it from its own checkout.
 

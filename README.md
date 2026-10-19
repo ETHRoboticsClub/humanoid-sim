@@ -44,7 +44,7 @@ flowchart TB
     sim --> physics["Isaac Lab 3.0 on Newton (MJWarp or Kamino)"]
 ```
 
-Policies are trained in humanoid-learning against the same drive and sensor models that Controls runs against in real time. [docs/overview.md](docs/overview.md#where-it-sits-among-the-repos) says which repo owns what.
+Policies are trained in humanoid-learning against the same drive and sensor models that Controls runs against in real time. humanoid-sim provides the mechanisms and knobs; terrain generators, curricula and every evaluation of a policy live in humanoid-learning. [docs/overview.md](docs/overview.md#where-it-sits-among-the-repos) says which repo owns what.
 
 ## See it
 
@@ -101,13 +101,12 @@ The plant is an Isaac Lab action term. A task turns its policy's actions into dr
 from humanoid_sim.train import TrainPlantCfg
 from humanoid_sim.train.isaaclab import PlantAction, PlantActionCfg
 from humanoid_sim.train.scene import robot_scene_cfg, robot_sim_cfg
-from humanoid_sim.world.terrain import rough_terrain_cfg
 
 class Drives(PlantAction):
     def demands(self, actions):  # -> DriveDemand [envs, drives] and the time [envs] (ns) it leaves the host
         ...
 
-cfg.scene = robot_scene_cfg(4096, usd, terrain=rough_terrain_cfg(friction=0.0))  # spawns in the home pose
+cfg.scene = robot_scene_cfg(4096, usd, terrain=terrain)  # spawns in the home pose; terrain: the task's
 cfg.sim = robot_sim_cfg(device="cuda:0")
 cfg.decimation = 5  # 4 ms physics, 20 ms policy period
 cfg.actions.drives = PlantActionCfg(class_type=Drives, action_dim=22, plant=TrainPlantCfg(randomization=[
@@ -120,7 +119,7 @@ cfg.actions.drives = PlantActionCfg(class_type=Drives, action_dim=22, plant=Trai
 #   plant.truth()     joint state, base pose and twist, contact forces
 ```
 
-Robots spawn in the CAD's home pose: legs straight, both soles flat on the ground. `pose="standing"` uses the standing pose captured on the robot instead, whose soles are pitched by 10 and 17 degrees under an upright base. [docs/training.md](docs/training.md) has the full API.
+`terrain` is the task's: humanoid-learning's generators build it with `heightfield_terrain_cfg`, which accepts only terrain the physics can collide with. Robots spawn in the CAD's home pose: legs straight, both soles flat on the ground. `pose="standing"` uses the standing pose captured on the robot instead, whose soles are pitched by 10 and 17 degrees under an upright base. [docs/training.md](docs/training.md) has the full API.
 
 ## How it is built
 

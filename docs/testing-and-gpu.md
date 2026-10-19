@@ -29,7 +29,7 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 | `test_supports.py` | Gantry programs, and rope tension and cable length on the robot | 2 tests `physics` |
 | `test_sysid.py` | The passive-fit search space and CMA-ES | |
 | `test_train_env.py` | The Train-Time API in a manager-based Isaac Lab environment with two robots | `physics` |
-| `test_world.py` | Rough terrain under the feet, force pushes, and a robot holding the home pose standing on flat ground | `physics` |
+| `test_world.py` | A heightfield terrain under the feet, force pushes, and a robot holding the home pose standing on flat ground | `physics` |
 
 A test skips when something it needs is missing: Isaac Lab (`isaaclab_newton`), Newton, the Rerun SDK, scipy, the built robot asset, the captures, CUDA or a C compiler. The skip reason names it, and pytest prints every reason at the end of the run (`-ra` is set in `pyproject.toml`). A physics run without the built assets therefore passes with most tests skipped; read the skip summary after a physics run.
 

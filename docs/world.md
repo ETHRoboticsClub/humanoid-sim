@@ -26,14 +26,16 @@ The robot touches the world through one convex hull per body and a thin box unde
 
 The robot's contacts run in MJWarp's own collision pipeline, which collides the robot's hulls and boxes with heightfields but not with triangle-mesh terrain. Isaac Lab's terrain generator builds the whole terrain as one triangle mesh and tags it for conversion to a heightfield only when every sub-terrain sets `convert_to_heightfield`, which the `Hf*` configs do by default; Newton then replaces the mesh by a heightfield at the terrain's horizontal resolution. `heightfield_terrain_cfg` (`src/humanoid_sim/world/terrain.py`) enforces this and raises a `ValueError` for any sub-terrain that is not an `Hf*` config with conversion on. Mesh sub-terrains (Isaac Lab's `Mesh*` configs, such as stairs with vertical risers) are therefore not supported.
 
-`heightfield_terrain_cfg(sub_terrains, *, ...)` takes a dict of `Hf*` sub-terrain configs, whose `proportion` fields act as weights, and returns an Isaac Lab `TerrainImporterCfg`:
+This module is the mechanism only. Which tiles a task trains on, how many, how hard, and any curriculum over them are the task's choice and live in humanoid-learning with its terrain generators; humanoid-sim fixes only what the physics can collide with. So `heightfield_terrain_cfg` has no stock tile mix and no default layout: the caller states the grid.
+
+`heightfield_terrain_cfg(sub_terrains, *, size_m, rows, cols, border_m, curriculum, ...)` takes a dict of `Hf*` sub-terrain configs, whose `proportion` fields act as weights, and returns an Isaac Lab `TerrainImporterCfg`:
 
 | Option | Default | Meaning |
 |---|---|---|
-| `size_m` | 8.0 | Side of one square tile (m) |
-| `rows`, `cols` | 10, 20 | Tile grid; with `curriculum`, rows are difficulty levels |
-| `border_m` | 20.0 | Border around the grid (m) |
-| `curriculum` | `True` | Difficulty grows with the row; without it each tile draws a random difficulty |
+| `size_m` | required | Side of one square tile (m) |
+| `rows`, `cols` | required | Tile grid; with `curriculum`, rows are difficulty levels |
+| `border_m` | required | Border around the grid (m) |
+| `curriculum` | required | Difficulty grows with the row; without it each tile draws a random difficulty |
 | `friction` | 1.0 | Static and dynamic friction of the terrain; 0 when robot friction is randomized |
 | `horizontal_scale_m`, `vertical_scale_m` | 0.1, 0.005 | Heightfield grid spacing and height step (m) |
 | `seed` | `None` | Seed of the terrain generator |
@@ -47,38 +49,18 @@ How envs land on tiles:
 
 Moving envs between rows is Isaac Lab's terrain curriculum (`TerrainImporter.update_env_origins`), driven from your task.
 
-`rough_terrain_cfg(*, max_noise_m=0.025, max_obstacle_m=0.0125, flat=0.5, **kwargs)` builds a mixed terrain from three tile types and passes `kwargs` on to `heightfield_terrain_cfg`:
-
-| Tile | Isaac Lab config | Share | Surface |
-|---|---|---|---|
-| flat | `HfPyramidSlopedTerrainCfg`, slope 0, 2 m platform | `flat` | Flat |
-| uniform | `HfRandomUniformTerrainCfg` | `(1 - flat) / 2` | Random heights from 0 to `max_noise_m` in 5 mm steps, a new height at every grid point |
-| obstacles | `HfDiscreteObstaclesTerrainCfg` | `(1 - flat) / 2` | 40 rectangular blocks raised or sunk by up to `max_obstacle_m`, around a flat 1 m platform at the centre |
-
-Difficulty acts on the obstacle tiles only. Isaac Lab's random-uniform terrain ignores the difficulty, so the uniform tiles get the full noise on every row. An obstacle tile's block height is `max_obstacle_m` times the difficulty, rounded down to the 5 mm vertical step, and each block is raised or sunk by that height or by half of it. With the default 12.5 mm the highest blocks are 10 mm and the easiest rows have none:
-
-| Difficulty | Block height at the default `max_obstacle_m` | Rows, with the default 10 rows and `curriculum` |
-|---|---|---|
-| below 0.4 | 0 (the tile is flat) | 0 to 3 |
-| 0.4 to 0.8 | 5 mm | 4 to 7 |
-| 0.8 and above | 10 mm | 8 and 9 |
-
-Block sides are drawn from the 0.25 to 0.75 m range on the heightfield grid in steps of 4 cells, which at the default 0.1 m spacing leaves 0.2 m and 0.6 m.
-
 ```python
 from isaaclab.terrains.height_field import HfPyramidSlopedTerrainCfg, HfWaveTerrainCfg
 
 from humanoid_sim.train.scene import robot_scene_cfg
-from humanoid_sim.world.terrain import heightfield_terrain_cfg, rough_terrain_cfg
+from humanoid_sim.world.terrain import heightfield_terrain_cfg
 
-# The stock mix, with the terrain at zero friction because the robot's friction is randomized:
-cfg.scene = robot_scene_cfg(4096, usd, terrain=rough_terrain_cfg(friction=0.0))
-
-# A custom mix of heightfield tiles:
+# Slopes and waves on a 10 by 20 grid of 8 m tiles, rows as difficulty levels, the terrain at zero friction
+# because the robot's friction is randomized:
 terrain = heightfield_terrain_cfg({
     "slopes": HfPyramidSlopedTerrainCfg(proportion=0.5, slope_range=(0.0, 0.1), platform_width=2.0),
     "waves": HfWaveTerrainCfg(proportion=0.5, amplitude_range=(0.0, 0.03), num_waves=4),
-}, friction=0.0)
+}, size_m=8.0, rows=10, cols=20, border_m=20.0, curriculum=True, friction=0.0)
 cfg.scene = robot_scene_cfg(4096, usd, terrain=terrain)
 ```
 

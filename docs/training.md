@@ -9,7 +9,7 @@ This page is for someone writing a task. The drive model itself is in [drives.md
 `examples/train_scene.py` is a complete scene on this API and the place to start a task from. It has no policy: its action term, `ScriptedDrives`, demands the scene's default pose at the baseline drive gains plus an arm wave (shoulders and elbows, 0.5 Hz, a different phase per env). A task replaces `ScriptedDrives.demands` with its policy's action path. The rest of the scene is what most tasks need:
 
 - The robot starts in the home pose (the default of `robot_scene_cfg`, see [The initial pose](#the-initial-pose)), and the demands are taken from the articulation's `data.default_joint_pos`.
-- The ground is rough terrain from `rough_terrain_cfg` laid out as one row of 2.5 m tiles, one tile per robot, without a curriculum. Isaac Lab puts every env assigned to a tile at that tile's origin, so envs that share a tile spawn on the same spot. `--flat` uses the flat ground instead.
+- The ground is a heightfield of random bumps up to 25 mm (`heightfield_terrain_cfg` with one `HfRandomUniformTerrainCfg` tile type) laid out as one row of 2.5 m tiles, one tile per robot, without a curriculum. The tile mix is the example's own; a task takes its terrain from its generator in humanoid-learning. Isaac Lab puts every env assigned to a tile at that tile's origin, so envs that share a tile spawn on the same spot. `--flat` uses the flat ground instead.
 - Robot friction (0.4 to 1.0), a payload of 0 to 4.5 kg on `base_link` and one drive latency per env (10 to 20 ms) are randomized. The terrain and the flat ground have friction 0 so the robot's value decides.
 - A `ForcePush` pushes `base_link` with 40 to 120 N for 0.1 to 0.2 s, with 1.5 to 3 s between pushes. The loop steps it once per policy step.
 - With `--rrd`, a `SceneRecorder` records every robot to a Rerun file, and `plant.log` adds robot 0's left knee and base height to the same recording, every `--record-every` policy steps (default 2). See [Recording a scene](#recording-a-scene).
@@ -33,7 +33,7 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `PlantAction`, `PlantActionCfg` | `src/humanoid_sim/train/isaaclab.py` | An Isaac Lab action term that owns a `RobotPlant`; you subclass it and implement `demands()` |
 | `robot_scene_cfg`, `robot_sim_cfg` | `src/humanoid_sim/train/scene.py` | The `InteractiveSceneCfg` (robot, IMU, contact sensor, ground or terrain) and the `SimulationCfg` (one 4 ms step on MJWarp) |
 | `initial_pose`, `POSES` | `src/humanoid_sim/model/poses.py`, re-exported by `humanoid_sim.train.scene` | The joint positions and base height of a named initial pose |
-| `heightfield_terrain_cfg`, `rough_terrain_cfg` | `src/humanoid_sim/world/terrain.py` | Terrain-importer configs, described in [world.md](world.md) |
+| `heightfield_terrain_cfg` | `src/humanoid_sim/world/terrain.py` | The terrain-importer config for a heightfield terrain the caller lays out, described in [world.md](world.md#heightfield-terrain) |
 | `ForcePush`, `Gantry` | `src/humanoid_sim/world/` | Pushes and gantry ropes a task applies, described in [world.md](world.md) |
 | `DriveDemand` | `src/humanoid_sim/devices/demand.py` | One SI demand per env and drive: law, targets, gains, torque limit |
 | `SceneRecorder` | `src/humanoid_sim/signals/scene.py` | Records many envs of a scene to one Rerun recording |
@@ -502,7 +502,7 @@ The plant's steady-state work (`submit`, `pre_physics`, `measured`, `truth`, `re
 
 ## Pitfalls
 
-- The solver uses the larger friction of the two shapes in contact (MJWarp always, Kamino as the profile configures it). When `friction` is randomized on the robot, give the ground zero friction (`robot_scene_cfg(..., ground_friction=0.0)` or `rough_terrain_cfg(friction=0.0)`); with the profile's ground friction of 1.0 every robot value below 1 has no effect.
+- The solver uses the larger friction of the two shapes in contact (MJWarp always, Kamino as the profile configures it). When `friction` is randomized on the robot, give the ground zero friction (`robot_scene_cfg(..., ground_friction=0.0)` or `heightfield_terrain_cfg(..., friction=0.0)`); with the profile's ground friction of 1.0 every robot value below 1 has no effect.
 - Take targets and action offsets from `data.default_joint_pos`, not from `standing_offset_rad`: the scene spawns in the home pose, and the standing pose, which a rigid robot cannot hold on flat ground, is only used when a scene asks for it. See [The initial pose](#the-initial-pose).
 - The encoder jitter is drawn on every `measured()` call, for `drive` and for `history`. Two observation terms that each call `measured()` see different jitter in the same step; read it once in one term, as `actor_obs` does.
 - `history[:, 0]` is one physics step older than `drive`. The history and the IMU are sampled at the start of each physics step, so after an env step their newest entries are from `plant.t_ns - 4 ms`, while `drive` is the state now. Use `history_ns` for the times.
