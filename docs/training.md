@@ -98,14 +98,14 @@ Train on the plain asset. The `--base-joints` variant is for replays ([replay-an
 
 | `pose` | Joint positions | Held rigidly on flat ground |
 |---|---|---|
-| `"home"` (default) | The description's [home pose](glossary.md#home-pose) (`Description.home_pose`): the CAD's export pose, legs straight and both soles level at one height | At the baseline gains it stands still on flat ground (60 s measured, the base within 0.6° of upright); pushes and rough terrain make it fall unless a policy balances it (`tests/test_world.py::test_a_robot_holding_the_home_pose_stands`). |
+| `"home"` (default) | The description's [home pose](glossary.md#home-pose) (`Description.home_pose`): the V1's CAD export pose, legs straight; the G1's deploy standing pose, knees bent 0.3 rad; both soles level at one height | At the baseline gains the V1 stands still on flat ground (60 s measured, the base within 0.6° of upright); pushes and rough terrain make it fall unless a policy balances it. The G1 tips over within about 1.3 s: an inverted pendulum on its ankles, it stands only on ankles stiffer in pitch than its weight times its centre of mass's height above them (about 210 Nm/rad), and Unitree's deploy gains give 80 Nm/rad for both. A G1 task needs its policy to balance from the first step (`tests/test_world.py::test_holding_the_home_pose_stands_only_on_ankles_stiffer_than_toppling`). |
 | `"standing"` | The description's [standing pose](glossary.md#standing-pose), captured on the robot: every joint at its `standing_offset_rad` | Under an upright base the soles are pitched about 10° (left) and 17° (right). The robot lands on its sole edges, hops and tips over within about a second. |
 
 In both poses the base is upright and the lowest sole corner is 1 mm above the ground (`STANDING_CLEARANCE_M` in `src/humanoid_sim/model/poses.py`); on the current description the base starts 0.924 m up in the home pose and 0.945 m up in the standing pose. Where the home pose comes from, and why the standing pose does not stand, is in [robot-model.md](robot-model.md#standing-on-the-ground).
 
 The articulation's `data.default_joint_pos` holds the chosen pose (articulation joint order), so `mdp.reset_scene_to_default` puts the robot back into it. Take action offsets from `default_joint_pos`, as `examples/train_scene.py` does, instead of from `standing_offset_rad`; then the task follows whichever pose the scene was built with.
 
-`initial_pose(usd, robot="ethrc_v1", pose="home")` returns the pose's joint positions `[22]` (description order, float64) and the base height at which its lowest sole corner touches the ground, without the clearance. To build your own scene config, `articulation_cfg(usd, props, ..., joint_pos=...)` in `src/humanoid_sim/physics/isaaclab.py` takes the initial joint positions in `props.names` order; without `joint_pos` it uses the standing pose.
+`initial_pose(usd, robot="ethrc_v1", pose="home")` returns the pose's joint positions `[J]` (description order, float64) and the base height at which its lowest sole corner touches the ground, without the clearance. To build your own scene config, `articulation_cfg(usd, props, ..., joint_pos=...)` in `src/humanoid_sim/physics/isaaclab.py` takes the initial joint positions in `props.names` order; without `joint_pos` it uses the standing pose.
 
 ## A minimal environment
 
