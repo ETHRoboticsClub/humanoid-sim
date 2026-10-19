@@ -32,8 +32,11 @@ def heightfield_terrain_cfg(sub_terrains: dict, *, size_m: float = 8.0, rows: in
 
 
 def rough_terrain_cfg(*, max_noise_m: float = 0.025, max_obstacle_m: float = 0.0125, flat: float = 0.5, **kwargs):
-    """Flat, random-uniform and box-obstacle tiles (proportions ``flat`` and the rest split evenly), roughness
-    growing with the row (difficulty) up to ``max_noise_m`` and ``max_obstacle_m``."""
+    """Flat, random-uniform and box-obstacle tiles (proportions ``flat`` and the rest split evenly).
+
+    Random-uniform tiles get noise up to ``max_noise_m`` on every row: Isaac Lab's random-uniform terrain does not
+    scale with difficulty. Obstacle heights grow with the row (difficulty) up to ``max_obstacle_m`` and snap to
+    5 mm steps, so the default 12.5 mm gives at most 10 mm and the easiest rows get none."""
     from isaaclab.terrains.height_field import (
         HfDiscreteObstaclesTerrainCfg,
         HfPyramidSlopedTerrainCfg,

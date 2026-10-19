@@ -49,7 +49,7 @@ PARAMS: dict[str, Param] = {
     "friction": Param("physics", "env", doc="friction coefficient of every robot shape"),
     "drive_stiffness": Param("device", "drive", doc="drive's realized P gain over the demanded one"),
     "drive_damping": Param("device", "drive", doc="drive's realized D gain over the demanded one"),
-    "torque_limit": Param("device", "drive", doc="scale of the torque–speed envelope and torque cap"),
+    "torque_limit": Param("device", "drive", doc="scale of the torque-speed envelope and torque cap"),
     "latency": Param("device", "drive", unit="s", doc="bus and drive latency, demand sent → in force"),
     "encoder_offset": Param("device", "drive", unit="rad", doc="drive's position reading minus the truth"),
     "imu_gyro_bias": Param("device", "axis", unit="rad/s", doc="gyro bias, sensor frame"),
@@ -108,7 +108,9 @@ class ParamSpec:
         if name not in PARAMS:
             raise ValueError(f"unknown parameter {name!r}; known: {sorted(PARAMS)}")
         key = _SELECTORS.get(PARAMS[name].target)
-        select = d.pop(key, ".*") if key else ".*"
+        if key and "select" in d:
+            raise ValueError(f"{name}: select {PARAMS[name].target}s with {key!r}")
+        select = d.pop(key, ".*") if key else d.pop("select", ".*")  # e.g. IMU axes
         stray = set(d) & (set(_SELECTORS.values()) - {key})
         if stray:
             raise ValueError(f"{name}: selector {sorted(stray)} does not apply to a {PARAMS[name].target} parameter")
