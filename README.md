@@ -1,7 +1,7 @@
 <h1 align="center">humanoid-sim</h1>
 
 <p align="center">
-  The ETHRC humanoid from the EtherCAT drives down: 22 drives, the ankle linkage and the body,<br/> simulated on Isaac Lab 3.0 and Newton's MJWarp solver, for training, for Controls and for checking against the robot.
+  Humanoids from the drives down: the ETHRC humanoid's 22 drives and ankle linkage, the Unitree G1's 29 motors, and their bodies,<br/> simulated on Isaac Lab 3.0 and Newton, for training, for Controls and for checking against the robot.
 </p>
 
 <p align="center">
@@ -14,7 +14,7 @@
 
 ![Six simulated robots on rough terrain, each holding its pose while waving its arms](docs/images/scene-hero.png)
 
-The sim stops where Controls starts. It takes what the EtherCAT master sends each drive and returns what each drive and the IMU report back, with the drives' own control law, torque limits, latency, encoder resolution and IMU burst timing in between. Robot facts come from the `humanoid-urdf` description that Controls pins, so the sim and the controller always describe the same robot.
+The sim stops where Controls starts. It takes what the robot's host sends each drive, a control law with its targets and gains in SI units, and returns what each drive and the IMU report back, with the drives' own control law, torque limits, latency, encoder resolution and IMU burst timing in between. Robot facts come from the `humanoid-urdf` description that Controls pins, so the sim and the controller always describe the same robot, and any robot in it runs with `--robot` ([docs/robot-model.md](docs/robot-model.md#robots)).
 
 <table>
   <tr>
@@ -104,7 +104,7 @@ from humanoid_sim.train.scene import robot_scene_cfg, robot_sim_cfg
 from humanoid_sim.world.terrain import rough_terrain_cfg
 
 class Drives(PlantAction):
-    def demands(self, actions):  # -> DriveDemand [envs, 22] and the time [envs] (ns) it leaves the master
+    def demands(self, actions):  # -> DriveDemand [envs, drives] and the time [envs] (ns) it leaves the host
         ...
 
 cfg.scene = robot_scene_cfg(4096, usd, terrain=rough_terrain_cfg(friction=0.0))  # spawns in the home pose

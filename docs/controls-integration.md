@@ -1,12 +1,14 @@
 # Running Controls against humanoid-sim
 
-Controls' fake-coe lane runs the production EtherCAT master, the `standalone` binary of `ethercat_device_configurator` with `--transport fake-coe`, against a bank of simulated EPOS4 drives (`Epos4Slave` in Controls' `ethrc_fake_ethercat` package). The master speaks CANopen over EtherCAT (CoE) to them as it would to the robot. A separate plant host process owns that bank: each bus cycle it reads every drive's demand from the bank and gives each drive its feedback. By default the plant host steps a MuJoCo plant itself. With `--physics humanoid-sim` it forwards each demand to humanoid-sim's runtime segment and hands the sim's feedback back to the bank. Everything above the drives (master, safety monitor, router, policies, robot API) is the stack that runs on the robot.
+Controls runs humanoid-sim behind two lanes: the ETHRC V1's fake-coe lane, below, and the Unitree G1's lane ([The G1 lane](#the-g1-lane)). Each converts its robot's native device commands into the segment's SI drive demands at its own boundary, so one segment serves both.
+
+Controls' fake-coe lane runs the production EtherCAT master, the `standalone` binary of `ethercat_device_configurator` with `--transport fake-coe`, against a bank of simulated EPOS4 drives (`Epos4Slave` in Controls' `ethrc_fake_ethercat` package). The master speaks CANopen over EtherCAT (CoE) to them as it would to the robot. A separate plant host process owns that bank: each bus cycle it reads every drive's demand from the bank and gives each drive its feedback. By default the plant host steps a MuJoCo plant itself. With `--physics humanoid-sim` it converts each demand to an SI drive demand on humanoid-sim's runtime segment and hands the sim's feedback back to the bank. Everything above the drives (master, safety monitor, router, policies, robot API) is the stack that runs on the robot.
 
 This page covers the Controls side. [runtime.md](runtime.md) describes `humanoid-sim serve`, the segment and the commands.
 
 ## The Controls branch
 
-The humanoid-sim plant is on Controls' branch `exp/humanoid-sim-runtime`, which is not merged into `master`; `master` has the MuJoCo plant only. The files involved, relative to the Controls checkout:
+The V1's humanoid-sim plant is on Controls' branch `exp/humanoid-sim-runtime`, which is not merged into `master`; `master` has the MuJoCo plant only. Its SI demands (plant ABI 2.0) are on `exp/humanoid-sim-runtime-si`, on top of it; an ABI 1 build of Controls refuses an ABI 2 segment. The files involved, relative to the Controls checkout:
 
 | File | Role |
 |---|---|
@@ -35,7 +37,7 @@ At startup:
 
 Every bus cycle (the period from Controls' drive configuration):
 
-- `SegmentPlant.exchange` writes one demands record. Each drive's bank demand goes in unchanged (`demand_fields`); a sim drive missing from the bus inventory is written disabled.
+- `SegmentPlant.exchange` writes one demands record. `demand_fields` converts each drive's bank demand as `references_from_demands` does for MuJoCo: JVPT (-64) becomes PD, freeze (-62) and homing (6) FREEZE, a disabled drive or another mode DISABLED; the raw JVPT gains become SI through `ethrc_ssot.drive_gains.si_gain`, an unset torque cap (0) becomes `inf`, and a non-zero I gain is refused. A sim drive missing from the bus inventory is written disabled.
 - It reads the feedback region and passes each drive's position, velocity, applied torque and demanded torque to the bank (`bank.feedback`). If the region is mid-write it reuses the previous cycle's feedback.
 - It raises `SimLost` when the segment's state is no longer ready or the sim's heartbeat is older than 500 ms (`SIM_STALE_NS`). The plant host then writes the fault to its status file and exits.
 - `new_imu_samples` takes the IMU samples it has not seen (by `seq`), oldest first, and maps their stamps to its own `CLOCK_MONOTONIC` with the feedback's `written_mono_ns - sim_time_ns`. The sim's `seq` keeps rising across a `RESET` and across sessions, so the last number seen stays valid. `RawImuChain` runs each through the deployed chain (Madgwick with the time step from consecutive receipt stamps, then the relay's rotation into `base_link` by the description's mount), and the plant host publishes the result on `/rt/imu`.
@@ -109,7 +111,7 @@ python3 /opt/ethrc/repository/scripts/sim/launch.py --prepared --headless --no-a
 | `--seconds S` | `60` | How long to run once they are |
 | `--keep` | off | Leave the containers and the volume |
 
-The script waits until every drive is enabled or the plant host reports a fault, runs for `--seconds`, and then reads the segment from inside the Controls container. It prints a JSON result: the plant host's status (`physics`, `cycles`, `keeping_up`, `drives`, `drives_operational`, `drives_enabled`, `drives_faulted`, `fault`) and, from the segment, `sim_steps`, `sim_time_s`, `sim_late_steps`, `imu_samples`, `jvpt_drives` and `max_tracking_error_rad`. `ok` is true, and the exit code 0, when there is no fault, every drive is enabled and none faulted, at least one drive runs JVPT, and the largest JVPT tracking error is under 0.05 rad.
+The script waits until every drive is enabled or the plant host reports a fault, runs for `--seconds`, and then reads the segment from inside the Controls container. It prints a JSON result: the plant host's status (`physics`, `cycles`, `keeping_up`, `drives`, `drives_operational`, `drives_enabled`, `drives_faulted`, `fault`) and, from the segment, `sim_steps`, `sim_time_s`, `sim_late_steps`, `imu_samples`, `pd_drives` and `max_tracking_error_rad`. `ok` is true, and the exit code 0, when there is no fault, every drive is enabled and none faulted, at least one drive runs the PD law, and the largest PD tracking error is under 0.05 rad.
 
 On the default CPU device the lane comes up but the sim does not keep up with real time.
 
@@ -143,6 +145,40 @@ containers/compose.sh -f compose.sim.yaml -f containers/compose.sim.headless.yam
 ```
 
 Here `/srv/hsim` is the host directory the sim serves into, directly or from its container with the directory mounted; the tests container sees it as `/shared`. The `tests` service drops all capabilities, so the segment file must be readable and writable by the container's root user (see [Shared volume, clock and permissions](#shared-volume-clock-and-permissions)). Run the sim on a GPU for these scenarios: on the CPU device it falls behind real time, and the plant host's status then reports `keeping_up` false.
+
+## The G1 lane
+
+Controls' G1 lane runs the production G1 host (`ethrc_body_host`) on its `LowCmd` bus against a fake motor board (`ethrc_fake_unitree`), through the same shared segment it uses with Unitree's bridge on the robot. The board's plant host steps a MuJoCo plant by default; with `--physics humanoid-sim` humanoid-sim is the plant. It is on Controls' branch `exp/humanoid-sim-g1`, from `master`, not merged:
+
+| File | Role |
+|---|---|
+| `ros2_ws/src/sim/ethrc_sim/ethrc_sim/humanoid_sim/` | Vendored `plant_abi.py` and `plant_abi.h`, and `SegmentClient`, the vendor-neutral side of the segment |
+| `ros2_ws/src/sim/ethrc_fake_unitree/ethrc_fake_unitree/sim_plant.py` | `SegmentUnitreePlant`, `SegmentPeer` and `KinematicHands` |
+| `ros2_ws/src/sim/ethrc_fake_unitree/ethrc_fake_unitree/plant_host.py` | `--physics humanoid-sim --sim-segment PATH --sim-wait S` |
+| `scripts/sim/launch.py` | `--bus unitree --plant humanoid-sim --sim-segment PATH` |
+| `ros2_ws/src/sim/ethrc_fake_unitree/test/test_sim_plant.py` | Unit tests against a stand-in sim |
+| `ros2_ws/src/sim/ethrc_fake_unitree/test/test_sim_plant_live.py` | The adapter against a live sim (`ETHRC_TEST_HUMANOID_SIM_SEGMENT`) |
+
+Serve the variant Controls runs, with the support the session asks for and the truth every step:
+
+```bash
+humanoid-sim --robot g1_29dof_with_hand_rev_1_0 serve --segment /srv/hsim/plant --support suspended --truth-every 1
+```
+
+The G1's motor driver runs each motor's PD itself, and so does humanoid-sim, so the plant host sends laws, not torques. Every period (the description's `control_period_s`, 2 ms) the peer passes the host's command through the relay and the board as on MuJoCo, then hands humanoid-sim each motor's law (`Board.law`): PD with the command's `q`, `dq`, `tau`, `kp` and `kd` for an enabled motor, DISABLED for a limp one, no torque limit (the sim applies the motor's envelope). It keeps doing so while paused, because the sim pauses its own physics on `PAUSE` and ends a session whose demands stop. The motors map to the sim's drives by name: the embodiment's actuator names are the description's joint names, which are the sim's drive names, and the motor frame (`actuator = sign · joint`) is the sim's drive frame.
+
+`LowState` reads what the sim's motors measure. Its IMU gyroscope and accelerometer are the newest sample of the sim's IMU model; its quaternion, on the robot the board's own estimate, is the true orientation: the truth region's base orientation through the URDF's `imu_joint`, as the MuJoCo plant reports its site's. The plant host refuses a truth more than one physics step behind the feedback, hence `--truth-every 1`. The sim welds the Dex3 fingers, so each declared hand is a kinematic `FakeDex3` stepped with the loop, outside the body's physics. Both are in the status's `fidelity_gaps`.
+
+The sim's support is fixed when it starts: the plant host exits if `--profile` differs from it and refuses `/sim/profile` requests. `/sim/reset` sends `RESET` to the home pose. The gantry test seam, `--slam-truth` and the launcher's navigation need MuJoCo's world and are not served.
+
+`test_sim_plant_live.py` checks the adapter against a running sim. In the humanoid-sim image, with a Controls checkout mounted at `/controls` and its Python packages on `PYTHONPATH`:
+
+```bash
+humanoid-sim --robot g1_29dof_with_hand_rev_1_0 serve --segment /tmp/plant --device cpu --support suspended --truth-every 1 &
+ETHRC_TEST_HUMANOID_SIM_SEGMENT=/tmp/plant python -m pytest /controls/ros2_ws/src/sim/ethrc_fake_unitree/test/test_sim_plant_live.py
+```
+
+It steps the left knee 0.2 rad with every motor at its deploy gains and checks that the knee gets there, that every motor applies `kp (target - q)` at rest, that the IMU reads a still, upright pelvis, and that limp motors apply no torque. It passes on Warp's CPU device.
 
 ## Shared volume, clock and permissions
 

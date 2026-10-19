@@ -1,6 +1,6 @@
 # Robot model
 
-humanoid-sim does not define the robot. Geometry, masses, joints, drives and their constants come from the humanoid-urdf description in `third_party/humanoid-urdf`, read in place. This page follows that description from its files to the simulated articulation: how it is loaded and identified, how `humanoid-sim build-asset` turns it into the USD file the physics loads, which per-joint values are written to the solver, the host-side kinematics, the two poses the robot can stand in, the left/right mirror map, and the profile `profiles/ethrc_v1.yaml` that holds this repository's modeling choices. The last section is the workflow for getting a measured value into the simulation.
+humanoid-sim does not define the robot. Geometry, masses, joints, drives and their constants come from the humanoid-urdf description in `third_party/humanoid-urdf`, read in place. This page follows that description from its files to the simulated articulation: how it is loaded and identified, how `humanoid-sim build-asset` turns it into the USD file the physics loads, which per-joint values are written to the solver, the host-side kinematics, the two poses the robot can stand in, the left/right mirror map, and the profile (`profiles/<robot>.yaml`) that holds this repository's modeling choices. The examples are the ETHRC V1's; [Robots](#robots) lists what changes for the Unitree G1 and how to add a robot. The last section is the workflow for getting a measured value into the simulation.
 
 ```
 third_party/humanoid-urdf/ethrc_v1/            profiles/ethrc_v1.yaml
@@ -20,11 +20,35 @@ third_party/humanoid-urdf/ethrc_v1/            profiles/ethrc_v1.yaml
   joint_properties        physics/joint_properties.py, physics/isaaclab.py   (written at spawn)
 ```
 
+## Robots
+
+Every directory of the description root that holds an `actuators.yaml` is a robot, named by its directory: `ethrc_v1`, the ETHRC humanoid, and the Unitree G1 as `g1_29dof_rev_1_0` and `g1_29dof_with_hand_rev_1_0` (the variant Controls runs, its hands welded here). `robots()` in `model/description.py` lists them, and the global option `--robot` (or `robot=` in the Python APIs) picks one; `ethrc_v1` is the default. Each robot's modeling choices are in `profiles/<robot>.yaml`, merged over `profiles/defaults.yaml` key by key (see [The profile](#the-profile)).
+
+Nothing in the code names a robot. What differs between them comes from the description or the profile:
+
+| | ETHRC V1 | Unitree G1 |
+|---|---|---|
+| Drives | 22 EPOS4 drives: 18 drive a joint each, two crank drives per ankle move pitch and roll through a linkage | 29 motors, one per joint, in `LowCmd` slots `motor_index` 0 to 28 |
+| Gains | `baseline_position_gains` per drive | `baseline_stiffness` and `baseline_damping` per joint (Unitree's deploy gains) |
+| Home pose | the pose the CAD was exported in (`poses.home: {export: tools/urdf6_zero_rebase.json}`) | Unitree's standing pose, knees bent 0.3 rad (`poses.home: {preset: standing-init-v1}` from `position-presets.yaml`) |
+| Feet | a sole plate fitted to each foot's lowest face (`model.sole`) | four 5 mm spheres per foot, bounded by a sole box for the truth (`model.sole.fit: bounds`) |
+| Self-collision | on, with Controls' contact excludes | off, as Isaac Lab's own G1 has it |
+| IMU | the URDF's `imu_joint` | the URDF's `imu_joint`, on the pelvis |
+
+`tests/test_robots.py` runs over every robot `robots()` finds: inventory, profile merge, the prepared URDF, sole boxes, mirror pairs, the home pose inside the travel, and the plant at the home pose. `tests/test_runtime_host.py::test_the_host_serves_the_g1` serves the G1 through the runtime segment.
+
+### Adding a robot
+
+1. Add the robot to humanoid-urdf in its own directory: an `actuators.yaml` (schema `ethrc-actuators/v1`) whose `urdf:` names the URDF inside its ament package, every actuated joint with its limits, sign, family and gains, the families with their `torque_speed` curves, and an `imu_joint` in the URDF. Facts this repo needs and the description lacks go there, not into this repo.
+2. Write `profiles/<robot>.yaml` with `schema` and `robot`, and whatever differs from `profiles/defaults.yaml`: usually `poses.home` and `model.sole`, and `physics.self_collision` if the URDF's collision shapes of neighbouring links overlap at rest.
+3. Build the asset (`humanoid-sim --robot <robot> build-asset`) and run `tests/test_robots.py`, which now includes the robot.
+4. For the runtime, the client converts the robot's device commands into the segment's SI drive demands ([runtime.md](runtime.md#demands)); [controls-integration.md](controls-integration.md) shows Controls' two peers.
+
 ## The description
 
 ### Files
 
-`Description` (`src/humanoid_sim/model/description.py`) maps the robot id `ethrc_v1` to the directory `third_party/humanoid-urdf/ethrc_v1/` and the ament package inside it, `URDF_6_description` (the `ROBOTS` table). It reads these files:
+`Description` (`src/humanoid_sim/model/description.py`) maps a robot id to its directory, `third_party/humanoid-urdf/<robot>/`, and to the ament package inside it, the one subdirectory holding the URDF that `actuators.yaml` names. For `ethrc_v1` that is `URDF_6_description`, and it reads these files:
 
 | File (under `ethrc_v1/`) | What humanoid-sim takes from it |
 |---|---|
@@ -317,21 +341,22 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 
 ## The profile
 
-`profiles/ethrc_v1.yaml` holds this repository's modeling choices for the robot. `load_profile(robot)` reads `profiles/<robot>.yaml` and checks that its `robot` key matches. Each entry that mirrors Controls names its source in a comment.
+`profiles/<robot>.yaml` holds this repository's modeling choices for a robot, merged over `profiles/defaults.yaml`: `load_profile(robot)` reads both, merges nested blocks key by key with the robot's file winning, and checks that the `robot` key matches. Each entry that mirrors Controls names its source in a comment. The defaults below are those of `profiles/defaults.yaml`.
 
 | Key | Read by | Effect |
 |---|---|---|
 | `schema` | nothing | Format tag, `humanoid-sim-profile/v1`. Not checked. |
 | `robot` | `load_profile` | Must equal the robot id (`--robot`, default `ethrc_v1`). |
-| `model.urdf` | `PreparedUrdf` | URDF variant to build, relative to `URDF_6_description/`. |
-| `model.weld_unlisted_joints` | `PreparedUrdf.weld_unlisted` | Weld movable joints that `actuators.yaml` does not list. Default `false`. |
+| `model.urdf` | `PreparedUrdf` | URDF variant to build, relative to the robot's ament package. Default: the one `actuators.yaml` names. |
+| `model.weld_unlisted_joints` | `PreparedUrdf.weld_unlisted` | Weld movable joints that `actuators.yaml` does not list. Default `true`. |
 | `model.sole.joints` | `PreparedUrdf.add_sole_boxes` | Side to joint; the joint's child body gets the sole box. |
 | `model.sole.fit` | `PreparedUrdf.add_sole_boxes` | `plate` (default): fit a box to the plate face and collide with it. `bounds`: the box bounding the foot's own collision shapes, for the truth only. |
 | `model.sole.box_thickness_m` | `fit_sole_plate` | Sole box thickness (0.005), `plate` only. |
 | `model.sole.face_depth_m` | `fit_sole_plate` | How far along the face normal a vertex may lie and still belong to the plate face (0.001). |
 | `model.contact_excludes` | `add_contact_excludes` | Body pairs that never collide. |
-| `model.collision_hulls` | `PreparedUrdf.build` | `per_body` or `per_mesh`. Default `per_mesh`; anything else raises. |
+| `model.collision_hulls` | `PreparedUrdf.build` | `per_body` (the default) or `per_mesh`; anything else raises. |
 | `model.self_collision.sets`, `.rest`, `.pairs` | `PreparedUrdf.body_sets`, `self_collision_excludes` | Self-collision sets and which pairs of them collide. Unknown joints or set names raise. |
+| `poses.home` | `home_pose` | The home pose: `zero` (the default, the URDF's zero), `{export: <table>}` (the pose a CAD export was made in, from a zero-rebase table) or `{preset: <id>}` (from the robot's `position-presets.yaml`). |
 | `model.ground_friction` | `SimCore`, `robot_scene_cfg` | Friction of the flat ground (1.0) unless the caller overrides it or passes a terrain. See [world.md](world.md). |
 | `devices.encoders.<family>.counts_per_revolution` | `DriveReporting` | Output encoder resolution in counts per revolution: the integer units the drive reports position in. The training plant quantizes measured feedback with it; in the runtime, Controls' fake drive does that. |
 | `physics.period_ns` | `SimCore`, `RobotPlant`, `robot_sim_cfg` | Physics step, 4000000 ns (4 ms, 250 Hz). `replay --period-ms` sets it for replays. |
