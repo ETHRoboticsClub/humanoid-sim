@@ -6,7 +6,7 @@ Around the robot, humanoid-sim has a ground (a flat plane, or in training a heig
 |---|---|---|---|
 | Flat ground | default; friction set by `ground_friction` | profile friction | profile friction |
 | Heightfield terrain | `robot_scene_cfg(..., terrain=...)` | none | none |
-| Start pose | `robot_scene_cfg(..., pose=...)`: `"home"` (default) or `"standing"` | the capture's first measured drive positions | home; `RESET` can pick `standing` |
+| Start pose | `robot_scene_cfg(..., pose=...)`: `"home"` (default) or `"standing"` | the capture's first measured drive positions | the profile's `poses.start` (V1 `standing`, G1 `home`) or `--pose`; `RESET` can pick either |
 | Free base | always | none | `--support free` |
 | Fixed base | none | `--base fixed` | `--support suspended` (default) |
 | Base orientation prescribed through base joints | none | `--base yaw` (default) or `--base orientation` | none |

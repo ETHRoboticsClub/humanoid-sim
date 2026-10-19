@@ -207,7 +207,7 @@ def cmd_serve(args) -> int:
     from humanoid_sim.runtime.host import EXIT_CLIENT_LOST, EXIT_DETACHED, RuntimeHost
 
     host = RuntimeHost(args.segment, _usd(args), device=args.device, robot=args.robot, solver=args.solver,
-                       support=args.support,
+                       support=args.support, pose=args.pose,
                        bus_period_ns=int(args.bus_period_us * 1000),
                        client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
                        sim_revision=_revision(), truth_every=args.truth_every)
@@ -342,6 +342,8 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--segment", required=True, help="segment file (on a volume shared with the plant host)")
     sv.add_argument("--support", choices=("suspended", "free"), default="suspended",
                     help="suspended welds the base to the world; free stands it on the ground (gantry by command)")
+    sv.add_argument("--pose", choices=("home", "standing"), default=None,
+                    help="the pose every session starts in (default: the profile's poses.start)")
     sv.add_argument("--device", default="cuda:0")
     sv.add_argument("--bus-period-us", type=float, default=1500.0, help="the client's bus cycle (informational)")
     sv.add_argument("--client-timeout-ms", type=float, default=500.0,

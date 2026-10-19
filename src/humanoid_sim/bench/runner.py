@@ -103,7 +103,7 @@ def run_runtime_bench(args, usd: Path) -> dict:
     desc = Description.load(args.robot)
     with tempfile.TemporaryDirectory() as tmp:
         host = RuntimeHost(Path(tmp) / "plant", usd, device=args.device, robot=args.robot, solver=args.solver,
-                           support="free")
+                           support="free", pose="home")
         client = abi.Segment.open(Path(tmp) / "plant")
         try:
             host._reset({"pose": "home"})

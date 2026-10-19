@@ -5,7 +5,8 @@
 * ``"standing"``: every joint at the description's standing offset. For the ETHRC V1 the pose captured on the
   robot, whose soles are pitched by 10° and 17° under an upright base; for the G1 the URDF's zero.
 
-Training scenes (``humanoid_sim.train.scene``) and the runtime host both start robots from these.
+Training scenes (``humanoid_sim.train.scene``) and the runtime host both start robots from these. A runtime session
+starts in the profile's ``poses.start`` (:func:`start_pose`).
 """
 
 from __future__ import annotations
@@ -32,6 +33,23 @@ def home_pose(desc, profile: dict) -> dict[str, float]:
     raise ValueError(f"poses.home {spec!r}: zero, {{export: <table>}} or {{preset: <preset_id>}}")
 
 
+def start_pose(profile: dict) -> str:
+    """The named pose a runtime session starts in: the profile's ``poses.start``."""
+    name = profile.get("poses", {}).get("start", "home")
+    if name not in POSES:
+        raise ValueError(f"poses.start {name!r}: one of {POSES}")
+    return name
+
+
+def pose_joint_positions(desc, profile: dict, pose: str) -> dict[str, float]:
+    """URDF joint positions (rad) of the named ``pose`` (see :data:`POSES`)."""
+    if pose == "home":
+        return home_pose(desc, profile)
+    if pose == "standing":
+        return {n: desc.joints[n].standing_offset_rad for n in desc.joints}
+    raise ValueError(f"unknown pose {pose!r}; known: {POSES}")
+
+
 def initial_pose(usd: Path, robot: str = "ethrc_v1", pose: str = "home"):
     """Joint positions ``[J]`` (description order) of ``pose`` (see :data:`POSES`) and the upright base height at
     which its lowest collision point touches the ground."""
@@ -41,11 +59,6 @@ def initial_pose(usd: Path, robot: str = "ethrc_v1", pose: str = "home"):
     from humanoid_sim.model.kinematics import standing_base_height
 
     desc = Description.load(robot)
-    if pose == "home":
-        home = home_pose(desc, load_profile(robot))
-        q = torch.tensor([home[n] for n in desc.joints], dtype=torch.float64)
-    elif pose == "standing":
-        q = torch.tensor([desc.joints[n].standing_offset_rad for n in desc.joints], dtype=torch.float64)
-    else:
-        raise ValueError(f"unknown pose {pose!r}; known: {POSES}")
+    joints = pose_joint_positions(desc, load_profile(robot), pose)
+    q = torch.tensor([joints[n] for n in desc.joints], dtype=torch.float64)
     return q, standing_base_height(usd, desc, q)

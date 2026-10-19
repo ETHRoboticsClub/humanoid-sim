@@ -302,9 +302,9 @@ q, height = initial_pose(usd, pose="standing")   # 0.945 m
 
 Training: `robot_scene_cfg(num_envs, usd, pose=...)` (`src/humanoid_sim/train/scene.py`) spawns every env in the named pose, `"home"` by default. The pose becomes the articulation's default joint positions (`robot.data.default_joint_pos`), so `reset_scene_to_default` and a task's action offsets use it. `initial_pose(usd, robot, pose)` (`src/humanoid_sim/model/poses.py`, also importable from `humanoid_sim.train.scene`) returns the joint positions and base height of a pose, for a task that writes its own resets. `POSES` lists the names, `("home", "standing")`; any other name raises `ValueError`.
 
-Runtime: each session starts in the home pose. The mailbox command `RESET` with `{"pose": "home"}` or `{"pose": "standing"}` puts the joints in that pose, and in a free session the base upright at that pose's height (see [runtime.md](runtime.md#reset-1)). The host computes both poses at startup.
+Runtime: each session starts in the profile's start pose (`poses.start`, or `serve --pose`): `standing` for the ETHRC V1, whose home pose Controls would refuse to arm, and `home` for the G1 (see [runtime.md](runtime.md#the-start-pose)). The mailbox command `RESET` with `{"pose": "home"}` or `{"pose": "standing"}` puts the joints in that pose, and in a free session the base upright at that pose's height (see [runtime.md](runtime.md#reset-1)). The host computes both poses at startup.
 
-The training scene places the base 1 mm (`STANDING_CLEARANCE_M`) above the pose's height, and so does the runtime host in a free session. A suspended session welds the base 0.3 m above the home pose's height, with the feet in the air.
+The training scene places the base 1 mm (`STANDING_CLEARANCE_M`) above the pose's height, and so does the runtime host in a free session. A suspended session welds the base 0.3 m above the start pose's height, with the feet in the air.
 
 ## Mirror map
 
@@ -357,6 +357,7 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `model.collision_hulls` | `PreparedUrdf.build` | `per_body` (the default) or `per_mesh`; anything else raises. |
 | `model.self_collision.sets`, `.rest`, `.pairs` | `PreparedUrdf.body_sets`, `self_collision_excludes` | Self-collision sets and which pairs of them collide. Unknown joints or set names raise. |
 | `poses.home` | `home_pose` | The home pose: `zero` (the default, the URDF's zero), `{export: <table>}` (the pose a CAD export was made in, from a zero-rebase table) or `{preset: <id>}` (from the robot's `position-presets.yaml`). |
+| `poses.start` | `start_pose`, `RuntimeHost` | The pose every runtime session starts in: `home` (the default) or `standing`. `serve --pose` overrides it. |
 | `model.ground_friction` | `SimCore`, `robot_scene_cfg` | Friction of the flat ground (1.0) unless the caller overrides it or passes a terrain. See [world.md](world.md). |
 | `devices.encoders.<family>.counts_per_revolution` | `DriveReporting` | Output encoder resolution in counts per revolution: the integer units the drive reports position in. The training plant quantizes measured feedback with it; in the runtime, Controls' fake drive does that. |
 | `physics.period_ns` | `SimCore`, `RobotPlant`, `robot_sim_cfg` | Physics step, 4000000 ns (4 ms, 250 Hz). `replay --period-ms` sets it for replays. |

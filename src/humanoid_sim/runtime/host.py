@@ -17,9 +17,9 @@ the session (:meth:`RuntimeHost.run` returns :data:`EXIT_DETACHED`), as do deman
 ``client_timeout_ns`` once attached (:data:`EXIT_CLIENT_LOST`); the segment's state becomes ended, and Controls'
 bank ends its side when this host's heartbeat stops. :meth:`RuntimeHost.new_session` then serves the next client
 on a new segment at the same path, the robot back in its start state, without recompiling the step. Until its
-client attaches, a session holds the robot in its start pose (home; the base too when free), so the session
-starts when the client does, as a plant started with its client would: a robot left hanging with idle drives
-between clients would sag to its rest pose first.
+client attaches, a session holds the robot in its start pose (the profile's ``poses.start`` unless ``pose`` names
+another; the base too when free), so the session starts when the client does, as a plant started with its client
+would: a robot left hanging with idle drives between clients would sag to its rest pose first.
 
 A disabled drive is back-driven through its gearbox: while a 1:1 drive's law is DISABLED, its joint's Coulomb
 friction is the family's ``backdrive_torque`` (the joint's own friction when the family has none) instead of the
@@ -126,21 +126,25 @@ class _Disturbance:
 
 class RuntimeHost:
     def __init__(self, segment: str | Path, usd: Path, *, device: str = "cuda:0", robot: str = "ethrc_v1",
-                 solver: str | None = None, support: str = "suspended", bus_period_ns: int = 1_500_000,
+                 solver: str | None = None, support: str = "suspended", pose: str | None = None,
+                 bus_period_ns: int = 1_500_000,
                  client_timeout_ns: int = 500_000_000,
                  seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True):
-        from humanoid_sim.model.asset import asset_meta
-        from humanoid_sim.model.poses import POSES, STANDING_CLEARANCE_M, initial_pose
+        from humanoid_sim.model.asset import asset_meta, load_profile
+        from humanoid_sim.model.poses import POSES, STANDING_CLEARANCE_M, initial_pose, start_pose
         from humanoid_sim.sim import SimCore
 
         if support not in ("suspended", "free"):
             raise ValueError(f"support {support!r}: start suspended or free (hang a gantry by command)")
         self.support = support
         meta = asset_meta(usd)
+        if pose is not None and pose not in POSES:
+            raise ValueError(f"pose {pose!r}: one of {POSES}")
+        self.start_pose = pose or start_pose(load_profile(robot))
         # The named poses for RESET {"pose": ...}: joint positions (description order) and the upright base height
-        # at which the soles touch the ground. The session's start pose is home.
+        # at which the soles touch the ground. Every session starts in start_pose.
         self._poses = {name: initial_pose(usd, robot, name) for name in POSES}
-        height = self._poses["home"][1] + STANDING_CLEARANCE_M + (0.3 if support == "suspended" else 0.0)
+        height = self._poses[self.start_pose][1] + STANDING_CLEARANCE_M + (0.3 if support == "suspended" else 0.0)
         cuda = str(device).startswith("cuda")
         self.sim = SimCore(usd, device=device, robot=robot, solver=solver, fixed_base=support == "suspended",
                            base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
@@ -202,7 +206,8 @@ class RuntimeHost:
         self._client_mono_ns = 0
         self._demand_seq = 0
         self._command_seq = 0
-        self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = self._named_pose("home")  # until attached
+        # Held until the client attaches.
+        self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = self._named_pose(self.start_pose)
         self._write_pose(*self._prescribed)
         self._set_drives_off(np.ones(len(self.drives), dtype=bool))  # no client, no demands
         self._truth_due = True
@@ -219,7 +224,7 @@ class RuntimeHost:
             self._clear_fault(key)
         self.sim.gantry.release(torch.tensor([0], device=self.device))
         self.sim.imu.set_noise(True)
-        self._reset({"pose": "home"})
+        self._reset({"pose": self.start_pose})
         self._open_session()
 
     def _warm_up(self, steps: int = 3) -> None:

@@ -17,6 +17,8 @@ model:
 # {preset: <preset_id in position-presets.yaml>}; zero: the URDF's zero.
 poses:
   home: zero
+  # The pose every runtime session starts in (`serve --pose` overrides): home or standing.
+  start: home
 
 # Drive feedback as reported. Without devices.encoders the training plant reports exact values.
 devices: {}

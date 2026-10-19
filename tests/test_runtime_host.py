@@ -14,7 +14,7 @@ import pytest
 
 from humanoid_sim.model.asset import asset_dir, load_profile
 from humanoid_sim.model.description import Description
-from humanoid_sim.model.poses import home_pose
+from humanoid_sim.model.poses import pose_joint_positions
 from humanoid_sim.runtime.abi import plant_abi as abi
 
 REPO = Path(__file__).resolve().parents[1]
@@ -205,10 +205,11 @@ def test_detach_and_next_session(tmp_path):
         assert torch.equal(host.sim.imu._sigma, host.sim.imu._nominal_sigma)  # every session starts real
         assert int(host.sim.gantry.mode[0]) == 0
         _, truth = second.regions["truth"].read()
-        home_q = home_pose(host.desc, load_profile("ethrc_v1"))
-        home = [home_q[j] for j in host.joints]  # the start pose
-        assert np.allclose(truth["joint_pos_rad"][: len(home)], home, atol=1e-4)
-        assert float(truth["base_position_m"][2]) == pytest.approx(host._poses["home"][1] + 0.001, abs=1e-3)
+        assert host.start_pose == "standing"  # the V1 profile's poses.start
+        start_q = pose_joint_positions(host.desc, load_profile("ethrc_v1"), "standing")
+        start = [start_q[j] for j in host.joints]
+        assert np.allclose(truth["joint_pos_rad"][: len(start)], start, atol=1e-4)
+        assert float(truth["base_position_m"][2]) == pytest.approx(host._poses["standing"][1] + 0.001, abs=1e-3)
 
         first.regions["demands"].write(abi.demands_record(demand, cycle=2, session_id=first.session_id))
         host.step()
