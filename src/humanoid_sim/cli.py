@@ -115,16 +115,16 @@ def cmd_bench(args) -> int:
     if args.runtime:
         from humanoid_sim.bench.runner import run_runtime_bench
 
-        print(json.dumps(run_runtime_bench(args, _usd(args)), indent=1))
+        print(json.dumps(run_runtime_bench(args, _usd(args), scene=_scene(args)), indent=1))
         return 0
     if args.train:
         from humanoid_sim.bench.train import run_train_bench
 
-        print(json.dumps(run_train_bench(args, _usd(args)), indent=1))
+        print(json.dumps(run_train_bench(args, _usd(args), scene=_scene(args)), indent=1))
         return 0
     from humanoid_sim.bench.runner import run_bench
 
-    print(json.dumps(run_bench(args, _usd(args)), indent=1))
+    print(json.dumps(run_bench(args, _usd(args), scene=_scene(args)), indent=1))
     return 0
 
 
@@ -203,11 +203,29 @@ def _revision() -> str:
         return "unknown"
 
 
+def _scene(args):
+    """The static boxes of ``--scene`` with ``--spawn`` at the world origin, or None."""
+    if args.scene is None:
+        if args.spawn is not None:
+            raise SystemExit("--spawn places a --scene")
+        return None
+    from humanoid_sim.world.boxes import StaticBoxes
+
+    return StaticBoxes.load(args.scene, args.spawn or (0.0, 0.0))
+
+
+def _add_scene_args(parser) -> None:
+    parser.add_argument("--scene", default=None, help="static boxes (walls, furniture) around the robot: an .npz as "
+                        "world/boxes.py describes, such as Controls' hangar_proxy.npz")
+    parser.add_argument("--spawn", nargs=2, type=float, default=None, metavar=("X", "Y"),
+                        help="the scene point (m) the robot starts at, placed at the world origin (default 0 0)")
+
+
 def cmd_serve(args) -> int:
     from humanoid_sim.runtime.host import EXIT_CLIENT_LOST, EXIT_DETACHED, RuntimeHost
 
     host = RuntimeHost(args.segment, _usd(args), device=args.device, robot=args.robot, solver=args.solver,
-                       support=args.support, pose=args.pose,
+                       support=args.support, pose=args.pose, scene=_scene(args),
                        bus_period_ns=int(args.bus_period_us * 1000),
                        client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
                        sim_revision=_revision(), truth_every=args.truth_every)
@@ -304,6 +322,7 @@ def main(argv: list[str] | None = None) -> int:
     be.add_argument("--no-self-collision", action="store_true")
     be.add_argument("--train", action="store_true", help="Train-Time API scene: RobotPlant, IMU, contacts")
     be.add_argument("--runtime", action="store_true", help="the real-time host's whole step, unpaced")
+    _add_scene_args(be)
     be.set_defaults(func=cmd_bench)
 
     fp = sub.add_parser("fit-passive", help="fit upper-body passive joint parameters to captures")
@@ -354,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
                     "and serve the next client on a new session, until stopped")
     sv.add_argument("--max-steps", type=int, default=None, help="periods per session")
     sv.add_argument("--seed", type=int, default=0)
+    _add_scene_args(sv)
     sv.set_defaults(func=cmd_serve)
 
     args = p.parse_args(argv)

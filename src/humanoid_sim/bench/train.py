@@ -1,8 +1,8 @@
 """Benchmark of the Train-Time API scene: throughput and host syncs with sensors and randomization on.
 
-Workload: the training scene (robot, IMU, contacts, flat ground) with :class:`RobotPlant` and a randomization
-like a locomotion policy's (masses and payload, armature, friction, gain and torque scales, latency, encoder
-offsets, IMU bias). Every env holds the home pose with a new demand every 20 ms (the policy period);
+Workload: the training scene (robot, IMU, contacts, flat ground; with ``--scene`` its static boxes, every env at
+the spawn point) with :class:`RobotPlant` and a randomization like a locomotion policy's (masses and payload,
+armature, friction, gain and torque scales, latency, encoder offsets, IMU bias). Every env holds the home pose with a new demand every 20 ms (the policy period);
 reads ``measured()`` and ``truth()`` once per policy period; resets 1/50 of the envs per policy period to the
 default state (as episodes ending). ``fraction_envs_up`` is the share of robots whose base is above 0.7 m at the
 end. The steady-state loop runs under ``torch.cuda.set_sync_debug_mode("error")`` on CUDA.
@@ -17,6 +17,7 @@ import torch
 
 from humanoid_sim.devices.demand import DriveDemand
 from humanoid_sim.timing.clock import NS_PER_MS, NS_PER_S
+from humanoid_sim.world.boxes import StaticBoxes
 
 POLICY_PERIOD_NS = 20 * NS_PER_MS
 
@@ -37,7 +38,7 @@ RANDOMIZATION = [
 ]
 
 
-def run_train_bench(args, usd: Path) -> dict:
+def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict:
     import isaaclab.sim as sim_utils
     from isaaclab.utils import instantiate
 
@@ -46,8 +47,9 @@ def run_train_bench(args, usd: Path) -> dict:
 
     n = args.num_envs
     sim = sim_utils.SimulationContext(robot_sim_cfg(args.robot, device=args.device, solver=args.solver))
+    boxes = scene
     scene = instantiate(robot_scene_cfg(n, usd, robot=args.robot, ground_friction=0.0, pose="home",
-                                        self_collision=False if args.no_self_collision else None))
+                                        self_collision=False if args.no_self_collision else None, scene=boxes))
     sim.reset()
     plant = RobotPlant(scene["robot"], TrainPlantCfg(robot=args.robot, randomization=RANDOMIZATION),
                        imu=scene["imu"], contacts=scene["contacts"], physics_manager=sim.physics_manager)
@@ -111,4 +113,5 @@ def run_train_bench(args, usd: Path) -> dict:
     return {"workload": "train", "device": args.device, "num_envs": n, "steps": args.steps, "wall_s": wall,
             "env_steps_per_s": n * args.steps / wall, "sim_seconds_per_wall_second": n * sim_s / wall,
             "self_collision": not args.no_self_collision, "host_syncs": "none (torch sync debug mode)" if cuda else "n/a",
-            "checksum_finite": bool(torch.isfinite(sink).item()), "fraction_envs_up": up}
+            "checksum_finite": bool(torch.isfinite(sink).item()), "fraction_envs_up": up,
+            "scene": None if boxes is None else boxes.describe()}
