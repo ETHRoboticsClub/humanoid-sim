@@ -22,7 +22,7 @@ import math
 
 import torch
 
-from humanoid_sim.core import DriveFeedback
+from humanoid_sim.devices.feedback import DriveFeedback
 
 
 class DriveReporting:

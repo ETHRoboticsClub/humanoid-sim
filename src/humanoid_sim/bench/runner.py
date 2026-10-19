@@ -29,7 +29,7 @@ POLICY_PERIOD_NS = 20 * NS_PER_MS
 
 
 def run_bench(args, usd: Path) -> dict:
-    from humanoid_sim.train.scene import STANDING_CLEARANCE_M, initial_pose
+    from humanoid_sim.model.poses import STANDING_CLEARANCE_M, initial_pose
 
     device = args.device
     pose, height = initial_pose(usd, args.robot, "home")

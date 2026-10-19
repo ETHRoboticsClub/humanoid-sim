@@ -29,42 +29,22 @@ from pathlib import Path
 
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
-from humanoid_sim.model.joint_properties import JointProperties
+from humanoid_sim.model.poses import POSES, STANDING_CLEARANCE_M, initial_pose
 from humanoid_sim.physics.isaaclab import contact_sensor_cfg, imu_sensor_cfg
+from humanoid_sim.physics.joint_properties import JointProperties
 
-STANDING_CLEARANCE_M = 0.001  # spawn the soles just above the ground
+__all__ = ["POSES", "STANDING_CLEARANCE_M", "initial_pose", "plant_joint_properties", "robot_scene_cfg",
+           "robot_sim_cfg"]
 
 
 def plant_joint_properties(robot: str = "ethrc_v1") -> JointProperties:
     """The solver properties of the description's joints (constant PD ``k0, d0``, passive terms, limits)."""
     from humanoid_sim.core import PlantCfg, PlantCore
-    from humanoid_sim.model.joint_properties import joint_properties
+    from humanoid_sim.physics.joint_properties import joint_properties
 
     desc = Description.load(robot)
     joints = list(desc.joints)
     return joint_properties(PlantCore(desc, joints, 1, PlantCfg(robot=robot)), joints)
-
-
-POSES = ("home", "standing")
-
-
-def initial_pose(usd: Path, robot: str = "ethrc_v1", pose: str = "home"):
-    """Joint positions ``[J]`` (description order) of ``pose`` (see :data:`POSES`) and the upright base height at
-    which its lowest sole corner touches the ground."""
-    import torch
-
-    from humanoid_sim.model.asset import asset_meta
-    from humanoid_sim.model.kinematics import standing_base_height
-
-    desc = Description.load(robot)
-    soles = asset_meta(usd)["sole_boxes"]
-    if pose == "home":
-        q = torch.tensor([desc.home_pose[n] for n in desc.joints], dtype=torch.float64)
-    elif pose == "standing":
-        q = torch.tensor([desc.joints[n].standing_offset_rad for n in desc.joints], dtype=torch.float64)
-    else:
-        raise ValueError(f"unknown pose {pose!r}; known: {POSES}")
-    return q, standing_base_height(usd, desc, soles, q)
 
 
 def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_spacing: float = 2.5,

@@ -20,8 +20,8 @@ from pathlib import Path
 import torch
 
 from humanoid_sim.model.description import Description
-from humanoid_sim.model.joint_properties import JointProperties
 from humanoid_sim.model.urdf import BASE_JOINTS
+from humanoid_sim.physics.joint_properties import JointProperties
 
 # Base-joint PD. Each joint carries the whole robot (a few kg m² about yaw, ~10 about pitch and roll at the
 # pelvis), so 1e5 Nm/rad holds a 30 Nm waist reaction to 0.3 mrad and stays below the explicit-stiffness

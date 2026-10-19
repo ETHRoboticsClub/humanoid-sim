@@ -45,7 +45,7 @@ def test_home_pose_levels_both_soles_at_one_height(usd):
 
     from humanoid_sim.model.asset import asset_meta
     from humanoid_sim.model.kinematics import RobotKinematics, _rotate, _sole_corners, standing_base_height
-    from humanoid_sim.train.scene import initial_pose
+    from humanoid_sim.model.poses import initial_pose
 
     desc = Description.load()
     soles = asset_meta(usd)["sole_boxes"]

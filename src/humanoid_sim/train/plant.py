@@ -28,8 +28,9 @@ from dataclasses import dataclass, field
 
 import torch
 
-from humanoid_sim.core import DriveFeedback, PlantCfg, PlantCore
+from humanoid_sim.core import PlantCfg, PlantCore
 from humanoid_sim.devices.demand import DriveDemand
+from humanoid_sim.devices.feedback import DriveFeedback
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.randomization import PARAMS, ParamSpec, Randomizer, parse_specs

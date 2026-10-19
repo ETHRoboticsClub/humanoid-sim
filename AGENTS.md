@@ -6,6 +6,8 @@ The robot below Controls: drives, ankle mechanism and body, on Isaac Lab 3.0 / N
 
 - **No ROS.** Nothing here imports rclpy, ament or colcon, or any Controls code. Controls behaviour that the plant depends on is mirrored here with its source cited.
 - **Drive boundary.** Input is a `FakeDriveDemand` mirror per EtherCAT drive (ankle cranks included); output is physical drive-output position, velocity, applied torque and demanded torque. Controller behaviour (standing frame, ankle targets, Madgwick, slew/blend, trip rule, policy contract) belongs to Controls, not here.
+- **Repo split.** Tasks, observations, rewards, curricula and policies belong to humanoid-learning; this repo provides the robot, world, actuator and sensor models and the knobs a task turns. Controls reaches the sim only through the runtime adapter (its plant host, this repo's `runtime/` and the segment ABI).
+- **Layering.** Front ends (`train/`, `runtime/`, `replay/`) use the plant and the models, never each other; models never import a front end (the segment ABI's description digest is the one exception).
 - **Physics is Isaac Lab on Newton's MJWarp solver, only.** Never set `use_mujoco_cpu`: MuJoCo C does not step the robot here, on any device. Newton on the host is for kinematics (viewers, model checks), and MuJoCo only for cross-checking kinematics against Controls' MJCF. Physics runs on CUDA; Warp's CPU device is for tests only.
 
 ## Rules
@@ -21,7 +23,7 @@ The robot below Controls: drives, ankle mechanism and body, on Isaac Lab 3.0 / N
 
 ## Layout
 
-`src/humanoid_sim/`: `model/` (description → prepared URDF → USD asset; host kinematics; left/right mirror map), `timing/`, `devices/`, `transmissions/`, `core.py` (plant), `sensors/` (IMU delivery), `randomization/`, `world/` (terrains, pushes, gantry), `physics/isaaclab.py` (MJWarp), `sim.py` (SimCore: replays, benchmarks, the runtime), `train/` (Train-Time API: the plant in an Isaac Lab scene and action term), `runtime/` (real-time host and the segment ABI), `replay/`, `sysid/` (fits to captures), `signals/` (Rerun), `bench/`, `cli.py`. Spikes live in `spikes/` and are not imported by the package.
+`src/humanoid_sim/`: `model/` (description → prepared URDF → USD asset; host kinematics; named poses; left/right mirror map), `timing/`, `devices/`, `transmissions/`, `core.py` (plant), `sensors/` (IMU delivery), `randomization/`, `world/` (terrains, pushes, gantry), `physics/` (Isaac Lab on MJWarp, solver joint properties), `sim.py` (SimCore: replays, benchmarks, the runtime), `train/` (Train-Time API: the plant in an Isaac Lab scene and action term), `runtime/` (real-time host and the segment ABI), `replay/`, `sysid/` (fits to captures), `signals/` (Rerun), `bench/`, `cli.py`. Spikes live in `spikes/` and are not imported by the package.
 
 ## Workflow
 

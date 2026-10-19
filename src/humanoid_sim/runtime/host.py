@@ -130,8 +130,8 @@ class RuntimeHost:
                  support: str = "suspended", bus_period_ns: int = 1_500_000, client_timeout_ns: int = 500_000_000,
                  seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True):
         from humanoid_sim.model.asset import asset_meta
+        from humanoid_sim.model.poses import POSES, STANDING_CLEARANCE_M, initial_pose
         from humanoid_sim.sim import SimCore
-        from humanoid_sim.train.scene import POSES, STANDING_CLEARANCE_M, initial_pose
 
         if support not in ("suspended", "free"):
             raise ValueError(f"support {support!r}: start suspended or free (hang a gantry by command)")
@@ -327,7 +327,7 @@ class RuntimeHost:
         return p
 
     def _named_pose(self, name: str) -> tuple[torch.Tensor, torch.Tensor | None]:
-        from humanoid_sim.train.scene import STANDING_CLEARANCE_M
+        from humanoid_sim.model.poses import STANDING_CLEARANCE_M
 
         q_desc, height = self._poses[name]
         names = list(self.desc.joints)
