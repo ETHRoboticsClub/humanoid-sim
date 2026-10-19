@@ -79,6 +79,8 @@ Physics runs on CUDA; Warp's CPU device runs the same code for tests and small e
 
 Two runnable examples sit in `examples/`: `runtime_client.py` (a complete runtime client in NumPy) and `train_scene.py` (a training scene with terrain, randomization, pushes and a Rerun recording).
 
+Every command that steps physics runs the profile's Newton solver, MJWarp. `humanoid-sim --solver kamino <command>`, or `robot_sim_cfg(solver="kamino")` in training, runs Kamino instead; it is beta in Newton and not yet checked against the captures.
+
 ## Training with it
 
 The plant is an Isaac Lab action term. A task turns its policy's actions into drive demands; the plant applies them as the real drives would and exposes what the robot measures alongside the true state.

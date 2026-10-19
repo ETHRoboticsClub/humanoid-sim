@@ -1,4 +1,4 @@
-"""Physics on the built robot asset through Isaac Lab / MJWarp (Warp CPU device). Runs in the Isaac Lab image."""
+"""Physics on the built robot asset through Isaac Lab / Newton (Warp CPU device). Runs in the Isaac Lab image."""
 
 import json
 from pathlib import Path
@@ -76,12 +76,13 @@ def test_home_pose_levels_both_soles_at_one_height(usd):
     assert max(n for n, _ in standing) < np.cos(np.radians(5))  # pitched toes-down
 
 @pytest.mark.physics
-def test_holds_standing_on_fixed_base(usd, request):
+@pytest.mark.parametrize("solver", ["mjwarp", "kamino"])
+def test_holds_standing_on_fixed_base(usd, request, solver):
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.devices.demand import DriveDemand
     from humanoid_sim.sim import SimCore
 
-    sim = SimCore(usd, device="cpu", fixed_base=True)
+    sim = SimCore(usd, device="cpu", fixed_base=True, solver=solver)
     request.addfinalizer(sim.close)
     q, qd = sim.joint_state()
     p = sim.plant
@@ -179,13 +180,15 @@ def test_cuda_graph_step_matches_eager(usd):
 
 
 @pytest.mark.physics
-def test_a_joint_pushed_into_its_stop_stays_at_it(usd):
-    """MuJoCo's own limit constraint (profile joint_limits: mujoco): 40 Nm into the waist yaw stop sinks less than
-    2 mrad past it. The waist turns about a vertical axis, so gravity adds no torque of its own."""
+@pytest.mark.parametrize("solver", ["mjwarp", "kamino"])
+def test_a_joint_pushed_into_its_stop_stays_at_it(usd, solver):
+    """40 Nm into the waist yaw stop sinks less than 2 mrad past it: MuJoCo's own limit constraint on MJWarp
+    (profile joint_limits: mujoco), the hard stop on Kamino. The waist turns about a vertical axis, so gravity adds
+    no torque of its own."""
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.sim import SimCore
 
-    sim = SimCore(usd, device="cpu", fixed_base=True)
+    sim = SimCore(usd, device="cpu", fixed_base=True, solver=solver)
     try:
         j = list(sim.desc.joints).index("waist_upperbody_yaw")
         lo, hi = sim.desc.calibration_travel("waist_upperbody_yaw")

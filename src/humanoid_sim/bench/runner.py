@@ -1,4 +1,4 @@
-"""Benchmarks on Isaac Lab / MJWarp: single-robot real-time factor and batched throughput.
+"""Benchmarks on Isaac Lab / Newton: single-robot real-time factor and batched throughput.
 
 ``run_runtime_bench``: the real-time host's whole step (commands, demands, the graphed plant and physics,
 publishing feedback and truth to the segment), unpaced, as fast as it goes: its real-time factor is the
@@ -34,7 +34,8 @@ def run_bench(args, usd: Path) -> dict:
     device = args.device
     pose, height = initial_pose(usd, args.robot, "home")
     sim = SimCore(usd, device=device, robot=args.robot, num_envs=args.num_envs,
-                  base_height_m=height + STANDING_CLEARANCE_M, integrator=args.integrator,
+                  base_height_m=height + STANDING_CLEARANCE_M, solver=args.solver,
+                  integrator=args.integrator,
                   self_collision=False if getattr(args, "no_self_collision", False) else None)
     plant = sim.plant
     q0 = pose.to(device=sim.plant.cfg.device, dtype=sim.joint_state()[0].dtype).expand(args.num_envs, -1).clone()
@@ -81,7 +82,7 @@ def run_bench(args, usd: Path) -> dict:
     upright = (q - q0).abs().amax(dim=1).lt(0.5).float().mean().item()
     up = sim.backend.robot.data.root_link_pose_w.torch[:, 2].gt(0.7).float().mean().item()
     return {
-        "physics": "isaaclab/mjwarp", "device": device, "num_envs": args.num_envs, "period_ns": sim.period_ns,
+        "physics": f"isaaclab/{sim.solver}", "device": device, "num_envs": args.num_envs, "period_ns": sim.period_ns,
         "steps": args.steps, "wall_s": wall, "rtf_per_env": sim_s / wall,
         "env_steps_per_s": args.num_envs * args.steps / wall,
         "sim_seconds_per_wall_second": args.num_envs * sim_s / wall,
@@ -101,7 +102,8 @@ def run_runtime_bench(args, usd: Path) -> dict:
 
     gains = Description.load(args.robot).table["baseline_position_gains"]
     with tempfile.TemporaryDirectory() as tmp:
-        host = RuntimeHost(Path(tmp) / "plant", usd, device=args.device, robot=args.robot, support="free")
+        host = RuntimeHost(Path(tmp) / "plant", usd, device=args.device, robot=args.robot, solver=args.solver,
+                           support="free")
         client = abi.Segment.open(Path(tmp) / "plant")
         try:
             n = len(host.drives)

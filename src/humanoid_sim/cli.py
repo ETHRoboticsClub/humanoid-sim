@@ -1,12 +1,14 @@
 """humanoid-sim command line.
 
+    humanoid-sim [--solver mjwarp|kamino] <command>  Newton solver for the commands that step physics
+                                                   (default: the profile's)
     humanoid-sim build-asset [--base-joints]       robot USD from the description (Isaac Lab image)
     humanoid-sim replay <exc-dir> [--period-ms 4] [--base yaw|orientation|fixed]
-                                                   drive-level replay on MJWarp, scored against the capture;
+                                                   drive-level replay, scored against the capture;
                                                    base following the capture's IMU yaw (default), or fixed
     humanoid-sim view-replay <replay-dir> --save x.rrd   sim and real robot + every drive signal in Rerun
     humanoid-sim view-runtime <segment> [--save x.rrd]   watch a running `serve` in Rerun (read-only)
-    humanoid-sim bench --num-envs N [--train]      real-time factor / throughput (Isaac Lab / MJWarp); --train runs
+    humanoid-sim bench --num-envs N [--train]      real-time factor / throughput (Isaac Lab / Newton); --train runs
                                                    the Train-Time API scene (sensors, randomization); --runtime
                                                    the real-time host's step
     humanoid-sim fit-passive <exc-dir>... --num-envs N --generations G [--params ...] [--start G.P=V ...]
@@ -66,19 +68,19 @@ def cmd_replay(args) -> int:
     period_ns = int(round(args.period_ms * 1e6))
     moving = args.base != "fixed"
     sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, period_ns=period_ns,
-                  fixed_base=not moving, base_joints=moving, integrator=args.integrator)
+                  fixed_base=not moving, base_joints=moving, solver=args.solver, integrator=args.integrator)
     t = time.time()
     res = replay(cap, sim, duration_s=args.duration, base_motion=args.base if moving else None,
                  demand_delay_ns=int(round(args.demand_delay_ms * 1e6)))
     wall = time.time() - t
-    integrator = args.integrator or sim.profile["physics"]["integrator"]
+    integrator = sim.integrator
     delay = f"_demand{args.demand_delay_ms:+g}ms" if args.demand_delay_ms else ""
-    out = Path(args.out) / f"{cap.dataset_id}_mjwarp_{integrator}_{period_ns // 1000}us_base-{args.base}{delay}"
+    out = Path(args.out) / f"{cap.dataset_id}_{sim.solver}_{integrator}_{period_ns // 1000}us_base-{args.base}{delay}"
     out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out / "trace.npz", t_ns=res.t_ns, demand=res.demand,
                         **{f"sim_{k}": v for k, v in res.sim.items()}, **{f"real_{k}": v for k, v in res.real.items()})
     summary = {"dataset_id": cap.dataset_id, "name": cap.name, "period_ns": period_ns,
-               "physics": "isaaclab/mjwarp", "device": args.device, "integrator": integrator, "base": args.base,
+               "physics": f"isaaclab/{sim.solver}", "device": args.device, "integrator": integrator, "base": args.base,
                "wall_s": wall,
                "sim_s": len(res.t_ns) * period_ns / 1e9, "drives": res.drives,
                "rms_position_rad": res.rms("position"), "rms_velocity_rad_s": res.rms("velocity"),
@@ -157,7 +159,7 @@ def cmd_fit_passive(args) -> int:
                      log_bound=math.log(args.bound), start=start)
     moving = args.base != "fixed"
     sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, num_envs=args.num_envs,
-                  fixed_base=not moving, base_joints=moving)
+                  fixed_base=not moving, base_joints=moving, solver=args.solver)
     drives = sim.plant.map.drive_names
     scored = sorted({drives.index(sim.desc.joints[j].device) for g in space.groups for j in g.joints})
     captures = [ExcitationCapture(Path(c)) for c in args.captures]
@@ -204,7 +206,8 @@ def _revision() -> str:
 def cmd_serve(args) -> int:
     from humanoid_sim.runtime.host import EXIT_CLIENT_LOST, EXIT_DETACHED, RuntimeHost
 
-    host = RuntimeHost(args.segment, _usd(args), device=args.device, robot=args.robot, support=args.support,
+    host = RuntimeHost(args.segment, _usd(args), device=args.device, robot=args.robot, solver=args.solver,
+                       support=args.support,
                        bus_period_ns=int(args.bus_period_us * 1000),
                        client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
                        sim_revision=_revision(), truth_every=args.truth_every)
@@ -233,7 +236,7 @@ def cmd_fit_delay(args) -> int:
     delays = np.round(np.arange(lo, hi + step / 2, step) * 1e6).astype(np.int64)
     moving = args.base != "fixed"
     sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, num_envs=len(delays),
-                  fixed_base=not moving, base_joints=moving)
+                  fixed_base=not moving, base_joints=moving, solver=args.solver)
     captures = [ExcitationCapture(Path(c)) for c in args.captures]
     t = time.time()
     result = scan_delay(sim, captures, delays, base_motion=args.base if moving else None, duration_s=args.duration)
@@ -250,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="humanoid-sim", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--robot", default="ethrc_v1")
+    p.add_argument("--solver", default=None, help="Newton solver: mjwarp or kamino (default: the profile's)")
     p.add_argument("--assets", default=str(DEFAULT_ASSETS))
     p.add_argument("--usd", default=None, help="robot USD (default: the asset built for this description and profile)")
     sub = p.add_subparsers(dest="command")
@@ -264,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("capture")
     r.add_argument("--period-ms", type=float, default=4.0)
     r.add_argument("--integrator", default=None)
-    r.add_argument("--device", default="cuda:0", help="cuda:N, or cpu (MJWarp on Warp's CPU device: slow)")
+    r.add_argument("--device", default="cuda:0", help="cuda:N, or cpu (Warp's CPU device: slow)")
     r.add_argument("--duration", type=float, default=None)
     r.add_argument("--base", choices=("yaw", "orientation", "fixed"), default="yaw",
                    help="base yaw or full orientation from the capture's IMU (asset built with --base-joints), "

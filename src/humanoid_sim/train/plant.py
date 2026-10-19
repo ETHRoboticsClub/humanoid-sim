@@ -118,11 +118,12 @@ class RobotPlant:
         self.randomizer = Randomizer(specs, {k: v for k, v in nominal.items() if k in used},
                                      {"body": list(robot.body_names), "joint": self.joints, "drive": self.drives},
                                      num_envs=e, device=self.device, seed=cfg.seed, level=cfg.level)
+        from humanoid_sim.physics.isaaclab import apply_joint_limits, running_solver
+
         if "friction" in used and physics_manager is None:
             raise ValueError("randomizing friction needs the physics manager (env.sim.physics_manager)")
-        from humanoid_sim.physics.isaaclab import apply_joint_limits
-
-        apply_joint_limits(self.profile["physics"]["joint_limits"])
+        self._solver = running_solver()
+        apply_joint_limits(self.profile["physics"])
         self._write_physics()
         self._write_device(torch.arange(e, device=self.device))
 
@@ -162,6 +163,11 @@ class RobotPlant:
     def _write_physics(self) -> None:
         """Write every randomized solver parameter, all envs (startup and level changes only)."""
         v, r = self.randomizer.values, self.robot
+        if self._solver == "kamino":
+            # Kamino cannot switch a DoF's armature, damping or friction on or off without being rebuilt.
+            for name in ("joint_armature", "joint_friction", "joint_damping"):
+                if name in v and bool((v[name] <= 0).any()):
+                    raise ValueError(f"Kamino needs {name} above zero; the randomization drew zero or less")
         if "body_mass" in v:
             r.set_masses_index(masses=v["body_mass"])
         if "body_mass" in v or "body_inertia" in v:

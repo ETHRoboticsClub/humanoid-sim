@@ -1,6 +1,6 @@
 """Terrains for the training scene, as Isaac Lab terrain-importer configs.
 
-The robot's contacts run in MJWarp's own collision pipeline, which collides the robot's hulls and boxes with
+On MJWarp the robot's contacts run in its own collision pipeline, which collides the robot's hulls and boxes with
 heightfields but not with triangle-mesh terrain. Isaac Lab turns a generated terrain into a heightfield only
 when every sub-terrain is a heightfield one (``Hf*``), so :func:`heightfield_terrain_cfg` accepts only those.
 Imports Isaac Lab lazily.
@@ -13,7 +13,7 @@ def heightfield_terrain_cfg(sub_terrains: dict, *, size_m: float = 8.0, rows: in
                             border_m: float = 20.0, curriculum: bool = True, friction: float = 1.0,
                             horizontal_scale_m: float = 0.1, vertical_scale_m: float = 0.005, seed: int | None = None):
     """A generated terrain of heightfield sub-terrains (``{name: Hf*Cfg}``, proportions as weights). Rows are
-    difficulty levels when ``curriculum``. With robot friction randomized pass ``friction=0`` (MJWarp uses the
+    difficulty levels when ``curriculum``. With robot friction randomized pass ``friction=0`` (the solver uses the
     larger friction of a contact)."""
     from isaaclab.sim.spawners.materials import RigidBodyMaterialBaseCfg
     from isaaclab.terrains import TerrainGeneratorCfg, TerrainImporterCfg

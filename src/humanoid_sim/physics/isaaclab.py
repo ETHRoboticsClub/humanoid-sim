@@ -1,7 +1,9 @@
-"""Isaac Lab 3.0 / Newton: the robot USD as an Isaac Lab articulation, stepped by MJWarp (the only physics).
+"""Isaac Lab 3.0 / Newton: the robot USD as an Isaac Lab articulation, stepped by a Newton solver.
 
-``use_mujoco_cpu`` is never set: MuJoCo C does not step the robot in this repo. On ``device="cpu"`` MJWarp
-runs on Warp's CPU device (slow, for tests); real-time and batched use is on CUDA.
+The solver is selected by name (:data:`SOLVERS`): ``mjwarp`` (MuJoCo Warp) or ``kamino`` (Newton's
+maximal-coordinate solver, beta), each configured from its block of the profile's ``physics``. ``use_mujoco_cpu``
+is never set: MuJoCo C does not step the robot in this repo. On ``device="cpu"`` the solver runs on Warp's CPU
+device (slow, for tests); real-time and batched use is on CUDA.
 
 The solver PD gains are the plant's constant ``k0, d0`` (joint space), written once at spawn. Each step the
 plant writes position targets (velocity target 0); nothing else changes in the model while stepping.
@@ -25,11 +27,15 @@ from humanoid_sim.physics.joint_properties import JointProperties
 
 # Base-joint PD. Each joint carries the whole robot (a few kg m² about yaw, ~10 about pitch and roll at the
 # pelvis), so 1e5 Nm/rad holds a 30 Nm waist reaction to 0.3 mrad and stays below the explicit-stiffness
-# limit 4 I / dt² at 4 ms; the damping is implicit (implicitfast) and near critical.
+# limit 4 I / dt² at 4 ms; the damping is implicit (MJWarp implicitfast, Kamino's implicit PD) and near critical.
 BASE_JOINT_STIFFNESS = 1e5
 BASE_JOINT_DAMPING = 2e3
 
 ROBOT_PRIM = "{ENV_REGEX_NS}/Robot"
+
+SOLVERS = ("mjwarp", "kamino")
+# Isaac Lab's ``solver_type`` of each solver config.
+_SOLVER_TYPES = {"mujoco_warp": "mjwarp", "kamino": "kamino"}
 
 
 @dataclass
@@ -37,17 +43,13 @@ class IsaacLabCfg:
     num_envs: int = 1
     device: str = "cpu"
     period_s: float = 0.004
-    integrator: str = "implicitfast"
+    solver: str = "mjwarp"
+    settings: dict | None = None  # the solver's block of the profile's physics
+    integrator: str | None = None  # overrides the solver block's
     fixed_base: bool = False
     base_height_m: float = 1.0
     env_spacing_m: float = 3.0
-    iterations: int = 100
-    ls_iterations: int = 50
-    cone: str = "pyramidal"
-    njmax: int = 300
-    nconmax: int | None = None
     self_collision: bool = True
-    joint_limits: str = "mujoco"  # see apply_joint_limits
     base_joints: bool = False
     ground_friction: float = 1.0
     imu: bool = False  # the IMU sensor at the description's mount
@@ -56,11 +58,41 @@ class IsaacLabCfg:
     rerun_rrd: str | None = None
 
 
-def apply_joint_limits(kind: str) -> None:
-    """The joint-limit constraint of every DOF in the scene. ``mujoco``: MuJoCo's own (solref 0.02 s, damping
-    ratio 1, scaled by each DOF's inertia), as Controls' MJCF has it; Newton writes it when the force-space limit
-    gains are zero. ``newton``: Newton's force-space default, 1e4 Nm/rad whatever the inertia, in which 40 Nm on
-    the hip abduction sinks 11 mrad past its stop (under 2 mrad with MuJoCo's). Applied from the next step."""
+def solver_settings(physics: dict, solver: str | None = None) -> tuple[str, dict]:
+    """The selected solver (``solver``, else the profile's) and its block of the profile's ``physics``."""
+    name = physics["solver"] if solver is None else solver
+    if name not in SOLVERS:
+        raise ValueError(f"physics solver {name!r}: one of {', '.join(SOLVERS)}")
+    if name not in physics:
+        raise ValueError(f"the profile's physics has no {name!r} block")
+    return name, physics[name]
+
+
+def running_solver() -> str:
+    """The solver of the current Isaac Lab simulation."""
+    import isaaclab.sim as sim_utils
+
+    sim = sim_utils.SimulationContext.instance()
+    if sim is None:
+        raise RuntimeError("no simulation context")
+    kind = getattr(getattr(sim.cfg.physics, "solver_cfg", None), "solver_type", None)
+    if kind not in _SOLVER_TYPES:
+        raise RuntimeError(f"simulation runs solver {kind!r}, not one of {', '.join(SOLVERS)}")
+    return _SOLVER_TYPES[kind]
+
+
+def apply_joint_limits(physics: dict) -> None:
+    """The joint-limit constraint of every DOF in the scene, for the running solver. Applied from the next step.
+
+    MJWarp, the block's ``joint_limits``: ``mujoco``, MuJoCo's own (solref 0.02 s, damping ratio 1, scaled by
+    each DOF's inertia), as Controls' MJCF has it; Newton writes it when the force-space limit gains are zero.
+    ``newton``: Newton's force-space default, 1e4 Nm/rad whatever the inertia, in which 40 Nm on the hip
+    abduction sinks 11 mrad past its stop (under 2 mrad with MuJoCo's). Kamino's stops are hard constraints and
+    take no setting."""
+    solver = running_solver()
+    if solver == "kamino":
+        return
+    kind = physics[solver]["joint_limits"]
     if kind == "newton":
         return
     if kind != "mujoco":
@@ -142,7 +174,7 @@ def contact_sensor_cfg(history: int = 3, air_time: bool = True):
 
 
 def ground_cfg(friction: float):
-    """Flat ground at z = 0. MJWarp takes the larger friction of a contact's two shapes."""
+    """Flat ground at z = 0. Both solvers take the larger friction of a contact's two shapes."""
     import isaaclab.sim as sim_utils
     from isaaclab.assets import AssetBaseCfg
     from isaaclab.sim.spawners.materials import RigidBodyMaterialBaseCfg
@@ -151,18 +183,40 @@ def ground_cfg(friction: float):
     return AssetBaseCfg(prim_path="/World/Ground", spawn=sim_utils.GroundPlaneCfg(physics_material=material))
 
 
-def simulation_cfg(physics: dict, *, device: str, period_s: float, integrator: str | None = None,
-                   njmax: int | None = None, nconmax: int | None = None, visualizers=None):
-    """Isaac Lab on Newton with the MJWarp solver, configured from the profile's ``physics`` block."""
-    import isaaclab.sim as sim_utils
-    from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
+def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None):
+    """Isaac Lab's config for ``solver`` from its block of the profile's ``physics``."""
+    integrator = integrator or settings["integrator"]
+    if solver == "mjwarp":
+        from isaaclab_newton.physics import MJWarpSolverCfg
 
-    solver = MJWarpSolverCfg(integrator=integrator or physics["integrator"], use_mujoco_cpu=False,
-                             iterations=physics["iterations"], ls_iterations=physics["ls_iterations"],
-                             cone=physics["cone"], njmax=njmax or physics["njmax"],
-                             nconmax=nconmax or physics["nconmax"])
-    return sim_utils.SimulationCfg(dt=period_s, device=device, physics=NewtonCfg(solver_cfg=solver),
-                                   visualizer_cfgs=visualizers or None)
+        return MJWarpSolverCfg(integrator=integrator, use_mujoco_cpu=False, iterations=settings["iterations"],
+                               ls_iterations=settings["ls_iterations"], cone=settings["cone"],
+                               njmax=settings["njmax"], nconmax=settings["nconmax"])
+    if solver == "kamino":
+        from isaaclab_newton.physics import KaminoMaterialsCfg, KaminoPADMMCfg, KaminoPADMMSolverCfg
+
+        if integrator != "euler":
+            # Newton would fall back to euler: moreau needs Kamino's own collision detector, not used here.
+            raise ValueError(f"Kamino integrator {integrator!r}: euler (contacts come from Newton's pipeline)")
+
+        return KaminoPADMMSolverCfg(integrator=integrator,
+                                    dynamics_solver_cfg=KaminoPADMMCfg(max_iterations=settings["iterations"]),
+                                    max_contacts_per_world=settings["max_contacts_per_world"],
+                                    materials=KaminoMaterialsCfg(friction_mix_mode="max"))
+    raise ValueError(f"physics solver {solver!r}: one of {', '.join(SOLVERS)}")
+
+
+def simulation_cfg(physics: dict, *, device: str, period_s: float, solver: str | None = None,
+                   integrator: str | None = None, visualizers=None):
+    """Isaac Lab on Newton with the selected solver (``solver``, else the profile's), configured from the profile's
+    ``physics`` block."""
+    import isaaclab.sim as sim_utils
+    from isaaclab_newton.physics import NewtonCfg
+
+    name, settings = solver_settings(physics, solver)
+    return sim_utils.SimulationCfg(
+        dt=period_s, device=device, physics=NewtonCfg(solver_cfg=solver_cfg(name, settings, integrator=integrator)),
+        visualizer_cfgs=visualizers or None)
 
 
 class IsaacLabRobot:
@@ -194,13 +248,14 @@ class IsaacLabRobot:
             from isaaclab_visualizers.rerun import RerunVisualizerCfg
 
             visualizers.append(RerunVisualizerCfg(record_to_rrd=cfg.rerun_rrd, keep_historical_data=True))
-        physics = {"integrator": cfg.integrator, "iterations": cfg.iterations, "ls_iterations": cfg.ls_iterations,
-                   "cone": cfg.cone, "njmax": cfg.njmax, "nconmax": cfg.nconmax}
+        if cfg.settings is None:
+            raise ValueError("IsaacLabCfg.settings: the solver's block of the profile's physics")
+        physics = {"solver": cfg.solver, cfg.solver: cfg.settings}
         self.sim = sim_utils.SimulationContext(simulation_cfg(physics, device=cfg.device, period_s=cfg.period_s,
-                                                              visualizers=visualizers))
+                                                              integrator=cfg.integrator, visualizers=visualizers))
         self.scene = instantiate(scene_cfg)
         self.sim.reset()
-        apply_joint_limits(cfg.joint_limits)
+        apply_joint_limits(physics)
         self.robot = self.scene["robot"]
         self.imu = self.scene["imu"] if cfg.imu else None
         self.contacts = self.scene["contacts"] if cfg.contacts else None

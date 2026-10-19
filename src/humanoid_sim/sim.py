@@ -1,7 +1,8 @@
-"""SimCore: the plant core on Isaac Lab / MJWarp, stepped on an integer-ns clock.
+"""SimCore: the plant core on Isaac Lab / Newton, stepped on an integer-ns clock.
 
-One ``step()`` advances one physics period: plant → targets → solver → feedback. Isaac Lab with Newton's
-MJWarp solver is the only physics in this repo (on CUDA, or on Warp's CPU device for tests).
+One ``step()`` advances one physics period: plant → targets → solver → feedback. Isaac Lab on Newton is the only
+physics in this repo (on CUDA, or on Warp's CPU device for tests); ``solver`` selects Newton's solver by name
+(``mjwarp`` or ``kamino``), the profile's when not given.
 
 With ``base_joints`` (the asset variant built with them), :meth:`SimCore.set_base` prescribes the base
 orientation as yaw, pitch and roll (``R = Rz Ry Rx``) and their rates, held through the next steps.
@@ -39,7 +40,7 @@ from humanoid_sim.timing.clock import NS_PER_S
 class SimCore:
     def __init__(self, usd_path: Path, *, device: str, num_envs: int = 1, robot: str = "ethrc_v1",
                  period_ns: int | None = None, fixed_base: bool = False, base_height_m: float = 1.0,
-                 integrator: str | None = None, rerun: bool = False, rerun_rrd: str | None = None,
+                 solver: str | None = None, integrator: str | None = None, rerun: bool = False, rerun_rrd: str | None = None,
                  self_collision: bool | None = None, base_joints: bool = False, imu: bool = False,
                  contacts: bool = False, seed: int = 0, cuda_graph: bool = False, compile: bool = False,
                  imu_history: int | None = None):
@@ -47,22 +48,20 @@ class SimCore:
         self.profile = load_profile(robot)
         phys = self.profile["physics"]
         self.period_ns = int(period_ns or phys["period_ns"])
-        integrator = integrator or phys["integrator"]
+        from humanoid_sim.physics.isaaclab import IsaacLabCfg, IsaacLabRobot, solver_settings
+
+        self.solver, settings = solver_settings(phys, solver)
+        self.integrator = integrator or settings["integrator"]
         joints = list(self.desc.joints)
         # Description joint order for the plant; the articulation's order is mapped through names.
         self.plant = PlantCore(self.desc, joints, num_envs,
                                PlantCfg(robot=robot, physics_period_ns=self.period_ns, device=device))
         props = joint_properties(self.plant, joints)
         period_s = self.period_ns / NS_PER_S
-        from humanoid_sim.physics.isaaclab import IsaacLabCfg, IsaacLabRobot
-
         self.backend = IsaacLabRobot(self.desc, usd_path, IsaacLabCfg(
-            num_envs=num_envs, device=device, period_s=period_s, integrator=integrator,
-            fixed_base=fixed_base, base_height_m=base_height_m,
-            iterations=phys["iterations"], ls_iterations=phys["ls_iterations"], cone=phys["cone"],
-            njmax=phys["njmax"], nconmax=phys["nconmax"],
+            num_envs=num_envs, device=device, period_s=period_s, solver=self.solver, settings=settings,
+            integrator=self.integrator, fixed_base=fixed_base, base_height_m=base_height_m,
             self_collision=phys["self_collision"] if self_collision is None else self_collision,
-            joint_limits=phys["joint_limits"],
             base_joints=base_joints, ground_friction=self.profile["model"]["ground_friction"],
             imu=imu, contacts=contacts, rerun=rerun, rerun_rrd=rerun_rrd), props=props)
         order = [self.backend.joint_names.index(n) for n in joints]
