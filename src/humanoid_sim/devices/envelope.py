@@ -1,4 +1,4 @@
-"""Torque–speed envelope of each drive, batched.
+"""Torque-speed envelope of each drive, batched.
 
 Motoring (torque and velocity in the same direction): the datasheet curve at |velocity|, linearly
 interpolated between the description's points and zero beyond the last one. Braking (opposite signs) and

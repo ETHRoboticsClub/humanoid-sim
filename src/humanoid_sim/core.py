@@ -84,11 +84,16 @@ class PlantCore:
         self.external_torque.index_fill_(0, env_ids, 0.0)
 
     def submit(self, demand: DriveDemand, arrival_ns: torch.Tensor, env_mask: torch.Tensor | None = None):
-        # The solver gains are the baseline drive gains, so shaping is stable up to twice those.
-        self.gain_warnings |= outside_stable_region(
-            demand.p_gain_raw.to(self.cfg.dtype) / JVPT_PER_SI_GAIN,
-            demand.d_gain_raw.to(self.cfg.dtype) / JVPT_PER_SI_GAIN,
+        # The solver gains are the baseline drive gains, so shaping is stable up to twice those. The check uses
+        # the realized gains (randomized scales included) of the envs this demand reaches.
+        bank = self.bank
+        flagged = outside_stable_region(
+            demand.p_gain_raw.to(self.cfg.dtype) / JVPT_PER_SI_GAIN * bank.p_scale,
+            demand.d_gain_raw.to(self.cfg.dtype) / JVPT_PER_SI_GAIN * bank.d_scale,
             self.drive_stiffness, self.drive_damping) & demand.torque_enabled
+        if env_mask is not None:
+            flagged &= env_mask.unsqueeze(1)
+        self.gain_warnings |= flagged
         self.bank.submit(demand, arrival_ns, env_mask)
 
     # -- stepping ---------------------------------------------------------------------------------

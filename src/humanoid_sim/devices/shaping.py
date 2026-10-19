@@ -3,7 +3,7 @@
 The solver integrates its PD implicitly (MJWarp ``implicitfast``: implicit in the damping), which is what
 keeps stiff drives stable at 4 ms. Changing solver gains at run time costs a model update, so the gains
 stay at constant per-episode values ``k0, d0`` and every other force law (the drive's own gains, the
-torque–speed envelope and torque cap, arrival blending) is realized by moving the position target:
+torque-speed envelope and torque cap, arrival blending) is realized by moving the position target:
 
     k0 (target − q) + d0 (0 − q̇) = force   ⇒   target = q + (force + d0 q̇) / k0
 
