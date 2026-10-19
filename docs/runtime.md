@@ -24,6 +24,7 @@ humanoid-sim serve --segment /run/hsim/plant --support suspended
 |---|---|---|
 | `--segment PATH` | required | The segment file. The host writes `PATH.<pid>.tmp` and renames it over `PATH`, so it needs write access to the directory. Put it on a volume the client also mounts. |
 | `--support suspended\|free` | `suspended` | How the robot is held for the whole process (see [Supports](#supports)). |
+| `--pose home\|standing` | the profile's `poses.start` | The pose every session starts in (see [The start pose](#the-start-pose)). |
 | `--device` | `cuda:0` | `cuda:N`, or `cpu` for Warp's CPU device (below real time; see [Device and performance](#device-and-performance)). |
 | `--bus-period-us` | `1500` | The client's bus cycle, written to the header's `bus_period_ns`. Informational: the host does not use it. |
 | `--client-timeout-ms` | `500` | End the session when an attached client's latest demands are older than this. |
@@ -45,7 +46,7 @@ Four options of the top-level parser go before `serve`: `--solver` (`mjwarp` or 
 
 `RuntimeHost.__init__` builds everything before a client can see the segment:
 
-1. It loads the description and the asset, and computes the named poses `home` and `standing` (`initial_pose` in `src/humanoid_sim/model/poses.py`) with their base heights: the height of an upright base at which the pose's lowest sole corner is 1 mm above the floor (`STANDING_CLEARANCE_M`).
+1. It loads the description and the asset, picks the start pose (`--pose`, else the profile's `poses.start`), and computes the named poses `home` and `standing` (`initial_pose` in `src/humanoid_sim/model/poses.py`) with their base heights: the height of an upright base at which the pose's lowest sole corner is 1 mm above the floor (`STANDING_CLEARANCE_M`).
 2. It builds the scene (`SimCore`, with the IMU keeping its 32 latest delivered samples and a contact sensor on every body). On CUDA it captures the plant's work before and after the solver step as two CUDA graphs (a recorded sequence of GPU kernels that replays with one launch) and fuses their kernels with `torch.compile`, and it does the same for the demand intake (`_DemandIntake`). The command line always uses graphs and compilation on CUDA and neither on the CPU.
 3. It steps the physics three times and puts the state back (`_warm_up`), so that the first steps' kernel compilation does not happen while a client watches the heartbeat.
 4. It opens the first session (`_open_session`): it creates the segment in state creating, writes the start pose, publishes the first feedback and truth records, and then marks the segment ready.
@@ -58,18 +59,29 @@ The support is chosen at startup and reported in the descriptor's `support` fiel
 
 | Support | Base | What `SET_SUPPORT` can do |
 |---|---|---|
-| `suspended` | Welded to the world (a fixed-base articulation), 0.3 m above the home pose's height so the feet hang clear | Nothing: `{"support": "suspended"}` is accepted as a no-op, `free` and `gantry` are rejected. Any `base_pose` argument is rejected. |
-| `free` | Standing on the floor in the home pose, upright, at the origin | Hang a gantry rope (tension program or slack cable) and release it with `{"support": "free"}` |
+| `suspended` | Welded to the world (a fixed-base articulation), 0.3 m above the start pose's height so the feet hang clear | Nothing: `{"support": "suspended"}` is accepted as a no-op, `free` and `gantry` are rejected. Any `base_pose` argument is rejected. |
+| `free` | Standing on the floor in the start pose, upright, at the origin | Hang a gantry rope (tension program or slack cable) and release it with `{"support": "free"}` |
 
 The gantry and the floor are described in [world.md](world.md).
 
-A free robot starts in the [home pose](glossary.md#home-pose), with both soles flat on the floor. Held at the baseline gains, it stands still: in a 60 s free session on CUDA the base stayed at 0.923 m and within 0.6° of upright. To hold it, take the drive positions the first feedback reports as targets, as `examples/runtime_client.py` does. The description's standing pose (`RESET` with `{"pose": "standing"}`) leaves the soles tilted under an upright base, and a robot that holds it falls over within a second or two: in a free session on the CPU device, the base had tilted 99° and dropped to 0.16 m after 2.5 s of plant time. See [RESET](#reset-1) and [robot-model.md](robot-model.md#standing-on-the-ground).
+### The start pose
+
+Every session starts in the same named pose: the one `--pose` names, else the profile's `poses.start`. The host reports it as `RuntimeHost.start_pose`.
+
+| Robot | `poses.start` | Why |
+|---|---|---|
+| ETHRC V1 | `standing` | Controls arms a drive only while its position lies inside its window (the joint's `position_limit`, the crank's device-frame limit), and the [home pose](glossary.md#home-pose)'s straight knees lie 0.13 rad past the knees' upper bound, so Controls would refuse to arm a V1 that starts at home. The [standing pose](glossary.md#standing-pose) lies inside every window, and it is where Controls' MuJoCo plant starts the robot. |
+| G1 | `home` | Unitree's standing pose, which Controls' G1 lane also resets to |
+
+`test_the_runtime_start_pose_lies_inside_every_drive_window` (in `tests/test_robots.py`) checks every robot's start pose against its windows.
+
+The standing pose leaves the V1's soles tilted under an upright base, which does not matter while the robot hangs (`suspended`, the default). A free robot that holds it falls over within a second or two: in a free session on the CPU device, the base had tilted 99° and dropped to 0.16 m after 2.5 s of plant time. A free V1 that should stand by itself at the baseline gains needs `--pose home`, with both soles flat on the floor: in a 60 s free session on CUDA the base stayed at 0.923 m and within 0.6° of upright. To hold the start pose, take the drive positions the first feedback reports as targets, as `examples/runtime_client.py` does. See [RESET](#reset-1) and [robot-model.md](robot-model.md#standing-on-the-ground).
 
 ### Sessions
 
 The header's `session_id` (a random non-zero 64-bit number chosen when the segment file is created) names one client session.
 
-A client attaches by writing a demands record whose `session_id` echoes the header's. Records carrying another session id are ignored, so a client of an earlier session cannot attach to a new one. Until the first demand arrives, the session holds the robot in its start pose: the joints in the home pose and, in a free session, the base at the home pose's height. The pose is written before every physics step and every drive is treated as off. The client's first demands release the pose, so the robot starts moving when the client does. Physics and plant time run before attachment, and no client timeout applies until then.
+A client attaches by writing a demands record whose `session_id` echoes the header's. Records carrying another session id are ignored, so a client of an earlier session cannot attach to a new one. Until the first demand arrives, the session holds the robot in its [start pose](#the-start-pose): the joints in that pose and, in a free session, the base at its height. The pose is written before every physics step and every drive is treated as off. The client's first demands release the pose, so the robot starts moving when the client does. Physics and plant time run before attachment, and no client timeout applies until then.
 
 A session ends in one of three ways. The segment's `state` becomes ended in every case (`RuntimeHost.run` sets it when it returns):
 

@@ -8,8 +8,9 @@ from humanoid_sim.devices.demand import DriveDemand
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description, robots
 from humanoid_sim.model.mirror import mirror_map
-from humanoid_sim.model.poses import home_pose
+from humanoid_sim.model.poses import home_pose, pose_joint_positions, start_pose
 from humanoid_sim.model.urdf import PreparedUrdf
+from humanoid_sim.transmissions.drive_map import DriveJointMap
 
 ROBOTS = robots()
 
@@ -97,6 +98,33 @@ def test_the_home_pose_lies_inside_the_travel(robot):
     for name, q in home.items():
         lo, hi = desc.calibration_travel(name)
         assert lo <= q <= hi, name
+
+
+@pytest.mark.parametrize("robot", ROBOTS)
+def test_the_runtime_start_pose_lies_inside_every_drive_window(robot):
+    """Controls arms a drive only inside its window: the joint's position_limit (standing-relative) for a 1:1 drive,
+    the device-frame position_limit for an ankle crank."""
+    desc, profile = Description.load(robot), load_profile(robot)
+    pose = pose_joint_positions(desc, profile, start_pose(profile))
+    joints = list(desc.joints)
+    q = torch.tensor([[pose[n] for n in joints]], dtype=torch.float64)
+    drive_map = DriveJointMap(desc, joints, dtype=torch.float64)
+    at = dict(zip(drive_map.drive_names, drive_map.drive_state(q, torch.zeros_like(q))[0][0].tolist()))
+    for name, d in desc.drives.items():
+        if d.crank is None:
+            entry = desc.table["joints"][d.joints[0]]
+            lo, hi = (float(b) + float(entry["standing_offset_rad"]) for b in entry["position_limit"])
+            assert lo < pose[d.joints[0]] < hi, name
+        else:
+            lo, hi = d.position_limit_device
+            assert lo < at[name] < hi, name
+
+
+def test_the_v1_starts_a_session_standing_and_the_g1_at_home():
+    assert start_pose(load_profile("ethrc_v1")) == "standing"
+    assert start_pose(load_profile("g1_29dof_rev_1_0")) == "home"
+    with pytest.raises(ValueError, match="poses.start"):
+        start_pose({"poses": {"start": "crouch"}})
 
 
 def test_the_g1_home_pose_is_unitrees_standing_pose():

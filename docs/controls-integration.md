@@ -6,9 +6,9 @@ Controls' fake-coe lane runs the production EtherCAT master, the `standalone` bi
 
 This page covers the Controls side. [runtime.md](runtime.md) describes `humanoid-sim serve`, the segment and the commands.
 
-## The Controls branch
+## Where it lives in Controls
 
-The V1's humanoid-sim plant is on Controls' branch `exp/humanoid-sim-v1`, from `master` on top of the G1 lane's `exp/humanoid-sim-g1`, not merged. It is the interim path: [humanoid-sim issue #5](https://github.com/ETHRoboticsClub/humanoid-sim/issues/5) tracks the C++ bank host and IMU sensor feed of Controls' `docs/sim-learning-api-plan.md` §1 that replace it. The files involved, relative to the Controls checkout:
+The V1's humanoid-sim plant is on Controls' `master`. It is the interim path: [humanoid-sim issue #5](https://github.com/ETHRoboticsClub/humanoid-sim/issues/5) tracks the C++ bank host and IMU sensor feed of Controls' `docs/sim-learning-api-plan.md` §1 that replace it. The files involved, relative to the Controls checkout:
 
 | File | Role |
 |---|---|
@@ -123,6 +123,8 @@ python3 /opt/ethrc/repository/scripts/sim/launch.py --prepared --headless --no-a
 
 The script waits until every drive is enabled or the plant host reports a fault, runs for `--seconds`, and then reads the segment from inside the Controls container. It prints a JSON result: the plant host's status (`physics`, `cycles`, `keeping_up`, `drives`, `drives_operational`, `drives_enabled`, `drives_faulted`, `fault`) and, from the segment, `sim_steps`, `sim_time_s`, `sim_late_steps`, `imu_samples`, `pd_drives` and `max_tracking_error_rad`. `ok` is true, and the exit code 0, when there is no fault, every drive is enabled and none faulted, at least one drive runs the PD law, and the largest PD tracking error is under 0.05 rad.
 
+The sim starts every session in the V1's standing pose (its profile's `poses.start`, see [runtime.md](runtime.md#the-start-pose)), where every drive lies inside the window Controls arms it in. A sim started with `--pose home` holds the knees outside theirs, and Controls refuses to arm them.
+
 On the default CPU device the lane comes up but the sim does not keep up with real time.
 
 To watch the robot while Controls drives it, run `humanoid-sim view-runtime` on the same segment, for example `humanoid-sim view-runtime /srv/hsim/plant --save lane.rrd` next to a sim serving into `/srv/hsim`. The viewer only reads the segment, so the lane runs as it would without it, and it follows the sim from session to session under `--persist`. [runtime.md](runtime.md#watching-a-host-view-runtime) lists its options and what it needs.
@@ -158,7 +160,7 @@ Here `/srv/hsim` is the host directory the sim serves into, directly or from its
 
 ## The G1 lane
 
-Controls' G1 lane runs the production G1 host (`ethrc_body_host`) on its `LowCmd` bus against a fake motor board (`ethrc_fake_unitree`), through the same shared segment it uses with Unitree's bridge on the robot. The board's plant host steps a MuJoCo plant by default; with `--physics humanoid-sim` humanoid-sim is the plant. It is on Controls' branch `exp/humanoid-sim-g1`, from `master`, not merged:
+Controls' G1 lane runs the production G1 host (`ethrc_body_host`) on its `LowCmd` bus against a fake motor board (`ethrc_fake_unitree`), through the same shared segment it uses with Unitree's bridge on the robot. The board's plant host steps a MuJoCo plant by default; with `--physics humanoid-sim` humanoid-sim is the plant. It is on Controls' `master`:
 
 | File | Role |
 |---|---|
