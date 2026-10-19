@@ -110,12 +110,15 @@ class ImuDelivery:
         u = torch.rand(n, generator=self.generator, device=self.device, dtype=torch.float64)
         return (lo + (hi - lo) * u).round().to(torch.int64)
 
-    def reset(self, env_ids: torch.Tensor, t_ns: int, value: torch.Tensor | None = None) -> None:
-        """Restart ``env_ids`` at ``t_ns``: empty buffers, random sample phase and burst phase."""
+    def reset(self, env_ids: torch.Tensor, t_ns: int, value: torch.Tensor | None = None, *,
+              keep_seq: bool = False) -> None:
+        """Restart ``env_ids`` at ``t_ns``: empty buffers, random sample phase and burst phase. Sequence numbers
+        restart from 1 unless ``keep_seq`` (the runtime keeps them rising, as a client tracks the last one seen)."""
         n = len(env_ids)
         self.next_sample[env_ids] = t_ns + self._uniform_ns(n, 0, self.cfg.sample_period_ns)
         self.next_burst[env_ids] = t_ns + self._uniform_ns(n, 0, self.cfg.burst_period_ns[1])
-        self.seq.index_fill_(0, env_ids, 0)
+        if not keep_seq:
+            self.seq.index_fill_(0, env_ids, 0)
         self.pending_count.index_fill_(0, env_ids, 0)
         s = self.samples
         s.stamp_ns.index_fill_(0, env_ids, -1)

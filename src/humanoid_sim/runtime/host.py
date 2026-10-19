@@ -146,7 +146,7 @@ class RuntimeHost:
         cuda = str(device).startswith("cuda")
         self.sim = SimCore(usd, device=device, robot=robot, fixed_base=support == "suspended",
                            base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
-                           compile=compile and cuda)
+                           compile=compile and cuda, imu_history=abi.IMU_SAMPLES)
         self.device = torch.device(device)
         self._intake = _DemandIntake(self.sim.plant, len(self.sim.plant.map.drive_names), self.device,
                                      cuda_graph=cuda, compile=compile and cuda)
@@ -238,7 +238,7 @@ class RuntimeHost:
         env = torch.tensor([0], device=self.device)
         self.sim.plant.reset(env)  # plant time keeps running: the IMU's sample clock depends on it
         self.sim.feedback = None
-        self.sim.imu.reset(env, self.sim.t_ns)
+        self.sim.imu.reset(env, self.sim.t_ns, keep_seq=True)
 
     # -- descriptor and geometry ------------------------------------------------------------------
 
@@ -302,8 +302,8 @@ class RuntimeHost:
         except (KeyError, TypeError, ValueError) as e:
             self.seg.ack(seq, abi.ACK_REJECTED, f"{type(e).__name__}: {e}")
             return
-        except RuntimeError as e:
-            self.seg.ack(seq, abi.ACK_FAILED, str(e))
+        except Exception as e:  # noqa: BLE001 - a bad command must not take the host down
+            self.seg.ack(seq, abi.ACK_FAILED, f"{type(e).__name__}: {e}")
             return
         self.seg.ack(seq, abi.ACK_OK, message)
         self._truth_due = True
@@ -349,7 +349,7 @@ class RuntimeHost:
         self._write_pose(q, base)
         env = torch.tensor([0], device=self.device)
         self.sim.plant.reset(env)
-        self.sim.imu.reset(env, self.sim.t_ns)
+        self.sim.imu.reset(env, self.sim.t_ns, keep_seq=True)
         self._prescribed = None
         self._disturbances.clear()
         self._joint_torques.clear()  # the plant's reset zeroed the external torque
@@ -475,8 +475,10 @@ class RuntimeHost:
             self.sim.imu.accel_bias += value
             self._faults[key] = (end if end is not None else self.sim.t_ns + self.period_ns, value)
         elif fault == "power_sag":
-            if not 0.0 <= value <= 1.0:
-                raise ValueError("power_sag value is the torque scale, in [0, 1]")
+        if not math.isfinite(value):
+            raise ValueError(f"{fault} value must be finite")
+        if fault == "power_sag" and not 0.0 <= value <= 1.0:
+            raise ValueError("power_sag value is the torque scale, in [0, 1]")
             self.sim.plant.bank.torque_scale.fill_(value)
             self._faults[key] = (end, value)
         return f"{fault} active"

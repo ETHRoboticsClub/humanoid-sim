@@ -159,3 +159,4 @@ def test_a_joint_pushed_into_its_stop_stays_at_it(usd):
         assert -0.001 < past < 0.002, past
     finally:
         sim.close()
+@pytest.mark.physics

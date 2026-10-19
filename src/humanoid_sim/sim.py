@@ -22,6 +22,7 @@ feedback it returns is then a set of static buffers, overwritten by the next ste
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import torch
@@ -39,7 +40,8 @@ class SimCore:
                  period_ns: int | None = None, fixed_base: bool = False, base_height_m: float = 1.0,
                  integrator: str | None = None, rerun: bool = False, rerun_rrd: str | None = None,
                  self_collision: bool | None = None, base_joints: bool = False, imu: bool = False,
-                 contacts: bool = False, seed: int = 0, cuda_graph: bool = False, compile: bool = False):
+                 contacts: bool = False, seed: int = 0, cuda_graph: bool = False, compile: bool = False,
+                 imu_history: int | None = None):
         self.desc = Description.load(robot)
         self.profile = load_profile(robot)
         phys = self.profile["physics"]
@@ -77,8 +79,10 @@ class SimCore:
         if imu:
             from humanoid_sim.sensors.imu import ImuDelivery, ImuDeliveryCfg
 
-            self.imu = ImuDelivery(ImuDeliveryCfg.from_profile(self.profile["sensors"]["imu"]), num_envs,
-                                   device=device, seed=seed)
+            cfg = ImuDeliveryCfg.from_profile(self.profile["sensors"]["imu"])
+            if imu_history is not None:
+                cfg = dataclasses.replace(cfg, history=imu_history)
+            self.imu = ImuDelivery(cfg, num_envs, device=device, seed=seed)
             self.imu.reset(torch.arange(num_envs, device=device), 0)
         if cuda_graph and not str(device).startswith("cuda"):
             raise ValueError("cuda_graph needs a CUDA device")
