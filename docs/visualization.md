@@ -83,7 +83,7 @@ Options: `--fps` sets how often the segment is read (30 by default), `--seconds`
 
 ## Training scenes
 
-`SceneRecorder` records many environments of an Isaac Lab scene into one recording. It logs the ground (the generated terrain read from the USD stage, shaded by height) and each visual mesh of the robot once, then per frame one pose per robot and mesh, which Rerun draws as instances.
+`SceneRecorder` records many environments of an Isaac Lab scene into one recording. It logs the ground (the generated terrain read from the USD stage, shaded by height), any static boxes (at `/world/scene`, see [world.md](world.md#static-boxes)) and each visual mesh of the robot once, then per frame one pose per robot and mesh, which Rerun draws as instances.
 
 ```python
 from humanoid_sim.signals.scene import SceneRecorder

@@ -31,7 +31,8 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `RobotPlant` | `src/humanoid_sim/train/plant.py` | The batched plant for every env of a scene: `submit`, `pre_physics`, `measured`, `truth`, `params`, `reset`, `set_level`, `attach_log`, `log` |
 | `Measured`, `Truth` | `src/humanoid_sim/train/plant.py` | What `measured()` and `truth()` return |
 | `PlantAction`, `PlantActionCfg` | `src/humanoid_sim/train/isaaclab.py` | An Isaac Lab action term that owns a `RobotPlant`; you subclass it and implement `demands()` |
-| `robot_scene_cfg`, `robot_sim_cfg` | `src/humanoid_sim/train/scene.py` | The `InteractiveSceneCfg` (robot, IMU, contact sensor, ground or terrain) and the `SimulationCfg` (one 4 ms step on MJWarp) |
+| `robot_scene_cfg`, `robot_sim_cfg` | `src/humanoid_sim/train/scene.py` | The `InteractiveSceneCfg` (robot, IMU, contact sensor, ground or terrain, static boxes) and the `SimulationCfg` (one 4 ms step on MJWarp) |
+| `StaticBoxes` | `src/humanoid_sim/world/boxes.py` | A room's walls and furniture as static boxes, read from a file, described in [world.md](world.md#static-boxes) |
 | `initial_pose`, `POSES` | `src/humanoid_sim/model/poses.py`, re-exported by `humanoid_sim.train.scene` | The joint positions and base height of a named initial pose |
 | `heightfield_terrain_cfg` | `src/humanoid_sim/world/terrain.py` | The terrain-importer config for a heightfield terrain the caller lays out, described in [world.md](world.md#heightfield-terrain) |
 | `ForcePush`, `Gantry` | `src/humanoid_sim/world/` | Pushes and gantry ropes a task applies, described in [world.md](world.md) |
