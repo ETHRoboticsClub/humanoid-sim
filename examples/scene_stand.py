@@ -1,13 +1,17 @@
 """A robot standing among a scene's static boxes, recorded to Rerun: for looking at a robot in a room such as Controls'
-hangar.
+hangar, drawn as its photo-textured scan or as its boxes.
 
-    python examples/scene_stand.py --scene <controls>/ros2_ws/src/sim/ethrc_sim/environments/hangar/hangar_proxy.npz \\
-        --spawn -4.42 3.48 --seconds 4 --rrd outputs/hangar_v1.rrd
-    python examples/scene_stand.py --robot g1_29dof_with_hand_rev_1_0 --scene ... --spawn -4.42 3.48 \\
-        --rrd outputs/hangar_g1.rrd
+    H=<controls>/ros2_ws/src/sim/ethrc_sim/environments/hangar
+    python examples/scene_stand.py --scene $H/hangar_proxy.npz --spawn -4.42 3.48 \\
+        --scan-mesh $H/hangar_visual.obj --scan-texture $H/hangar_visual.png --scan-floor-texture $H/hangar_floor.png \\
+        --seconds 6 --rrd outputs/hangar_v1_scan.rrd
+    python examples/scene_stand.py --robot g1_29dof_with_hand_rev_1_0 --fixed-base --scene $H/hangar_proxy.npz \\
+        --spawn -4.42 3.48 --scan-mesh ... --rrd outputs/hangar_g1_scan_fixed_base.rrd
 
 The robot starts at the spawn point (the world origin) in its home pose on a free base (or a welded one with
-`--fixed-base`) and holds it at the baseline gains; the recording shows the boxes, the floor and the robot. `-4.42 3.48` is Controls' `HANGAR_SPAWN`
+`--fixed-base`) and holds it at the baseline gains. The recording shows the robot and the scan with its floor (or,
+without the scan or with `--draw boxes`, the boxes on the ground), at `--detail full` (every triangle and the whole
+texture, about 150 MB for the hangar) or `live` (about 3 MB). `-4.42 3.48` is Controls' `HANGAR_SPAWN`
 (`ethrc_sim/environments.py`), open floor 1.35 m from the nearest box. Runs in the Isaac Lab image (Warp's CPU
 device works, slowly).
 """
@@ -30,6 +34,11 @@ def main() -> None:
     p.add_argument("--spawn", nargs=2, type=float, default=(0.0, 0.0), metavar=("X", "Y"))
     p.add_argument("--seconds", type=float, default=4.0)
     p.add_argument("--fixed-base", action="store_true", help="weld the base where it starts, feet just above the floor")
+    p.add_argument("--scan-mesh", default=None, help="the room's textured scan (an OBJ), drawn instead of the boxes")
+    p.add_argument("--scan-texture", default=None, help="the scan's texture (PNG)")
+    p.add_argument("--scan-floor-texture", default=None, help="the floor seen from above (PNG), over floor_corners")
+    p.add_argument("--draw", choices=("scan", "boxes"), default=None, help="default: the scan when given")
+    p.add_argument("--detail", choices=("full", "live"), default="full", help="the scan's detail")
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--rrd", required=True)
     p.add_argument("--assets", default=str(REPO / "outputs" / "assets"))
@@ -42,15 +51,18 @@ def main() -> None:
     from humanoid_sim.signals.scene import SceneRecorder
     from humanoid_sim.sim import SimCore
     from humanoid_sim.world.boxes import StaticBoxes
+    from humanoid_sim.world.scan import ScanFiles
 
     out = asset_dir(Description.load(args.robot), load_profile(args.robot), Path(args.assets))
     usd = out / json.loads((out / "asset.json").read_text())["usd"]
-    scene = StaticBoxes.load(args.scene, args.spawn)
+    scan = None if args.scan_mesh is None else ScanFiles.of(args.scan_mesh, args.scan_texture, args.scan_floor_texture)
+    scene = StaticBoxes.load(args.scene, args.spawn, scan=scan)
     print(json.dumps(scene.describe()))
     pose, height = initial_pose(usd, args.robot, "home")
     sim = SimCore(usd, device=args.device, robot=args.robot, base_height_m=height + STANDING_CLEARANCE_M,
                   fixed_base=args.fixed_base, contacts=True, scene=scene)
-    recorder = SceneRecorder(sim.backend, usd, rrd=args.rrd, app_id="humanoid-sim scene")
+    recorder = SceneRecorder(sim.backend, usd, rrd=args.rrd, app_id="humanoid-sim scene", scene=scene, draw=args.draw,
+                             detail=args.detail)
     try:
         plant = sim.plant
         q = pose.to(device=plant.cfg.device, dtype=sim.joint_state()[0].dtype).unsqueeze(0)
