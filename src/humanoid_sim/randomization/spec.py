@@ -11,7 +11,7 @@ A :class:`ParamSpec` draws one plant parameter per env for a selection of joints
 
 Each parameter has a fixed kind (:data:`PARAMS`):
 
-* ``physics`` parameters live in the solver model. Writing them is expensive on MJWarp (every world is
+* ``physics`` parameters live in the solver model. Writing them is expensive (on MJWarp every world is
   updated and the host syncs), so they are drawn at startup and redrawn only when the level changes;
 * ``device`` parameters live in this repo's torch tensors and are redrawn for the envs being reset (or only at
   startup, with ``scope: startup``).
@@ -44,7 +44,7 @@ PARAMS: dict[str, Param] = {
     "body_com": Param("physics", "body", 3, "m", "centre-of-mass offset in the body frame"),
     "body_inertia": Param("physics", "body", doc="scale of the rotational inertia beyond the mass's"),
     "joint_armature": Param("physics", "joint", unit="kg m²", doc="reflected rotor inertia"),
-    "joint_friction": Param("physics", "joint", unit="N m", doc="Coulomb friction (MJWarp frictionloss)"),
+    "joint_friction": Param("physics", "joint", unit="N m", doc="Coulomb joint friction"),
     "joint_damping": Param("physics", "joint", unit="N m s/rad", doc="passive viscous damping"),
     "friction": Param("physics", "env", doc="friction coefficient of every robot shape"),
     "drive_stiffness": Param("device", "drive", doc="drive's realized P gain over the demanded one"),

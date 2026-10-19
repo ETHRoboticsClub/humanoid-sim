@@ -1,7 +1,7 @@
 # humanoid-sim
 
 The ETHRC humanoid below Controls: drives, ankle mechanism and body, on Isaac Lab 3.0 /
-Newton (MJWarp). ROS-free. See `AGENTS.md` for the rules and the layout.
+Newton (MJWarp, or Kamino with `--solver kamino`). ROS-free. See `AGENTS.md` for the rules and the layout.
 
 ```bash
 git submodule update --init --recursive
@@ -25,6 +25,11 @@ humanoid-sim fit-delay <exc-dir>...       # when each recorded demand acts, rela
 humanoid-sim fit-passive <exc-dir>... --holdout <exc-dir> --num-envs 512   # upper-body passive parameters
 humanoid-sim serve --segment /run/hsim/plant --support suspended   # one robot in real time, for Controls
 ```
+
+Every command that steps physics runs the profile's Newton solver (`physics.solver`, MJWarp);
+`humanoid-sim --solver kamino <command>` (or `robot_sim_cfg(solver="kamino")` in training) runs Kamino
+instead. Kamino is beta in Newton and not yet checked against the captures; it cannot randomize joint armature,
+damping or friction down to zero.
 
 `serve` publishes the runtime segment, a shared-memory file a client (Controls' plant host) attaches to: drive
 demands in, physical drive feedback and raw IMU samples out, a mailbox for reset, pause, supports, disturbances,

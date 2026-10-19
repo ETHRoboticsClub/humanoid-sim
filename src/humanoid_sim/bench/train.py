@@ -44,7 +44,7 @@ def run_train_bench(args, usd: Path) -> dict:
     from humanoid_sim.train.scene import robot_scene_cfg, robot_sim_cfg
 
     n = args.num_envs
-    sim = sim_utils.SimulationContext(robot_sim_cfg(args.robot, device=args.device))
+    sim = sim_utils.SimulationContext(robot_sim_cfg(args.robot, device=args.device, solver=args.solver))
     scene = instantiate(robot_scene_cfg(n, usd, robot=args.robot, ground_friction=0.0,
                                         self_collision=False if args.no_self_collision else None))
     sim.reset()

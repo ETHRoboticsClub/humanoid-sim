@@ -10,8 +10,8 @@
 The robot's default state is the standing pose, upright, its lowest sole corner on the ground
 (:func:`~humanoid_sim.model.kinematics.standing_base_height`), so ``reset_scene_to_default`` puts it on its feet.
 
-:func:`robot_sim_cfg` gives the ``SimulationCfg``: one physics step per period on Newton's MJWarp solver, from
-the profile. humanoid-learning builds its environment config from these and steps the plant through
+:func:`robot_sim_cfg` gives the ``SimulationCfg``: one physics step per period on a Newton solver (``mjwarp`` or
+``kamino``), from the profile. humanoid-learning builds its environment config from these and steps the plant through
 :class:`~humanoid_sim.train.plant.RobotPlant`. Isaac Lab is imported lazily.
 """
 
@@ -41,7 +41,7 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
                     terrain=None, ground_friction: float | None = None, imu: bool = True, contacts: bool = True,
                     self_collision: bool | None = None):
     """Scene config with the robot, its sensors and the ground (or ``terrain``, an Isaac Lab
-    ``TerrainImporterCfg``). With robot friction randomized, pass ``ground_friction=0``: MJWarp takes the larger
+    ``TerrainImporterCfg``). With robot friction randomized, pass ``ground_friction=0``: the solver takes the larger
     friction of the two shapes in contact."""
     from isaaclab.scene import InteractiveSceneCfg
     from isaaclab.utils import configclass
@@ -72,9 +72,10 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
     return cfg
 
 
-def robot_sim_cfg(robot: str = "ethrc_v1", *, device: str = "cuda:0", visualizers=None):
-    """``SimulationCfg`` with the profile's physics period and MJWarp solver settings."""
+def robot_sim_cfg(robot: str = "ethrc_v1", *, device: str = "cuda:0", solver: str | None = None, visualizers=None):
+    """``SimulationCfg`` with the profile's physics period and the settings of ``solver`` (the profile's if None)."""
     from humanoid_sim.physics.isaaclab import simulation_cfg
 
     physics = load_profile(robot)["physics"]
-    return simulation_cfg(physics, device=device, period_s=int(physics["period_ns"]) / 1e9, visualizers=visualizers)
+    return simulation_cfg(physics, device=device, period_s=int(physics["period_ns"]) / 1e9, solver=solver,
+                          visualizers=visualizers)
