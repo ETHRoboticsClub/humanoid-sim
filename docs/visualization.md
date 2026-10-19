@@ -68,7 +68,7 @@ The segment is a file in shared memory, so `view-runtime` has to run on the same
 
 ![view-runtime while examples/runtime_client.py waves the arms of a suspended robot](images/runtime-live.png)
 
-Here the client waves both arms (drive positions, top right) and pushes the left forearm 8 s after it attached, which shows as the spike at the left of the applied torques. The session ran in real time on an A10G. The robot hangs from the default `suspended` support, so the IMU (bottom right) sees only noise.
+Here the client waves both arms (drive positions, top right) and pushes the left forearm 8 s after it attached, which shows as the spike at the left of the applied torques. The session ran in real time on an L4. The robot hangs from the default `suspended` support, so the IMU (bottom right) sees only noise.
 
 | Path | Content |
 |---|---|
@@ -102,11 +102,11 @@ Each frame copies the poses of the recorded robots from the GPU, so record a few
 python examples/train_scene.py --num-envs 6 --seconds 8 --device cuda:0 --rrd outputs/train_scene.rrd
 ```
 
-![Six robots on rough terrain, holding the flat-foot pose while they wave their arms with different phases](images/scene-hero.png)
+![Six robots on rough terrain, holding the home pose while they wave their arms with different phases](images/scene-hero.png)
 
-The example has no policy. Each robot holds the flat-foot pose at the baseline gains and waves its arms, on rough terrain, with randomized friction, base mass and drive latency, and random pushes on the base. A rigid pose does not survive that for long: within a few seconds the robots fall, which is what a task's policy has to learn to prevent.
+The example has no policy. Each robot holds the home pose at the baseline gains and waves its arms, on rough terrain, with randomized friction, base mass and drive latency, and random pushes on the base. A rigid pose does not survive that for long: after 8 s, 1 of 24 robots and 3 of 6 are still standing, and keeping them up is what a task's policy has to learn.
 
-![24 robots 2.2 s in: the pushes have started, one robot is still up](images/scene-row.png)
+![24 robots 2.2 s in: the pushes have started and one robot is down](images/scene-row.png)
 
 ### One robot's signals next to the scene
 
@@ -123,7 +123,7 @@ plant.log("base_height", plant.truth().root_pose_w[:, 2], group="base")
 
 ![The scene with robot 0's knee and base signals](images/scene-signals.png)
 
-The reported position is the true one quantized to the knee drive's encoder (4096 counts per revolution, about 1.5 mrad), so the two lines lie on top of each other until you zoom in. Robot 0 goes down at about 2.3 s: the base height drops from 0.85 m to 0.35 m and the knee torque runs into the drive's 140 Nm peak.
+The reported position is the true one quantized to the knee drive's encoder (4096 counts per revolution, about 1.5 mrad), so the two lines lie on top of each other until you zoom in. Robot 0 stays up for the whole recording: its base settles at about 0.88 m on the terrain, and its knee torque stays within about 10 Nm while the arms wave and the pushes come.
 
 ## Regenerating the images
 

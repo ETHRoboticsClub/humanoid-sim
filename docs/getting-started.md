@@ -88,7 +88,7 @@ uv run pytest -m "not physics and not data"
 uv run ruff check src tests spikes examples docs
 ```
 
-These are the commands the `cpu-contracts` CI job runs. They cover the drive layer, the ankle transmission, the model build, the capture readers, the runtime segment layout and host kinematics. Tests marked `physics` or `data` are deselected. On an Apple silicon Mac with the three extras above and the plain robot asset built, pytest reports 75 passed and 20 deselected in about 20 s. Before the asset is built (see below), the three tests that load it with host kinematics are reported as skipped; pytest prints each skip reason. The full test layout and what runs where are in [testing-and-gpu.md](testing-and-gpu.md).
+These are the commands the `cpu-contracts` CI job runs. They cover the drive layer, the ankle transmission, the model build, the capture readers, the runtime segment layout and host kinematics. Tests marked `physics` or `data` are deselected. On an Apple silicon Mac with the three extras above and the plain robot asset built, pytest reports 77 passed and 22 deselected in about 20 s. Before the asset is built (see below), the three tests that load it with host kinematics are reported as skipped; pytest prints each skip reason. The full test layout and what runs where are in [testing-and-gpu.md](testing-and-gpu.md).
 
 ## Build the Isaac Lab image
 
@@ -186,7 +186,7 @@ The Train-Time API puts the plant into a manager-based Isaac Lab environment: th
 hsim pytest tests/test_train_env.py -q
 ```
 
-`examples/train_scene.py` is a fuller scene to start from: robots on rough terrain (or flat ground with `--flat`), each holding the flat-foot pose at the baseline gains while it waves its arms, with randomized friction, base mass and drive latency, and random pushes. Its drives are scripted, so there is no policy and a robot falls when a push or the terrain beats its rigid pose. With `--rrd` it records the scene to Rerun. A short run on the CPU:
+`examples/train_scene.py` is a fuller scene to start from: robots on rough terrain (or flat ground with `--flat`), each holding the home pose at the baseline gains while it waves its arms, with randomized friction, base mass and drive latency, and random pushes. Its drives are scripted, so there is no policy and a robot falls when a push or the terrain beats its rigid pose. With `--rrd` it records the scene to Rerun. A short run on the CPU:
 
 ```bash
 hsim python examples/train_scene.py --num-envs 2 --seconds 2 --device cpu --rrd outputs/train_scene.rrd

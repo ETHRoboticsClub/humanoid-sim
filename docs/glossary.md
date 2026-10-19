@@ -48,7 +48,7 @@ What the master sends one drive per cycle: mode, enable flag, targets, gains and
 
 ### Description
 
-The robot facts: the URDF and `actuators.yaml` in the `third_party/humanoid-urdf` submodule, loaded and hash-checked by `Description.load()`. The same commit is pinned by Controls.
+The robot facts: the URDF (`URDF_6.urdf`), `actuators.yaml` and the table that gives the [home pose](#home-pose), in the `third_party/humanoid-urdf` submodule, loaded and hash-checked by `Description.load()`. Controls pins the same repository.
 
 ### Digest
 
@@ -94,13 +94,13 @@ A failure injected into the runtime with `INJECT_FAULT`: `encoder_freeze` (a dri
 
 What the drives report back: position, velocity, applied torque and demanded torque per drive, plus the IMU samples. In the runtime it is the `feedback` region of the segment.
 
-### Flat-foot pose
-
-The [standing pose](#standing-pose) with the ankles adjusted so both soles lie level on the ground, and one leg bent slightly so both soles are at the same height. A robot holding it at the [baseline gains](#baseline-gains) stands for about 10 s before it leans over; one holding the standing pose tips over within a second. See [robot-model.md](robot-model.md#standing-on-the-ground).
-
 ### Gantry
 
 The overhead support the real robot hangs from. The sim models it as a tension program (a force that follows a schedule) or as a cable with stiffness and damping. See [world.md](world.md).
+
+### Home pose
+
+The pose the CAD model is exported in: legs straight, arms down, both soles level and at the same height under an upright base. humanoid-urdf records it per joint in `ethrc_v1/tools/urdf6_zero_rebase.json`, and `Description.home_pose` reads it. It is the default spawn pose in training and the runtime's start pose. See [robot-model.md](robot-model.md#standing-on-the-ground).
 
 ### IMU burst
 
@@ -184,7 +184,7 @@ The joint angle of each joint in the robot's standing pose, measured from the [c
 
 ### Standing pose
 
-All joints at their standing offsets. It is the reference for drive frames, ankle gains and the left/right mirror map, and the default spawn pose.
+All joints at their standing offsets: the pose the real robot was captured standing in. It is the reference for Controls' standing-relative angles, the ankle gains and the left/right mirror map. Under an upright base its soles are pitched by about 10° and 17°, so the sim spawns in the [home pose](#home-pose) unless asked for this one.
 
 ### Support
 

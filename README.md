@@ -23,8 +23,8 @@ The sim stops where Controls starts. It takes what the EtherCAT master sends eac
     <th width="33%">Check against the robot</th>
   </tr>
   <tr>
-    <td>Thousands of robots per GPU inside an Isaac Lab task, with randomized friction, masses, latency, gains and sensor errors. <b>4096 robots at about 990 simulated seconds per second</b> on one A10G.</td>
-    <td>One robot in real time behind a shared-memory segment that Controls' plant host attaches to, with commands for resets, supports, pushes and faults. <b>2.1x real time</b> on an A10G.</td>
+    <td>Thousands of robots per GPU inside an Isaac Lab task, with randomized friction, masses, latency, gains and sensor errors. <b>4096 robots at about 1,200 simulated seconds per second</b> on one L4.</td>
+    <td>One robot in real time behind a shared-memory segment that Controls' plant host attaches to, with commands for resets, supports, pushes and faults. <b>2.7x real time</b> on an L4.</td>
     <td>Replay captures from the real robot drive by drive and score the sim against what the drives measured; fit the command delay and passive joint parameters from batched replays.</td>
   </tr>
   <tr>
@@ -33,6 +33,18 @@ The sim stops where Controls starts. It takes what the EtherCAT master sends eac
     <td><a href="docs/replay-and-sysid.md">docs/replay-and-sysid.md</a></td>
   </tr>
 </table>
+
+## Where it fits
+
+```mermaid
+flowchart TB
+    rl["humanoid-learning<br/>tasks, rewards, curriculum"] -->|"batched tensor API"| sim
+    controls["ETHRC-Humanoid-Controls<br/>production runtime"] --> adapter["runtime adapter<br/>simulated drives and IMU"]
+    adapter -->|"shared-memory segment"| sim["humanoid-sim<br/>robot, world, actuator and sensor models"]
+    sim --> physics["Isaac Lab 3.0 on Newton (MJWarp or Kamino)"]
+```
+
+Policies are trained in humanoid-learning against the same drive and sensor models that Controls runs against in real time. [docs/overview.md](docs/overview.md#where-it-sits-among-the-repos) says which repo owns what.
 
 ## See it
 
@@ -95,7 +107,7 @@ class Drives(PlantAction):
     def demands(self, actions):  # -> DriveDemand [envs, 22] and the time [envs] (ns) it leaves the master
         ...
 
-cfg.scene = robot_scene_cfg(4096, usd, terrain=rough_terrain_cfg(friction=0.0), pose="flat_feet")
+cfg.scene = robot_scene_cfg(4096, usd, terrain=rough_terrain_cfg(friction=0.0))  # spawns in the home pose
 cfg.sim = robot_sim_cfg(device="cuda:0")
 cfg.decimation = 5  # 4 ms physics, 20 ms policy period
 cfg.actions.drives = PlantActionCfg(class_type=Drives, action_dim=22, plant=TrainPlantCfg(randomization=[
@@ -108,24 +120,24 @@ cfg.actions.drives = PlantActionCfg(class_type=Drives, action_dim=22, plant=Trai
 #   plant.truth()     joint state, base pose and twist, contact forces
 ```
 
-`pose="flat_feet"` starts each robot on level soles; the description's standing pose has its soles pitched by 10 and 17 degrees under an upright base and tips over. [docs/training.md](docs/training.md) has the full API.
+Robots spawn in the CAD's home pose: legs straight, both soles flat on the ground. `pose="standing"` uses the standing pose captured on the robot instead, whose soles are pitched by 10 and 17 degrees under an upright base. [docs/training.md](docs/training.md) has the full API.
 
 ## How it is built
 
 ```
 src/humanoid_sim/
-  model/           description -> prepared URDF -> USD asset; host kinematics; mirror map; flat-foot pose
+  model/           description -> prepared URDF -> USD asset; host kinematics; named poses; mirror map
   timing/          when each demand reaches its drive
   devices/         drive law, torque-speed envelope, faults
   transmissions/   drive frame <-> joint frame, the ankle linkage
   core.py          the plant: batched over [envs, drives], shared by every front end
   sensors/         encoders and IMU delivery
-  physics/         the Isaac Lab articulation on MJWarp
+  physics/         the Isaac Lab articulation on MJWarp and its solver joint properties
   randomization/   parameter specs and draws
   world/           terrain, pushes, gantry
-  train/           Train-Time API (Isaac Lab scene and action term)
-  runtime/         real-time host, the segment ABI, view-runtime
-  replay/, sysid/  captures, replays, fits
+  train/           front end: Train-Time API (Isaac Lab scene and action term)
+  runtime/         front end: real-time host, the segment ABI, view-runtime
+  replay/, sysid/  front end: captures, replays, fits
   signals/         Rerun logging
 third_party/       humanoid-urdf (robot facts) and ankle_kinematics, at the commits Controls pins
 profiles/          modeling choices that are not robot facts

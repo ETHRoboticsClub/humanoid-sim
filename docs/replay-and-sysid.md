@@ -79,7 +79,7 @@ humanoid-sim replay <exc-dir> --base fixed --period-ms 1 --duration 10
 
 In the Isaac Lab image, run these through `hsim` with the datasets mounted ([getting-started.md](getting-started.md#run-commands-in-the-image)), so that `../datasets/humanoid-v1` resolves inside the container. On a machine without CUDA add `--device cpu`.
 
-The top-level options `--robot` (default `ethrc_v1`), `--assets` (default `outputs/assets`) and `--usd` (an explicit robot USD) go before the subcommand. [robot-model.md](robot-model.md) describes the assets.
+The top-level options `--robot` (default `ethrc_v1`), `--assets` (default `outputs/assets`), `--usd` (an explicit robot USD) and `--solver` (`mjwarp` or `kamino`, default the profile's) go before the subcommand. [robot-model.md](robot-model.md) describes the assets.
 
 A replay (`replay()`, `_prepare()` and `_run()` in `src/humanoid_sim/replay/replay.py`) goes like this:
 

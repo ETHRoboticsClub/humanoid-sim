@@ -221,7 +221,7 @@ In the runtime these stay at identity, except `torque_scale`, which the `power_s
 
 ## Target shaping with constant solver gains
 
-Isaac Lab's articulation has a joint PD inside the solver. MJWarp's `implicitfast` integrator treats its damping implicitly, which keeps the stiff ankle-crank drives stable at a 4 ms step. Changing the solver's gains at run time requires a model update, so they are fixed when the plant is built. The solver gains `k0`, `d0` of a 1:1 joint are its drive's baseline gains (`baseline_position_gains` in actuators.yaml). For the ankle hinges they are `diag(Jᵀ K J)` and `diag(Jᵀ D J)` with the crank gains K, D and J at the standing pose (`DriveJointMap.joint_space_gains`). They are written to the articulation at spawn (`src/humanoid_sim/model/joint_properties.py`).
+Isaac Lab's articulation has a joint PD inside the solver. MJWarp's `implicitfast` integrator treats its damping implicitly, which keeps the stiff ankle-crank drives stable at a 4 ms step. Changing the solver's gains at run time requires a model update, so they are fixed when the plant is built. The solver gains `k0`, `d0` of a 1:1 joint are its drive's baseline gains (`baseline_position_gains` in actuators.yaml). For the ankle hinges they are `diag(Jᵀ K J)` and `diag(Jᵀ D J)` with the crank gains K, D and J at the standing pose (`DriveJointMap.joint_space_gains`). They are written to the articulation at spawn (`src/humanoid_sim/physics/joint_properties.py`).
 
 | Joints | `k0` (Nm/rad) | `d0` (Nm·s/rad) |
 |---|---|---|

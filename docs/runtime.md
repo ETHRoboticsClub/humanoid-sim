@@ -32,7 +32,7 @@ humanoid-sim serve --segment /run/hsim/plant --support suspended
 | `--max-steps N` | none | Physics periods per session, paused periods included. Reaching it ends the process, with or without `--persist`. |
 | `--seed` | `0` | Seed of the IMU's random generator (white noise, sample phase, burst timing). |
 
-Three options of the top-level parser go before `serve`: `--robot` (default `ethrc_v1`, also written to the header's `robot_id`), `--assets` (default `outputs/assets`, relative to the working directory) and `--usd` (a robot USD to use instead of the built asset). Without `--usd`, `serve` exits with a message if the asset for the current description and profile is not built.
+Four options of the top-level parser go before `serve`: `--solver` (`mjwarp` or `kamino`, default the profile's), `--robot` (default `ethrc_v1`, also written to the header's `robot_id`), `--assets` (default `outputs/assets`, relative to the working directory) and `--usd` (a robot USD to use instead of the built asset). Without `--usd`, `serve` exits with a message if the asset for the current description and profile is not built.
 
 `serve` prints one JSON line on stdout when a session is ready and one when it ends:
 
@@ -45,7 +45,7 @@ Three options of the top-level parser go before `serve`: `--robot` (default `eth
 
 `RuntimeHost.__init__` builds everything before a client can see the segment:
 
-1. It loads the description and the asset, and computes the standing base height: the height of an upright base at which the lowest sole corner of the standing pose is 1 mm above the floor (`STANDING_CLEARANCE_M`).
+1. It loads the description and the asset, and computes the named poses `home` and `standing` (`initial_pose` in `src/humanoid_sim/model/poses.py`) with their base heights: the height of an upright base at which the pose's lowest sole corner is 1 mm above the floor (`STANDING_CLEARANCE_M`).
 2. It builds the scene (`SimCore`, with the IMU keeping its 32 latest delivered samples and a contact sensor on every body). On CUDA it captures the plant's work before and after the solver step as two CUDA graphs (a recorded sequence of GPU kernels that replays with one launch) and fuses their kernels with `torch.compile`, and it does the same for the demand intake (`_DemandIntake`). The command line always uses graphs and compilation on CUDA and neither on the CPU.
 3. It steps the physics three times and puts the state back (`_warm_up`), so that the first steps' kernel compilation does not happen while a client watches the heartbeat.
 4. It opens the first session (`_open_session`): it creates the segment in state creating, writes the start pose, publishes the first feedback and truth records, and then marks the segment ready.
@@ -58,18 +58,18 @@ The support is chosen at startup and reported in the descriptor's `support` fiel
 
 | Support | Base | What `SET_SUPPORT` can do |
 |---|---|---|
-| `suspended` | Welded to the world (a fixed-base articulation), 0.3 m above the standing height so the feet hang clear | Nothing: `{"support": "suspended"}` is accepted as a no-op, `free` and `gantry` are rejected. Any `base_pose` argument is rejected. |
-| `free` | Standing on the floor at the standing height, upright, at the origin | Hang a gantry rope (tension program or slack cable) and release it with `{"support": "free"}` |
+| `suspended` | Welded to the world (a fixed-base articulation), 0.3 m above the home pose's height so the feet hang clear | Nothing: `{"support": "suspended"}` is accepted as a no-op, `free` and `gantry` are rejected. Any `base_pose` argument is rejected. |
+| `free` | Standing on the floor in the home pose, upright, at the origin | Hang a gantry rope (tension program or slack cable) and release it with `{"support": "free"}` |
 
 The gantry and the floor are described in [world.md](world.md).
 
-A free robot does not stay up in the start pose. The description's standing pose leaves the soles tilted under an upright base, and a robot that holds it at the baseline gains falls over within a second or two: in a free session on the CPU device, the base had tilted 99° and dropped to 0.16 m after 2.5 s of plant time. For a robot that stands, send `RESET` with `{"pose": "flat_feet"}` after attaching and then hold the drive positions the next feedback reports (see [RESET](#reset-1) and [robot-model.md](robot-model.md#standing-on-the-ground)).
+A free robot starts in the [home pose](glossary.md#home-pose), with both soles flat on the floor. Held at the baseline gains, it stands still: in a 60 s free session on CUDA the base stayed at 0.923 m and within 0.6° of upright. To hold it, take the drive positions the first feedback reports as targets, as `examples/runtime_client.py` does. The description's standing pose (`RESET` with `{"pose": "standing"}`) leaves the soles tilted under an upright base, and a robot that holds it falls over within a second or two: in a free session on the CPU device, the base had tilted 99° and dropped to 0.16 m after 2.5 s of plant time. See [RESET](#reset-1) and [robot-model.md](robot-model.md#standing-on-the-ground).
 
 ### Sessions
 
 The header's `session_id` (a random non-zero 64-bit number chosen when the segment file is created) names one client session.
 
-A client attaches by writing a demands record whose `session_id` echoes the header's. Records carrying another session id are ignored, so a client of an earlier session cannot attach to a new one. Until the first demand arrives, the session holds the robot in its start pose: the joints at the description's standing offsets and, in a free session, the base at the standing height. The pose is written before every physics step and every drive is treated as off. The client's first demands release the pose, so the robot starts moving when the client does. Physics and plant time run before attachment, and no client timeout applies until then.
+A client attaches by writing a demands record whose `session_id` echoes the header's. Records carrying another session id are ignored, so a client of an earlier session cannot attach to a new one. Until the first demand arrives, the session holds the robot in its start pose: the joints in the home pose and, in a free session, the base at the home pose's height. The pose is written before every physics step and every drive is treated as off. The client's first demands release the pose, so the robot starts moving when the client does. Physics and plant time run before attachment, and no client timeout applies until then.
 
 A session ends in one of three ways. The segment's `state` becomes ended in every case (`RuntimeHost.run` sets it when it returns):
 
@@ -191,7 +191,7 @@ The descriptor region holds one JSON object (sorted keys, at most 16,384 bytes) 
 | `support` | `suspended` or `free` |
 | `bodies` | The articulation's body names, for `APPLY_DISTURBANCE` and gantry `attachment_bodies` |
 | `description` | `robot`, `description_digest` and `description_revision` (the humanoid-urdf checkout's git `HEAD`, or null) |
-| `physics` | `engine` (`isaaclab/mjwarp`), `period_ns`, `integrator` |
+| `physics` | `engine` (`isaaclab/mjwarp` or `isaaclab/kamino`), `period_ns`, `integrator` |
 | `units` | One sentence each for `drive`, `joint`, `imu` and `time` |
 | `imu` | `parent`: the link the URDF's `imu_joint` mounts the IMU on |
 | `soles` | The two sole bodies, left then right |
@@ -283,7 +283,7 @@ The truth region is the oracle tests need. The host writes it at the start of a 
 | `base_lin_vel_m_s`, `base_ang_vel_rad_s` | f64[3], f64[3] | Root link twist |
 | `com_m` | f64[3] | Whole-robot centre of mass |
 | `gantry_tension_n` | f64 | Total rope tension applied on the last step; 0 without a rope |
-| `mass_kg` | f64 | Total mass (58.68 kg for `ethrc_v1`) |
+| `mass_kg` | f64 | Total mass (60.15 kg for `ethrc_v1`) |
 | `num_joints` | u32 | Joints filled in |
 | `joint_pos_rad`, `joint_vel_rad_s` | f64[64] | Joint state in URDF joint coordinates, in descriptor `joints` order |
 | `sole` | `HsimSole[2]` | Left, then right |
@@ -326,14 +326,14 @@ Times in arguments are seconds, and durations run in plant time. In the tables b
 
 | Arguments | Effect |
 |---|---|
-| `{}` or `{"pose": "standing"}` | Joints at the description's standing offsets; in a free session the base at the standing height at the origin, upright |
-| `{"pose": "flat_feet"}` | Joints at the flat-foot pose (the standing pose with both soles level and at the same height, see [robot-model.md](robot-model.md#standing-on-the-ground)); in a free session the base upright at the origin, at the height that puts the lowest sole corner 1 mm above the floor |
+| `{}` or `{"pose": "home"}` | Joints at the description's home pose (legs straight, both soles level and at the same height, see [robot-model.md](robot-model.md#standing-on-the-ground)); in a free session the base upright at the origin, at the height that puts the lowest sole corner 1 mm above the floor |
+| `{"pose": "standing"}` | Joints at the description's standing offsets; in a free session the base upright at the origin, at that pose's height |
 | `{"pose": "current"}` | Joints where they are; the base untouched |
 | `{"joint_pos": {name: rad, ...}, "base_pose": pose7 \| null}` | The named joints at the given positions, the others where they are; the base at `base_pose` when given |
 
 Joint velocities become zero, and the base's too when the base is written. Every position in `joint_pos` must lie within the joint's travel (its recorded mechanical stop, otherwise its position limit; `Description.calibration_travel`). `RESET` also resets the drive bank (queued demands dropped, every drive off until demands are taken again) and the IMU (history and undelivered samples emptied, `imu_count` and `imu_total` from 0, `seq` still rising), releases a prescribed pose, and clears the body and joint disturbances. The client's latest demands are taken again in the same period. Faults, the gantry, pause and the IMU's fidelity are kept. Ack: `reset`.
 
-The flat-foot pose is the one to use when a free robot should stand: a robot holding it at the baseline gains stays upright on flat ground for about 10 s, then leans over slowly and falls unless a controller balances it. The host solves the pose with host kinematics (`initial_pose` in `src/humanoid_sim/train/scene.py`) once at startup, which adds a few seconds before the segment is ready, so a `flat_feet` reset is as quick as a `standing` one. After the ack, wait for a feedback record newer than the ack (see [Commands](#commands)) and hold the drive positions it reports: demands that still target the old pose pull the joints back to it. In that CPU run, a free robot reset to the flat-foot pose and held there at the baseline gains stayed upright for the 2.5 s of plant time measured, with each sole level to within 2 mm across its face.
+The home pose is the one to use when a free robot should stand. Both poses are computed at startup, so a reset to either is quick. After the ack, wait for a feedback record newer than the ack (see [Commands](#commands)) and hold the drive positions it reports: demands that still target the old pose pull the joints back to it.
 
 ### PAUSE (2) and RESUME (3)
 
@@ -548,7 +548,7 @@ static int hsim_read(const void *region, void *out, size_t size) {
 
 ## Device and performance
 
-Run the host on CUDA. With its step captured as CUDA graphs and compiled, one unpaced step took 1.9 ms on average on an A10G (2.1 times faster than real time) with a new demand every step; [benchmarks.md](benchmarks.md) has the full figures. Device-to-host copies go into pinned buffers and the host thread sleeps on a blocking CUDA event while it waits, and it spins only for the last 100 µs before each deadline: the host shares its machine with Controls. Each truth publish waits for one more device-to-host copy, so `--truth-every 1` costs more per step than the default.
+Run the host on CUDA. With its step captured as CUDA graphs and compiled, one unpaced step took 1.5 ms on average on an L4 (2.7 times faster than real time) with a new demand every step; [benchmarks.md](benchmarks.md) has the full figures. Device-to-host copies go into pinned buffers and the host thread sleeps on a blocking CUDA event while it waits, and it spins only for the last 100 µs before each deadline: the host shares its machine with Controls. Each truth publish waits for one more device-to-host copy, so `--truth-every 1` costs more per step than the default.
 
 `humanoid-sim bench --runtime --device cuda:0` measures the host's whole step, unpaced, with a client writing a demand before every step. It reports `ms_per_step`, `ms_p99`, `ms_max`, `steps_over_period`, `real_time_factor` and whether CUDA graphs were used. [benchmarks.md](benchmarks.md) has the figures.
 

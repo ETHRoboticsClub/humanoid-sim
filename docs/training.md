@@ -8,7 +8,7 @@ This page is for someone writing a task. The drive model itself is in [drives.md
 
 `examples/train_scene.py` is a complete scene on this API and the place to start a task from. It has no policy: its action term, `ScriptedDrives`, demands the scene's default pose at the baseline drive gains plus an arm wave (shoulders and elbows, 0.5 Hz, a different phase per env). A task replaces `ScriptedDrives.demands` with its policy's action path. The rest of the scene is what most tasks need:
 
-- The robot starts in the flat-foot pose (`robot_scene_cfg(..., pose="flat_feet")`, see [The initial pose](#the-initial-pose)), and the demands are taken from the articulation's `data.default_joint_pos`.
+- The robot starts in the home pose (the default of `robot_scene_cfg`, see [The initial pose](#the-initial-pose)), and the demands are taken from the articulation's `data.default_joint_pos`.
 - The ground is rough terrain from `rough_terrain_cfg` laid out as one row of 2.5 m tiles, one tile per robot, without a curriculum. Isaac Lab puts every env assigned to a tile at that tile's origin, so envs that share a tile spawn on the same spot. `--flat` uses the flat ground instead.
 - Robot friction (0.4 to 1.0), a payload of 0 to 4.5 kg on `base_link` and one drive latency per env (10 to 20 ms) are randomized. The terrain and the flat ground have friction 0 so the robot's value decides.
 - A `ForcePush` pushes `base_link` with 40 to 120 N for 0.1 to 0.2 s, with 1.5 to 3 s between pushes. The loop steps it once per policy step.
@@ -32,7 +32,7 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `Measured`, `Truth` | `src/humanoid_sim/train/plant.py` | What `measured()` and `truth()` return |
 | `PlantAction`, `PlantActionCfg` | `src/humanoid_sim/train/isaaclab.py` | An Isaac Lab action term that owns a `RobotPlant`; you subclass it and implement `demands()` |
 | `robot_scene_cfg`, `robot_sim_cfg` | `src/humanoid_sim/train/scene.py` | The `InteractiveSceneCfg` (robot, IMU, contact sensor, ground or terrain) and the `SimulationCfg` (one 4 ms step on MJWarp) |
-| `initial_pose`, `POSES` | `src/humanoid_sim/train/scene.py` | The joint positions and base height of a named initial pose |
+| `initial_pose`, `POSES` | `src/humanoid_sim/model/poses.py`, re-exported by `humanoid_sim.train.scene` | The joint positions and base height of a named initial pose |
 | `heightfield_terrain_cfg`, `rough_terrain_cfg` | `src/humanoid_sim/world/terrain.py` | Terrain-importer configs, described in [world.md](world.md) |
 | `ForcePush`, `Gantry` | `src/humanoid_sim/world/` | Pushes and gantry ropes a task applies, described in [world.md](world.md) |
 | `DriveDemand` | `src/humanoid_sim/devices/demand.py` | One demand per env and drive, a mirror of Controls' `FakeDriveDemand` |
@@ -98,18 +98,18 @@ Train on the plain asset. The `--base-joints` variant is for replays ([replay-an
 
 | `pose` | Joint positions | Held rigidly on flat ground |
 |---|---|---|
-| `"standing"` (default) | The description's [standing pose](glossary.md#standing-pose): every joint at its `standing_offset_rad` | Under an upright base the soles are pitched about 10 deg (left) and 17 deg (right). The robot lands on its sole edges, hops and tips over within about a second. |
-| `"flat_feet"` | The [flat-foot pose](glossary.md#flat-foot-pose) (`flat_foot_pose` in `src/humanoid_sim/model/kinematics.py`): the standing pose with each ankle turned so its sole lies level, and the leg with the lower sole bent at hip and knee until both soles are at the same height | At the baseline gains it stands for about 10 s on flat ground, then leans over slowly and falls; a policy has to balance it (`tests/test_world.py::test_a_robot_holding_the_flat_foot_pose_stands`). |
+| `"home"` (default) | The description's [home pose](glossary.md#home-pose) (`Description.home_pose`): the CAD's export pose, legs straight and both soles level at one height | At the baseline gains it stands still on flat ground (60 s measured, the base within 0.6° of upright); pushes and rough terrain make it fall unless a policy balances it (`tests/test_world.py::test_a_robot_holding_the_home_pose_stands`). |
+| `"standing"` | The description's [standing pose](glossary.md#standing-pose), captured on the robot: every joint at its `standing_offset_rad` | Under an upright base the soles are pitched about 10° (left) and 17° (right). The robot lands on its sole edges, hops and tips over within about a second. |
 
-Use `pose="flat_feet"` for any task that starts on the ground. In both poses the base is upright and the lowest sole corner is 1 mm above the ground (`STANDING_CLEARANCE_M` in `src/humanoid_sim/train/scene.py`); on the current description the base starts about 0.95 m up in the standing pose and 0.90 m up in the flat-foot pose. Why the standing pose does not stand, and how the flat-foot pose is solved, is in [robot-model.md](robot-model.md#standing-on-the-ground).
+In both poses the base is upright and the lowest sole corner is 1 mm above the ground (`STANDING_CLEARANCE_M` in `src/humanoid_sim/model/poses.py`); on the current description the base starts 0.924 m up in the home pose and 0.945 m up in the standing pose. Where the home pose comes from, and why the standing pose does not stand, is in [robot-model.md](robot-model.md#standing-on-the-ground).
 
 The articulation's `data.default_joint_pos` holds the chosen pose (articulation joint order), so `mdp.reset_scene_to_default` puts the robot back into it. Take action offsets from `default_joint_pos`, as `examples/train_scene.py` does, instead of from `standing_offset_rad`; then the task follows whichever pose the scene was built with.
 
-`initial_pose(usd, robot="ethrc_v1", pose="standing")` returns the pose's joint positions `[22]` (description order, float64) and the base height at which its lowest sole corner touches the ground, without the clearance. To build your own scene config, `articulation_cfg(usd, props, ..., joint_pos=...)` in `src/humanoid_sim/physics/isaaclab.py` takes the initial joint positions in `props.names` order; without `joint_pos` it uses the standing pose.
+`initial_pose(usd, robot="ethrc_v1", pose="home")` returns the pose's joint positions `[22]` (description order, float64) and the base height at which its lowest sole corner touches the ground, without the clearance. To build your own scene config, `articulation_cfg(usd, props, ..., joint_pos=...)` in `src/humanoid_sim/physics/isaaclab.py` takes the initial joint positions in `props.names` order; without `joint_pos` it uses the standing pose.
 
 ## A minimal environment
 
-This env holds the flat-foot pose with policy actions as offsets, observes measured signals in the actor group and truth in the critic group, and randomizes friction, latency and inertia. It follows `tests/test_train_env.py` and `examples/train_scene.py`, and runs as written in the Isaac Lab image (change the device to `"cpu"` and the env count to a few on a machine without CUDA).
+This env holds the home pose with policy actions as offsets, observes measured signals in the actor group and truth in the critic group, and randomizes friction, latency and inertia. It follows `tests/test_train_env.py` and `examples/train_scene.py`, and runs as written in the Isaac Lab image (change the device to `"cpu"` and the env count to a few on a machine without CUDA).
 
 ```python
 from pathlib import Path
@@ -174,7 +174,7 @@ def critic_obs(env):
 
 
 def fallen(env):
-    return base_height(env) < 0.6  # the base starts about 0.90 m up
+    return base_height(env) < 0.6  # the base starts 0.924 m up
 
 
 @configclass
@@ -230,7 +230,7 @@ class StandCfg(ManagerBasedRLEnvCfg):
 
 usd = build_asset(Description.load("ethrc_v1"), load_profile("ethrc_v1"), Path("outputs/assets"))
 cfg = StandCfg()
-cfg.scene = robot_scene_cfg(4096, usd, ground_friction=0.0, pose="flat_feet")  # friction is randomized on the robot
+cfg.scene = robot_scene_cfg(4096, usd, ground_friction=0.0)  # home pose; friction is randomized on the robot
 cfg.sim = robot_sim_cfg(device="cuda:0")
 env = ManagerBasedRLEnv(cfg)
 ```
@@ -504,8 +504,8 @@ The plant's steady-state work (`submit`, `pre_physics`, `measured`, `truth`, `re
 
 ## Pitfalls
 
-- MJWarp uses the larger friction of the two shapes in contact. When `friction` is randomized on the robot, give the ground zero friction (`robot_scene_cfg(..., ground_friction=0.0)` or `rough_terrain_cfg(friction=0.0)`); with the profile's ground friction of 1.0 every robot value below 1 has no effect.
-- The default pose is the standing pose, which a rigid robot cannot hold on flat ground. Pass `pose="flat_feet"` for tasks that start on the ground, and take targets from `data.default_joint_pos`; see [The initial pose](#the-initial-pose).
+- The solver uses the larger friction of the two shapes in contact (MJWarp always, Kamino as the profile configures it). When `friction` is randomized on the robot, give the ground zero friction (`robot_scene_cfg(..., ground_friction=0.0)` or `rough_terrain_cfg(friction=0.0)`); with the profile's ground friction of 1.0 every robot value below 1 has no effect.
+- Take targets and action offsets from `data.default_joint_pos`, not from `standing_offset_rad`: the scene spawns in the home pose, and the standing pose, which a rigid robot cannot hold on flat ground, is only used when a scene asks for it. See [The initial pose](#the-initial-pose).
 - The encoder jitter is drawn on every `measured()` call, for `drive` and for `history`. Two observation terms that each call `measured()` see different jitter in the same step; read it once in one term, as `actor_obs` does.
 - `history[:, 0]` is one physics step older than `drive`. The history and the IMU are sampled at the start of each physics step, so after an env step their newest entries are from `plant.t_ns - 4 ms`, while `drive` is the state now. Use `history_ns` for the times.
 - After a reset, the history and IMU buffers keep the previous episode's values until they are overwritten; only `history_ns`, `sample_ns`, `stamp_ns`, `seq` and `count` mark them empty. The observation computed right after a reset, in the same env step, always has `count == 0`, and the first burst can take more than one policy period to arrive. Mask on `history_ns >= 0` and `stamp_ns >= 0` where it matters.

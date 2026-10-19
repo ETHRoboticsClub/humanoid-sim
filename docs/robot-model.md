@@ -5,7 +5,8 @@ humanoid-sim does not define the robot. Geometry, masses, joints, drives and the
 ```
 third_party/humanoid-urdf/ethrc_v1/            profiles/ethrc_v1.yaml
   actuators.yaml                                 model:    build choices (asset)
-  URDF_5_description/urdf/*.urdf, meshes/        physics:, devices:, sensors:  (spawn and run time)
+  URDF_6_description/urdf/*.urdf, meshes/        physics:, devices:, sensors:  (spawn and run time)
+  tools/urdf6_zero_rebase.json (home pose)
         |                                              |
         v                                              |
   Description             model/description.py         |
@@ -16,39 +17,40 @@ third_party/humanoid-urdf/ethrc_v1/            profiles/ethrc_v1.yaml
                                v
   build_asset             model/asset.py     ->  outputs/assets/ethrc_v1/<key>/usd/robot/robot.usda, asset.json
                                v
-  joint_properties        model/joint_properties.py, physics/isaaclab.py   (written at spawn)
+  joint_properties        physics/joint_properties.py, physics/isaaclab.py   (written at spawn)
 ```
 
 ## The description
 
 ### Files
 
-`Description` (`src/humanoid_sim/model/description.py`) maps the robot id `ethrc_v1` to the directory `third_party/humanoid-urdf/ethrc_v1/` and the ament package inside it, `URDF_5_description` (the `ROBOTS` table). It reads these files:
+`Description` (`src/humanoid_sim/model/description.py`) maps the robot id `ethrc_v1` to the directory `third_party/humanoid-urdf/ethrc_v1/` and the ament package inside it, `URDF_6_description` (the `ROBOTS` table). It reads these files:
 
 | File (under `ethrc_v1/`) | What humanoid-sim takes from it |
 |---|---|
 | `actuators.yaml` | Joint and drive inventory, signs, standing offsets, position limits, passive joint parameters, drive families, baseline drive gains, ankle linkage geometry. Its `schema` must be `ethrc-actuators/v1`; anything else raises. |
-| `URDF_5_description/urdf/URDF_5.urdf` | The URDF that `actuators.yaml` names in its `urdf:` key. Read for the description digest, the IMU mount (`Description.imu_mount`, the URDF's `imu_joint`) and the mirror map. |
-| `URDF_5_description/urdf/URDF_5_orca_hands.urdf` | The variant the profile selects (`model.urdf`) and the asset is built from: the same robot with ORCA hands, 58.68 kg against 55.68 kg for `URDF_5.urdf`. Controls builds its MJCF from this variant too. |
-| `URDF_5_description/meshes/` | Visual and collision meshes (STL), referenced as `package://URDF_5_description/meshes/...`. |
+| `URDF_6_description/urdf/URDF_6.urdf` | The URDF that `actuators.yaml` names in its `urdf:` key, and the one the profile selects (`model.urdf`) and the asset is built from: 60.15 kg, with the ORCA hands fixed at zero. Also read for the description digest, the IMU mount (`Description.imu_mount`, the URDF's `imu_joint`) and the mirror map. |
+| `URDF_6_description/urdf/URDF_6_orca_hands.urdf` | The same robot with the 34 hand joints movable. Welding them, as Controls' `--fixed-orca-hands` does, gives `URDF_6.urdf`. |
+| `URDF_6_description/meshes/` | Visual and collision meshes (STL), referenced as `package://URDF_6_description/meshes/...`. |
+| `tools/urdf6_zero_rebase.json` | The [home pose](#standing-on-the-ground): the joint angles of the CAD export (q = 0 in the export) in the URDF's coordinates. `Description.home_pose` reads it. |
 
-The two URDFs are not identical apart from the hands: 19 of the 22 joint origins differ, by up to 1.3 mm in position and up to 0.12 rad (7°) in orientation (`shoulder_abduction_l`; `leg_abduction_l` differs by 0.09 rad). `actuators.yaml` records that the standing sole alignment was matched on the ORCA-hands variant and does not carry over to the plain URDF (`standing_reference.alignment_source`).
+URDF_6 is the full-body CAD export rebased so that its zero is the calibration pose. Every part sits within 0.03 mm of where the previous model, URDF_5 with the ORCA hands, put it at the same joint angles, so the standing offsets and captures recorded on URDF_5 apply unchanged.
 
 ### Joint coordinates
 
 URDF joint zero is the [calibration pose](glossary.md#calibration-pose), the pose in which every drive reads zero. A one-to-one drive reads `sign · q`, with `q` in URDF radians and `sign` from the joint's `sign` field (`src/humanoid_sim/transmissions/drive_map.py`).
 
-The [standing offset](glossary.md#standing-offset) `standing_offset_rad` is the URDF angle of each joint in the robot's standing pose: `q_calibration = q_standing + standing_offset_rad`. humanoid-sim uses the vector of standing offsets as the standing pose. The mirror map mirrors about it, the ankle gains and ankle effort limits are evaluated there, and the articulation spawns there unless a scene asks for the flat-foot pose (see [Standing on the ground](#standing-on-the-ground)).
+The [standing offset](glossary.md#standing-offset) `standing_offset_rad` is the URDF angle of each joint in the robot's standing pose: `q_calibration = q_standing + standing_offset_rad`. humanoid-sim uses the vector of standing offsets as the standing pose. The mirror map mirrors about it, and the ankle gains and ankle effort limits are evaluated there. Robots spawn in the home pose by default instead, because the standing pose does not stand (see [Standing on the ground](#standing-on-the-ground)).
 
 A joint's `position_limit` is in standing-relative radians. `Description.calibration_travel(name)` turns it into the simulated range in URDF radians: both bounds plus the standing offset, then replaced on either side by `mechanical_stop_calibration_rad` where a stop is recorded. Only the knees have one, recorded as the hyperextension stop at 0.0 rad. A stop that lies inside the position limit raises, since the limit could never be reached. This is the rule of Controls' `ethrc_ssot/joint_travel.py`.
 
-The knee stop does not fit the simulated leg. The knee's `position_limit` is [-1.867, +0.28] rad standing-relative, but the stop replaces the upper bound, so the simulated knee travel is [-4.174, 0.0] rad (URDF) on the left and [-4.184, 0.0] rad on the right. In the URDF geometry the leg is straight (the angle between the `leg_flexion`, `knee` and `foot_pitch` joint frames, seen along the knee axis, reaches 180°) at about +0.41 rad standing-relative on the left and +0.43 rad on the right, that is URDF -1.90 and -1.88 rad. From there the simulated knee can bend backwards another 1.9 rad, about 110°, before it meets its joint limit. This is a description fact for humanoid-urdf to correct with a stop that matches the leg geometry (`mechanical_stop_calibration_rad` of `knee_l` and `knee_r`). humanoid-sim applies the travel the description gives and adds no stop of its own.
+The knee stop does not fit the simulated leg. The knee's `position_limit` is [-1.867, +0.28] rad standing-relative, but the stop replaces the upper bound, so the simulated knee travel is [-4.174, 0.0] rad (URDF) on the left and [-4.184, 0.0] rad on the right. In the URDF geometry the leg is straight (the angle between the `leg_flexion`, `knee` and `foot_pitch` joint frames, seen along the knee axis, reaches 180°) at about URDF -1.90 rad, the knee angle of the home pose, which is +0.41 rad standing-relative on the left and +0.42 rad on the right. That is 0.13 rad past the position limit's +0.28, so only the recorded stop lets the simulated knees reach the home pose. Controls supervises the drives against the position limit (`SafetyMonitor`, per `actuators.yaml`), so on the robot the home pose's knees would be out of range. From there the simulated knee can bend backwards another 1.9 rad, about 110°, before it meets its joint limit. This is a description fact for humanoid-urdf to correct with a stop that matches the leg geometry (`mechanical_stop_calibration_rad` of `knee_l` and `knee_r`). humanoid-sim applies the travel the description gives and adds no stop of its own.
 
-The ankle hinges get the box from their `position_limit`, ±30° about standing in pitch and in roll. The measured ankle range (`ankle_model.measured_range`) and the crank windows under `drives:` are not used as solver limits.
+The ankle hinges get the box from their `position_limit`, ±30° about standing in pitch and in roll. The crank windows under `drives:` are not used as solver limits.
 
 ### Base frame and forward direction
 
-The root body `base_link` carries the base frame. With the base upright, z points up and x is the lateral axis: the left foot sits at -x and the right foot at +x, which makes +y the robot's forward direction. Code that assumes x forward gets this robot wrong, so check the forward direction from the sole boxes. Their long axis runs heel to toe and lies along world y when the robot stands with an upright base (seen from above, within 3° to 5° of y in both poses of [Standing on the ground](#standing-on-the-ground)). That axis is the box x axis, the first column of `rotation` in `asset.json` `sole_boxes`. Its sign comes from a fit (it points to -y on the current asset), so it gives the fore-aft line only; which end is the toe follows from the foot positions above.
+The root body `base_link` carries the base frame. With the base upright, z points up and x is the lateral axis: the left foot sits at -x and the right foot at +x, which makes +y the robot's forward direction. Code that assumes x forward gets this robot wrong, so check the forward direction from the sole boxes. Their long axis runs heel to toe and lies along world y when the robot stands with an upright base (seen from above, along y in the home pose and within 4° of it in the standing pose). That axis is the box x axis, the first column of `rotation` in `asset.json` `sole_boxes`. Its sign comes from a fit (it points to -y on the current asset), so it gives the fore-aft line only; which end is the toe follows from the foot positions above.
 
 ### Joints, drives and families
 
@@ -81,14 +83,14 @@ EOF
 
 ### Identity and hash checks
 
-`Description.digest` is a sha256 over the file name and bytes of `URDF_5.urdf` and `actuators.yaml` (`description_digest` in `src/humanoid_sim/runtime/abi/plant_abi.py`). `Description.revision` is the git commit of the description root, or `None` outside a git checkout. `Description.identity()` returns the robot id, digest and revision. It is recorded in every `asset.json`, in the results of `replay`, `fit-delay` and `fit-passive`, and in the runtime segment's header and metadata.
+`Description.digest` is a sha256 over the file name and bytes of `URDF_6.urdf` and `actuators.yaml` (`description_digest` in `src/humanoid_sim/runtime/abi/plant_abi.py`). `Description.revision` is the git commit of the description root, or `None` outside a git checkout. `Description.identity()` returns the robot id, digest and revision. It is recorded in every `asset.json`, in the results of `replay`, `fit-delay` and `fit-passive`, and in the runtime segment's header and metadata.
 
 humanoid-sim has no expected digest built in. The digest is compared where two parties must agree on the description:
 
 - It is part of the asset key (see [Output directory](#output-directory-and-assetjson)). Every command that loads the robot (`replay`, `view-replay`, `view-runtime`, `bench`, `fit-delay`, `fit-passive`, `serve`) looks up the asset built from the current description and profile, and stops with `asset ... is not built for this description and profile` when there is none. `--usd PATH` (a global option, before the subcommand) skips that lookup.
 - The runtime host writes it into the segment header. A client that passes its own digest to `Segment.open` (`plant_abi.py`) refuses a segment whose digest differs ("the sim and the client read different descriptions"). See [controls-integration.md](controls-integration.md).
 
-The digest covers `URDF_5.urdf` and `actuators.yaml` only. The simulated variant `URDF_5_orca_hands.urdf` is covered by the asset key (through the prepared URDF), and the mesh files are covered by neither: after a change to an STL alone, rebuild with `humanoid-sim build-asset --force`.
+The digest covers `URDF_6.urdf` and `actuators.yaml` only. The home pose table is covered by the description's git revision, which is recorded next to the digest, and the mesh files by neither: after a change to an STL alone, rebuild with `humanoid-sim build-asset --force`.
 
 ### Using a different description root
 
@@ -118,10 +120,10 @@ Each prints the path of the USD. `--force` rebuilds an existing asset in place. 
 
 `PreparedUrdf.build` (`src/humanoid_sim/model/urdf.py`) applies the profile's modeling choices to the selected URDF, in this order. Every number comes from the meshes, the description or the profile.
 
-1. With `model.weld_unlisted_joints: true`, every movable joint without an entry in `actuators.yaml` becomes a fixed joint at its URDF zero. For the ORCA-hands variant those are the 34 hand joints (17 per hand), the same as Controls' `--fixed-orca-hands`. A listed joint missing from the URDF raises.
+1. With `model.weld_unlisted_joints: true`, every movable joint without an entry in `actuators.yaml` becomes a fixed joint at its URDF zero. `URDF_6.urdf` already has its 34 hand joints fixed, so nothing is welded; on `URDF_6_orca_hands.urdf` those 34 would be, the same as Controls' `--fixed-orca-hands`. A listed joint missing from the URDF raises.
 2. Each of the 22 joints becomes `revolute` (14 of them are `continuous` in the URDF) with the calibration travel as its range, the drive's peak `effort` and its `velocity`.
 3. Each foot gets a sole box. On the body carrying each `foot_roll` joint (profile `model.sole.joints`), the collision mesh with the lowest point, including meshes of links welded to that body, is the foot plate. `fit_sole_plate` fits a thin box to the plate's bottom face: it takes the vertices within 1.5 mm of the lowest point, fits the face normal by SVD, refits with the vertices within `face_depth_m` of the face (at most five rounds, until the set stops changing), and sizes the box from the face's extent along its principal in-plane axis and the axis across it. The box is `box_thickness_m` thick, its bottom face on the plate's bottom face, its x axis along the principal in-plane axis (the sole's long axis, heel to toe) and its z axis pointing up into the plate. The plate mesh's collision is removed and the box (`sole_box_l`, `sole_box_r`) is added. On the current description both boxes are about 250 x 90 x 5 mm. The algorithm is Controls' `build_mjcf.py` `sole_plate`, ported unchanged.
-4. The physics collides convex shapes, and the URDF converter turns each collision mesh into its convex hull (the smallest convex shape enclosing it). With `model.collision_hulls: per_body`, `merge_body_collisions` first combines every remaining collision mesh of a body and of the links welded to it into one mesh in the body frame, written as `collision/<body>.stl`, so each body gets one hull: 23 hulls plus the two sole boxes. With `per_mesh` each of the 120 remaining meshes becomes its own hull. Against the ground the hull of the union reaches exactly as far as the separate hulls did; between bodies it fills the gaps between parts. Primitive colliders (the sole boxes) are left alone.
+4. The physics collides convex shapes, and the URDF converter turns each collision mesh into its convex hull (the smallest convex shape enclosing it). With `model.collision_hulls: per_body`, `merge_body_collisions` first combines every remaining collision mesh of a body and of the links welded to it into one mesh in the body frame, written as `collision/<body>.stl`, so each body gets one hull: 23 hulls plus the two sole boxes. With `per_mesh` each of the 118 remaining meshes becomes its own hull. Against the ground the hull of the union reaches exactly as far as the separate hulls did; between bodies it fills the gaps between parts. Primitive colliders (the sole boxes) are left alone.
 5. With `--base-joints` only, three base joints are added above the root; see [Base joints](#base-joints).
 6. `package://` mesh URIs are resolved to absolute paths for the converter. A mesh from any other package raises.
 
@@ -172,7 +174,7 @@ outputs/assets/ethrc_v1/<key>/
   asset.json             provenance and build record
 ```
 
-`build_asset` returns the existing USD without rebuilding when `asset.json` is present and `--force` is not given. A change to `actuators.yaml`, to `URDF_5.urdf`, to the selected URDF variant or to anything in the profile's `model` block produces a new key, so the old asset stays on disk and commands ask for a build. Changes to the `physics`, `devices` and `sensors` blocks are applied at spawn or run time and need no rebuild. Mesh file contents are not part of the key, nor are build steps that leave the prepared URDF text unchanged (the converter settings, the authoring of contact excludes); after changing either, rebuild with `--force`.
+`build_asset` returns the existing USD without rebuilding when `asset.json` is present and `--force` is not given. A change to `actuators.yaml`, to `URDF_6.urdf`, to the selected URDF variant or to anything in the profile's `model` block produces a new key, so the old asset stays on disk and commands ask for a build. Changes to the `physics`, `devices` and `sensors` blocks are applied at spawn or run time and need no rebuild. Mesh file contents are not part of the key, nor are build steps that leave the prepared URDF text unchanged (the converter settings, the authoring of contact excludes); after changing either, rebuild with `--force`.
 
 | `asset.json` field | Content |
 |---|---|
@@ -186,7 +188,7 @@ outputs/assets/ethrc_v1/<key>/
 | `contact_excludes`, `self_collision_excludes` | the filtered pairs as USD prim paths |
 | `self_collision_sets` | body to set name |
 
-The training scene and the runtime host read `sole_boxes` from it (through `asset_meta`) to place the robot on the ground and to compute the flat-foot pose. To find the current asset from Python:
+The training scene and the runtime host read `sole_boxes` from it (through `asset_meta`) to place the robot on the ground. To find the current asset from Python:
 
 ```python
 import json
@@ -204,7 +206,7 @@ Code that is handed a USD path directly (`--usd`, `robot_scene_cfg(num_envs, usd
 
 ## Per-joint solver properties
 
-The USD carries geometry, inertia and joint ranges. The remaining per-joint values are written to the articulation when it is spawned, through Isaac Lab's `ImplicitActuatorCfg` in `articulation_cfg` (`src/humanoid_sim/physics/isaaclab.py`). `joint_properties` (`src/humanoid_sim/model/joint_properties.py`) computes them from the plant (`PlantCore`, `src/humanoid_sim/core.py`) and the description:
+The USD carries geometry, inertia and joint ranges. The remaining per-joint values are written to the articulation when it is spawned, through Isaac Lab's `ImplicitActuatorCfg` in `articulation_cfg` (`src/humanoid_sim/physics/isaaclab.py`). `joint_properties` (`src/humanoid_sim/physics/joint_properties.py`) computes them from the plant (`PlantCore`, `src/humanoid_sim/core.py`) and the description:
 
 | Property | Value | Source |
 |---|---|---|
@@ -213,10 +215,10 @@ The USD carries geometry, inertia and joint ranges. The remaining per-joint valu
 | `friction` | Coulomb friction of an enabled drive (Nm). | `actuators.yaml` `friction` |
 | `viscous_friction` | Passive viscous damping (Nm s/rad), separate from the PD damping. | `actuators.yaml` `damping` |
 | `joint_effort_limit` | One-to-one joints: the drive's peak `effort`. Ankle hinges: the torque both cranks reach at their peak at the standing pose (per hinge, the sum over the two cranks of the Jacobian entry's magnitude times the crank's peak), so the solver's clamp never binds before the drive model's own torque envelope does. | `actuators.yaml` `effort` |
-| initial position | The standing pose, or the flat-foot pose when a training scene asks for it (`robot_scene_cfg(..., pose="flat_feet")`). | `standing_offset_rad` |
+| initial position | The home pose, or the standing pose when a scene asks for it (`robot_scene_cfg(..., pose="standing")`). A bare `articulation_cfg` without `joint_pos` spawns in the standing pose. | `tools/urdf6_zero_rebase.json`, `standing_offset_rad` |
 | range | Calibration travel, built into the USD. | `position_limit`, `mechanical_stop_calibration_rad` |
 
-The solver gains are written at reset only; during a step the plant shapes the position target so that the solver applies the drive model's torque ([drives.md](drives.md)). How stiff the joint stops are is set by the profile's `physics.joint_limits`. The runtime host changes one value while running: when a one-to-one drive is disabled, its joint's Coulomb friction becomes the family's `backdrive_torque` until the drive is enabled again (`RuntimeHost._set_drives_off`, `src/humanoid_sim/runtime/host.py`); the ankle hinges keep theirs. Training can randomize several of these values per environment, see [training.md](training.md).
+The solver gains are written at reset only; during a step the plant shapes the position target so that the solver applies the drive model's torque ([drives.md](drives.md)). How stiff the joint stops are is set by the profile's `physics.mjwarp.joint_limits` on MJWarp; on Kamino they are hard constraints. The runtime host changes one value while running: when a one-to-one drive is disabled, its joint's Coulomb friction becomes the family's `backdrive_torque` until the drive is enabled again (`RuntimeHost._set_drives_off`, `src/humanoid_sim/runtime/host.py`); the ankle hinges keep theirs. Training can randomize several of these values per environment, see [training.md](training.md).
 
 To print the values as the solver receives them (core dependencies only):
 
@@ -232,7 +234,7 @@ EOF
 
 ## Host kinematics
 
-`RobotKinematics` (`src/humanoid_sim/model/kinematics.py`) loads the asset USD into a Newton model on the CPU and evaluates forward kinematics: body poses from joint positions, with the root fixed at `base_height_m`. It has no solver and steps nothing. The replay viewer, the flat-foot pose and the model checks use it. It needs `uv sync --extra newton` and a built asset.
+`RobotKinematics` (`src/humanoid_sim/model/kinematics.py`) loads the asset USD into a Newton model on the CPU and evaluates forward kinematics: body poses from joint positions, with the root fixed at `base_height_m`. It has no solver and steps nothing. The viewers, the spawn height of each pose and the model checks use it. It needs `uv sync --extra newton` and a built asset.
 
 ```python
 import torch
@@ -250,52 +252,35 @@ The robot can be put on flat ground in two poses. Both have the base upright and
 
 | Pose | Joints | Soles under an upright base | Base height |
 |---|---|---|---|
-| `standing` | The description's standing offsets | Pitched by about 10° (left) and 17° (right) | 0.945 m |
-| `flat_feet` | The flat-foot pose, derived below | Level, both at one height | 0.900 m |
+| `home` (default) | The CAD's export pose, from `tools/urdf6_zero_rebase.json` | Level, both at one height | 0.924 m |
+| `standing` | The description's standing offsets, captured on the robot | Pitched by about 10° (left) and 17° (right) | 0.945 m |
 
-Under an upright base the description's [standing pose](glossary.md#standing-pose) does not put the soles flat on the ground. A robot that holds it rigidly (every drive in JVPT at the [baseline gains](glossary.md#baseline-gains), targets at the standing pose) lands on the sole edges, saturates the ankle cranks at their 30 Nm peak, hops and tips over within about a second. Held the same way, the [flat-foot pose](glossary.md#flat-foot-pose) stands. The physics test `test_a_robot_holding_the_flat_foot_pose_stands` (`tests/test_world.py`) checks that after 1.5 s the base is still upright and above 0.85 m, with the weight on the ground. Holding a pose is not balancing, though: with no randomization on flat ground the robot stays up for about 10 s, then a slow sideways lean builds and it tips over at about 13 s. Anything longer needs a controller.
+The [home pose](glossary.md#home-pose) is the pose the CAD model is exported in: legs straight, arms down, feet flat. humanoid-urdf rebases the export so that the URDF's zero is the calibration pose and records, per joint, the export's angle at the calibration pose (`q_star_rad`); `Description.home_pose` is its negative, in URDF radians. The table is symmetric: both knees at -1.900 rad, both `foot_pitch` at +0.329 rad, the rolls at 0.
 
-### The flat-foot pose
+The [standing pose](glossary.md#standing-pose) was captured on the real robot, and it is neither symmetric nor flat-footed. Its knees are 0.41 to 0.42 rad more bent than at home, its hips 0.18 to 0.19 rad more flexed, and left and right differ (`foot_pitch` 0.391 against 0.260 rad, `hip_yaw` -0.013 against +0.094 rad). Under an upright base its soles do not lie flat. A robot that holds it rigidly (every drive in JVPT at the [baseline gains](glossary.md#baseline-gains), targets at the standing pose) lands on the sole edges, saturates the ankle cranks at their 30 Nm peak, hops and tips over within about a second.
 
-`flat_foot_pose(usd, desc, soles)` (`src/humanoid_sim/model/kinematics.py`) derives the pose from the standing pose by forward kinematics on the built asset, with the base upright:
+Held the same way, the home pose stands. The physics test `test_a_robot_holding_the_home_pose_stands` (`tests/test_world.py`) checks that after 1.5 s the base is still upright and above 0.85 m, with the weight on the ground. Held for 60 s of plant time on flat ground with no randomization (on CUDA, and for 30 s on Warp's CPU device), the base stayed at 0.923 m and within 0.6° of upright, without drifting. A rigid pose is still not balance: a push or rough terrain that it cannot absorb makes it fall, and a controller has to prevent that.
 
-1. For each foot it solves `foot_pitch` and `foot_roll` so that the sole box lies level. On the current description that pitches the left ankle by +0.17 rad and the right by +0.30 rad; the roll changes by under 0.01 rad.
-2. The sole that now hangs lower (the left, by 15 mm) is raised to the other's height by bending that leg at `leg_flexion` and `knee`, with its ankle solved again so the sole stays level and keeps its fore-aft position along its long axis.
-3. Every other joint keeps its standing offset. A pose outside a joint's travel raises `ValueError`.
+`tests/test_physics.py` `test_home_pose_levels_both_soles_at_one_height` checks on the built asset that the home pose's soles are level within 0.1°, their bottoms within 0.5 mm of each other, every joint inside its travel, and that the standing pose's soles are not level.
 
-The joints that move, on the current description (rad, URDF):
+The home pose is a starting pose. The standing pose stays the reference for everything else: the standing-relative coordinates Controls works in (`q - standing_offset_rad`), the ankle hinges' solver gains and effort limits (taken through the crank Jacobian at standing) and the mirror map's center.
 
-| Joint | Standing | Flat-foot | Change |
-|---|---|---|---|
-| `leg_flexion_l` | +0.183 | +0.268 | +0.085 |
-| `knee_l` | -2.307 | -2.474 | -0.167 (more flexion) |
-| `foot_pitch_l` | +0.391 | +0.649 | +0.258 (0.17 to level the sole, the rest for the knee bend) |
-| `foot_roll_l` | +0.004 | -0.006 | -0.010 |
-| `foot_pitch_r` | +0.260 | +0.559 | +0.299 |
-| `foot_roll_r` | +0.008 | +0.010 | +0.002 |
-
-`tests/test_physics.py` `test_flat_foot_pose_levels_both_soles_at_one_height` checks that both soles are level, their bottoms within 0.5 mm of each other, and that only these leg joints move.
-
-The flat-foot pose is a starting pose. The description's standing pose stays the reference for everything else: the standing-relative coordinates Controls works in (`q - standing_offset_rad`), the ankle hinges' solver gains and effort limits (taken through the crank Jacobian at standing), the mirror map's center, and the runtime's start pose for each session.
-
-`standing_base_height(usd, desc, soles, q=None)` returns the height of an upright base at which joint positions `q` (`[J]`, description joint order; the standing pose when omitted) touch the ground with their lowest sole-box corner. Both functions need Newton (`uv sync --extra newton` on the host) and a built asset. `soles` is the `sole_boxes` list of the asset's `asset.json`:
+`standing_base_height(usd, desc, soles, q=None)` (`src/humanoid_sim/model/kinematics.py`) returns the height of an upright base at which joint positions `q` (`[J]`, description joint order; the standing pose when omitted) touch the ground with their lowest sole-box corner. It needs Newton (`uv sync --extra newton` on the host) and a built asset. `initial_pose` (`src/humanoid_sim/model/poses.py`) returns a named pose with its height:
 
 ```python
-from humanoid_sim.model.asset import asset_meta
-from humanoid_sim.model.kinematics import flat_foot_pose, standing_base_height
+from humanoid_sim.model.poses import initial_pose
 
-soles = asset_meta(usd)["sole_boxes"]                 # usd and desc as in the asset.json snippet above
-q = flat_foot_pose(usd, desc, soles)                  # [22] rad, description joint order
-height = standing_base_height(usd, desc, soles, q)    # 0.900 m; without q, the standing pose: 0.945 m
+q, height = initial_pose(usd, pose="home")   # [22] rad, description joint order; 0.924 m
+q, height = initial_pose(usd, pose="standing")   # 0.945 m
 ```
 
 ### Selecting a pose
 
-Training: `robot_scene_cfg(num_envs, usd, pose="flat_feet")` (`src/humanoid_sim/train/scene.py`) spawns every env in the flat-foot pose. The pose becomes the articulation's default joint positions (`robot.data.default_joint_pos`), so `reset_scene_to_default` and a task's action offsets use it. `pose="standing"` is the default. The pose is computed when the config is built, which takes several seconds. `humanoid_sim.train.scene.initial_pose(usd, robot, pose)` returns the joint positions and base height of a pose, for a task that writes its own resets. `POSES` lists the names, `("standing", "flat_feet")`; any other name raises `ValueError`.
+Training: `robot_scene_cfg(num_envs, usd, pose=...)` (`src/humanoid_sim/train/scene.py`) spawns every env in the named pose, `"home"` by default. The pose becomes the articulation's default joint positions (`robot.data.default_joint_pos`), so `reset_scene_to_default` and a task's action offsets use it. `initial_pose(usd, robot, pose)` (`src/humanoid_sim/model/poses.py`, also importable from `humanoid_sim.train.scene`) returns the joint positions and base height of a pose, for a task that writes its own resets. `POSES` lists the names, `("home", "standing")`; any other name raises `ValueError`.
 
-Runtime: the mailbox command `RESET` with `{"pose": "flat_feet"}` puts the joints in the flat-foot pose, and in a free session the base upright at that pose's height (see [runtime.md](runtime.md#reset-1)). The host computes the pose on the first such reset and keeps it for later ones. That computation takes several seconds (about 10 s on a laptop CPU), during which the host neither steps nor publishes a heartbeat; the period then counts as late. A session still starts in the standing pose.
+Runtime: each session starts in the home pose. The mailbox command `RESET` with `{"pose": "home"}` or `{"pose": "standing"}` puts the joints in that pose, and in a free session the base upright at that pose's height (see [runtime.md](runtime.md#reset-1)). The host computes both poses at startup.
 
-The training scene places the base 1 mm (`STANDING_CLEARANCE_M`) above the pose's height, and so does the runtime host in a free session. A suspended session welds the base 0.3 m above the standing pose's height, with the feet in the air.
+The training scene places the base 1 mm (`STANDING_CLEARANCE_M`) above the pose's height, and so does the runtime host in a free session. A suspended session welds the base 0.3 m above the home pose's height, with the feet in the air.
 
 ## Mirror map
 
@@ -314,7 +299,7 @@ The training scene places the base 1 mm (`STANDING_CLEARANCE_M`) above the pose'
 
 With the current description every drive sign is -1.
 
-The robot is not mirror-symmetric. Left and right standing offsets differ (`foot_pitch_l` stands at 0.391 rad, `foot_pitch_r` at 0.260 rad), left and right leg axes differ by a few degrees, and at the standing pose the feet sit several centimetres from each other's mirror image. `MirrorMap.standing_asymmetry_m` is the largest mismatch of a joint frame at the standing pose, 0.058 m on the current description. Because each side mirrors about its own standing pose, the mirror of the standing pose is the standing pose, but a mirrored state is the other side doing the mirrored motion with its own geometry, which is close to the geometric mirror image without being equal to it. The map reads `URDF_5.urdf`, the URDF `actuators.yaml` names, and not the ORCA-hands variant the asset is built from; the signs are the same for both.
+The standing pose is not mirror-symmetric. Left and right standing offsets differ (`foot_pitch_l` stands at 0.391 rad, `foot_pitch_r` at 0.260 rad), and at the standing pose the feet sit several centimetres from each other's mirror image. `MirrorMap.standing_asymmetry_m` is the largest mismatch of a joint frame at the standing pose, 0.060 m on the current description. Because each side mirrors about its own standing pose, the mirror of the standing pose is the standing pose, but a mirrored state is the other side doing the mirrored motion with its own geometry, which is close to the geometric mirror image without being equal to it. The map reads `URDF_6.urdf`, the URDF `actuators.yaml` names and the asset is built from.
 
 ```python
 import numpy as np
@@ -338,7 +323,7 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 |---|---|---|
 | `schema` | nothing | Format tag, `humanoid-sim-profile/v1`. Not checked. |
 | `robot` | `load_profile` | Must equal the robot id (`--robot`, default `ethrc_v1`). |
-| `model.urdf` | `PreparedUrdf` | URDF variant to build, relative to `URDF_5_description/`. |
+| `model.urdf` | `PreparedUrdf` | URDF variant to build, relative to `URDF_6_description/`. |
 | `model.weld_unlisted_joints` | `PreparedUrdf.weld_unlisted` | Weld movable joints that `actuators.yaml` does not list. Default `false`. |
 | `model.sole.joints` | `PreparedUrdf.add_sole_boxes` | Side to joint; the joint's child body gets the sole box. |
 | `model.sole.box_thickness_m` | `fit_sole_plate` | Sole box thickness (0.005). |
@@ -349,13 +334,16 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `model.ground_friction` | `SimCore`, `robot_scene_cfg` | Friction of the flat ground (1.0) unless the caller overrides it or passes a terrain. See [world.md](world.md). |
 | `devices.encoders.<family>.counts_per_revolution` | `DriveReporting` | Output encoder resolution in counts per revolution: the integer units the drive reports position in. The training plant quantizes measured feedback with it; in the runtime, Controls' fake drive does that. |
 | `physics.period_ns` | `SimCore`, `RobotPlant`, `robot_sim_cfg` | Physics step, 4000000 ns (4 ms, 250 Hz). `replay --period-ms` sets it for replays. |
-| `physics.solver` | nothing | Records MJWarp, the only solver. |
-| `physics.integrator` | `simulation_cfg` | MJWarp integrator, `implicitfast`. `replay --integrator` overrides it. |
-| `physics.cone` | `simulation_cfg` | Friction cone model, `pyramidal`. |
-| `physics.iterations`, `physics.ls_iterations` | `simulation_cfg` | Solver and line-search iteration limits. |
-| `physics.njmax`, `physics.nconmax` | `simulation_cfg` | MJWarp buffers: constraint rows per world (a maximum) and contacts per world (an average; the pool is shared by all worlds). |
+| `physics.solver` | `solver_settings` | The Newton solver that steps the robot: `mjwarp` (the default) or `kamino` (beta). The global option `--solver` and `robot_sim_cfg(solver=...)` override it; the solver needs its own block below. |
 | `physics.self_collision` | `SimCore`, `robot_scene_cfg` | Self-collision on the spawned articulation. |
-| `physics.joint_limits` | `apply_joint_limits` | `mujoco`: MuJoCo's own joint-limit constraint, as Controls' MJCF has it. `newton`: Newton's force-space default, softer for the legs. |
+| `physics.mjwarp.integrator` | `solver_cfg` | MJWarp integrator, `implicitfast`. `replay --integrator` overrides it. |
+| `physics.mjwarp.cone` | `solver_cfg` | Friction cone model, `pyramidal`. |
+| `physics.mjwarp.iterations`, `.ls_iterations` | `solver_cfg` | Solver and line-search iteration limits. |
+| `physics.mjwarp.njmax`, `.nconmax` | `solver_cfg` | MJWarp buffers: constraint rows per world (a maximum) and contacts per world (an average; the pool is shared by all worlds). |
+| `physics.mjwarp.joint_limits` | `apply_joint_limits` | `mujoco`: MuJoCo's own joint-limit constraint, as Controls' MJCF has it. `newton`: Newton's force-space default, softer for the legs. |
+| `physics.kamino.integrator` | `solver_cfg` | `euler`, the only one allowed: `moreau` needs Kamino's own collision detector, which is not used here. |
+| `physics.kamino.iterations` | `solver_cfg` | Iteration limit of Kamino's P-ADMM dynamics solver. |
+| `physics.kamino.max_contacts_per_world` | `solver_cfg` | Contact buffer per world (128, an estimate); Newton drops contacts beyond it. |
 | `sensors.imu.*` | `ImuDeliveryCfg.from_profile` | IMU sample period, burst delivery timing and noise densities. See [sensors.md](sensors.md). |
 | `solver_gains` | nothing | Records that the solver PD is the description's baseline gains. |
 
@@ -382,10 +370,11 @@ A measured value reaches the simulation through humanoid-urdf. Find where the fa
 | Joint Coulomb friction or viscous damping | `actuators.yaml` `joints.<joint>.friction` / `damping`, with `damping_friction_source` | Solver friction and passive damping at spawn |
 | Back-driving torque of a disabled drive | `actuators.yaml` `families.<family>.backdrive_torque` | Friction of a disabled drive's joint in the runtime host |
 | Rotor inertia | `joints.<joint>.armature` (ankles: `armature_joint`) | Solver armature |
-| A joint's zero or the standing pose | `joints.<joint>.standing_offset_rad` and `standing_reference`; follow `ethrc_v1/AGENTS.md` in humanoid-urdf (never move URDF joint origins for this) | Standing pose, flat-foot pose, simulated travel, ankle gains and effort limits, mirror center, spawn height |
+| A joint's zero or the standing pose | `joints.<joint>.standing_offset_rad` and `standing_reference`; follow `ethrc_v1/AGENTS.md` in humanoid-urdf (never move URDF joint origins for this) | Standing pose, simulated travel, ankle gains and effort limits, mirror center |
+| The CAD (a new export) | humanoid-urdf re-exports it, rebases it to the calibration pose with `tools/match_calibration_zero.py` and records the angles in `tools/urdf6_zero_rebase.json` (see `ethrc_v1/tools/README.md` there) | Geometry, masses, the home pose and its spawn height |
 | Joint travel or a mechanical stop | `joints.<joint>.position_limit` (standing-relative) or `mechanical_stop_calibration_rad` (URDF radians) | Joint range in the USD |
 | Drive gains, peak torque, torque-speed curve | `baseline_position_gains`, `effort`, `families.<family>.torque_speed` | Solver PD, effort limits, torque envelope |
-| A link's mass, inertia or geometry | The link's `<inertial>`, `<origin>` or meshes in the URDF. humanoid-urdf edits the calibration-coordinate sources in `ethrc_v1/tools/calibration_model/` and publishes them with `tools/sync_calibration_model.py` (see `ethrc_v1/tools/README.md` there). humanoid-sim simulates `URDF_5_orca_hands.urdf`, so the change must reach that file. | Mass, inertia and collision shapes in the USD |
+| A link's mass, inertia or geometry | The link's `<inertial>`, `<origin>` or meshes in the URDF. humanoid-urdf edits the calibration-coordinate sources in `ethrc_v1/tools/calibration_model/` and publishes them with `tools/sync_calibration_model.py` (see `ethrc_v1/tools/README.md` there). humanoid-sim simulates `URDF_6.urdf`, so the change must reach that file. | Mass, inertia and collision shapes in the USD |
 | Encoder resolution, IMU timing or noise | `profiles/ethrc_v1.yaml` in this repository | Training plant feedback, IMU delivery |
 
 Then:

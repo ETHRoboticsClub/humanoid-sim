@@ -8,7 +8,7 @@ Frames and units are as in [drives.md](drives.md#frames): drive quantities in ra
 
 ## Drive feedback
 
-`DriveFeedback` in `src/humanoid_sim/core.py` is the physical feedback of every drive, `[E, D]`. It is what Controls' fake bank accepts (`fake_bank_feedback`).
+`DriveFeedback` in `src/humanoid_sim/devices/feedback.py` is the physical feedback of every drive, `[E, D]`. It is what Controls' fake bank accepts (`fake_bank_feedback`).
 
 | Field | Unit | Meaning |
 |---|---|---|
@@ -39,7 +39,7 @@ The velocity is coarse: a HEJ90 joint moving slower than half a step, 1.92 rad/s
 
 ```python
 import torch
-from humanoid_sim.core import DriveFeedback
+from humanoid_sim.devices.feedback import DriveFeedback
 from humanoid_sim.devices.reporting import DriveReporting
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
@@ -223,4 +223,4 @@ The sole plates are the [sole boxes](glossary.md#sole-box), the box contact prim
 | `plate_face_height_span_m` | m | Height difference across the plate's bottom face (0 when it lies flat) |
 | `face_xy_m` | m, `[4, 2]` | The plate's bottom-face corners, world x and y |
 
-In the description's standing pose under an upright base the plates are tilted (about 10° on the left, 17° on the right); in the flat-foot pose they lie flat. See [robot-model.md](robot-model.md#standing-on-the-ground).
+In the description's standing pose under an upright base the plates are tilted (about 10° on the left, 17° on the right); in the home pose they lie flat. See [robot-model.md](robot-model.md#standing-on-the-ground).

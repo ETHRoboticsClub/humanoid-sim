@@ -1,6 +1,6 @@
 # Testing and GPU runs
 
-The test suite has three tiers. Contract tests run natively on any machine. Physics tests step Isaac Lab and MJWarp, and run in the Docker image on Warp's CPU device. A few tests need CUDA and run only on a GPU, which in this repository means a SkyPilot node. This page describes the suite, the CI jobs, and how to run work on a GPU. [getting-started.md](getting-started.md) covers installing uv, building the image and the robot asset.
+The test suite has three tiers. Contract tests run natively on any machine. Physics tests step Isaac Lab and a Newton solver (MJWarp, and Kamino for two of them), and run in the Docker image on Warp's CPU device. A few tests need CUDA and run only on a GPU, which in this repository means a SkyPilot node. This page describes the suite, the CI jobs, and how to run work on a GPU. [getting-started.md](getting-started.md) covers installing uv, building the image and the robot asset.
 
 ## Test layout
 
@@ -18,21 +18,22 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 | `test_imu_delivery.py` | IMU sampling on the sensor clock, burst delivery, bias, misalignment and noise, per-env reset | |
 | `test_mirror.py` | The left/right mirror map against URDF forward kinematics | |
 | `test_model_build.py` | The prepared URDF: inventory, welds, limits, sole boxes, digest, body tree, collision meshes, self-collision sets, base joints | |
-| `test_physics.py` | The built asset: mass and bodies and the flat-foot pose (both soles level and at one height) with host kinematics; on MJWarp, holding a standing pose, base joints following a prescribed yaw, raw IMU samples, CUDA-graph step against eager, a joint pushed into its stop staying there | 5 tests `physics`, 2 unmarked (see below) |
+| `test_physics.py` | The built asset: mass and bodies and the home pose (both soles level and at one height) with host kinematics; on MJWarp, holding a standing pose, base joints following a prescribed yaw, raw IMU samples, CUDA-graph step against eager, the waist pushed into its stop staying there; standing and the stop on both MJWarp and Kamino | 7 tests `physics`, 2 unmarked (see below) |
 | `test_plant_log.py` | `RobotPlant.log` writing signals at plant time | |
 | `test_randomization.py` | Randomization specs: parsing, selection (bodies, drives, an IMU axis), composition, scopes, levels, reproducibility | |
 | `test_reporting.py` | Drive reporting in encoder counts, velocity and torque, against values Controls' fake drive tests pin | |
 | `test_runtime_abi.py` | The runtime segment: C header against the Python layout (needs a C compiler), identity checks, torn-record rejection, mailbox and demand records, concurrent reads | |
 | `test_runtime_host.py` | `humanoid-sim serve` end to end with the test as client: round trip, prescribed pose, detach and next session, demand intake, joint disturbance, back-driven disabled drive | `physics` |
 | `test_runtime_view.py` | `view-runtime` recording frames from a segment that a stand-in host writes through the ABI (no physics; needs Newton, Rerun and the built asset) | |
+| `test_solvers.py` | Solver selection from the profile and its overrides, and the errors for unknown or unconfigured solvers | |
 | `test_supports.py` | Gantry programs, and rope tension and cable length on the robot | 2 tests `physics` |
 | `test_sysid.py` | The passive-fit search space and CMA-ES | |
 | `test_train_env.py` | The Train-Time API in a manager-based Isaac Lab environment with two robots | `physics` |
-| `test_world.py` | Rough terrain under the feet, force pushes, and a robot holding the flat-foot pose standing on flat ground | `physics` |
+| `test_world.py` | Rough terrain under the feet, force pushes, and a robot holding the home pose standing on flat ground | `physics` |
 
 A test skips when something it needs is missing: Isaac Lab (`isaaclab_newton`), Newton, the Rerun SDK, scipy, the built robot asset, the captures, CUDA or a C compiler. The skip reason names it, and pytest prints every reason at the end of the run (`-ra` is set in `pyproject.toml`). A physics run without the built assets therefore passes with most tests skipped; read the skip summary after a physics run.
 
-Three tests need the built plain asset but carry no marker, because they use host kinematics (Newton, with the `newton` extra) and step no physics: `test_kinematic_model_mass_and_bodies` and `test_flat_foot_pose_levels_both_soles_at_one_height` in `test_physics.py`, and `test_view_runtime_records_frames_from_a_segment` in `test_runtime_view.py`, which also needs the Rerun SDK (the `viz` extra). They run natively once the asset exists in `outputs/assets/`, and skip without it. None of them runs in CI: the `cpu-contracts` job has no asset, and the `isaaclab-image` job selects `-m physics`. All three run under a plain `pytest` in the image and in the `e2e` task.
+Three tests need the built plain asset but carry no marker, because they use host kinematics (Newton, with the `newton` extra) and step no physics: `test_kinematic_model_mass_and_bodies` and `test_home_pose_levels_both_soles_at_one_height` in `test_physics.py`, and `test_view_runtime_records_frames_from_a_segment` in `test_runtime_view.py`, which also needs the Rerun SDK (the `viz` extra). They run natively once the asset exists in `outputs/assets/`, and skip without it. None of them runs in CI: the `cpu-contracts` job has no asset, and the `isaaclab-image` job selects `-m physics`. All three run under a plain `pytest` in the image and in the `e2e` task.
 
 ## Markers
 
@@ -40,7 +41,7 @@ The markers are declared in `pyproject.toml`.
 
 | Marker | Meaning | Where it runs |
 |---|---|---|
-| `physics` | Steps physics through Isaac Lab and MJWarp | The image, or a GPU node set up by `sky/setup.sh` |
+| `physics` | Steps physics through Isaac Lab and a Newton solver (MJWarp; the standing and joint-stop tests also run on Kamino) | The image, or a GPU node set up by `sky/setup.sh` |
 | `data` | Reads the `exc-*` captures | Anywhere the captures are; one of the three is also `physics` |
 
 The `data` tests look for captures in the directory named by `HUMANOID_SIM_DATASETS`. When it is unset they use `datasets/humanoid-v1` next to the checkout (`../datasets/humanoid-v1` from the repository root). Without captures the `data` tests skip.
@@ -55,7 +56,7 @@ The `data` tests look for captures in the directory named by `HUMANOID_SIM_DATAS
 | Image, everything | see below, `pytest` | Every test the machine can run |
 | GPU node | the `e2e` SkyPilot task | Everything, including the CUDA and capture tests |
 
-Natively you need the `dev` and `newton` extras (`uv sync --extra dev --extra newton`); without `newton`, the tests that need scipy or Newton skip. On an Apple silicon Mac with the `newton` and `viz` extras and the plain asset built, the native command reports 75 passed and 20 deselected (the `physics` and `data` tests) in about 20 s.
+Natively you need the `dev` and `newton` extras (`uv sync --extra dev --extra newton`); without `newton`, the tests that need scipy or Newton skip. On an Apple silicon Mac with the `newton` and `viz` extras and the plain asset built, the native command reports 77 passed and 22 deselected (the `physics` and `data` tests) in about 20 s.
 
 The image includes pytest (`docker/Dockerfile` installs `pytest>=9,<10`). Build both robot assets first, or most physics tests skip. This is the `isaaclab-image` CI job's sequence:
 
@@ -73,7 +74,7 @@ docker run --rm -v "$PWD":/workspace/humanoid-sim -v "$(dirname "$PWD")/datasets
   -w /workspace/humanoid-sim humanoid-sim:dev pytest
 ```
 
-To run one file or one test, name it: `pytest tests/test_world.py` or `pytest -k cable`. On Warp's CPU device the physics tests are slow. In the arm64 image on an Apple silicon Mac, with both assets built and Warp's kernel cache kept on a volume (`-v hsim-warp-cache:/cache`), the whole suite gives 91 passed and 4 skipped in about 3 minutes: the CUDA-graph test, and three capture tests that need the captures mounted. Without the cache volume every run compiles the kernels again and takes longer.
+To run one file or one test, name it: `pytest tests/test_world.py` or `pytest -k cable`. On Warp's CPU device the physics tests are slow. In the arm64 image on an Apple silicon Mac, with both assets built and Warp's kernel cache kept on a volume (`-v hsim-warp-cache:/cache`), the whole suite gives 95 passed and 4 skipped in about 3 minutes: the CUDA-graph test, and three capture tests that need the captures mounted. Without the cache volume every run compiles the kernels again and takes longer.
 
 Two tests exercise CUDA graphs, the captured GPU step the runtime host uses: `test_physics.py::test_cuda_graph_step_matches_eager` skips without CUDA, and `test_runtime_host.py::test_demand_intake_queues_what_the_record_says` checks the graphed demand intake only when CUDA is available. The `e2e` task runs both on a GPU.
 

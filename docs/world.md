@@ -6,7 +6,7 @@ Around the robot, humanoid-sim has a ground (a flat plane, or in training a heig
 |---|---|---|---|
 | Flat ground | default; friction set by `ground_friction` | profile friction | profile friction |
 | Heightfield terrain | `robot_scene_cfg(..., terrain=...)` | none | none |
-| Start pose | `robot_scene_cfg(..., pose=...)`: `"standing"` (default) or `"flat_feet"` | the capture's first measured drive positions | standing; `RESET` can pick `flat_feet` |
+| Start pose | `robot_scene_cfg(..., pose=...)`: `"home"` (default) or `"standing"` | the capture's first measured drive positions | home; `RESET` can pick `standing` |
 | Free base | always | none | `--support free` |
 | Fixed base | none | `--base fixed` | `--support suspended` (default) |
 | Base orientation prescribed through base joints | none | `--base yaw` (default) or `--base orientation` | none |
@@ -72,14 +72,14 @@ from humanoid_sim.train.scene import robot_scene_cfg
 from humanoid_sim.world.terrain import heightfield_terrain_cfg, rough_terrain_cfg
 
 # The stock mix, with the terrain at zero friction because the robot's friction is randomized:
-cfg.scene = robot_scene_cfg(4096, usd, terrain=rough_terrain_cfg(friction=0.0), pose="flat_feet")
+cfg.scene = robot_scene_cfg(4096, usd, terrain=rough_terrain_cfg(friction=0.0))
 
 # A custom mix of heightfield tiles:
 terrain = heightfield_terrain_cfg({
     "slopes": HfPyramidSlopedTerrainCfg(proportion=0.5, slope_range=(0.0, 0.1), platform_width=2.0),
     "waves": HfWaveTerrainCfg(proportion=0.5, amplitude_range=(0.0, 0.03), num_waves=4),
 }, friction=0.0)
-cfg.scene = robot_scene_cfg(4096, usd, terrain=terrain, pose="flat_feet")
+cfg.scene = robot_scene_cfg(4096, usd, terrain=terrain)
 ```
 
 `cfg` and `usd` are the env config and robot USD from [training.md](training.md#a-minimal-environment). When a terrain is given, the scene has no flat ground and `ground_friction` is ignored.
@@ -103,7 +103,7 @@ A support holds the robot up while it is tested, the way the real robot hangs in
 
 ### Free
 
-No support: the robot stands or falls on the ground. Training scenes are free (`robot_scene_cfg` has no fixed-base option). A training robot spawns upright in the pose that `robot_scene_cfg`'s `pose` names; held rigidly, the default standing pose tips over within a second and the flat-foot pose stands for about 10 s ([training.md](training.md#the-initial-pose)). In the runtime, `--support free` starts the robot standing on the ground; until a client attaches, the host holds it in its start pose, base included ([runtime.md](runtime.md)).
+No support: the robot stands or falls on the ground. Training scenes are free (`robot_scene_cfg` has no fixed-base option). A training robot spawns upright in the pose that `robot_scene_cfg`'s `pose` names; held rigidly, the default home pose stands still on flat ground and the standing pose tips over within a second ([training.md](training.md#the-initial-pose)). In the runtime, `--support free` starts the robot standing on the ground; until a client attaches, the host holds it in its start pose, base included ([runtime.md](runtime.md)).
 
 ### Suspended (fixed base)
 
