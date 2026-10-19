@@ -53,22 +53,33 @@ devices:
 
 physics:
   period_ns: 4000000          # 250 Hz
+  # Newton solver stepping the robot: mjwarp or kamino. Each has its own block below.
   solver: mjwarp
-  integrator: implicitfast    # implicit in the damping: stable with the stiff ankle-crank PD at 4 ms
-  cone: pyramidal
-  iterations: 100
-  ls_iterations: 50
-  # MJWarp buffers. nconmax is a per-world average (the contact pool is shared by all worlds), njmax a
-  # per-world maximum. With per-body hulls a standing robot needs about 30 contacts, a fallen one up to
-  # about 390 constraint rows. MJWarp prints an overflow warning when either runs out.
-  njmax: 400
-  nconmax: 64
   self_collision: true
-  # Joint stops: MuJoCo's own limit constraint (solref 0.02 s, damping ratio 1), as Controls' MJCF has it.
-  # Newton's force-space default (1e4 Nm/rad) is softer for the legs: 40 Nm on the hip abduction sinks 11 mrad
-  # past its stop (under 2 mrad here), and Controls' range survey found that stop 4 mrad out. The real stops'
-  # stiffness is not measured (modeled).
-  joint_limits: mujoco
+  mjwarp:
+    integrator: implicitfast  # implicit in the damping: stable with the stiff ankle-crank PD at 4 ms
+    cone: pyramidal
+    iterations: 100
+    ls_iterations: 50
+    # Buffers. nconmax is a per-world average (the contact pool is shared by all worlds), njmax a per-world
+    # maximum. With per-body hulls a standing robot needs about 30 contacts, a fallen one up to about 390
+    # constraint rows. MJWarp prints an overflow warning when either runs out.
+    njmax: 400
+    nconmax: 64
+    # Joint stops: MuJoCo's own limit constraint (solref 0.02 s, damping ratio 1), as Controls' MJCF has it.
+    # Newton's force-space default (1e4 Nm/rad) is softer for the legs: 40 Nm on the hip abduction sinks 11 mrad
+    # past its stop (under 2 mrad here), and Controls' range survey found that stop 4 mrad out. The real stops'
+    # stiffness is not measured (modeled).
+    joint_limits: mujoco
+  # Kamino (beta in Newton 1.6): maximal coordinates, hard joint-limit and contact constraints, P-ADMM forward
+  # dynamics, contacts from Newton's collision pipeline. Contact friction mixes by the larger coefficient, as
+  # MJWarp does. Not yet checked against MJWarp or the captures (modeled).
+  kamino:
+    integrator: euler  # moreau needs Kamino's own collision detector
+    iterations: 100
+    # Contact buffer per world, the same for every world; Newton drops contacts beyond it. An estimate (about
+    # 100 contacts for a fallen robot, from MJWarp's constraint rows), not counted on Kamino.
+    max_contacts_per_world: 128
 
 sensors:
   imu:

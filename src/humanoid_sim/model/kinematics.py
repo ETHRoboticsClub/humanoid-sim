@@ -1,7 +1,7 @@
 """Robot kinematics on the host: the asset USD in a Newton model, forward kinematics only.
 
 Used by viewers (body poses from joint positions) and model checks. There is no solver here: physics runs
-only through Isaac Lab on MJWarp (``physics/isaaclab.py``). MuJoCo never steps the robot in this repo.
+only through Isaac Lab on Newton's solvers (``physics/isaaclab.py``). MuJoCo never steps the robot in this repo.
 """
 
 from __future__ import annotations

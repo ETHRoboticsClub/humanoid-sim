@@ -45,7 +45,7 @@ where = ["src"]
 testpaths = ["tests"]
 addopts = "-ra"
 markers = [
-    "physics: steps physics through Isaac Lab / MJWarp (run in the Isaac Lab image)",
+    "physics: steps physics through Isaac Lab / Newton (run in the Isaac Lab image)",
     "data: needs datasets/humanoid-v1 exc-* captures (HUMANOID_SIM_DATASETS)",
 ]
 

@@ -1,4 +1,4 @@
-"""Physics on the built robot asset through Isaac Lab / MJWarp (Warp CPU device). Runs in the Isaac Lab image."""
+"""Physics on the built robot asset through Isaac Lab / Newton (Warp CPU device). Runs in the Isaac Lab image."""
 
 import json
 from pathlib import Path
@@ -36,12 +36,13 @@ def test_kinematic_model_mass_and_bodies(usd):
 
 
 @pytest.mark.physics
-def test_holds_standing_on_fixed_base(usd, request):
+@pytest.mark.parametrize("solver", ["mjwarp", "kamino"])
+def test_holds_standing_on_fixed_base(usd, request, solver):
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.devices.demand import DriveDemand
     from humanoid_sim.sim import SimCore
 
-    sim = SimCore(usd, device="cpu", fixed_base=True)
+    sim = SimCore(usd, device="cpu", fixed_base=True, solver=solver)
     request.addfinalizer(sim.close)
     q, qd = sim.joint_state()
     p = sim.plant
@@ -138,13 +139,15 @@ def test_cuda_graph_step_matches_eager(usd):
         assert (seq[:8].diff() == -1).all() and gyro[:8].std() > 0  # samples delivered, noise drawn per replay
 
 
-def test_a_joint_pushed_into_its_stop_stays_at_it(usd):
-    """MuJoCo's own limit constraint (profile joint_limits: mujoco): 40 Nm into the hip abduction stop sinks less
-    than 2 mrad past it (Newton's force-space default lets it sink 11 mrad)."""
+@pytest.mark.physics
+@pytest.mark.parametrize("solver", ["mjwarp", "kamino"])
+def test_a_joint_pushed_into_its_stop_stays_at_it(usd, solver):
+    """40 Nm into the hip abduction stop sinks less than 2 mrad past it: MuJoCo's own limit constraint on MJWarp
+    (profile joint_limits: mujoco; Newton's force-space default lets it sink 11 mrad), the hard stop on Kamino."""
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.sim import SimCore
 
-    sim = SimCore(usd, device="cpu", fixed_base=True)
+    sim = SimCore(usd, device="cpu", fixed_base=True, solver=solver)
     try:
         j = list(sim.desc.joints).index("leg_abduction_l")
         lo, hi = sim.desc.calibration_travel("leg_abduction_l")

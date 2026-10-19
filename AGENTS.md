@@ -1,6 +1,6 @@
 # humanoid-sim
 
-The robot below Controls: drives, ankle mechanism and body, on Isaac Lab 3.0 / Newton (MJWarp).
+The robot below Controls: drives, ankle mechanism and body, on Isaac Lab 3.0 / Newton (MJWarp or Kamino).
 
 ## Boundaries
 
@@ -10,10 +10,10 @@ The robot below Controls: drives, ankle mechanism and body, on Isaac Lab 3.0 / N
   output is physical drive-output position, velocity, applied torque and demanded torque. Controller
   behaviour (standing frame, ankle targets, Madgwick, slew/blend, trip rule, policy contract) belongs
   to Controls, not here.
-- **Physics is Isaac Lab on Newton's MJWarp solver, only.** Never set `use_mujoco_cpu`: MuJoCo C does not
-  step the robot here, on any device. Newton on the host is for kinematics (viewers, model checks), and
-  MuJoCo only for cross-checking kinematics against Controls' MJCF. Physics runs on CUDA; Warp's CPU
-  device is for tests only.
+- **Physics is Isaac Lab on a Newton solver, only:** MJWarp (the profile's default) or Kamino (beta),
+  selected by name. Never set `use_mujoco_cpu`: MuJoCo C does not step the robot here, on any device.
+  Newton on the host is for kinematics (viewers, model checks), and MuJoCo only for cross-checking
+  kinematics against Controls' MJCF. Physics runs on CUDA; Warp's CPU device is for tests only.
 
 ## Rules
 
@@ -34,7 +34,7 @@ The robot below Controls: drives, ankle mechanism and body, on Isaac Lab 3.0 / N
 
 `src/humanoid_sim/`: `model/` (description → prepared URDF → USD asset; host kinematics; left/right mirror map),
 `timing/`, `devices/`, `transmissions/`, `core.py` (plant), `sensors/` (IMU delivery), `randomization/`, `world/`
-(terrains, pushes, gantry), `physics/isaaclab.py` (MJWarp), `sim.py` (SimCore: replays, benchmarks, the runtime),
+(terrains, pushes, gantry), `physics/isaaclab.py` (MJWarp, Kamino), `sim.py` (SimCore: replays, benchmarks, the runtime),
 `train/` (Train-Time API: the plant in an Isaac Lab scene and action term), `runtime/` (real-time host and the
 segment ABI), `replay/`, `sysid/` (fits to captures), `signals/` (Rerun), `bench/`, `cli.py`.
 Spikes live in `spikes/` and are not imported by the package.

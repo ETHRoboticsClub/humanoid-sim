@@ -127,7 +127,8 @@ class _Disturbance:
 
 class RuntimeHost:
     def __init__(self, segment: str | Path, usd: Path, *, device: str = "cuda:0", robot: str = "ethrc_v1",
-                 support: str = "suspended", bus_period_ns: int = 1_500_000, client_timeout_ns: int = 500_000_000,
+                 solver: str | None = None, support: str = "suspended", bus_period_ns: int = 1_500_000,
+                 client_timeout_ns: int = 500_000_000,
                  seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True):
         from humanoid_sim.model.asset import asset_meta
         from humanoid_sim.model.kinematics import standing_base_height
@@ -144,7 +145,7 @@ class RuntimeHost:
         self.standing_height_m = standing_base_height(usd, desc, meta["sole_boxes"]) + STANDING_CLEARANCE_M
         height = self.standing_height_m + (0.3 if support == "suspended" else 0.0)
         cuda = str(device).startswith("cuda")
-        self.sim = SimCore(usd, device=device, robot=robot, fixed_base=support == "suspended",
+        self.sim = SimCore(usd, device=device, robot=robot, solver=solver, fixed_base=support == "suspended",
                            base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
                            compile=compile and cuda)
         self.device = torch.device(device)
@@ -243,11 +244,11 @@ class RuntimeHost:
     # -- descriptor and geometry ------------------------------------------------------------------
 
     def _descriptor(self, support: str) -> dict:
-        phys = self.sim.profile["physics"]
         return {
             "robot": self.desc.robot, "drives": self.drives, "joints": self.joints, "support": support,
             "bodies": list(self.robot.body_names), "description": self.desc.identity(),
-            "physics": {"engine": "isaaclab/mjwarp", "period_ns": self.period_ns, "integrator": phys["integrator"]},
+            "physics": {"engine": f"isaaclab/{self.sim.solver}", "period_ns": self.period_ns,
+                        "integrator": self.sim.integrator},
             "units": {"drive": "physical drive-output frame (crank angle for ankle cranks), SI",
                       "joint": "URDF joint coordinates", "imu": "sensor frame, rad/s and m/s^2 (specific force)",
                       "time": "sim_time_ns and IMU stamps are plant time; *_mono_ns is CLOCK_MONOTONIC"},
