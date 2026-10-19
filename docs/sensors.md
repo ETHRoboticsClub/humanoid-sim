@@ -1,23 +1,14 @@
 # Sensors
 
-The plant reports three kinds of signal: [drive feedback](glossary.md#feedback) per drive, in the physical
-drive-output frame; raw IMU samples, as the robot's host receives them; and [truth](glossary.md#truth), which
-covers joint state, base pose and twist, contacts, and in the runtime the sole plates.
+The plant reports three kinds of signal: [drive feedback](glossary.md#feedback) per drive, in the physical drive-output frame; raw IMU samples, as the robot's host receives them; and [truth](glossary.md#truth), which covers joint state, base pose and twist, contacts, and in the runtime the sole plates.
 
-Drive feedback and IMU samples are measured signals, the ones the real robot has. Truth exists only in simulation.
-A policy's inputs are built from measured signals only: `RobotPlant.measured()` in training and the feedback region
-in the runtime. Truth is for critics, rewards, terminations and tests. The plant has no sensor the robot lacks, and
-processing on top of the raw signals, such as orientation filtering (Madgwick) and the standing frame, belongs to the
-consumer, which on the robot is Controls.
+Drive feedback and IMU samples are measured signals, the ones the real robot has. Truth exists only in simulation. A policy's inputs are built from measured signals only: `RobotPlant.measured()` in training and the feedback region in the runtime. Truth is for critics, rewards, terminations and tests. The plant has no sensor the robot lacks, and processing on top of the raw signals, such as orientation filtering (Madgwick) and the standing frame, belongs to the consumer, which on the robot is Controls.
 
-Frames and units are as in [drives.md](drives.md#frames): drive quantities in rad, rad/s and Nm at the drive output
-(crank angle for the ankle cranks), joint quantities in URDF joint coordinates, all times in integer nanoseconds on
-the plant clock.
+Frames and units are as in [drives.md](drives.md#frames): drive quantities in rad, rad/s and Nm at the drive output (crank angle for the ankle cranks), joint quantities in URDF joint coordinates, all times in integer nanoseconds on the plant clock.
 
 ## Drive feedback
 
-`DriveFeedback` in `src/humanoid_sim/core.py` is the physical feedback of every drive, `[E, D]`. It is what Controls'
-fake bank accepts (`fake_bank_feedback`).
+`DriveFeedback` in `src/humanoid_sim/core.py` is the physical feedback of every drive, `[E, D]`. It is what Controls' fake bank accepts (`fake_bank_feedback`).
 
 | Field | Unit | Meaning |
 |---|---|---|
@@ -26,28 +17,17 @@ fake bank accepts (`fake_bank_feedback`).
 | `applied_torque_nm` | Nm | Torque the drive applied during the step, after the envelope and cap, time-weighted |
 | `demanded_torque_nm` | Nm | Control-law output during the step, before any clip, time-weighted |
 
-`PlantCore.feedback(q, qd)` builds it from the joint state after a solver step: position and velocity through the
-drive map, torques from the step just taken (`PlantCore.last`). Physical feedback has no encoder offset and no
-quantization.
+`PlantCore.feedback(q, qd)` builds it from the joint state after a solver step: position and velocity through the drive map, torques from the step just taken (`PlantCore.last`). Physical feedback has no encoder offset and no quantization.
 
 ### Reporting in training
 
-A real drive does not report its physical state exactly. It reports whole encoder counts, a velocity measured over
-its controller sample, and a torque in whole mNm. In the runtime, Controls' `Epos4Slave` (its simulated EPOS4 drive)
-turns the plant's physical feedback into the drive's process data, so the runtime publishes physical feedback and
-leaves reporting to Controls; applying it in both places would quantize twice. Training has no Controls in the loop,
-so `DriveReporting` in `src/humanoid_sim/devices/reporting.py` mirrors `Epos4Slave` (`setFeedback`,
-`reportedPosition`, `reportedVelocityMilliRpm`, `torqueEstimate_mNm`):
+A real drive does not report its physical state exactly. It reports whole encoder counts, a velocity measured over its controller sample, and a torque in whole mNm. In the runtime, Controls' `Epos4Slave` (its simulated EPOS4 drive) turns the plant's physical feedback into the drive's process data, so the runtime publishes physical feedback and leaves reporting to Controls; applying it in both places would quantize twice. Training has no Controls in the loop, so `DriveReporting` in `src/humanoid_sim/devices/reporting.py` mirrors `Epos4Slave` (`setFeedback`, `reportedPosition`, `reportedVelocityMilliRpm`, `torqueEstimate_mNm`):
 
-- Position: whole encoder counts of the drive's reading (the truth plus its `encoder_offset`),
-  `round(position · cpr / 2π)`, plus a jitter of -1, 0 or +1 count drawn uniformly on every read, converted back with
-  `counts · 2π / cpr`. `cpr` is the encoder's counts per revolution.
-- Velocity: whole counts per controller sample, `round(velocity · cpr / 2π · T)` with `T = 1 / controller_rate_hz`,
-  converted back to rad/s.
+- Position: whole encoder counts of the drive's reading (the truth plus its `encoder_offset`), `round(position · cpr / 2π)`, plus a jitter of -1, 0 or +1 count drawn uniformly on every read, converted back with `counts · 2π / cpr`. `cpr` is the encoder's counts per revolution.
+- Velocity: whole counts per controller sample, `round(velocity · cpr / 2π · T)` with `T = 1 / controller_rate_hz`, converted back to rad/s.
 - Applied torque: rounded to whole mNm. The demanded torque passes through unchanged.
 
-Rounding is half away from zero, as C's `lround` does. The resulting resolution (controller rate 2500 Hz for every
-family, so `T` = 400 µs):
+Rounding is half away from zero, as C's `lround` does. The resulting resolution (controller rate 2500 Hz for every family, so `T` = 400 µs):
 
 | Family | Encoder (counts/rev) | Position step | Velocity step |
 |---|---|---|---|
@@ -85,10 +65,7 @@ out = reporting.report(fb)
 | `history_ns` | `[E, H]` | Plant time of each history entry; -1 for none yet |
 | `imu` | `ImuSamples` or None | The raw IMU samples received so far (below) |
 
-A history entry is taken at the start of each physics step: the state at that time and the torques of the step that
-just ended. `history[:, 0]` is therefore one physics period older than `drive`. The jitter is drawn on every call,
-for the history too, so two calls in the same step give different jitter. With `reporting=False` the feedback is
-unquantized but still includes the encoder offset.
+A history entry is taken at the start of each physics step: the state at that time and the torques of the step that just ended. `history[:, 0]` is therefore one physics period older than `drive`. The jitter is drawn on every call, for the history too, so two calls in the same step give different jitter. With `reporting=False` the feedback is unquantized but still includes the encoder offset.
 
 ```python
 plant = env.action_manager.get_term("drives").plant
@@ -101,43 +78,28 @@ gyro = m.imu.gyro[:, 0]           # [E, 3] rad/s, newest delivered sample
 
 ## IMU
 
-The robot's IMU is an MTi-610. `ImuDelivery` in `src/humanoid_sim/sensors/imu.py` turns the ideal readings of Isaac
-Lab's IMU sensor into raw samples as the robot's host receives them.
+The robot's IMU is an MTi-610. `ImuDelivery` in `src/humanoid_sim/sensors/imu.py` turns the ideal readings of Isaac Lab's IMU sensor into raw samples as the robot's host receives them.
 
 ### Mount and ideal input
 
-The sensor sits at the URDF's `imu_joint` (`Description.imu_mount`, `imu_sensor_cfg` in
-`src/humanoid_sim/physics/isaaclab.py`): parent `base_link`, offset (0, 0.04, 0.07) m, rotation rpy
-(π/2, π/2, 0) rad. Its frame is the chip frame given by that joint. Isaac Lab's IMU sensor provides, at each step
-boundary, the angular velocity (rad/s) and the specific force (m/s²) in the sensor frame. Specific force is what an
-accelerometer measures: at rest it reads gravity's reaction, 9.81 m/s² pointing up.
+The sensor sits at the URDF's `imu_joint` (`Description.imu_mount`, `imu_sensor_cfg` in `src/humanoid_sim/physics/isaaclab.py`): parent `base_link`, offset (0, 0.04, 0.07) m, rotation rpy (π/2, π/2, 0) rad. Its frame is the chip frame given by that joint. Isaac Lab's IMU sensor provides, at each step boundary, the angular velocity (rad/s) and the specific force (m/s²) in the sensor frame. Specific force is what an accelerometer measures: at rest it reads gravity's reaction, 9.81 m/s² pointing up.
 
-The plant advances the IMU at the start of every physics step, to that step's start time (`SimCore.step`,
-`RobotPlant.pre_physics`). What a consumer reads after a step therefore holds the samples measured and delivered up
-to the start of that step; a sample or burst that falls inside the step shows up one step later.
+The plant advances the IMU at the start of every physics step, to that step's start time (`SimCore.step`, `RobotPlant.pre_physics`). What a consumer reads after a step therefore holds the samples measured and delivered up to the start of that step; a sample or burst that falls inside the step shows up one step later.
 
 ### Sampling and errors
 
-The sensor takes a sample every `sample_period_ns` = 2.74 ms (about 365 Hz) on its own clock, with a random phase per
-env drawn at reset. Each sample's value is linearly interpolated between the two step-boundary readings around it.
+The sensor takes a sample every `sample_period_ns` = 2.74 ms (about 365 Hz) on its own clock, with a random phase per env drawn at reset. Each sample's value is linearly interpolated between the two step-boundary readings around it.
 
-Each sample and axis gets Gaussian white noise with `σ = density · √(sample rate)`. The densities are the MTi-610
-datasheet figures (from Controls' `ethrc_ssot/imu_sensors.py`), set in `profiles/ethrc_v1.yaml` under `sensors.imu`:
+Each sample and axis gets Gaussian white noise with `σ = density · √(sample rate)`. The densities are the MTi-610 datasheet figures (from Controls' `ethrc_ssot/imu_sensors.py`), set in `profiles/ethrc_v1.yaml` under `sensors.imu`:
 
 | Channel | Density | σ per sample |
 |---|---|---|
 | Gyro | 1.2217e-4 rad/s/√Hz (0.007 °/s/√Hz) | 2.33e-3 rad/s |
 | Accelerometer | 5.884e-4 m/s²/√Hz (60 µg/√Hz) | 0.0112 m/s² |
 
-Each env also has a gyro bias `gyro_bias` (rad/s), an accelerometer bias `accel_bias` (m/s²) and a `misalignment`
-(a rotation vector in rad: the sensor's rotation in its mount). A sample is `R(misalignment) · ideal + bias + noise`.
-In training the three come from the `imu_gyro_bias`, `imu_accel_bias` and `imu_misalignment`
-[randomization](training.md#randomization) parameters and stay constant through an episode; there is no bias
-drift. In the runtime they are zero unless an `imu_bias` or `imu_spike` fault is injected (see
-[drives.md](drives.md#physical-faults)).
+Each env also has a gyro bias `gyro_bias` (rad/s), an accelerometer bias `accel_bias` (m/s²) and a `misalignment` (a rotation vector in rad: the sensor's rotation in its mount). A sample is `R(misalignment) · ideal + bias + noise`. In training the three come from the `imu_gyro_bias`, `imu_accel_bias` and `imu_misalignment` [randomization](training.md#randomization) parameters and stay constant through an episode; there is no bias drift. In the runtime they are zero unless an `imu_bias` or `imu_spike` fault is injected (see [drives.md](drives.md#physical-faults)).
 
-Each of the three is a vector over the sensor axes `x`, `y` and `z`. A spec draws every axis unless its `select`
-key, a regular expression over the axis names, picks some. The dict form takes `select` as `ParamSpec` does:
+Each of the three is a vector over the sensor axes `x`, `y` and `z`. A spec draws every axis unless its `select` key, a regular expression over the axis names, picks some. The dict form takes `select` as `ParamSpec` does:
 
 ```python
 from humanoid_sim.train.plant import TrainPlantCfg
@@ -152,23 +114,17 @@ Each selected axis gets its own draw; `"per_target": False` shares one draw acro
 
 ### Delivery
 
-On the robot the samples wait in a serial buffer and reach the host in [bursts](glossary.md#imu-burst). The plant
-reproduces the delivery seen in the robot's captures:
+On the robot the samples wait in a serial buffer and reach the host in [bursts](glossary.md#imu-burst). The plant reproduces the delivery seen in the robot's captures:
 
-- Measured samples wait in a pending buffer of 16 samples (`ImuDeliveryCfg.pending`); if it fills, the oldest
-  pending sample is dropped.
-- A burst arrives every `burst_period_ns`, drawn uniformly from 13.9 to 17.6 ms for each burst, starting from a random
-  phase per env. It delivers every pending sample measured by the burst time.
-- Delivered samples get host-receipt stamps: the oldest sample of a burst is stamped at the burst time and each newer
-  one `in_burst_spacing_ns` = 13 µs later.
+- Measured samples wait in a pending buffer of 16 samples (`ImuDeliveryCfg.pending`); if it fills, the oldest pending sample is dropped.
+- A burst arrives every `burst_period_ns`, drawn uniformly from 13.9 to 17.6 ms for each burst, starting from a random phase per env. It delivers every pending sample measured by the burst time.
+- Delivered samples get host-receipt stamps: the oldest sample of a burst is stamped at the burst time and each newer one `in_burst_spacing_ns` = 13 µs later.
 
 A burst carries 5 to 7 samples, and a consumer that reads "the latest sample" sees it up to one burst period late.
 
 ### `ImuSamples`
 
-The last H delivered samples per env, newest first. H is `ImuDeliveryCfg.history`: 16 by default, which is what
-training keeps, and 32 in the runtime, which builds its `SimCore` with `imu_history=abi.IMU_SAMPLES` so the
-feedback region's 32 slots can fill. Slots not yet filled have a `sample_ns` and `stamp_ns` of -1.
+The last H delivered samples per env, newest first. H is `ImuDeliveryCfg.history`: 16 by default, which is what training keeps, and 32 in the runtime, which builds its `SimCore` with `imu_history=abi.IMU_SAMPLES` so the feedback region's 32 slots can fill. Slots not yet filled have a `sample_ns` and `stamp_ns` of -1.
 
 | Field | Shape | Unit | Meaning |
 |---|---|---|---|
@@ -179,20 +135,14 @@ feedback region's 32 slots can fill. Slots not yet filled have a `sample_ns` and
 | `seq` | `[E, H]` | count | Per-env sequence number of the sample (see below) |
 | `count` | `[E]` | count | Samples delivered since the last reset |
 
-The tensors are updated in place every step; clone what you keep. A reset (`ImuDelivery.reset`) empties the
-buffers, sets `count` to 0 and draws new sample and burst phases. What happens to `seq` depends on the front end:
+The tensors are updated in place every step; clone what you keep. A reset (`ImuDelivery.reset`) empties the buffers, sets `count` to 0 and draws new sample and burst phases. What happens to `seq` depends on the front end:
 
 - Training: every env reset restarts `seq`, so the first sample after it is number 1.
-- Runtime: `RESET` and a new session call `ImuDelivery.reset(..., keep_seq=True)`, and `PRESCRIBE_POSE` does not
-  reset the IMU at all, so sequence numbers keep rising for as long as the host runs. A client that remembers the
-  last `seq` it saw and takes only newer samples (as Controls' `new_imu_samples` does) keeps receiving samples
-  across a reset.
+- Runtime: `RESET` and a new session call `ImuDelivery.reset(..., keep_seq=True)`, and `PRESCRIBE_POSE` does not reset the IMU at all, so sequence numbers keep rising for as long as the host runs. A client that remembers the last `seq` it saw and takes only newer samples (as Controls' `new_imu_samples` does) keeps receiving samples across a reset.
 
 ### Ideal or real IMU
 
-`ImuDelivery.set_noise(enabled)` turns the white noise off (an ideal sensor) or back on, in place, so it also works
-inside a captured CUDA graph. The sample clock, interpolation, burst delivery and any bias stay as they are. The
-runtime exposes it as the `SET_FIDELITY` mailbox command; every session starts with `"real"`:
+`ImuDelivery.set_noise(enabled)` turns the white noise off (an ideal sensor) or back on, in place, so it also works inside a captured CUDA graph. The sample clock, interpolation, burst delivery and any bias stay as they are. The runtime exposes it as the `SET_FIDELITY` mailbox command; every session starts with `"real"`:
 
 ```python
 from humanoid_sim.runtime.abi import plant_abi as abi
@@ -204,9 +154,7 @@ print(seg.wait_ack(seq))  # (0, 'imu ideal')
 
 ## What the runtime publishes
 
-Every physics period, paused or not, the runtime host writes the feedback region of the segment
-(`RuntimeHost._publish_feedback` in `src/humanoid_sim/runtime/host.py`; layout in
-`src/humanoid_sim/runtime/abi/plant_abi.py`):
+Every physics period, paused or not, the runtime host writes the feedback region of the segment (`RuntimeHost._publish_feedback` in `src/humanoid_sim/runtime/host.py`; layout in `src/humanoid_sim/runtime/abi/plant_abi.py`):
 
 | Field | Meaning |
 |---|---|
@@ -248,14 +196,11 @@ The other feedback fields (lateness, pause) and the session protocol are in [run
 | `drive` | `DriveFeedback [E, D]` | | Physical drive feedback: no offset, no quantization |
 | `contact_forces_w` | `[E, B, 3]` or None | N | Net contact force on each body, world frame (None without the contact sensor) |
 
-The base frame is that of `base_link`. With the base upright its x axis is lateral (the left foot at -x), y points
-forward and z up; see [robot-model.md](robot-model.md#base-frame-and-forward-direction).
+The base frame is that of `base_link`. With the base upright its x axis is lateral (the left foot at -x), y points forward and z up; see [robot-model.md](robot-model.md#base-frame-and-forward-direction).
 
 ### Runtime truth region
 
-The runtime host writes the truth region every `truth_every` steps (default 5, so every 20 ms; `serve
---truth-every`) and after every mailbox command it applies (`ACK_OK`); its `sim_time_ns` says when
-(`RuntimeHost._publish_truth`). It is the oracle for tests; a controller must not read it.
+The runtime host writes the truth region every `truth_every` steps (default 5, so every 20 ms; `serve --truth-every`) and after every mailbox command it applies (`ACK_OK`); its `sim_time_ns` says when (`RuntimeHost._publish_truth`). It is the oracle for tests; a controller must not read it.
 
 | Field | Unit | Meaning |
 |---|---|---|
@@ -267,8 +212,7 @@ The runtime host writes the truth region every `truth_every` steps (default 5, s
 | `mass_kg` | kg | Total robot mass |
 | `sole[2]` | | The two sole plates, left then right |
 
-The sole plates are the [sole boxes](glossary.md#sole-box), the box contact primitives fitted under each foot (on
-the body carrying each foot_roll joint; see [robot-model.md](robot-model.md#the-prepared-urdf)). Per plate:
+The sole plates are the [sole boxes](glossary.md#sole-box), the box contact primitives fitted under each foot (on the body carrying each foot_roll joint; see [robot-model.md](robot-model.md#the-prepared-urdf)). Per plate:
 
 | Field | Unit | Meaning |
 |---|---|---|
@@ -279,5 +223,4 @@ the body carrying each foot_roll joint; see [robot-model.md](robot-model.md#the-
 | `plate_face_height_span_m` | m | Height difference across the plate's bottom face (0 when it lies flat) |
 | `face_xy_m` | m, `[4, 2]` | The plate's bottom-face corners, world x and y |
 
-In the description's standing pose under an upright base the plates are tilted (about 10° on the left, 17° on the
-right); in the flat-foot pose they lie flat. See [robot-model.md](robot-model.md#standing-on-the-ground).
+In the description's standing pose under an upright base the plates are tilted (about 10° on the left, 17° on the right); in the flat-foot pose they lie flat. See [robot-model.md](robot-model.md#standing-on-the-ground).

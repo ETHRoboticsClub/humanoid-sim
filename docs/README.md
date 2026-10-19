@@ -1,7 +1,6 @@
 # humanoid-sim documentation
 
-Start with [overview.md](overview.md) for how the parts fit together, then pick the page for what you are doing.
-[glossary.md](glossary.md) defines the terms the pages use.
+Start with [overview.md](overview.md) for how the parts fit together, then pick the page for what you are doing. [glossary.md](glossary.md) defines the terms the pages use.
 
 ## By role
 

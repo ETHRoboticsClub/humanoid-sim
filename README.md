@@ -1,8 +1,7 @@
 <h1 align="center">humanoid-sim</h1>
 
 <p align="center">
-  The ETHRC humanoid from the EtherCAT drives down: 22 drives, the ankle linkage and the body,<br/>
-  simulated on Isaac Lab 3.0 and Newton's MJWarp solver, for training, for Controls and for checking against the robot.
+  The ETHRC humanoid from the EtherCAT drives down: 22 drives, the ankle linkage and the body,<br/> simulated on Isaac Lab 3.0 and Newton's MJWarp solver, for training, for Controls and for checking against the robot.
 </p>
 
 <p align="center">
@@ -15,10 +14,7 @@
 
 ![Six simulated robots on rough terrain, each holding its pose while waving its arms](docs/images/scene-hero.png)
 
-The sim stops where Controls starts. It takes what the EtherCAT master sends each drive and returns what each
-drive and the IMU report back, with the drives' own control law, torque limits, latency, encoder resolution and
-IMU burst timing in between. Robot facts come from the `humanoid-urdf` description that Controls pins, so the
-sim and the controller always describe the same robot.
+The sim stops where Controls starts. It takes what the EtherCAT master sends each drive and returns what each drive and the IMU report back, with the drives' own control law, torque limits, latency, encoder resolution and IMU burst timing in between. Robot facts come from the `humanoid-urdf` description that Controls pins, so the sim and the controller always describe the same robot.
 
 <table>
   <tr>
@@ -27,12 +23,9 @@ sim and the controller always describe the same robot.
     <th width="33%">Check against the robot</th>
   </tr>
   <tr>
-    <td>Thousands of robots per GPU inside an Isaac Lab task, with randomized friction, masses, latency, gains and
-    sensor errors. <b>4096 robots at about 990 simulated seconds per second</b> on one A10G.</td>
-    <td>One robot in real time behind a shared-memory segment that Controls' plant host attaches to, with
-    commands for resets, supports, pushes and faults. <b>2.1x real time</b> on an A10G.</td>
-    <td>Replay captures from the real robot drive by drive and score the sim against what the drives measured;
-    fit the command delay and passive joint parameters from batched replays.</td>
+    <td>Thousands of robots per GPU inside an Isaac Lab task, with randomized friction, masses, latency, gains and sensor errors. <b>4096 robots at about 990 simulated seconds per second</b> on one A10G.</td>
+    <td>One robot in real time behind a shared-memory segment that Controls' plant host attaches to, with commands for resets, supports, pushes and faults. <b>2.1x real time</b> on an A10G.</td>
+    <td>Replay captures from the real robot drive by drive and score the sim against what the drives measured; fit the command delay and passive joint parameters from batched replays.</td>
   </tr>
   <tr>
     <td><a href="docs/training.md">docs/training.md</a></td>
@@ -49,14 +42,12 @@ sim and the controller always describe the same robot.
     <td width="50%"><img alt="A live runtime session in Rerun" src="docs/images/runtime-live.png"></td>
   </tr>
   <tr>
-    <td>A replay of a whole-body capture. Grey is the sim, orange the real robot; the plot shows one drive's demand,
-    the real drive and the simulated drive over two seconds.</td>
+    <td>A replay of a whole-body capture. Grey is the sim, orange the real robot; the plot shows one drive's demand, the real drive and the simulated drive over two seconds.</td>
     <td><code>view-runtime</code> watching a session while a client waves the arms and pushes the left forearm.</td>
   </tr>
 </table>
 
-Every viewer writes [Rerun](https://rerun.io) recordings; [docs/visualization.md](docs/visualization.md) shows
-them all.
+Every viewer writes [Rerun](https://rerun.io) recordings; [docs/visualization.md](docs/visualization.md) shows them all.
 
 ## Quick start
 
@@ -71,9 +62,7 @@ hsim build-asset                                     # the robot as USD, under o
 hsim pytest -m physics                               # physics tests on Warp's CPU device
 ```
 
-Physics runs on CUDA; Warp's CPU device runs the same code for tests and small experiments. For a GPU, the
-SkyPilot tasks in `sky/` set up a node with Isaac Lab and run the end-to-end check, benchmarks and replays.
-[docs/getting-started.md](docs/getting-started.md) walks through all of it.
+Physics runs on CUDA; Warp's CPU device runs the same code for tests and small experiments. For a GPU, the SkyPilot tasks in `sky/` set up a node with Isaac Lab and run the end-to-end check, benchmarks and replays. [docs/getting-started.md](docs/getting-started.md) walks through all of it.
 
 ## Commands
 
@@ -88,13 +77,11 @@ SkyPilot tasks in `sky/` set up a node with Isaac Lab and run the end-to-end che
 | `humanoid-sim fit-passive <exc-dir>... --num-envs N` | Fits upper-body passive joint parameters to captures |
 | `humanoid-sim bench [--train\|--runtime] --num-envs N` | Measures throughput or the runtime's step time |
 
-Two runnable examples sit in `examples/`: `runtime_client.py` (a complete runtime client in NumPy) and
-`train_scene.py` (a training scene with terrain, randomization, pushes and a Rerun recording).
+Two runnable examples sit in `examples/`: `runtime_client.py` (a complete runtime client in NumPy) and `train_scene.py` (a training scene with terrain, randomization, pushes and a Rerun recording).
 
 ## Training with it
 
-The plant is an Isaac Lab action term. A task turns its policy's actions into drive demands; the plant applies
-them as the real drives would and exposes what the robot measures alongside the true state.
+The plant is an Isaac Lab action term. A task turns its policy's actions into drive demands; the plant applies them as the real drives would and exposes what the robot measures alongside the true state.
 
 ```python
 from humanoid_sim.train import TrainPlantCfg
@@ -119,8 +106,7 @@ cfg.actions.drives = PlantActionCfg(class_type=Drives, action_dim=22, plant=Trai
 #   plant.truth()     joint state, base pose and twist, contact forces
 ```
 
-`pose="flat_feet"` starts each robot on level soles; the description's standing pose has its soles pitched by 10
-and 17 degrees under an upright base and tips over. [docs/training.md](docs/training.md) has the full API.
+`pose="flat_feet"` starts each robot on level soles; the description's standing pose has its soles pitched by 10 and 17 degrees under an upright base and tips over. [docs/training.md](docs/training.md) has the full API.
 
 ## How it is built
 
@@ -143,13 +129,11 @@ third_party/       humanoid-urdf (robot facts) and ankle_kinematics, at the comm
 profiles/          modeling choices that are not robot facts
 ```
 
-The rules the code follows (no ROS, physics only through Isaac Lab on MJWarp, integer nanoseconds, no robot
-constants typed into the repo, measured and true quantities kept apart) are in [AGENTS.md](AGENTS.md).
+The rules the code follows (no ROS, physics only through Isaac Lab on MJWarp, integer nanoseconds, no robot constants typed into the repo, measured and true quantities kept apart) are in [AGENTS.md](AGENTS.md).
 
 ## Documentation
 
-[docs/README.md](docs/README.md) indexes every page by role: hardware, training, Controls, testing. Good first
-reads are [docs/overview.md](docs/overview.md) and [docs/glossary.md](docs/glossary.md).
+[docs/README.md](docs/README.md) indexes every page by role: hardware, training, Controls, testing. Good first reads are [docs/overview.md](docs/overview.md) and [docs/glossary.md](docs/glossary.md).
 
 ## License
 

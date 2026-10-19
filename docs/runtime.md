@@ -1,13 +1,6 @@
 # Real-time runtime
 
-`humanoid-sim serve` runs one robot against the wall clock and publishes the runtime segment, a shared-memory file
-that one client attaches to. Every bus cycle (one exchange of the EtherCAT master with its drives, 1.5 ms on the
-robot) the client writes one demand per EtherCAT drive (the 22 drives, ankle cranks included) and reads back the
-physical drive feedback and the raw IMU samples. A mailbox carries commands for reset, pause, supports,
-disturbances, faults, prescribed poses and the IMU's fidelity, and a truth region gives tests the robot's true
-state. The usual client is Controls' plant host; see [controls-integration.md](controls-integration.md). The
-smallest working client is `examples/runtime_client.py` (see [Writing a client](#writing-a-client)), and
-`humanoid-sim view-runtime` shows a running host in Rerun (see [Watching a host](#watching-a-host-view-runtime)).
+`humanoid-sim serve` runs one robot against the wall clock and publishes the runtime segment, a shared-memory file that one client attaches to. Every bus cycle (one exchange of the EtherCAT master with its drives, 1.5 ms on the robot) the client writes one demand per EtherCAT drive (the 22 drives, ankle cranks included) and reads back the physical drive feedback and the raw IMU samples. A mailbox carries commands for reset, pause, supports, disturbances, faults, prescribed poses and the IMU's fidelity, and a truth region gives tests the robot's true state. The usual client is Controls' plant host; see [controls-integration.md](controls-integration.md). The smallest working client is `examples/runtime_client.py` (see [Writing a client](#writing-a-client)), and `humanoid-sim view-runtime` shows a running host in Rerun (see [Watching a host](#watching-a-host-view-runtime)).
 
 | What | Where |
 |---|---|
@@ -21,8 +14,7 @@ smallest working client is `examples/runtime_client.py` (see [Writing a client](
 
 ## Running `serve`
 
-`serve` runs in the Isaac Lab image or on a GPU node, with the robot asset built (see
-[getting-started.md](getting-started.md)):
+`serve` runs in the Isaac Lab image or on a GPU node, with the robot asset built (see [getting-started.md](getting-started.md)):
 
 ```bash
 humanoid-sim serve --segment /run/hsim/plant --support suspended
@@ -40,10 +32,7 @@ humanoid-sim serve --segment /run/hsim/plant --support suspended
 | `--max-steps N` | none | Physics periods per session, paused periods included. Reaching it ends the process, with or without `--persist`. |
 | `--seed` | `0` | Seed of the IMU's random generator (white noise, sample phase, burst timing). |
 
-Three options of the top-level parser go before `serve`: `--robot` (default `ethrc_v1`, also written to the
-header's `robot_id`), `--assets` (default `outputs/assets`, relative to the working directory) and `--usd` (a robot
-USD to use instead of the built asset). Without `--usd`, `serve` exits with a message if the asset for the current
-description and profile is not built.
+Three options of the top-level parser go before `serve`: `--robot` (default `ethrc_v1`, also written to the header's `robot_id`), `--assets` (default `outputs/assets`, relative to the working directory) and `--usd` (a robot USD to use instead of the built asset). Without `--usd`, `serve` exits with a message if the asset for the current description and profile is not built.
 
 `serve` prints one JSON line on stdout when a session is ready and one when it ends:
 
@@ -56,23 +45,12 @@ description and profile is not built.
 
 `RuntimeHost.__init__` builds everything before a client can see the segment:
 
-1. It loads the description and the asset, and computes the standing base height: the height of an upright base
-   at which the lowest sole corner of the standing pose is 1 mm above the floor (`STANDING_CLEARANCE_M`).
-2. It builds the scene (`SimCore`, with the IMU keeping its 32 latest delivered samples and a contact sensor on
-   every body). On CUDA it captures the plant's work before and after the solver step as two CUDA graphs (a
-   recorded sequence of GPU kernels that replays with one launch) and fuses their kernels with `torch.compile`,
-   and it does the same for the demand intake (`_DemandIntake`). The command line always uses graphs and
-   compilation on CUDA and neither on the CPU.
-3. It steps the physics three times and puts the state back (`_warm_up`), so that the first steps' kernel
-   compilation does not happen while a client watches the heartbeat.
-4. It opens the first session (`_open_session`): it creates the segment in state creating, writes the start pose,
-   publishes the first feedback and truth records, and then marks the segment ready.
+1. It loads the description and the asset, and computes the standing base height: the height of an upright base at which the lowest sole corner of the standing pose is 1 mm above the floor (`STANDING_CLEARANCE_M`).
+2. It builds the scene (`SimCore`, with the IMU keeping its 32 latest delivered samples and a contact sensor on every body). On CUDA it captures the plant's work before and after the solver step as two CUDA graphs (a recorded sequence of GPU kernels that replays with one launch) and fuses their kernels with `torch.compile`, and it does the same for the demand intake (`_DemandIntake`). The command line always uses graphs and compilation on CUDA and neither on the CPU.
+3. It steps the physics three times and puts the state back (`_warm_up`), so that the first steps' kernel compilation does not happen while a client watches the heartbeat.
+4. It opens the first session (`_open_session`): it creates the segment in state creating, writes the start pose, publishes the first feedback and truth records, and then marks the segment ready.
 
-On CUDA, compilation takes about a minute. On the CPU nothing is compiled ahead, but the first steps compile Warp
-kernels and every step is slow: in the arm64 image on an Apple silicon Mac, with Warp's kernel cache kept on a
-volume, the segment became ready 25 to 40 s after start. The host tests allow up to three minutes. A client
-waits with `Segment.open(path, wait_s=...)`, which retries until the segment is ready. Controls' plant host waits up
-to `--sim-wait` seconds (default 180).
+On CUDA, compilation takes about a minute. On the CPU nothing is compiled ahead, but the first steps compile Warp kernels and every step is slow: in the arm64 image on an Apple silicon Mac, with Warp's kernel cache kept on a volume, the segment became ready 25 to 40 s after start. The host tests allow up to three minutes. A client waits with `Segment.open(path, wait_s=...)`, which retries until the segment is ready. Controls' plant host waits up to `--sim-wait` seconds (default 180).
 
 ### Supports
 
@@ -85,26 +63,15 @@ The support is chosen at startup and reported in the descriptor's `support` fiel
 
 The gantry and the floor are described in [world.md](world.md).
 
-A free robot does not stay up in the start pose. The description's standing pose leaves the soles tilted under an
-upright base, and a robot that holds it at the baseline gains falls over within a second or two: in a free session
-on the CPU device, the base had tilted 99° and dropped to 0.16 m after 2.5 s of plant time. For a robot that stands,
-send `RESET` with `{"pose": "flat_feet"}` after attaching and then hold the drive positions the next feedback
-reports (see [RESET](#reset-1) and [robot-model.md](robot-model.md#standing-on-the-ground)).
+A free robot does not stay up in the start pose. The description's standing pose leaves the soles tilted under an upright base, and a robot that holds it at the baseline gains falls over within a second or two: in a free session on the CPU device, the base had tilted 99° and dropped to 0.16 m after 2.5 s of plant time. For a robot that stands, send `RESET` with `{"pose": "flat_feet"}` after attaching and then hold the drive positions the next feedback reports (see [RESET](#reset-1) and [robot-model.md](robot-model.md#standing-on-the-ground)).
 
 ### Sessions
 
-The header's `session_id` (a random non-zero 64-bit number chosen when the segment file is created) names one
-client session.
+The header's `session_id` (a random non-zero 64-bit number chosen when the segment file is created) names one client session.
 
-A client attaches by writing a demands record whose `session_id` echoes the header's. Records carrying another
-session id are ignored, so a client of an earlier session cannot attach to a new one. Until the first demand
-arrives, the session holds the robot in its start pose: the joints at the description's standing offsets and, in a
-free session, the base at the standing height. The pose is written before every physics step and every drive is
-treated as off. The client's first demands release the pose, so the robot starts moving when the client does.
-Physics and plant time run before attachment, and no client timeout applies until then.
+A client attaches by writing a demands record whose `session_id` echoes the header's. Records carrying another session id are ignored, so a client of an earlier session cannot attach to a new one. Until the first demand arrives, the session holds the robot in its start pose: the joints at the description's standing offsets and, in a free session, the base at the standing height. The pose is written before every physics step and every drive is treated as off. The client's first demands release the pose, so the robot starts moving when the client does. Physics and plant time run before attachment, and no client timeout applies until then.
 
-A session ends in one of three ways. The segment's `state` becomes ended in every case (`RuntimeHost.run` sets it
-when it returns):
+A session ends in one of three ways. The segment's `state` becomes ended in every case (`RuntimeHost.run` sets it when it returns):
 
 | End | `"exit"` in the JSON line | Process exit code without `--persist` |
 |---|---|---|
@@ -112,57 +79,30 @@ when it returns):
 | An attached client's latest demands are older than `--client-timeout-ms` | 3 (`EXIT_CLIENT_LOST`) | 3 |
 | `--max-steps` reached, or SIGINT or SIGTERM | 0 (`EXIT_DONE`) | 0 |
 
-The client timeout compares the host's `CLOCK_MONOTONIC` with the `written_mono_ns` stamp inside the client's
-latest demands record, so only new demand records keep a session alive; commands do not. A stop signal is handled
-at the end of the current period once the host is serving. An unexpected error in the host loop also ends the
-session and exits the process with a traceback.
+The client timeout compares the host's `CLOCK_MONOTONIC` with the `written_mono_ns` stamp inside the client's latest demands record, so only new demand records keep a session alive; commands do not. A stop signal is handled at the end of the current period once the host is serving. An unexpected error in the host loop also ends the session and exits the process with a traceback.
 
-With `--persist`, a detached or lost session is followed by a new one (`RuntimeHost.new_session`) without
-recompiling. The host clears the faults, releases any gantry, turns the IMU noise back on and resets the robot to
-the start pose, which also clears the prescribed pose, the disturbances, the drive bank and the IMU history. It then
-creates a new segment file with a new session id, unpaused, and renames it over the same path. A client that still
-maps the old file sees it ended; a client that opens the path gets the new session. The feedback's `step` and
-`late_steps` restart from 0; plant time and the IMU sample numbers run on. A persistent host ends only on a signal
-or `--max-steps`, with exit code 0.
+With `--persist`, a detached or lost session is followed by a new one (`RuntimeHost.new_session`) without recompiling. The host clears the faults, releases any gantry, turns the IMU noise back on and resets the robot to the start pose, which also clears the prescribed pose, the disturbances, the drive bank and the IMU history. It then creates a new segment file with a new session id, unpaused, and renames it over the same path. A client that still maps the old file sees it ended; a client that opens the path gets the new session. The feedback's `step` and `late_steps` restart from 0; plant time and the IMU sample numbers run on. A persistent host ends only on a signal or `--max-steps`, with exit code 0.
 
-A session is tied to the segment file and outlives the client process that drove it. A client that opens the path
-while the session is still ready, and echoes its session id, continues that session where the previous client left
-it.
+A session is tied to the segment file and outlives the client process that drove it. A client that opens the path while the session is still ready, and echoes its session id, continues that session where the previous client left it.
 
 ## The clock
 
-The runtime runs in real time only. `RuntimeHost.run` paces each physics period, 4 ms (`physics.period_ns` in
-`profiles/ethrc_v1.yaml`), to `CLOCK_MONOTONIC`: it sleeps until 100 µs before the step's deadline and spins for the
-rest (`SPIN_NS`). Each period does, in order (`RuntimeHost.step`):
+The runtime runs in real time only. `RuntimeHost.run` paces each physics period, 4 ms (`physics.period_ns` in `profiles/ethrc_v1.yaml`), to `CLOCK_MONOTONIC`: it sleeps until 100 µs before the step's deadline and spins for the rest (`SPIN_NS`). Each period does, in order (`RuntimeHost.step`):
 
 1. Handle a new mailbox command, if there is one, and write its ack.
-2. Take the client's latest demands record, if it changed, into the drive bank. Its arrival time is the step's start,
-   so it is in force for the whole step. The host reads demands once per step: of the records a 1.5 ms bus writes
-   during one 4 ms step only the latest acts, and if no new record arrives the last one stays in force. See
-   [drives.md](drives.md) for the arrival queue and the drive law.
+2. Take the client's latest demands record, if it changed, into the drive bank. Its arrival time is the step's start, so it is in force for the whole step. The host reads demands once per step: of the records a 1.5 ms bus writes during one 4 ms step only the latest acts, and if no new record arrives the last one stays in force. See [drives.md](drives.md) for the arrival queue and the drive law.
 3. Step the physics with the active gantry, disturbances and prescribed pose, unless paused.
 4. Publish the feedback, the truth when due, and the heartbeat.
 
-A step that starts more than one period after its deadline counts as late (`late_steps`), and the schedule restarts
-from that moment. A step that starts late by less than a period is not counted, and the following steps run back to
-back until they are on schedule again. Plant time advances by exactly one period per step and never jumps, so when
-the host falls behind, plant time falls behind the wall clock. `keeping_up` is 1 while no step in the last second was
-late (`KEEPING_UP_WINDOW_NS`). Both are in every feedback record; `late_steps` counts per session.
+A step that starts more than one period after its deadline counts as late (`late_steps`), and the schedule restarts from that moment. A step that starts late by less than a period is not counted, and the following steps run back to back until they are on schedule again. Plant time advances by exactly one period per step and never jumps, so when the host falls behind, plant time falls behind the wall clock. `keeping_up` is 1 while no step in the last second was late (`KEEPING_UP_WINDOW_NS`). Both are in every feedback record; `late_steps` counts per session.
 
-Plant time (`sim_time_ns`, and the IMU samples' `sample_ns` and `stamp_ns`) starts at 0 when the host starts and runs
-on across sessions. Each feedback record maps a plant time `t` to the host's clock as
-`written_mono_ns - (sim_time_ns - t)`. The offset grows whenever steps are late, so take it from the latest record.
-`*_mono_ns` fields are `CLOCK_MONOTONIC` of the writing process, which is the same clock for every process and
-container on one machine.
+Plant time (`sim_time_ns`, and the IMU samples' `sample_ns` and `stamp_ns`) starts at 0 when the host starts and runs on across sessions. Each feedback record maps a plant time `t` to the host's clock as `written_mono_ns - (sim_time_ns - t)`. The offset grows whenever steps are late, so take it from the latest record. `*_mono_ns` fields are `CLOCK_MONOTONIC` of the writing process, which is the same clock for every process and container on one machine.
 
-While paused, physics, plant time and the step counter stop. Commands and demands are still taken, and the feedback
-(with `paused` = 1) and the heartbeat are still written every period. Disturbances and faults are timed in plant time,
-so they wait as well.
+While paused, physics, plant time and the step counter stop. Commands and demands are still taken, and the feedback (with `paused` = 1) and the heartbeat are still written every period. Disturbances and faults are timed in plant time, so they wait as well.
 
 ## The segment
 
-The segment is one file of 27,840 bytes: a 272-byte header and six regions. Values are little-endian at natural
-alignment, and every region starts on a 64-byte boundary. Each region has one writer.
+The segment is one file of 27,840 bytes: a 272-byte header and six regions. Values are little-endian at natural alignment, and every region starts on a 64-byte boundary. Each region has one writer.
 
 | Region | Offset | Bytes | Writer | Contents |
 |---|---|---|---|---|
@@ -174,8 +114,7 @@ alignment, and every region starts on a 64-byte boundary. Each region has one wr
 | ack | 25,984 | 288 | sim | The last command handled: its number, a result code, a message |
 | truth | 26,304 | 1,536 | sim | Base pose and twist, centre of mass, joint state, gantry tension, sole plates |
 
-`MAX_DRIVES` (32) and `MAX_JOINTS` (64) size the arrays. A robot with more drives or joints needs a new major ABI
-version. Only one client may write the demands and mailbox regions: a second writer would break the protocol below.
+`MAX_DRIVES` (32) and `MAX_JOINTS` (64) size the arrays. A robot with more drives or joints needs a new major ABI version. Only one client may write the demands and mailbox regions: a second writer would break the protocol below.
 
 ### Header
 
@@ -200,14 +139,11 @@ The header is written when the file is created; afterwards only `state` and `hea
 | `sim_revision` | char[48] | Git `HEAD` of the humanoid-sim checkout, or `unknown` when the package is not in a checkout |
 | `offsets` | u64[6] | Offsets of the descriptor, demands, feedback, mailbox, ack and truth regions |
 
-Strings are NUL-padded and not NUL-terminated when full: `description_digest` uses all 64 bytes. A client watches
-`state` and `heartbeat_mono_ns`; Controls' plant host treats a heartbeat older than 500 ms as a lost sim.
+Strings are NUL-padded and not NUL-terminated when full: `description_digest` uses all 64 bytes. A client watches `state` and `heartbeat_mono_ns`; Controls' plant host treats a heartbeat older than 500 ms as a lost sim.
 
 ### Reading and writing a region
 
-Every region starts with `seq` (u64), `crc` (u32) and 4 bytes of padding. The payload is the rest of the region,
-from byte 16 to the end of its struct, padding included. The protocol is a sequence lock with a checksum
-(`Region.write` and `Region.read` in `plant_abi.py`).
+Every region starts with `seq` (u64), `crc` (u32) and 4 bytes of padding. The payload is the rest of the region, from byte 16 to the end of its struct, padding included. The protocol is a sequence lock with a checksum (`Region.write` and `Region.read` in `plant_abi.py`).
 
 A writer takes five steps:
 
@@ -219,20 +155,15 @@ A writer takes five steps:
 
 A reader repeats three steps, up to 1000 times (`attempts`):
 
-1. It reads `seq`. A 0 means the region was never written. An odd value means a write is in progress, so it tries
-   again.
+1. It reads `seq`. A 0 means the region was never written. An odd value means a write is in progress, so it tries again.
 2. It copies the payload and reads `crc`.
 3. It accepts the copy if `seq` still has the value from step 1 and the CRC of the copy matches.
 
-`Region.read` returns `(seq, record)`, `None` for a region never written, or raises `StaleRead` when no attempt found
-a complete write, as when the writer was descheduled in the middle of one. A periodic reader keeps its last record
-and reads again next cycle. The CRC makes a torn copy detectable without relying on memory ordering, which Python
-does not give. `seq` grows by 2 per write, so it also tells a reader whether a record is new.
+`Region.read` returns `(seq, record)`, `None` for a region never written, or raises `StaleRead` when no attempt found a complete write, as when the writer was descheduled in the middle of one. A periodic reader keeps its last record and reads again next cycle. The CRC makes a torn copy detectable without relying on memory ordering, which Python does not give. `seq` grows by 2 per write, so it also tells a reader whether a record is new.
 
 ### Validating a segment
 
-`Segment.open(path, robot_id=None, description_digest=None, wait_s=0.0)` opens the file read-write and checks, in
-order:
+`Segment.open(path, robot_id=None, description_digest=None, wait_s=0.0)` opens the file read-write and checks, in order:
 
 | Check | Expected |
 |---|---|
@@ -242,25 +173,15 @@ order:
 | `layout_hash` | This side's `LAYOUT_HASH` |
 | `state` | Ready |
 
-While the file is missing or one of these fails it retries every 10 ms until `wait_s` has passed, then raises
-`FileNotFoundError` or `AbiError`. Once the segment is ready it compares `robot_id` and `description_digest` with the
-values given and raises `AbiError` on a mismatch. A different `abi_minor` is accepted: the commands marked "ABI 1.1"
-in `plant_abi.py` (`DETACH`, `SET_FIDELITY`) need a 1.1 sim.
+While the file is missing or one of these fails it retries every 10 ms until `wait_s` has passed, then raises `FileNotFoundError` or `AbiError`. Once the segment is ready it compares `robot_id` and `description_digest` with the values given and raises `AbiError` on a mismatch. A different `abi_minor` is accepted: the commands marked "ABI 1.1" in `plant_abi.py` (`DETACH`, `SET_FIDELITY`) need a 1.1 sim.
 
-The layout hash (`layout_hash()`) is the first 8 bytes, little-endian, of a SHA-256 over every field's name, offset,
-type and shape and the region offsets. Any change to the layout changes it. `plant_abi.h` carries the same value as
-`HSIM_PLANT_LAYOUT_HASH` (`0x8b55fa9a7f94d7f2`), and `tests/test_runtime_abi.py` compiles the header and checks
-every struct size, field offset, region offset and the hash against the Python layout.
+The layout hash (`layout_hash()`) is the first 8 bytes, little-endian, of a SHA-256 over every field's name, offset, type and shape and the region offsets. Any change to the layout changes it. `plant_abi.h` carries the same value as `HSIM_PLANT_LAYOUT_HASH` (`0x8b55fa9a7f94d7f2`), and `tests/test_runtime_abi.py` compiles the header and checks every struct size, field offset, region offset and the hash against the Python layout.
 
-The description digest (`description_digest(urdf, actuators)`) is the SHA-256 over the URDF and `actuators.yaml`
-of the robot description in `third_party/humanoid-urdf`, each as its file name followed by its bytes. The sim
-writes `Description.digest`. A client computes the digest from its own checkout of humanoid-urdf and passes it to
-`Segment.open`: equal digests mean both sides run the same description.
+The description digest (`description_digest(urdf, actuators)`) is the SHA-256 over the URDF and `actuators.yaml` of the robot description in `third_party/humanoid-urdf`, each as its file name followed by its bytes. The sim writes `Description.digest`. A client computes the digest from its own checkout of humanoid-urdf and passes it to `Segment.open`: equal digests mean both sides run the same description.
 
 ### Descriptor
 
-The descriptor region holds one JSON object (sorted keys, at most 16,384 bytes) written when the file is created.
-`Segment.descriptor()` returns it as a dict.
+The descriptor region holds one JSON object (sorted keys, at most 16,384 bytes) written when the file is created. `Segment.descriptor()` returns it as a dict.
 
 | Key | Contents |
 |---|---|
@@ -297,8 +218,7 @@ The client writes the demands region every bus cycle.
 | `num_drives` | u32 | Drives filled in (the host reads as many entries as the header's `num_drives`) |
 | `drive` | `HsimDriveDemand[32]` | One demand per drive, in descriptor order |
 
-Each drive's demand mirrors Controls' `FakeDriveDemand` (`fake_bank.h`), the demand an `Epos4Slave` reports to the
-plant:
+Each drive's demand mirrors Controls' `FakeDriveDemand` (`fake_bank.h`), the demand an `Epos4Slave` reports to the plant:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -311,13 +231,7 @@ plant:
 | `p_gain_raw`, `i_gain_raw`, `d_gain_raw` | u32 | Raw JVPT gains (0x34C6:01 to 03), 1000 counts per Nm/rad or Nm s/rad |
 | `max_torque_mnm` | u32 | Torque cap 0x34C6:04 in mNm; 0 means unset |
 
-JVPT is the EPOS4's cyclic mode in which the drive tracks the position and velocity targets with its own P and D
-gains and adds the feed-forward torque. A drive acts when `torque_enabled` is set, `i_gain_raw` is 0 and `mode` is
-JVPT, freeze or homing. Any other demand leaves it off: it applies no torque and its joint, for a 1:1 drive, takes
-the drive family's back-drive friction. A non-zero I gain is refused, as Controls' MuJoCo plant refuses it.
-[drives.md](drives.md) gives the drive law, the envelope and the frames.
-`demands_record(demand, cycle=..., session_id=...)` builds a record from a dict of per-drive arrays named as the
-fields above.
+JVPT is the EPOS4's cyclic mode in which the drive tracks the position and velocity targets with its own P and D gains and adds the feed-forward torque. A drive acts when `torque_enabled` is set, `i_gain_raw` is 0 and `mode` is JVPT, freeze or homing. Any other demand leaves it off: it applies no torque and its joint, for a 1:1 drive, takes the drive family's back-drive friction. A non-zero I gain is refused, as Controls' MuJoCo plant refuses it. [drives.md](drives.md) gives the drive law, the envelope and the frames. `demands_record(demand, cycle=..., session_id=...)` builds a record from a dict of per-drive arrays named as the fields above.
 
 ### Feedback
 
@@ -337,20 +251,11 @@ The host writes the feedback region every period, paused or not.
 | `drive` | `HsimDriveFeedback[32]` | Per drive: `position_rad`, `velocity_rad_s`, `applied_torque_nm`, `demanded_torque_nm` |
 | `imu` | `HsimImuSample[32]` | The latest delivered IMU samples, newest first |
 
-Drive feedback is SI in the physical drive-output frame, as Controls' `fake_bank_feedback` takes it. `applied` is
-the torque after the torque-speed envelope and the cap, `demanded` the control law's output before them.
+Drive feedback is SI in the physical drive-output frame, as Controls' `fake_bank_feedback` takes it. `applied` is the torque after the torque-speed envelope and the cap, `demanded` the control law's output before them.
 
-Each IMU sample has `seq` (u64), `sample_ns` (measurement time) and `stamp_ns` (host-receipt time), both plant
-time, then `gyro_rad_s[3]` and `specific_force_m_s2[3]` in the sensor frame. The samples arrive in bursts, as the
-robot's MTi-610 delivers them to its computer: about 365 samples per second, in bursts every 13.9 to 17.6 ms (see
-[sensors.md](sensors.md)). The host keeps the 32 latest delivered samples (`IMU_SAMPLES`), so `imu_count` reaches
-32 about 0.1 s of plant time after the IMU was reset (32 samples 2.74 ms apart, plus the wait for the next burst).
+Each IMU sample has `seq` (u64), `sample_ns` (measurement time) and `stamp_ns` (host-receipt time), both plant time, then `gyro_rad_s[3]` and `specific_force_m_s2[3]` in the sensor frame. The samples arrive in bursts, as the robot's MTi-610 delivers them to its computer: about 365 samples per second, in bursts every 13.9 to 17.6 ms (see [sensors.md](sensors.md)). The host keeps the 32 latest delivered samples (`IMU_SAMPLES`), so `imu_count` reaches 32 about 0.1 s of plant time after the IMU was reset (32 samples 2.74 ms apart, plus the wait for the next burst).
 
-`seq` numbers the samples in the order they were measured. It starts at 1 when the host starts and keeps rising for
-the life of the process: `RESET` and a new session do not restart it, and samples measured but not yet delivered
-when the IMU is reset are dropped, so the numbers can skip across a reset. A client reading every bus cycle takes
-the samples whose `seq` is above the last one it saw, oldest first, and keeps its last-seen number across a
-`RESET`. `imu_count` and `imu_total` do start again from 0 after a reset.
+`seq` numbers the samples in the order they were measured. It starts at 1 when the host starts and keeps rising for the life of the process: `RESET` and a new session do not restart it, and samples measured but not yet delivered when the IMU is reset are dropped, so the numbers can skip across a reset. A client reading every bus cycle takes the samples whose `seq` is above the last one it saw, oldest first, and keeps its last-seen number across a `RESET`. `imu_count` and `imu_total` do start again from 0 after a reset.
 
 ### Mailbox and ack
 
@@ -369,9 +274,7 @@ The protocol is in [Commands](#commands).
 
 ### Truth
 
-The truth region is the oracle tests need. The host writes it at the start of a session, every `--truth-every`
-steps (its `sim_time_ns` says when) and in the period an accepted command was handled. All poses and velocities are
-in the world frame.
+The truth region is the oracle tests need. The host writes it at the start of a session, every `--truth-every` steps (its `sim_time_ns` says when) and in the period an accepted command was handled. All poses and velocities are in the world frame.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -385,8 +288,7 @@ in the world frame.
 | `joint_pos_rad`, `joint_vel_rad_s` | f64[64] | Joint state in URDF joint coordinates, in descriptor `joints` order |
 | `sole` | `HsimSole[2]` | Left, then right |
 
-Each sole entry describes the sole plate, the contact box fitted to the bottom of each foot (see
-[robot-model.md](robot-model.md)):
+Each sole entry describes the sole plate, the contact box fitted to the bottom of each foot (see [robot-model.md](robot-model.md)):
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -402,18 +304,12 @@ Each sole entry describes the sole plate, the contact box fitted to the bottom o
 The client posts one command at a time:
 
 1. `Segment.send(code, args)` writes the mailbox and returns the command's number, the mailbox region's new `seq`.
-2. At the start of each period the host reads the mailbox. If its `seq` is above the last one handled, the host
-   runs the command and writes the ack with `acked` set to that number.
+2. At the start of each period the host reads the mailbox. If its `seq` is above the last one handled, the host runs the command and writes the ack with `acked` set to that number.
 3. `Segment.wait_ack(seq, timeout_s=5.0)` polls the ack every millisecond and returns `(result, message)`.
 
-A command posted before the previous one was handled replaces it, and `wait_ack` for the replaced one raises
-`AbiError` ("superseded"). Wait for each ack before sending the next command. Commands are handled while paused. At
-real time the ack comes within a period or two; on a slow host keep writing demands while waiting, or the client
-timeout ends the session.
+A command posted before the previous one was handled replaces it, and `wait_ack` for the replaced one raises `AbiError` ("superseded"). Wait for each ack before sending the next command. Commands are handled while paused. At real time the ack comes within a period or two; on a slow host keep writing demands while waiting, or the client timeout ends the session.
 
-The ack is written at the start of the period, before that period's physics step and publish. A feedback or truth
-record read right after the ack can still be the previous period's, from before the command took effect. To see
-the result of a command, wait for a record whose `sim_time_ns` is later than the one you read when the ack arrived.
+The ack is written at the start of the period, before that period's physics step and publish. A feedback or truth record read right after the ack can still be the previous period's, from before the command took effect. To see the result of a command, wait for a record whose `sim_time_ns` is later than the one you read when the ack arrived.
 
 | Result | Code | When |
 |---|---|---|
@@ -424,8 +320,7 @@ the result of a command, wait for a record whose `sim_time_ns` is later than the
 
 A rejected command changes nothing: every handler checks its arguments before it touches the state.
 
-Times in arguments are seconds, and durations run in plant time. In the tables below `pose7` is
-`[x, y, z, qx, qy, qz, qw]` in the world frame with a unit quaternion, and is accepted only in a free session.
+Times in arguments are seconds, and durations run in plant time. In the tables below `pose7` is `[x, y, z, qx, qy, qz, qw]` in the world frame with a unit quaternion, and is accepted only in a free session.
 
 ### RESET (1)
 
@@ -436,21 +331,9 @@ Times in arguments are seconds, and durations run in plant time. In the tables b
 | `{"pose": "current"}` | Joints where they are; the base untouched |
 | `{"joint_pos": {name: rad, ...}, "base_pose": pose7 \| null}` | The named joints at the given positions, the others where they are; the base at `base_pose` when given |
 
-Joint velocities become zero, and the base's too when the base is written. Every position in `joint_pos` must lie
-within the joint's travel (its recorded mechanical stop, otherwise its position limit;
-`Description.calibration_travel`). `RESET` also resets the drive bank (queued demands dropped, every drive off
-until demands are taken again) and the IMU (history and undelivered samples emptied, `imu_count` and `imu_total`
-from 0, `seq` still rising), releases a prescribed pose, and clears the body and joint disturbances. The client's
-latest demands are taken again in the same period. Faults, the gantry, pause and the IMU's fidelity are kept. Ack:
-`reset`.
+Joint velocities become zero, and the base's too when the base is written. Every position in `joint_pos` must lie within the joint's travel (its recorded mechanical stop, otherwise its position limit; `Description.calibration_travel`). `RESET` also resets the drive bank (queued demands dropped, every drive off until demands are taken again) and the IMU (history and undelivered samples emptied, `imu_count` and `imu_total` from 0, `seq` still rising), releases a prescribed pose, and clears the body and joint disturbances. The client's latest demands are taken again in the same period. Faults, the gantry, pause and the IMU's fidelity are kept. Ack: `reset`.
 
-The flat-foot pose is the one to use when a free robot should stand: a robot holding it at the baseline gains
-stays upright on flat ground for about 10 s, then leans over slowly and falls unless a controller balances it. The host solves the pose with host kinematics (`initial_pose` in
-`src/humanoid_sim/train/scene.py`) once at startup, which adds a few seconds before the segment is ready, so a
-`flat_feet` reset is as quick as a `standing` one. After the ack, wait for a feedback record newer than the ack (see [Commands](#commands)) and hold the
-drive positions it reports: demands that still target the old pose pull the joints back to it. In that CPU run, a
-free robot reset to the flat-foot pose and held there at the baseline gains stayed upright for the 2.5 s of plant
-time measured, with each sole level to within 2 mm across its face.
+The flat-foot pose is the one to use when a free robot should stand: a robot holding it at the baseline gains stays upright on flat ground for about 10 s, then leans over slowly and falls unless a controller balances it. The host solves the pose with host kinematics (`initial_pose` in `src/humanoid_sim/train/scene.py`) once at startup, which adds a few seconds before the segment is ready, so a `flat_feet` reset is as quick as a `standing` one. After the ack, wait for a feedback record newer than the ack (see [Commands](#commands)) and hold the drive positions it reports: demands that still target the old pose pull the joints back to it. In that CPU run, a free robot reset to the flat-foot pose and held there at the baseline gains stayed upright for the 2.5 s of plant time measured, with each sole level to within 2 mm across its face.
 
 ### PAUSE (2) and RESUME (3)
 
@@ -466,13 +349,7 @@ time measured, with each sole level to within 2 mm across its face.
 | `{"support": "gantry", "tension_breakpoints_s_n": [[t, N], ...], "attachment_bodies": [name, ...]}` | free | The same, on one or two points fixed in the base frame where the named bodies are now: `gantry` |
 | `{"support": "gantry", "cable": {"overhead_distance_m": m, "length_breakpoints_s_m": [[t, m], ...], "stiffness_n_m": k, "damping_n_s_m": c}, "attachment_local_m": [x, y, z]}` | free | A slack cable: `gantry` |
 
-A tension program has 1 to 8 breakpoints, at non-negative increasing times counted from the command, linear between
-them and held beyond both ends, with non-negative tensions. The force is vertical and split evenly over the one or
-two points. Either `attachment_local_m` or `attachment_bodies` is required; when both are given, the bodies are
-used. A cable runs from one base-frame point to an anchor `overhead_distance_m` above where that point is when the
-cable is hung. Its unstretched length follows the program (positive lengths), and it pulls along the rope only when
-stretched: `T = max(0, k · extension + c · extension rate)`, with `k` positive and `c` non-negative. Hanging a rope
-replaces the previous one; a rejected rope leaves the previous one hanging. [world.md](world.md) describes both.
+A tension program has 1 to 8 breakpoints, at non-negative increasing times counted from the command, linear between them and held beyond both ends, with non-negative tensions. The force is vertical and split evenly over the one or two points. Either `attachment_local_m` or `attachment_bodies` is required; when both are given, the bodies are used. A cable runs from one base-frame point to an anchor `overhead_distance_m` above where that point is when the cable is hung. Its unstretched length follows the program (positive lengths), and it pulls along the rope only when stretched: `T = max(0, k · extension + c · extension rate)`, with `k` positive and `c` non-negative. Hanging a rope replaces the previous one; a rejected rope leaves the previous one hanging. [world.md](world.md) describes both.
 
 ### APPLY_DISTURBANCE (5)
 
@@ -482,9 +359,7 @@ A wrench on a body:
 {"body": "base_link", "force_n": [40.0, 0.0, 0.0], "torque_nm": [0.0, 0.0, 0.0], "duration_s": 0.3}
 ```
 
-`body` is one of the descriptor's `bodies`. The force and torque are in the world frame and default to zero;
-`duration_s` is required and positive. Several wrenches can be active at once. Ack: `until <t> ns`, the plant time at
-which it ends.
+`body` is one of the descriptor's `bodies`. The force and torque are in the world frame and default to zero; `duration_s` is required and positive. Several wrenches can be active at once. Ack: `until <t> ns`, the plant time at which it ends.
 
 A torque on one joint, outside the drive (it is not part of the drive's applied torque):
 
@@ -492,11 +367,7 @@ A torque on one joint, outside the drive (it is not part of the drive's applied 
 {"drive": "maxonHEJ50AR4", "torque_nm": 4.0, "frequency_hz": 5.0, "duration_s": null}
 ```
 
-Name the joint with `"joint"`, or a 1:1 drive with `"drive"` (an ankle crank has no single joint and is rejected).
-`torque_nm` is constant when `frequency_hz` is 0 (the default), otherwise the amplitude of
-`torque_nm · sin(2π · frequency_hz · t)` with `t` the plant time. `duration_s` absent or null lasts until cleared.
-Each joint has at most one such torque: a new command replaces it and `torque_nm` 0 clears it. Acks:
-`<joint> until <t> ns`, `<joint> until cleared`, `cleared`.
+Name the joint with `"joint"`, or a 1:1 drive with `"drive"` (an ankle crank has no single joint and is rejected). `torque_nm` is constant when `frequency_hz` is 0 (the default), otherwise the amplitude of `torque_nm · sin(2π · frequency_hz · t)` with `t` the plant time. `duration_s` absent or null lasts until cleared. Each joint has at most one such torque: a new command replaces it and `torque_nm` 0 clears it. Acks: `<joint> until <t> ns`, `<joint> until cleared`, `cleared`.
 
 ### INJECT_FAULT (6)
 
@@ -511,12 +382,7 @@ Each joint has at most one such torque: a new command replaces it and `torque_nm
 | `imu_spike` | ignored | m/s² | Added to the accelerometer bias on all three axes; lasts one period (4 ms) when `duration_s` is null | 0 |
 | `power_sag` | ignored | torque scale in [0, 1] | Scales every drive's torque-speed envelope and torque cap | 1 |
 
-`value` defaults to 1 and must be finite; for `power_sag` it must lie in [0, 1]. `duration_s` null lasts until
-cleared or the session ends. Injecting a fault again (on the same drive, for `encoder_freeze`) replaces it, and
-sending its no-fault value clears it. The value is checked before the active fault is touched, so a rejected
-command, such as `power_sag` 1.5, leaves the fault that was active in place. Acks: `<fault> active`, `cleared`. An
-unknown fault name is rejected with the list of known ones. Bus and protocol faults, and a drive whose encoder stops
-reporting, are Controls' fake bank's to inject. [drives.md](drives.md) has more on the faults.
+`value` defaults to 1 and must be finite; for `power_sag` it must lie in [0, 1]. `duration_s` null lasts until cleared or the session ends. Injecting a fault again (on the same drive, for `encoder_freeze`) replaces it, and sending its no-fault value clears it. The value is checked before the active fault is touched, so a rejected command, such as `power_sag` 1.5, leaves the fault that was active in place. Acks: `<fault> active`, `cleared`. An unknown fault name is rejected with the list of known ones. Bus and protocol faults, and a drive whose encoder stops reporting, are Controls' fake bank's to inject. [drives.md](drives.md) has more on the faults.
 
 ### PRESCRIBE_POSE (7)
 
@@ -524,11 +390,7 @@ reporting, are Controls' fake bank's to inject. [drives.md](drives.md) has more 
 {"joint_pos": {"knee_l": -2.0}, "base_pose": [0.0, 0.0, 1.0, 0.0, 0.0871557, 0.0, 0.9961947], "floor_clearance_m": 0.002}
 ```
 
-The pose is written, with zero velocities, before every physics step until it is released, a `RESET`, or the end of
-the session. Named joints must lie within their travel, as for `RESET`; the others keep their positions at the time
-of the command. `base_pose` is optional. `floor_clearance_m` needs a `base_pose` and moves the base vertically so
-that the lowest sole-plate corner sits that far above the floor. Ack: `prescribed`. `{"release": true}` releases
-the pose; ack: `released`. The IMU is not reset, so its samples run on.
+The pose is written, with zero velocities, before every physics step until it is released, a `RESET`, or the end of the session. Named joints must lie within their travel, as for `RESET`; the others keep their positions at the time of the command. `base_pose` is optional. `floor_clearance_m` needs a `base_pose` and moves the base vertically so that the lowest sole-plate corner sits that far above the floor. Ack: `prescribed`. `{"release": true}` releases the pose; ack: `released`. The IMU is not reset, so its samples run on.
 
 ### DETACH (8)
 
@@ -536,27 +398,20 @@ the pose; ack: `released`. The IMU is not reset, so its samples run on.
 
 ### SET_FIDELITY (9)
 
-`{"imu": "ideal"}` or `{"imu": "real"}`: the IMU without or with its white noise, from the next sample, for this
-session. Every session starts `real`. Bias and spike faults apply in both. Acks: `imu ideal`, `imu real`.
+`{"imu": "ideal"}` or `{"imu": "real"}`: the IMU without or with its white noise, from the next sample, for this session. Every session starts `real`. Bias and spike faults apply in both. Acks: `imu ideal`, `imu real`.
 
 ## Writing a client
 
-A client in Python needs only `plant_abi.py` and NumPy. Controls vendors the file unchanged next to its copy of
-`plant_abi.h`.
+A client in Python needs only `plant_abi.py` and NumPy. Controls vendors the file unchanged next to its copy of `plant_abi.h`.
 
-`examples/runtime_client.py` is the smallest working client. It opens the segment with an identity check (robot id
-and description digest), holds the pose the robot starts in at the description's baseline gains, waves both arms,
-pushes the left forearm with 40 N for 0.3 s, then detaches. It uses NumPy and the humanoid-sim package for the
-description, and does not need Isaac Lab:
+`examples/runtime_client.py` is the smallest working client. It opens the segment with an identity check (robot id and description digest), holds the pose the robot starts in at the description's baseline gains, waves both arms, pushes the left forearm with 40 N for 0.3 s, then detaches. It uses NumPy and the humanoid-sim package for the description, and does not need Isaac Lab:
 
 ```bash
 humanoid-sim serve --segment /tmp/hsim/plant --device cuda:0 &
 python examples/runtime_client.py /tmp/hsim/plant --seconds 20     # --wave-hz 0.4, --push-at 8 (s; negative: no push)
 ```
 
-It prints the plant time, `late_steps` and the largest applied torque once per second. To stay short it does not
-watch the heartbeat, does not wait for the push's ack, and does not reset the robot, so in a free session the robot
-falls (see [Supports](#supports)).
+It prints the plant time, `late_steps` and the largest applied torque once per second. To stay short it does not watch the heartbeat, does not wait for the push's ack, and does not reset the robot, so in a free session the robot falls (see [Supports](#supports)).
 
 A complete client follows these steps:
 
@@ -567,10 +422,7 @@ A complete client follows these steps:
 5. Post commands one at a time, and keep writing demands until each is acked.
 6. Send `DETACH` and close the segment when leaving.
 
-The client below holds the robot where it starts in JVPT at the description's baseline gains, takes the new IMU
-samples each cycle, switches the IMU to ideal, reads the truth and detaches. It imports `Description` from
-humanoid-sim for the digest and the gains; a vendored client computes the digest with
-`plant_abi.description_digest(urdf_path, actuators_path)` from its own humanoid-urdf checkout.
+The client below holds the robot where it starts in JVPT at the description's baseline gains, takes the new IMU samples each cycle, switches the IMU to ideal, reads the truth and detaches. It imports `Description` from humanoid-sim for the digest and the gains; a vendored client computes the digest with `plant_abi.description_digest(urdf_path, actuators_path)` from its own humanoid-urdf checkout.
 
 ```python
 import time
@@ -658,22 +510,13 @@ finally:
     client.close()
 ```
 
-`time.sleep` paces the loop only roughly; a real client keeps its own schedule. The tests drive the host the same
-way: `tests/test_runtime_host.py` runs `serve` on the CPU as a subprocess and acts as its client, and
-`bench --runtime` (`run_runtime_bench` in `src/humanoid_sim/bench/runner.py`) writes a demand before every unpaced
-step.
+`time.sleep` paces the loop only roughly; a real client keeps its own schedule. The tests drive the host the same way: `tests/test_runtime_host.py` runs `serve` on the CPU as a subprocess and acts as its client, and `bench --runtime` (`run_runtime_bench` in `src/humanoid_sim/bench/runner.py`) writes a demand before every unpaced step.
 
 ### C and C++ clients
 
-`plant_abi.h` declares the same layout as C11 and C++17 structs (`HsimHeader`, `HsimDemands`, `HsimFeedback`,
-`HsimMailbox`, `HsimAck`, `HsimTruth` and their elements), the constants (`HSIM_PLANT_LAYOUT_HASH`,
-`HSIM_PLANT_SEGMENT_BYTES`, `HSIM_OFFSET_*`, `HSIM_CMD_*`, `HSIM_ACK_*`, `HSIM_STATE_*`) and static asserts on the
-header, feedback and truth sizes. Command arguments are JSON, as documented in `plant_abi.py` and above.
+`plant_abi.h` declares the same layout as C11 and C++17 structs (`HsimHeader`, `HsimDemands`, `HsimFeedback`, `HsimMailbox`, `HsimAck`, `HsimTruth` and their elements), the constants (`HSIM_PLANT_LAYOUT_HASH`, `HSIM_PLANT_SEGMENT_BYTES`, `HSIM_OFFSET_*`, `HSIM_CMD_*`, `HSIM_ACK_*`, `HSIM_STATE_*`) and static asserts on the header, feedback and truth sizes. Command arguments are JSON, as documented in `plant_abi.py` and above.
 
-A C or C++ client maps the file with `mmap(MAP_SHARED)` after opening it read-write, checks `magic`, `abi_major`,
-`layout_hash` and `segment_bytes`, and waits for `state` to be ready. It follows the same region protocol, with the
-final `seq` store a release store and the reader's `seq` loads acquire loads, as the header's comment says. The CRC
-is zlib's `crc32(0, payload, sizeof(region) - 16)`. A reader sketch:
+A C or C++ client maps the file with `mmap(MAP_SHARED)` after opening it read-write, checks `magic`, `abi_major`, `layout_hash` and `segment_bytes`, and waits for `state` to be ready. It follows the same region protocol, with the final `seq` store a release store and the reader's `seq` loads acquire loads, as the header's comment says. The CRC is zlib's `crc32(0, payload, sizeof(region) - 16)`. A reader sketch:
 
 ```c
 #include <stdatomic.h>
@@ -705,32 +548,15 @@ static int hsim_read(const void *region, void *out, size_t size) {
 
 ## Device and performance
 
-Run the host on CUDA. With its step captured as CUDA graphs and compiled, one unpaced step took 1.9 ms on average
-on an A10G (2.1 times faster than real time) with a new demand every step; [benchmarks.md](benchmarks.md) has the
-full figures. Device-to-host copies go into pinned buffers and the host thread sleeps on a blocking CUDA
-event while it waits, and it spins only for the last 100 µs before each deadline: the host shares its machine with
-Controls. Each truth publish waits for one more device-to-host copy, so `--truth-every 1` costs more per step than
-the default.
+Run the host on CUDA. With its step captured as CUDA graphs and compiled, one unpaced step took 1.9 ms on average on an A10G (2.1 times faster than real time) with a new demand every step; [benchmarks.md](benchmarks.md) has the full figures. Device-to-host copies go into pinned buffers and the host thread sleeps on a blocking CUDA event while it waits, and it spins only for the last 100 µs before each deadline: the host shares its machine with Controls. Each truth publish waits for one more device-to-host copy, so `--truth-every 1` costs more per step than the default.
 
-`humanoid-sim bench --runtime --device cuda:0` measures the host's whole step, unpaced, with a client writing a
-demand before every step. It reports `ms_per_step`, `ms_p99`, `ms_max`, `steps_over_period`, `real_time_factor` and
-whether CUDA graphs were used. [benchmarks.md](benchmarks.md) has the figures.
+`humanoid-sim bench --runtime --device cuda:0` measures the host's whole step, unpaced, with a client writing a demand before every step. It reports `ms_per_step`, `ms_p99`, `ms_max`, `steps_over_period`, `real_time_factor` and whether CUDA graphs were used. [benchmarks.md](benchmarks.md) has the figures.
 
-`--device cpu` runs MJWarp on Warp's CPU device, without graphs or compilation, well below real time. Once a step
-takes more than two periods, every step counts as late: `late_steps` climbs, `keeping_up` stays 0 and plant time
-runs slower than the wall clock. The protocol is the same, which makes the CPU device useful for tests and protocol
-checks. On the CPU, raise `--client-timeout-ms` so that a client which pauses its demands while it waits for an ack
-is not taken for lost: `tests/test_runtime_host.py` uses 1500 ms and Controls' lane script 10000 ms.
-[testing-and-gpu.md](testing-and-gpu.md) covers running the tests.
+`--device cpu` runs MJWarp on Warp's CPU device, without graphs or compilation, well below real time. Once a step takes more than two periods, every step counts as late: `late_steps` climbs, `keeping_up` stays 0 and plant time runs slower than the wall clock. The protocol is the same, which makes the CPU device useful for tests and protocol checks. On the CPU, raise `--client-timeout-ms` so that a client which pauses its demands while it waits for an ack is not taken for lost: `tests/test_runtime_host.py` uses 1500 ms and Controls' lane script 10000 ms. [testing-and-gpu.md](testing-and-gpu.md) covers running the tests.
 
 ## Watching a host: `view-runtime`
 
-`humanoid-sim view-runtime <segment>` shows a running host in [Rerun](https://rerun.io/), a viewer for 3D scenes and
-time series. It poses the robot from the truth region and plots, from the feedback and truth regions, each drive's
-position, velocity, applied torque and demanded torque, the newest IMU sample, the two soles' normal forces, the
-base height, the gantry tension, and the host's `late_steps` and `keeping_up`. It only reads the descriptor,
-feedback and truth regions. It never writes demands or commands, so it can watch a session that Controls or another
-client is driving without changing it, and it does not attach a session or keep one alive.
+`humanoid-sim view-runtime <segment>` shows a running host in [Rerun](https://rerun.io/), a viewer for 3D scenes and time series. It poses the robot from the truth region and plots, from the feedback and truth regions, each drive's position, velocity, applied torque and demanded torque, the newest IMU sample, the two soles' normal forces, the base height, the gantry tension, and the host's `late_steps` and `keeping_up`. It only reads the descriptor, feedback and truth regions. It never writes demands or commands, so it can watch a session that Controls or another client is driving without changing it, and it does not attach a session or keep one alive.
 
 ```bash
 humanoid-sim view-runtime /run/hsim/plant                      # opens a Rerun viewer window
@@ -746,21 +572,8 @@ humanoid-sim view-runtime /run/hsim/plant --save runtime.rrd   # writes a record
 | `--seconds S` | until the host goes | Stop after this long |
 | `--wait S` | `60` | How long to wait for the segment to appear and become ready |
 
-Each read logs the truth and feedback records that are new since the last read, at their `sim_time_ns` on Rerun's
-`time` timeline (plant time in seconds). The recording therefore samples the host about `--fps` times per second,
-not every 4 ms step, and the robot's pose moves only as often as the host publishes the truth (every
-`--truth-every` steps, 20 ms by default).
+Each read logs the truth and feedback records that are new since the last read, at their `sim_time_ns` on Rerun's `time` timeline (plant time in seconds). The recording therefore samples the host about `--fps` times per second, not every 4 ms step, and the robot's pose moves only as often as the host publishes the truth (every `--truth-every` steps, 20 ms by default).
 
-When a session ends, the viewer follows the next session at the same path if it becomes ready within 10 s
-(`FOLLOW_S` in `view.py`), as with `serve --persist`, and logs the new session id under `/sim/0/host/session`.
-Plant time runs on across sessions, so the recording stays on one timeline. If no session follows, or after
-`--seconds`, or on Ctrl-C, it stops and prints how many robot frames it logged.
+When a session ends, the viewer follows the next session at the same path if it becomes ready within 10 s (`FOLLOW_S` in `view.py`), as with `serve --persist`, and logs the new session id under `/sim/0/host/session`. Plant time runs on across sessions, so the recording stays on one timeline. If no session follows, or after `--seconds`, or on Ctrl-C, it stops and prints how many robot frames it logged.
 
-The viewer maps the segment file, so it runs on the machine the host runs on. It needs Newton and the Rerun SDK
-(the `newton` and `viz` extras natively; the Isaac Lab image has both) and the plain robot asset (or `--usd`),
-whose bodies it places with host kinematics. It refuses a segment whose robot id or description digest differs
-from the description it loaded (`--robot`). `Segment.open` maps the file read-write, so the viewer's user needs write
-permission on the file, as a client does, although the viewer writes nothing. With the host in a container, the
-simplest way is a second container on the same volume writing a recording, opened afterwards on any machine with
-`rerun runtime.rrd` (see [getting-started.md](getting-started.md#serve-the-runtime)).
-[visualization.md](visualization.md) shows the viewer's layout with screenshots.
+The viewer maps the segment file, so it runs on the machine the host runs on. It needs Newton and the Rerun SDK (the `newton` and `viz` extras natively; the Isaac Lab image has both) and the plain robot asset (or `--usd`), whose bodies it places with host kinematics. It refuses a segment whose robot id or description digest differs from the description it loaded (`--robot`). `Segment.open` maps the file read-write, so the viewer's user needs write permission on the file, as a client does, although the viewer writes nothing. With the host in a container, the simplest way is a second container on the same volume writing a recording, opened afterwards on any machine with `rerun runtime.rrd` (see [getting-started.md](getting-started.md#serve-the-runtime)). [visualization.md](visualization.md) shows the viewer's layout with screenshots.

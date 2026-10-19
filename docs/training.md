@@ -1,47 +1,27 @@
 # Training on the Train-Time API
 
-`humanoid_sim.train` puts the robot's [plant](glossary.md#plant) inside a manager-based Isaac Lab environment. The
-plant is everything between a drive demand and the physics solver: the 22 EtherCAT drives (18 that turn one joint
-each and 4 that turn the [ankle cranks](glossary.md#ankle-crank), the levers that move each foot in pitch and roll
-through a linkage), the crank transmission, the drives' feedback reporting and the IMU's sample delivery. A task
-turns policy actions into drive demands and reads back what the robot's computer would read. Physics is Isaac Lab
-3.0 on Newton's MJWarp solver, with every env (one simulated robot) batched on the GPU.
+`humanoid_sim.train` puts the robot's [plant](glossary.md#plant) inside a manager-based Isaac Lab environment. The plant is everything between a drive demand and the physics solver: the 22 EtherCAT drives (18 that turn one joint each and 4 that turn the [ankle cranks](glossary.md#ankle-crank), the levers that move each foot in pitch and roll through a linkage), the crank transmission, the drives' feedback reporting and the IMU's sample delivery. A task turns policy actions into drive demands and reads back what the robot's computer would read. Physics is Isaac Lab 3.0 on Newton's MJWarp solver, with every env (one simulated robot) batched on the GPU.
 
-This page is for someone writing a task. The drive model itself is in [drives.md](drives.md), the IMU and the
-drive reporting in [sensors.md](sensors.md), terrain, supports and pushes in [world.md](world.md).
+This page is for someone writing a task. The drive model itself is in [drives.md](drives.md), the IMU and the drive reporting in [sensors.md](sensors.md), terrain, supports and pushes in [world.md](world.md).
 
 ## Start from the example
 
-`examples/train_scene.py` is a complete scene on this API and the place to start a task from. It has no policy:
-its action term, `ScriptedDrives`, demands the scene's default pose at the baseline drive gains plus an arm wave
-(shoulders and elbows, 0.5 Hz, a different phase per env). A task replaces `ScriptedDrives.demands` with its
-policy's action path. The rest of the scene is what most tasks need:
+`examples/train_scene.py` is a complete scene on this API and the place to start a task from. It has no policy: its action term, `ScriptedDrives`, demands the scene's default pose at the baseline drive gains plus an arm wave (shoulders and elbows, 0.5 Hz, a different phase per env). A task replaces `ScriptedDrives.demands` with its policy's action path. The rest of the scene is what most tasks need:
 
-- The robot starts in the flat-foot pose (`robot_scene_cfg(..., pose="flat_feet")`, see
-  [The initial pose](#the-initial-pose)), and the demands are taken from the articulation's
-  `data.default_joint_pos`.
-- The ground is rough terrain from `rough_terrain_cfg` laid out as one row of 2.5 m tiles, one tile per robot,
-  without a curriculum. Isaac Lab puts every env assigned to a tile at that tile's origin, so envs that share a tile
-  spawn on the same spot. `--flat` uses the flat ground instead.
-- Robot friction (0.4 to 1.0), a payload of 0 to 4.5 kg on `base_link` and one drive latency per env (10 to 20 ms)
-  are randomized. The terrain and the flat ground have friction 0 so the robot's value decides.
-- A `ForcePush` pushes `base_link` with 40 to 120 N for 0.1 to 0.2 s, with 1.5 to 3 s between pushes. The loop
-  steps it once per policy step.
-- With `--rrd`, a `SceneRecorder` records every robot to a Rerun file, and `plant.log` adds robot 0's left knee
-  and base height to the same recording, every `--record-every` policy steps (default 2). See
-  [Recording a scene](#recording-a-scene).
+- The robot starts in the flat-foot pose (`robot_scene_cfg(..., pose="flat_feet")`, see [The initial pose](#the-initial-pose)), and the demands are taken from the articulation's `data.default_joint_pos`.
+- The ground is rough terrain from `rough_terrain_cfg` laid out as one row of 2.5 m tiles, one tile per robot, without a curriculum. Isaac Lab puts every env assigned to a tile at that tile's origin, so envs that share a tile spawn on the same spot. `--flat` uses the flat ground instead.
+- Robot friction (0.4 to 1.0), a payload of 0 to 4.5 kg on `base_link` and one drive latency per env (10 to 20 ms) are randomized. The terrain and the flat ground have friction 0 so the robot's value decides.
+- A `ForcePush` pushes `base_link` with 40 to 120 N for 0.1 to 0.2 s, with 1.5 to 3 s between pushes. The loop steps it once per policy step.
+- With `--rrd`, a `SceneRecorder` records every robot to a Rerun file, and `plant.log` adds robot 0's left knee and base height to the same recording, every `--record-every` policy steps (default 2). See [Recording a scene](#recording-a-scene).
 
-Run it in the Isaac Lab image (`hsim`, see [getting-started.md](getting-started.md#run-commands-in-the-image)) or
-on a GPU node. Warp's CPU device works for a few envs, slowly:
+Run it in the Isaac Lab image (`hsim`, see [getting-started.md](getting-started.md#run-commands-in-the-image)) or on a GPU node. Warp's CPU device works for a few envs, slowly:
 
 ```bash
 hsim python examples/train_scene.py --num-envs 4 --seconds 2 --device cpu
 python examples/train_scene.py --num-envs 64 --seconds 6 --device cuda:0 --rrd outputs/train_scene.rrd
 ```
 
-It prints how many robots still have their base above 0.6 m at the end. A rigid pose does not survive pushes and
-terrain for long, so most robots fall within a few seconds. Once they are down, MJWarp floods the console with
-`height field collision overflow` messages; [world.md](world.md#heightfield-collision-overflow) explains them.
+It prints how many robots still have their base above 0.6 m at the end. A rigid pose does not survive pushes and terrain for long, so most robots fall within a few seconds. Once they are down, MJWarp floods the console with `height field collision overflow` messages; [world.md](world.md#heightfield-collision-overflow) explains them.
 
 ## The pieces
 
@@ -83,37 +63,23 @@ terrain for long, so most robots fall within a few seconds. Once they are down, 
 
 ### How an env step runs the plant
 
-Isaac Lab's `ManagerBasedRLEnv.step` calls each action term's `process_actions` once per env step and
-`apply_actions` before every physics step. `PlantAction` uses them like this:
+Isaac Lab's `ManagerBasedRLEnv.step` calls each action term's `process_actions` once per env step and `apply_actions` before every physics step. `PlantAction` uses them like this:
 
-1. `process_actions(actions)` calls your `demands(actions)` and hands the result to `RobotPlant.submit`. Each
-   drive queues the demand to take effect at `sent_ns` plus that drive's [latency](glossary.md#latency).
-2. `apply_actions()` calls `RobotPlant.pre_physics()`. With the state at the start of the physics step it
-   appends drive feedback to the history and steps the IMU delivery model; then it runs the drive bank over the
-   step (every demand in force during the step, weighted by the time it covers), maps drive torque to joint
-   torque through the ankle transmission, and writes the position target that makes the solver's constant PD
-   produce that torque. `plant.t_ns` then advances by one physics period.
-3. When envs finish an episode, Isaac Lab runs the reset events, which write the new state, and then the action
-   manager's reset, which calls `RobotPlant.reset(env_ids)`.
+1. `process_actions(actions)` calls your `demands(actions)` and hands the result to `RobotPlant.submit`. Each drive queues the demand to take effect at `sent_ns` plus that drive's [latency](glossary.md#latency).
+2. `apply_actions()` calls `RobotPlant.pre_physics()`. With the state at the start of the physics step it appends drive feedback to the history and steps the IMU delivery model; then it runs the drive bank over the step (every demand in force during the step, weighted by the time it covers), maps drive torque to joint torque through the ankle transmission, and writes the position target that makes the solver's constant PD produce that torque. `plant.t_ns` then advances by one physics period.
+3. When envs finish an episode, Isaac Lab runs the reset events, which write the new state, and then the action manager's reset, which calls `RobotPlant.reset(env_ids)`.
 
-The solver's PD gains are constant per joint and written once at spawn. The drives' own gains, the torque-speed
-envelope and the torque cap are all realized by moving the position target
-([target shaping](glossary.md#target-shaping), see [drives.md](drives.md)), so nothing in the solver model changes
-while training steps.
+The solver's PD gains are constant per joint and written once at spawn. The drives' own gains, the torque-speed envelope and the torque cap are all realized by moving the position target ([target shaping](glossary.md#target-shaping), see [drives.md](drives.md)), so nothing in the solver model changes while training steps.
 
 ## Build the robot USD first
 
-`robot_scene_cfg` reads the built asset: `asset.json` holds the sole boxes, from which it computes the initial
-pose and the base height with Newton's forward kinematics on the host. The USD must exist before you build the env
-config. Build it once in the Isaac Lab image:
+`robot_scene_cfg` reads the built asset: `asset.json` holds the sole boxes, from which it computes the initial pose and the base height with Newton's forward kinematics on the host. The USD must exist before you build the env config. Build it once in the Isaac Lab image:
 
 ```bash
 humanoid-sim build-asset
 ```
 
-The asset goes to `outputs/assets/ethrc_v1/<key>/`, where the key is a digest of the description and the
-profile; changing either needs a rebuild. In code, `build_asset` (`src/humanoid_sim/model/asset.py`) returns the
-USD path of an asset that is already built, and builds it otherwise (which needs the image):
+The asset goes to `outputs/assets/ethrc_v1/<key>/`, where the key is a digest of the description and the profile; changing either needs a rebuild. In code, `build_asset` (`src/humanoid_sim/model/asset.py`) returns the USD path of an asset that is already built, and builds it otherwise (which needs the image):
 
 ```python
 from pathlib import Path
@@ -124,42 +90,26 @@ from humanoid_sim.model.description import Description
 usd = build_asset(Description.load("ethrc_v1"), load_profile("ethrc_v1"), Path("outputs/assets"))
 ```
 
-Train on the plain asset. The `--base-joints` variant is for replays ([replay-and-sysid.md](replay-and-sysid.md)).
-Setup of the image is in [getting-started.md](getting-started.md).
+Train on the plain asset. The `--base-joints` variant is for replays ([replay-and-sysid.md](replay-and-sysid.md)). Setup of the image is in [getting-started.md](getting-started.md).
 
 ## The initial pose
 
-`robot_scene_cfg(..., pose=...)` picks the joint positions every env spawns and resets to. The names are in
-`POSES`; any other name raises a `ValueError`.
+`robot_scene_cfg(..., pose=...)` picks the joint positions every env spawns and resets to. The names are in `POSES`; any other name raises a `ValueError`.
 
 | `pose` | Joint positions | Held rigidly on flat ground |
 |---|---|---|
 | `"standing"` (default) | The description's [standing pose](glossary.md#standing-pose): every joint at its `standing_offset_rad` | Under an upright base the soles are pitched about 10 deg (left) and 17 deg (right). The robot lands on its sole edges, hops and tips over within about a second. |
 | `"flat_feet"` | The [flat-foot pose](glossary.md#flat-foot-pose) (`flat_foot_pose` in `src/humanoid_sim/model/kinematics.py`): the standing pose with each ankle turned so its sole lies level, and the leg with the lower sole bent at hip and knee until both soles are at the same height | At the baseline gains it stands for about 10 s on flat ground, then leans over slowly and falls; a policy has to balance it (`tests/test_world.py::test_a_robot_holding_the_flat_foot_pose_stands`). |
 
-Use `pose="flat_feet"` for any task that starts on the ground. In both poses the base is upright and the lowest
-sole corner is 1 mm above the ground (`STANDING_CLEARANCE_M` in `src/humanoid_sim/train/scene.py`); on the
-current description the base starts about 0.95 m up in the standing pose and 0.90 m up in the flat-foot pose. Why
-the standing pose does not stand, and how the flat-foot pose is solved, is in
-[robot-model.md](robot-model.md#standing-on-the-ground).
+Use `pose="flat_feet"` for any task that starts on the ground. In both poses the base is upright and the lowest sole corner is 1 mm above the ground (`STANDING_CLEARANCE_M` in `src/humanoid_sim/train/scene.py`); on the current description the base starts about 0.95 m up in the standing pose and 0.90 m up in the flat-foot pose. Why the standing pose does not stand, and how the flat-foot pose is solved, is in [robot-model.md](robot-model.md#standing-on-the-ground).
 
-The articulation's `data.default_joint_pos` holds the chosen pose (articulation joint order), so
-`mdp.reset_scene_to_default` puts the robot back into it. Take action offsets from `default_joint_pos`, as
-`examples/train_scene.py` does, instead of from `standing_offset_rad`; then the task follows whichever pose the
-scene was built with.
+The articulation's `data.default_joint_pos` holds the chosen pose (articulation joint order), so `mdp.reset_scene_to_default` puts the robot back into it. Take action offsets from `default_joint_pos`, as `examples/train_scene.py` does, instead of from `standing_offset_rad`; then the task follows whichever pose the scene was built with.
 
-`initial_pose(usd, robot="ethrc_v1", pose="standing")` returns the pose's joint positions `[22]` (description
-order, float64) and the base height at which its lowest sole corner touches the ground, without the clearance. To
-build your own scene config, `articulation_cfg(usd, props, ..., joint_pos=...)` in
-`src/humanoid_sim/physics/isaaclab.py` takes the initial joint positions in `props.names` order; without
-`joint_pos` it uses the standing pose.
+`initial_pose(usd, robot="ethrc_v1", pose="standing")` returns the pose's joint positions `[22]` (description order, float64) and the base height at which its lowest sole corner touches the ground, without the clearance. To build your own scene config, `articulation_cfg(usd, props, ..., joint_pos=...)` in `src/humanoid_sim/physics/isaaclab.py` takes the initial joint positions in `props.names` order; without `joint_pos` it uses the standing pose.
 
 ## A minimal environment
 
-This env holds the flat-foot pose with policy actions as offsets, observes measured signals in the actor group
-and truth in the critic group, and randomizes friction, latency and inertia. It follows `tests/test_train_env.py`
-and `examples/train_scene.py`, and runs as written in the Isaac Lab image (change the device to `"cpu"` and the
-env count to a few on a machine without CUDA).
+This env holds the flat-foot pose with policy actions as offsets, observes measured signals in the actor group and truth in the critic group, and randomizes friction, latency and inertia. It follows `tests/test_train_env.py` and `examples/train_scene.py`, and runs as written in the Isaac Lab image (change the device to `"cpu"` and the env count to a few on a machine without CUDA).
 
 ```python
 from pathlib import Path
@@ -287,25 +237,17 @@ env = ManagerBasedRLEnv(cfg)
 
 The observation groups come out as `policy` `[E, 50]` and `critic` `[E, 77]`.
 
-The [physics period](glossary.md#physics-period) comes from the profile (`physics.period_ns: 4000000`, 4 ms or
-250 Hz), and `robot_sim_cfg` sets the simulation `dt` from it. With `decimation = 5` the policy runs every 20 ms
-(50 Hz). The plant does not depend on the decimation: it runs once per physics step and stamps everything on its
-own clock.
+The [physics period](glossary.md#physics-period) comes from the profile (`physics.period_ns: 4000000`, 4 ms or 250 Hz), and `robot_sim_cfg` sets the simulation `dt` from it. With `decimation = 5` the policy runs every 20 ms (50 Hz). The plant does not depend on the decimation: it runs once per physics step and stamps everything on its own clock.
 
-Other terms reach the plant through the action term, `env.action_manager.get_term("drives").plant`; the term can
-have any name.
+Other terms reach the plant through the action term, `env.action_manager.get_term("drives").plant`; the term can have any name.
 
-For the rsl-rl side, `tests/test_train_smoke.py` in
-[humanoid-learning](https://github.com/ETHRoboticsClub/humanoid-learning) is the working example: it builds an env
-on this API, wraps it in `RslRlVecEnvWrapper` and trains one PPO iteration on the plant. With separate actor and
-critic groups as above, the runner config maps them with `obs_groups={"actor": ["policy"], "critic": ["critic"]}`.
+For the rsl-rl side, `tests/test_train_smoke.py` in [humanoid-learning](https://github.com/ETHRoboticsClub/humanoid-learning) is the working example: it builds an env on this API, wraps it in `RslRlVecEnvWrapper` and trains one PPO iteration on the plant. With separate actor and critic groups as above, the runner config maps them with `obs_groups={"actor": ["policy"], "critic": ["critic"]}`.
 
 ### What `demands()` returns
 
 `demands(actions)` returns a pair `(demand, sent_ns)`.
 
-`demand` is a `DriveDemand` with every field `[E, 22]`, in the plant's drive order (`plant.drives`, the
-description's drive order). It mirrors Controls' `FakeDriveDemand` field for field:
+`demand` is a `DriveDemand` with every field `[E, 22]`, in the plant's drive order (`plant.drives`, the description's drive order). It mirrors Controls' `FakeDriveDemand` field for field:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -318,29 +260,13 @@ description's drive order). It mirrors Controls' `FakeDriveDemand` field for fie
 | `max_torque_mnm` | int64 | Torque cap in mNm, 0 for none |
 | `homing_hold` | bool | Carried for an exact mirror; not read |
 
-In [JVPT](glossary.md#jvpt) mode an enabled drive applies `kp (target - q) + kd (v_target - v) + ff`, clipped by
-its torque-speed envelope and the cap. `DriveDemand.jvpt(position, stiffness, damping, *, velocity=None,
-feedforward=None, max_torque_nm=None)` builds an enabled JVPT demand from SI gains, rounding them to raw counts as
-Controls does; `DriveDemand.disabled(num_envs, num_drives, device=...)` turns every drive off. The modes are in
-[drives.md](drives.md).
+In [JVPT](glossary.md#jvpt) mode an enabled drive applies `kp (target - q) + kd (v_target - v) + ff`, clipped by its torque-speed envelope and the cap. `DriveDemand.jvpt(position, stiffness, damping, *, velocity=None, feedforward=None, max_torque_nm=None)` builds an enabled JVPT demand from SI gains, rounding them to raw counts as Controls does; `DriveDemand.disabled(num_envs, num_drives, device=...)` turns every drive off. The modes are in [drives.md](drives.md).
 
-Positions are in the [drive frame](glossary.md#drive-frame). For a 1:1 drive that is the joint angle times a sign;
-for an ankle drive it is the crank angle, which is neither the foot pitch nor the foot roll.
-`plant.core.map.drive_state(q, qd)` maps joint positions in description order to drive positions through the
-ankle transmission, which is how `PoseOffsets` turns the default pose into drive targets. A policy that acts in
-foot pitch and roll converts them the same way inside `demands()`.
+Positions are in the [drive frame](glossary.md#drive-frame). For a 1:1 drive that is the joint angle times a sign; for an ankle drive it is the crank angle, which is neither the foot pitch nor the foot roll. `plant.core.map.drive_state(q, qd)` maps joint positions in description order to drive positions through the ankle transmission, which is how `PoseOffsets` turns the default pose into drive targets. A policy that acts in foot pitch and roll converts them the same way inside `demands()`.
 
-`sent_ns` is an `[E]` int64 tensor: when the demand leaves the EtherCAT master, in nanoseconds on the plant clock.
-`self.plant.t_ns` is now, the start of the first physics step of this env step. Drive `d` of env `e` applies the
-demand from `sent_ns[e] + latency[e, d]`, where `latency` comes from randomization and is zero when it isn't
-randomized. A demand that arrives inside a physics step is in force for the part of the step it covers. Demands
-never overtake each other on a drive: an arrival earlier than the last queued one is moved to it. When a queue is
-full, its oldest pending demand is dropped, so size `queue_capacity` for your submit rate and maximum latency.
+`sent_ns` is an `[E]` int64 tensor: when the demand leaves the EtherCAT master, in nanoseconds on the plant clock. `self.plant.t_ns` is now, the start of the first physics step of this env step. Drive `d` of env `e` applies the demand from `sent_ns[e] + latency[e, d]`, where `latency` comes from randomization and is zero when it isn't randomized. A demand that arrives inside a physics step is in force for the part of the step it covers. Demands never overtake each other on a drive: an arrival earlier than the last queued one is moved to it. When a queue is full, its oldest pending demand is dropped, so size `queue_capacity` for your submit rate and maximum latency.
 
-The [baseline gains](glossary.md#baseline-gains) (`plant.core.drive_stiffness`, `plant.core.drive_damping`, from
-humanoid-urdf) are also the solver gains. Target shaping is guaranteed stable for demanded gains up to twice the
-baseline; `plant.core.gain_warnings` (`[E, 22]` bool, cleared at reset) marks drives that received an enabled
-demand above that.
+The [baseline gains](glossary.md#baseline-gains) (`plant.core.drive_stiffness`, `plant.core.drive_damping`, from humanoid-urdf) are also the solver gains. Target shaping is guaranteed stable for demanded gains up to twice the baseline; `plant.core.gain_warnings` (`[E, 22]` bool, cleared at reset) marks drives that received an enabled demand above that.
 
 ## Reading the plant
 
@@ -355,12 +281,7 @@ demand above that.
 | `history_ns` | `[E, H]` int64 | Plant time of each history entry; -1 where nothing was recorded since the last reset |
 | `imu` | `ImuSamples` or `None` | Raw IMU samples received so far, newest first |
 
-With `reporting=True` the drive values are quantized the way Controls' fake EtherCAT drive (`Epos4Slave.cpp`)
-reports them, in `src/humanoid_sim/devices/reporting.py`. The position is the drive's own reading in whole
-encoder counts, so it includes the drive's `encoder_offset`, plus a random -1, 0 or +1 count on every read. The
-velocity is whole counts per controller sample at 2.5 kHz, converted back to rad/s. The applied torque is in
-whole mNm; the demanded torque passes through. Values stay in rad, rad/s and Nm. With `reporting=False` only the
-offset is added.
+With `reporting=True` the drive values are quantized the way Controls' fake EtherCAT drive (`Epos4Slave.cpp`) reports them, in `src/humanoid_sim/devices/reporting.py`. The position is the drive's own reading in whole encoder counts, so it includes the drive's `encoder_offset`, plus a random -1, 0 or +1 count on every read. The velocity is whole counts per controller sample at 2.5 kHz, converted back to rad/s. The applied torque is in whole mNm; the demanded torque passes through. Values stay in rad, rad/s and Nm. With `reporting=False` only the offset is added.
 
 | Drive family | Drives | Counts per rev | Position step | Velocity step |
 |---|---|---|---|---|
@@ -381,18 +302,9 @@ The velocity steps are coarse; this is what the real drives report.
 | `seq` | `[E, 16]` | Sequence number, from 1 after a reset; 0 for an empty slot |
 | `count` | `[E]` | Samples delivered since the last reset |
 
-The sensor frame is the chip frame at the description's IMU mount (`imu_joint` on `base_link`); nothing rotates it
-into the base frame. The sensor samples every 2.74 ms (about 365 samples/s) and the host receives them in
-[bursts](glossary.md#imu-burst) every 13.9 to 17.6 ms, so the newest sample can be one burst period old. Each
-sample carries white noise at the MTi-610 datasheet densities, plus any bias and misalignment the randomization
-drew. Details are in [sensors.md](sensors.md).
+The sensor frame is the chip frame at the description's IMU mount (`imu_joint` on `base_link`); nothing rotates it into the base frame. The sensor samples every 2.74 ms (about 365 samples/s) and the host receives them in [bursts](glossary.md#imu-burst) every 13.9 to 17.6 ms, so the newest sample can be one burst period old. Each sample carries white noise at the MTi-610 datasheet densities, plus any bias and misalignment the randomization drew. Details are in [sensors.md](sensors.md).
 
-Actor observations come from `measured()` only. That is the information a deployed policy has on the robot;
-`truth()` and `params()` are for critics, rewards, terminations and diagnostics. The plant hands out raw drive
-feedback and raw IMU samples. What Controls computes from them before a policy sees them (an orientation
-estimate, the standing-frame joint offsets, the observation layout of its policy contract) is Controls
-behaviour and is not modeled here; a task that trains for Controls reproduces it from measured signals
-([controls-integration.md](controls-integration.md)).
+Actor observations come from `measured()` only. That is the information a deployed policy has on the robot; `truth()` and `params()` are for critics, rewards, terminations and diagnostics. The plant hands out raw drive feedback and raw IMU samples. What Controls computes from them before a policy sees them (an orientation estimate, the standing-frame joint offsets, the observation layout of its policy contract) is Controls behaviour and is not modeled here; a task that trains for Controls reproduces it from measured signals ([controls-integration.md](controls-integration.md)).
 
 ### `truth()`
 
@@ -405,48 +317,28 @@ behaviour and is not modeled here; a task that trains for Controls reproduces it
 | `drive` | `DriveFeedback`, each field `[E, 22]` | Physical drive-frame feedback, without offsets or quantization |
 | `contact_forces_w` | `[E, B, 3]` or `None` | Net contact force on each body (N, world frame) |
 
-The contact sensor covers every body and also tracks force history (3 steps) and air time; read those from
-`env.scene["contacts"].data`. Its body order is the sensor's own (`sensor_names`), so look bodies up by name
-there, as the runtime host does, instead of assuming the articulation's `body_names` order.
+The contact sensor covers every body and also tracks force history (3 steps) and air time; read those from `env.scene["contacts"].data`. Its body order is the sensor's own (`sensor_names`), so look bodies up by name there, as the runtime host does, instead of assuming the articulation's `body_names` order.
 
 ### `params()`
 
-`params()` returns the realized randomized parameters per env as a dict keyed by parameter name. Only the
-parameters in the spec list appear. Units are those of the [parameter table](#parameters); shapes are `[E, N]`
-over the parameter's targets, `[E, 23, 3]` for `body_com`, `[E, 1]` for `friction` and `[E, 3]` for the IMU
-parameters. They suit privileged critic inputs (latency, payload, friction). The tensors are the randomizer's own;
-clone what you keep.
+`params()` returns the realized randomized parameters per env as a dict keyed by parameter name. Only the parameters in the spec list appear. Units are those of the [parameter table](#parameters); shapes are `[E, N]` over the parameter's targets, `[E, 23, 3]` for `body_com`, `[E, 1]` for `friction` and `[E, 3]` for the IMU parameters. They suit privileged critic inputs (latency, payload, friction). The tensors are the randomizer's own; clone what you keep.
 
 ## Time
 
-`plant.t_ns` is a Python int: nanoseconds since the plant was constructed, advanced by one physics period in
-every `pre_physics()`. There is one clock for all envs, and resets do not restart it. `sent_ns`, `history_ns` and
-the IMU's `sample_ns` and `stamp_ns` are all on this clock, so the age of the newest IMU sample is
-`plant.t_ns - m.imu.stamp_ns[:, 0]`. For time within an episode use Isaac Lab's `env.episode_length_buf` or record
-`plant.t_ns` at reset.
+`plant.t_ns` is a Python int: nanoseconds since the plant was constructed, advanced by one physics period in every `pre_physics()`. There is one clock for all envs, and resets do not restart it. `sent_ns`, `history_ns` and the IMU's `sample_ns` and `stamp_ns` are all on this clock, so the age of the newest IMU sample is `plant.t_ns - m.imu.stamp_ns[:, 0]`. For time within an episode use Isaac Lab's `env.episode_length_buf` or record `plant.t_ns` at reset.
 
 ## Resets
 
-`RobotPlant.reset(env_ids, *, joint_pos=None, joint_vel=None, root_pose=None, root_vel=None, demand=None)`
-resets the given envs:
+`RobotPlant.reset(env_ids, *, joint_pos=None, joint_vel=None, root_pose=None, root_vel=None, demand=None)` resets the given envs:
 
-- The given state is written: joint state in description order (a missing `joint_vel` means zero), root pose as
-  position plus quaternion (x, y, z, w) in the world frame (add `env.scene.env_origins`), root velocity `[n, 6]`.
-- Queued demands are dropped and every drive is off, unless `demand` (rows for `env_ids`) is passed; it is then
-  in force from the next physics step, with no latency.
+- The given state is written: joint state in description order (a missing `joint_vel` means zero), root pose as position plus quaternion (x, y, z, w) in the world frame (add `env.scene.env_origins`), root velocity `[n, 6]`.
+- Queued demands are dropped and every drive is off, unless `demand` (rows for `env_ids`) is passed; it is then in force from the next physics step, with no latency.
 - Gain warnings and external joint torques (`plant.core.external_torque`) are cleared.
 - The reset-scope device parameters are redrawn for these envs and written. Solver parameters are not redrawn.
-- The feedback history is marked empty: every `history_ns` entry is -1. The history values themselves still hold
-  the previous episode's feedback until new physics steps push it out.
-- IMU delivery restarts at `plant.t_ns` with a new random sample phase and burst phase. `count` is 0, every slot
-  has `sample_ns` and `stamp_ns` -1 and `seq` 0, and `gyro` and `specific_force` keep the previous episode's
-  samples until new ones are delivered.
+- The feedback history is marked empty: every `history_ns` entry is -1. The history values themselves still hold the previous episode's feedback until new physics steps push it out.
+- IMU delivery restarts at `plant.t_ns` with a new random sample phase and burst phase. `count` is 0, every slot has `sample_ns` and `stamp_ns` -1 and `seq` 0, and `gyro` and `specific_force` keep the previous episode's samples until new ones are delivered.
 
-`plant.t_ns` keeps running. `PlantAction.reset` calls `plant.reset(env_ids)` with no arguments after Isaac Lab's
-reset events, so the state comes from your events and the drives come back off. The first demand after the reset
-is submitted in the next env step and acts one latency later (10 to 20 ms with the example's randomization); a
-standing robot is unpowered until then. To have the drives hold from the first physics step, pass a demand from
-your own `reset`:
+`plant.t_ns` keeps running. `PlantAction.reset` calls `plant.reset(env_ids)` with no arguments after Isaac Lab's reset events, so the state comes from your events and the drives come back off. The first demand after the reset is submitted in the next env step and acts one latency later (10 to 20 ms with the example's randomization); a standing robot is unpowered until then. To have the drives hold from the first physics step, pass a demand from your own `reset`:
 
 ```python
 class HeldPoseOffsets(PoseOffsets):  # PoseOffsets from the minimal environment
@@ -461,9 +353,7 @@ class HeldPoseOffsets(PoseOffsets):  # PoseOffsets from the minimal environment
 
 ## Randomization
 
-The plant draws its own [randomization](glossary.md#domain-randomization) (`src/humanoid_sim/randomization/`),
-batched on the device and seeded by `TrainPlantCfg.seed`. Each entry of `TrainPlantCfg.randomization` is a dict
-(parsed by `ParamSpec.from_dict`) or a `ParamSpec`:
+The plant draws its own [randomization](glossary.md#domain-randomization) (`src/humanoid_sim/randomization/`), batched on the device and seeded by `TrainPlantCfg.seed`. Each entry of `TrainPlantCfg.randomization` is a dict (parsed by `ParamSpec.from_dict`) or a `ParamSpec`:
 
 | Key | Values | Meaning |
 |---|---|---|
@@ -477,34 +367,20 @@ batched on the device and seeded by `TrainPlantCfg.seed`. Each entry of `TrainPl
 | `levels` | `true` (default), `false` | Whether the level shrinks this draw |
 | `per_target` | `true` (default), `false` | One draw per selected target, or one draw shared by all of an env's selected targets |
 
-Unknown names, distributions, ops or scopes raise, as does a selector key that doesn't fit the parameter (a
-`bodies` key on a drive parameter) or a regex that selects nothing. Body names are the merged URDF link names
-(`Component171_1` is the upper body above the waist yaw joint, `base_link` the root body that carries the IMU; see
-[robot-model.md](robot-model.md)), joint names are the description's, drive names the EtherCAT drive names such as
-`maxonHEJ90L4`. `friction` has no selector. The IMU parameters apply to all three axes unless `select` picks some,
-for example `{"param": "imu_gyro_bias", "select": "z", "dist": "normal", "range": [0.0, 0.003], "op": "add"}` for
-a yaw-rate bias only; `ParamSpec(..., select="z")` is the same.
+Unknown names, distributions, ops or scopes raise, as does a selector key that doesn't fit the parameter (a `bodies` key on a drive parameter) or a regex that selects nothing. Body names are the merged URDF link names (`Component171_1` is the upper body above the waist yaw joint, `base_link` the root body that carries the IMU; see [robot-model.md](robot-model.md)), joint names are the description's, drive names the EtherCAT drive names such as `maxonHEJ90L4`. `friction` has no selector. The IMU parameters apply to all three axes unless `select` picks some, for example `{"param": "imu_gyro_bias", "select": "z", "dist": "normal", "range": [0.0, 0.003], "op": "add"}` for a yaw-rate bias only; `ParamSpec(..., select="z")` is the same.
 
-Every parameter starts from its nominal value. Startup draws apply first, in list order; reset draws then apply in
-list order on top of the startup value, for the envs being reset. So `body_mass` can be scaled on every body and
-then get a payload added on one, and a reset-scope `encoder_offset` can add to a startup-scope one.
+Every parameter starts from its nominal value. Startup draws apply first, in list order; reset draws then apply in list order on top of the startup value, for the envs being reset. So `body_mass` can be scaled on every body and then get a payload added on one, and a reset-scope `encoder_offset` can add to a startup-scope one.
 
 When a spec is drawn depends on the parameter's kind:
 
-- Physics parameters live in the solver model. Writing them on MJWarp updates every world and syncs with the
-  host, so they are drawn at construction and redrawn only by `set_level`. `scope: reset` on one raises.
-- Device parameters live in this repo's tensors and are redrawn for each env at its reset (and at construction).
-  With `scope: startup` they are drawn at construction and on `set_level` only.
+- Physics parameters live in the solver model. Writing them on MJWarp updates every world and syncs with the host, so they are drawn at construction and redrawn only by `set_level`. `scope: reset` on one raises.
+- Device parameters live in this repo's tensors and are redrawn for each env at its reset (and at construction). With `scope: startup` they are drawn at construction and on `set_level` only.
 
-The level, in [0, 1], pulls every draw toward its identity: `draw(level) = identity + level * (draw - identity)`.
-The identity is 1 for `scale`, 0 for `add`, and for `set` the centre of the distribution (the midpoint for
-`uniform`, the geometric mean for `log_uniform`, the mean for `normal`). `levels: false` exempts a spec. At level 0
-every scale and add spec gives the nominal value.
+The level, in [0, 1], pulls every draw toward its identity: `draw(level) = identity + level * (draw - identity)`. The identity is 1 for `scale`, 0 for `add`, and for `set` the centre of the distribution (the midpoint for `uniform`, the geometric mean for `log_uniform`, the mean for `normal`). `levels: false` exempts a spec. At level 0 every scale and add spec gives the nominal value.
 
 ### Parameters
 
-The full table is `PARAMS` in `src/humanoid_sim/randomization/spec.py`. E is the number of envs; the robot has 23
-bodies, 22 joints and 22 drives.
+The full table is `PARAMS` in `src/humanoid_sim/randomization/spec.py`. E is the number of envs; the robot has 23 bodies, 22 joints and 22 drives.
 
 | Parameter | Kind | Shape | Unit | Nominal | Meaning |
 |---|---|---|---|---|---|
@@ -524,10 +400,7 @@ bodies, 22 joints and 22 drives.
 | `imu_accel_bias` | device | `[E, 3]` | m/s² | 0 | Accelerometer bias, sensor frame |
 | `imu_misalignment` | device | `[E, 3]` | rad | 0 | Rotation of the sensor in its mount, as a rotation vector |
 
-A drive acts on its own reading, so with an `encoder_offset` it regulates the offset position: the drive output
-settles `encoder_offset` away from the demanded target, and `measured()` shows the offset reading while `truth()`
-shows the physical one. Randomizing `friction` needs the physics manager, which `PlantAction` passes in; see the
-ground-friction pitfall below. The IMU parameters only take effect when the scene has the IMU.
+A drive acts on its own reading, so with an `encoder_offset` it regulates the offset position: the drive output settles `encoder_offset` away from the demanded target, and `measured()` shows the offset reading while `truth()` shows the physical one. Randomizing `friction` needs the physics manager, which `PlantAction` passes in; see the ground-friction pitfall below. The IMU parameters only take effect when the scene has the IMU.
 
 A list like the one the train benchmark uses (`src/humanoid_sim/bench/train.py`), with a few additions:
 
@@ -555,16 +428,11 @@ RANDOMIZATION = [
 ]
 ```
 
-This scales every body's mass and adds up to 4.5 kg of payload on the upper body, shares one latency across an
-env's drives with extra latency on the four ankle drives, adds a second, wider offset on the ankle cranks, adds a
-larger gyro bias on the z axis, and keeps one IMU misalignment per env until the level changes.
+This scales every body's mass and adds up to 4.5 kg of payload on the upper body, shares one latency across an env's drives with extra latency on the four ankle drives, adds a second, wider offset on the ankle cranks, adds a larger gyro bias on the z axis, and keeps one IMU misalignment per env until the level changes.
 
 ### Levels
 
-`plant.set_level(level)` redraws everything at the new level, startup and reset draws for every env, and writes it
-all, solver parameters included. Running envs get new device parameters immediately. Because of the solver write,
-call it rarely and only when the level changes, for example from a curriculum term that steps through a few
-levels. This extends the minimal environment above:
+`plant.set_level(level)` redraws everything at the new level, startup and reset draws for every env, and writes it all, solver parameters included. Running envs get new device parameters immediately. Because of the solver write, call it rarely and only when the level changes, for example from a curriculum term that steps through a few levels. This extends the minimal environment above:
 
 ```python
 from isaaclab.managers import CurriculumTermCfg
@@ -583,15 +451,11 @@ class Curriculum:
     randomization = CurriculumTermCfg(func=randomization_level)
 ```
 
-Add `curriculum = Curriculum()` to the env config and start the plant at `TrainPlantCfg(level=0.0)`. Isaac Lab
-calls curriculum terms on every reset, which is why the function compares before it writes.
+Add `curriculum = Curriculum()` to the env config and start the plant at `TrainPlantCfg(level=0.0)`. Isaac Lab calls curriculum terms on every reset, which is why the function compares before it writes.
 
 ## Signal logging
 
-`plant.attach_log(log)` attaches a `SignalLog` (`src/humanoid_sim/signals/log.py`), and `plant.log(name, value,
-*, envs=(0,), group="signals")` writes `value` (`[E]` or `[E, ...]`) for the listed envs as
-`/sim/{env}/{group}/{name}` at the plant time, on the same `time` timeline as the 3D views. With `env` from the
-minimal environment:
+`plant.attach_log(log)` attaches a `SignalLog` (`src/humanoid_sim/signals/log.py`), and `plant.log(name, value, *, envs=(0,), group="signals")` writes `value` (`[E]` or `[E, ...]`) for the listed envs as `/sim/{env}/{group}/{name}` at the plant time, on the same `time` timeline as the 3D views. With `env` from the minimal environment:
 
 ```python
 from humanoid_sim.signals.log import SignalLog
@@ -601,24 +465,15 @@ p.attach_log(SignalLog(rrd="outputs/train_debug.rrd"))
 p.log("base_height", p.truth().root_pose_w[:, 2], envs=(0, 1), group="base")
 ```
 
-Every `log` call copies to the host, so keep it to inspection runs. Opening and reading the recordings is in
-[visualization.md](visualization.md).
+Every `log` call copies to the host, so keep it to inspection runs. Opening and reading the recordings is in [visualization.md](visualization.md).
 
 ### Recording a scene
 
-`SceneRecorder(env, usd, *, rrd=None, connect=None, envs=None)` (`src/humanoid_sim/signals/scene.py`) records the
-robots of an Isaac Lab scene into one [Rerun](glossary.md#rerun) recording. It logs the ground once (the generated
-terrain read from the USD stage, or a 40 m square for the flat ground) and each visual mesh of the robot once.
-Every `frame(t_ns)` call then logs the body poses of the recorded envs as instance poses of those meshes. `envs`
-lists the env indices to record (default all), `rrd` writes a file and `connect` streams to a running viewer; the
-recording's application id is `humanoid-sim scene`. `close()` ends the recording.
+`SceneRecorder(env, usd, *, rrd=None, connect=None, envs=None)` (`src/humanoid_sim/signals/scene.py`) records the robots of an Isaac Lab scene into one [Rerun](glossary.md#rerun) recording. It logs the ground once (the generated terrain read from the USD stage, or a 40 m square for the flat ground) and each visual mesh of the robot once. Every `frame(t_ns)` call then logs the body poses of the recorded envs as instance poses of those meshes. `envs` lists the env indices to record (default all), `rrd` writes a file and `connect` streams to a running viewer; the recording's application id is `humanoid-sim scene`. `close()` ends the recording.
 
-A frame copies `[envs, bodies, 7]` poses from the GPU, so record at a low rate (every few policy steps) and use it
-for debugging and showcases. Leave it out of a training loop that has to stay free of host syncs.
+A frame copies `[envs, bodies, 7]` poses from the GPU, so record at a low rate (every few policy steps) and use it for debugging and showcases. Leave it out of a training loop that has to stay free of host syncs.
 
-A `SignalLog(init=False)` joins the recording the recorder opened, so one robot's signals appear next to the
-scene. This fragment is the recording part of `examples/train_scene.py` (`env`, `usd`, `steps` and `actions` come
-from the surrounding script):
+A `SignalLog(init=False)` joins the recording the recorder opened, so one robot's signals appear next to the scene. This fragment is the recording part of `examples/train_scene.py` (`env`, `usd`, `steps` and `actions` come from the surrounding script):
 
 ```python
 from humanoid_sim.signals.log import SignalLog
@@ -639,51 +494,25 @@ Screenshots of such a recording are in [visualization.md](visualization.md#train
 
 ## Performance
 
-The plant's steady-state work (`submit`, `pre_physics`, `measured`, `truth`, `reset`) is batched torch on the
-device with no host syncs. `humanoid-sim bench --train` checks this by running its loop under
-`torch.cuda.set_sync_debug_mode("error")` ([benchmarks.md](benchmarks.md)). Task code should follow the same
-rules:
+The plant's steady-state work (`submit`, `pre_physics`, `measured`, `truth`, `reset`) is batched torch on the device with no host syncs. `humanoid-sim bench --train` checks this by running its loop under `torch.cuda.set_sync_debug_mode("error")` ([benchmarks.md](benchmarks.md)). Task code should follow the same rules:
 
-- Keep observation, reward and termination terms free of host syncs: no `.item()`, `.cpu()`, `.tolist()` or
-  printing of device tensors, no Python branches on tensor values, no boolean-mask indexing.
+- Keep observation, reward and termination terms free of host syncs: no `.item()`, `.cpu()`, `.tolist()` or printing of device tensors, no Python branches on tensor values, no boolean-mask indexing.
 - Compute constants once in `__init__`, as `PoseOffsets` does with its targets and gains.
-- Write the solver model only at startup and on level changes. The plant writes physics parameters at
-  construction and in `set_level`. Isaac Lab events in reset mode that change masses, materials or joint
-  properties write the same solver model on every reset; randomize those through the plant instead.
+- Write the solver model only at startup and on level changes. The plant writes physics parameters at construction and in `set_level`. Isaac Lab events in reset mode that change masses, materials or joint properties write the same solver model on every reset; randomize those through the plant instead.
 - Solver gains stay fixed. Gain changes go in the demand and are realized by target shaping at no solver cost.
-- `plant.log`, `SceneRecorder.frame` and `set_level` sync with the host by design: use them in inspection runs and
-  for rare curriculum steps only.
+- `plant.log`, `SceneRecorder.frame` and `set_level` sync with the host by design: use them in inspection runs and for rare curriculum steps only.
 
 ## Pitfalls
 
-- MJWarp uses the larger friction of the two shapes in contact. When `friction` is randomized on the robot, give
-  the ground zero friction (`robot_scene_cfg(..., ground_friction=0.0)` or `rough_terrain_cfg(friction=0.0)`);
-  with the profile's ground friction of 1.0 every robot value below 1 has no effect.
-- The default pose is the standing pose, which a rigid robot cannot hold on flat ground. Pass `pose="flat_feet"`
-  for tasks that start on the ground, and take targets from `data.default_joint_pos`; see
-  [The initial pose](#the-initial-pose).
-- The encoder jitter is drawn on every `measured()` call, for `drive` and for `history`. Two observation terms that
-  each call `measured()` see different jitter in the same step; read it once in one term, as `actor_obs` does.
-- `history[:, 0]` is one physics step older than `drive`. The history and the IMU are sampled at the start of each
-  physics step, so after an env step their newest entries are from `plant.t_ns - 4 ms`, while `drive` is the
-  state now. Use `history_ns` for the times.
-- After a reset, the history and IMU buffers keep the previous episode's values until they are overwritten; only
-  `history_ns`, `sample_ns`, `stamp_ns`, `seq` and `count` mark them empty. The observation computed right after a
-  reset, in the same env step, always has `count == 0`, and the first burst can take more than one policy period
-  to arrive. Mask on `history_ns >= 0` and `stamp_ns >= 0` where it matters.
+- MJWarp uses the larger friction of the two shapes in contact. When `friction` is randomized on the robot, give the ground zero friction (`robot_scene_cfg(..., ground_friction=0.0)` or `rough_terrain_cfg(friction=0.0)`); with the profile's ground friction of 1.0 every robot value below 1 has no effect.
+- The default pose is the standing pose, which a rigid robot cannot hold on flat ground. Pass `pose="flat_feet"` for tasks that start on the ground, and take targets from `data.default_joint_pos`; see [The initial pose](#the-initial-pose).
+- The encoder jitter is drawn on every `measured()` call, for `drive` and for `history`. Two observation terms that each call `measured()` see different jitter in the same step; read it once in one term, as `actor_obs` does.
+- `history[:, 0]` is one physics step older than `drive`. The history and the IMU are sampled at the start of each physics step, so after an env step their newest entries are from `plant.t_ns - 4 ms`, while `drive` is the state now. Use `history_ns` for the times.
+- After a reset, the history and IMU buffers keep the previous episode's values until they are overwritten; only `history_ns`, `sample_ns`, `stamp_ns`, `seq` and `count` mark them empty. The observation computed right after a reset, in the same env step, always has `count == 0`, and the first burst can take more than one policy period to arrive. Mask on `history_ns >= 0` and `stamp_ns >= 0` where it matters.
 - `measured().imu` is the delivery model's buffer, updated in place every physics step. Clone it to keep it.
-- Joint order differs. `truth()`, `reset(joint_pos=...)` and the plant use the description's joint order;
-  `env.scene["robot"].data.joint_pos` and `data.default_joint_pos` use the articulation's order.
-  `plant.joint_ids` maps one to the other.
+- Joint order differs. `truth()`, `reset(joint_pos=...)` and the plant use the description's joint order; `env.scene["robot"].data.joint_pos` and `data.default_joint_pos` use the articulation's order. `plant.joint_ids` maps one to the other.
 - Build the USD before creating the env config; `robot_scene_cfg` fails without the asset.
-- Use one `PlantAction` per robot and no other action term that writes the robot's joint targets; the plant
-  overwrites them before every physics step.
-- Keep the articulation's actuators implicit, as `robot_scene_cfg` builds them. If explicit actuator configs are
-  added, Isaac Lab's Newton backend can run the whole decimation loop in one physics call, and
-  `apply_actions` (the plant) would run once per policy step instead of once per physics step.
+- Use one `PlantAction` per robot and no other action term that writes the robot's joint targets; the plant overwrites them before every physics step.
+- Keep the articulation's actuators implicit, as `robot_scene_cfg` builds them. If explicit actuator configs are added, Isaac Lab's Newton backend can run the whole decimation loop in one physics call, and `apply_actions` (the plant) would run once per policy step instead of once per physics step.
 - Drives are off after a reset until a demand arrives; see [Resets](#resets).
-- Training keeps each joint's Coulomb friction at its enabled-drive value from the description while a drive is
-  off. The runtime host switches the joints of disabled 1:1 drives to the family's
-  [back-drive](glossary.md#back-drive) torque (`src/humanoid_sim/runtime/host.py`), which is larger: 1.5 Nm on an
-  HEJ 90 joint where the knee's enabled friction is 0.31 Nm. An unpowered robot in training therefore folds more
-  easily than the same robot in the runtime. The ankle joints keep their friction in both.
+- Training keeps each joint's Coulomb friction at its enabled-drive value from the description while a drive is off. The runtime host switches the joints of disabled 1:1 drives to the family's [back-drive](glossary.md#back-drive) torque (`src/humanoid_sim/runtime/host.py`), which is larger: 1.5 Nm on an HEJ 90 joint where the knee's enabled friction is 0.31 Nm. An unpowered robot in training therefore folds more easily than the same robot in the runtime. The ankle joints keep their friction in both.
