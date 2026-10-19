@@ -46,23 +46,25 @@ class RobotKinematics:
         return self.state.body_q.numpy().copy()
 
 
-def standing_base_height(usd_path: Path, desc, soles: list[dict]) -> float:
-    """Height of the upright base at which the standing pose touches the ground with its lowest sole-box corner
-    (``asset.json`` ``sole_boxes``). With the description's standing offsets the soles are not level under an
-    upright base (they pitch toes-down by 10° and 17°), so the robot stands on their edges; as a rigid pose it
-    is not balanced and tips over within about a second."""
+SOLE_CORNERS = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], dtype=np.float64)
+
+
+def _sole_corners(pose: np.ndarray, sole: dict) -> np.ndarray:
+    """World corners ``[8, 3]`` of a sole box (``asset.json`` ``sole_boxes`` entry) on a body at ``pose``."""
+    local = np.asarray(sole["center"]) + (SOLE_CORNERS * np.asarray(sole["half_extents"])) @ np.asarray(sole["rotation"]).T
+    return _rotate(pose[3:], local) + pose[:3]
+
+
+def standing_base_height(usd_path: Path, desc, soles: list[dict], q: torch.Tensor | None = None) -> float:
+    """Height of the upright base at which joint positions ``q`` ``[J]`` (default: the standing pose) touch the
+    ground with their lowest sole-box corner (``asset.json`` ``sole_boxes``)."""
     joints = list(desc.joints)
     kin = RobotKinematics(usd_path, joints, base_height_m=0.0)
-    q = torch.tensor([[desc.joints[n].standing_offset_rad for n in joints]], dtype=torch.float64)
-    poses = kin.body_poses(q)
+    if q is None:
+        q = torch.tensor([desc.joints[n].standing_offset_rad for n in joints], dtype=torch.float64)
+    poses = kin.body_poses(q.reshape(1, -1))
     labels = [lbl.rsplit("/", 1)[-1] for lbl in kin.model.body_label]
-    signs = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], dtype=np.float64)
-    lowest = np.inf
-    for sole in soles:
-        pose = poses[labels.index(sole["body"])]
-        local = np.asarray(sole["center"]) + (signs * np.asarray(sole["half_extents"])) @ np.asarray(sole["rotation"]).T
-        lowest = min(lowest, float((_rotate(pose[3:], local) + pose[:3])[:, 2].min()))
-    return -lowest
+    return -min(float(_sole_corners(poses[labels.index(sole["body"])], sole)[:, 2].min()) for sole in soles)
 
 
 def _rotate(q_xyzw: np.ndarray, v: np.ndarray) -> np.ndarray:

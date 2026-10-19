@@ -6,7 +6,7 @@ Force law and clip follow Controls' MuJoCo plant (``ethrc_sim/plant.py`` ``Plant
 * enabled and mode JVPT (-64): ``τ = kp (target − q) + kd (v_target − v) + ff``;
 * enabled and mode freeze (-62) or homing (6): hold the position latched on entry, ``v_target = 0``, no ff;
 * otherwise off: no torque;
-* ``demanded`` = control-law output before any clip; ``applied`` = clipped by the torque–speed envelope
+* ``demanded`` = control-law output before any clip; ``applied`` = clipped by the torque-speed envelope
   (braking side bounded by the peak) and by 0x34C6:04 when set;
 * a non-zero I-gain is refused (Controls raises and the plant faults): flagged in ``fault``, treated as off.
 
@@ -82,9 +82,10 @@ class DriveBank:
         kind = self._kind(rec)
         self.fault |= ((rec["i_gain_raw"] != 0) & rec["torque_enabled"] & (w > 0)).any(dim=1)
 
-        # The drive acts on its own reading. Freeze latches it when a drive enters freeze.
+        # The drive acts on its own reading. Freeze latches it when a drive enters freeze: a freeze demand in
+        # effect during this step (queued ones that haven't arrived, and spent slots, don't count).
         q = q + self.position_offset
-        entering = (kind == FREEZE).any(dim=1) & (self.last_kind != FREEZE)
+        entering = ((kind == FREEZE) & (w > 0)).any(dim=1) & (self.last_kind != FREEZE)
         self.frozen.copy_(torch.where(entering, q, self.frozen))
 
         qe, ve = q.unsqueeze(1), v.unsqueeze(1)
@@ -98,7 +99,8 @@ class DriveBank:
         tau = torch.where(kind == OFF, torch.zeros_like(tau), tau)
 
         ts = self.torque_scale.unsqueeze(1)
-        applied = self.envelope.clamp(tau / ts, ve.expand_as(tau)) * ts
+        nonzero = torch.where(ts > 0, ts, torch.ones_like(ts))  # a scale of 0 (no power) applies no torque
+        applied = self.envelope.clamp(tau / nonzero, ve.expand_as(tau)) * ts
         cap = rec["max_torque_mnm"].to(self.dtype) / 1000.0 * ts
         applied = torch.where(cap > 0, torch.maximum(torch.minimum(applied, cap.abs()), -cap.abs()), applied)
         applied = torch.where(kind == OFF, torch.zeros_like(applied), applied)
@@ -109,6 +111,10 @@ class DriveBank:
             enabled_fraction=((kind != OFF).to(self.dtype) * wk).sum(1),
             target_velocity=(vel * (kind == JVPT) * wk).sum(1),
         )
+        # The mode in force at the end of this step (the last record with a share of it), which the next step's
+        # freeze entry compares against. Records are in arrival order.
+        slots = torch.arange(w.shape[1], device=w.device).view(1, -1, 1).expand_as(w)
+        last = torch.where(w > 0, slots, torch.zeros_like(slots)).amax(dim=1, keepdim=True)
+        self.last_kind.copy_(torch.gather(kind, 1, last).squeeze(1))
         self.queue.advance(t1_ns)
-        self.last_kind.copy_(self._kind(self.queue.active))
         return out

@@ -5,7 +5,7 @@ import math
 
 import torch
 
-from humanoid_sim.core import DriveFeedback
+from humanoid_sim.devices.feedback import DriveFeedback
 from humanoid_sim.devices.reporting import DriveReporting
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description

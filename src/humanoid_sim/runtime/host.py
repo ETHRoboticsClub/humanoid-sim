@@ -17,7 +17,7 @@ the session (:meth:`RuntimeHost.run` returns :data:`EXIT_DETACHED`), as do deman
 ``client_timeout_ns`` once attached (:data:`EXIT_CLIENT_LOST`); the segment's state becomes ended, and Controls'
 bank ends its side when this host's heartbeat stops. :meth:`RuntimeHost.new_session` then serves the next client
 on a new segment at the same path, the robot back in its start state, without recompiling the step. Until its
-client attaches, a session holds the robot in its start pose (standing; the base too when free), so the session
+client attaches, a session holds the robot in its start pose (home; the base too when free), so the session
 starts when the client does, as a plant started with its client would: a robot left hanging with idle drives
 between clients would sag to its rest pose first.
 
@@ -131,23 +131,21 @@ class RuntimeHost:
                  client_timeout_ns: int = 500_000_000,
                  seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True):
         from humanoid_sim.model.asset import asset_meta
-        from humanoid_sim.model.kinematics import standing_base_height
+        from humanoid_sim.model.poses import POSES, STANDING_CLEARANCE_M, initial_pose
         from humanoid_sim.sim import SimCore
-        from humanoid_sim.train.scene import STANDING_CLEARANCE_M
 
         if support not in ("suspended", "free"):
             raise ValueError(f"support {support!r}: start suspended or free (hang a gantry by command)")
         self.support = support
-        from humanoid_sim.model.description import Description
-
-        desc = Description.load(robot)
         meta = asset_meta(usd)
-        self.standing_height_m = standing_base_height(usd, desc, meta["sole_boxes"]) + STANDING_CLEARANCE_M
-        height = self.standing_height_m + (0.3 if support == "suspended" else 0.0)
+        # The named poses for RESET {"pose": ...}: joint positions (description order) and the upright base height
+        # at which the soles touch the ground. The session's start pose is home.
+        self._poses = {name: initial_pose(usd, robot, name) for name in POSES}
+        height = self._poses["home"][1] + STANDING_CLEARANCE_M + (0.3 if support == "suspended" else 0.0)
         cuda = str(device).startswith("cuda")
         self.sim = SimCore(usd, device=device, robot=robot, solver=solver, fixed_base=support == "suspended",
                            base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
-                           compile=compile and cuda)
+                           compile=compile and cuda, imu_history=abi.IMU_SAMPLES)
         self.device = torch.device(device)
         self._intake = _DemandIntake(self.sim.plant, len(self.sim.plant.map.drive_names), self.device,
                                      cuda_graph=cuda, compile=compile and cuda)
@@ -203,7 +201,7 @@ class RuntimeHost:
         self._client_mono_ns = 0
         self._demand_seq = 0
         self._command_seq = 0
-        self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = self._standing()  # until attached
+        self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = self._named_pose("home")  # until attached
         self._write_pose(*self._prescribed)
         self._set_drives_off(np.ones(len(self.drives), dtype=bool))  # no client, no demands
         self._truth_due = True
@@ -220,7 +218,7 @@ class RuntimeHost:
             self._clear_fault(key)
         self.sim.gantry.release(torch.tensor([0], device=self.device))
         self.sim.imu.set_noise(True)
-        self._reset({"pose": "standing"})
+        self._reset({"pose": "home"})
         self._open_session()
 
     def _warm_up(self, steps: int = 3) -> None:
@@ -239,7 +237,7 @@ class RuntimeHost:
         env = torch.tensor([0], device=self.device)
         self.sim.plant.reset(env)  # plant time keeps running: the IMU's sample clock depends on it
         self.sim.feedback = None
-        self.sim.imu.reset(env, self.sim.t_ns)
+        self.sim.imu.reset(env, self.sim.t_ns, keep_seq=True)
 
     # -- descriptor and geometry ------------------------------------------------------------------
 
@@ -303,8 +301,8 @@ class RuntimeHost:
         except (KeyError, TypeError, ValueError) as e:
             self.seg.ack(seq, abi.ACK_REJECTED, f"{type(e).__name__}: {e}")
             return
-        except RuntimeError as e:
-            self.seg.ack(seq, abi.ACK_FAILED, str(e))
+        except Exception as e:  # noqa: BLE001 - a bad command must not take the host down
+            self.seg.ack(seq, abi.ACK_FAILED, f"{type(e).__name__}: {e}")
             return
         self.seg.ack(seq, abi.ACK_OK, message)
         self._truth_due = True
@@ -329,11 +327,15 @@ class RuntimeHost:
             raise ValueError("base_pose is [x, y, z, qx, qy, qz, qw] with a unit quaternion")
         return p
 
-    def _standing(self) -> tuple[torch.Tensor, torch.Tensor | None]:
-        q = torch.tensor([[self.desc.joints[n].standing_offset_rad for n in self.joints]], device=self.device)
+    def _named_pose(self, name: str) -> tuple[torch.Tensor, torch.Tensor | None]:
+        from humanoid_sim.model.poses import STANDING_CLEARANCE_M
+
+        q_desc, height = self._poses[name]
+        names = list(self.desc.joints)
+        q = torch.tensor([[float(q_desc[names.index(n)]) for n in self.joints]], device=self.device)
         base = None
         if self.support != "suspended":
-            base = torch.tensor([[0.0, 0.0, self.standing_height_m, 0.0, 0.0, 0.0, 1.0]], device=self.device)
+            base = torch.tensor([[0.0, 0.0, height + STANDING_CLEARANCE_M, 0.0, 0.0, 0.0, 1.0]], device=self.device)
         return q, base
 
     def _reset(self, args: dict) -> str:
@@ -341,8 +343,8 @@ class RuntimeHost:
             q, base = self._joint_vector(args["joint_pos"]), None
             if args.get("base_pose") is not None:
                 base = self._base_pose(args["base_pose"])
-        elif args.get("pose", "standing") == "standing":
-            q, base = self._standing()
+        elif args.get("pose", "home") in self._poses:
+            q, base = self._named_pose(args.get("pose", "home"))
         elif args["pose"] == "current":
             q, base = self.sim.joint_state()[0], None
         else:
@@ -350,7 +352,7 @@ class RuntimeHost:
         self._write_pose(q, base)
         env = torch.tensor([0], device=self.device)
         self.sim.plant.reset(env)
-        self.sim.imu.reset(env, self.sim.t_ns)
+        self.sim.imu.reset(env, self.sim.t_ns, keep_seq=True)
         self._prescribed = None
         self._disturbances.clear()
         self._joint_torques.clear()  # the plant's reset zeroed the external torque
@@ -417,8 +419,9 @@ class RuntimeHost:
         force = torch.tensor(args.get("force_n", [0.0, 0.0, 0.0]), dtype=torch.float32, device=self.device)
         torque = torch.tensor(args.get("torque_nm", [0.0, 0.0, 0.0]), dtype=torch.float32, device=self.device)
         duration = float(args["duration_s"])
-        if force.shape != (3,) or torque.shape != (3,) or not (duration > 0):
-            raise ValueError("force_n and torque_nm are 3-vectors, duration_s positive")
+        if force.shape != (3,) or torque.shape != (3,) or not (0 < duration < math.inf) or not (
+                torch.isfinite(force).all() and torch.isfinite(torque).all()):
+            raise ValueError("force_n and torque_nm are finite 3-vectors, duration_s positive and finite")
         end = self.sim.t_ns + int(round(duration * NS_PER_S))
         self._disturbances.append(_Disturbance(body, force.view(1, 1, 3), torque.view(1, 1, 3), end))
         return f"until {end} ns"
@@ -438,7 +441,7 @@ class RuntimeHost:
         torque, frequency = float(args["torque_nm"]), float(args.get("frequency_hz", 0.0))
         duration = args.get("duration_s")
         if not (math.isfinite(torque) and math.isfinite(frequency) and frequency >= 0) or (
-                duration is not None and not float(duration) > 0):
+                duration is not None and not 0 < float(duration) < math.inf):
             raise ValueError("torque_nm finite, frequency_hz non-negative, duration_s positive or null")
         j = self.joints.index(name)
         if torque == 0.0:
@@ -460,7 +463,13 @@ class RuntimeHost:
                 raise ValueError(f"encoder_freeze needs a drive; known: {self.drives}")
             d = self.drives.index(drive)
         duration = args.get("duration_s")
+        if duration is not None and not 0 < float(duration) < math.inf:
+            raise ValueError("duration_s is positive and finite, or null (until cleared)")
         end = None if duration is None else self.sim.t_ns + int(round(float(duration) * NS_PER_S))
+        if not math.isfinite(value):
+            raise ValueError(f"{fault} value must be finite")
+        if fault == "power_sag" and not 0.0 <= value <= 1.0:
+            raise ValueError("power_sag value is the torque scale, in [0, 1]")
         key = (fault, d)
         self._clear_fault(key)
         if value == (1.0 if fault == "power_sag" else 0.0):  # the value that means no fault
@@ -476,8 +485,6 @@ class RuntimeHost:
             self.sim.imu.accel_bias += value
             self._faults[key] = (end if end is not None else self.sim.t_ns + self.period_ns, value)
         elif fault == "power_sag":
-            if not 0.0 <= value <= 1.0:
-                raise ValueError("power_sag value is the torque scale, in [0, 1]")
             self.sim.plant.bank.torque_scale.fill_(value)
             self._faults[key] = (end, value)
         return f"{fault} active"

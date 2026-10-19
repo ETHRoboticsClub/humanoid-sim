@@ -31,9 +31,49 @@ def test_kinematic_model_mass_and_bodies(usd):
     from humanoid_sim.model.kinematics import RobotKinematics
 
     kin = RobotKinematics(usd, list(Description.load().joints))
-    assert float(kin.model.body_mass.numpy().sum()) == pytest.approx(58.684, abs=0.01)
+    assert float(kin.model.body_mass.numpy().sum()) == pytest.approx(60.149, abs=0.01)
     assert kin.model.body_count == 23
 
+
+
+def test_home_pose_levels_both_soles_at_one_height(usd):
+    """The description's home pose (the CAD's export pose) stands both sole boxes level and at one height under an
+    upright base; the standing pose captured on the robot does not."""
+    pytest.importorskip("newton")
+    pytest.importorskip("pxr")
+    import numpy as np
+
+    from humanoid_sim.model.asset import asset_meta
+    from humanoid_sim.model.kinematics import RobotKinematics, _rotate, _sole_corners, standing_base_height
+    from humanoid_sim.model.poses import initial_pose
+
+    desc = Description.load()
+    soles = asset_meta(usd)["sole_boxes"]
+    joints = list(desc.joints)
+    kin = RobotKinematics(usd, joints, base_height_m=0.0)
+    labels = [lbl.rsplit("/", 1)[-1] for lbl in kin.model.body_label]
+
+    def soles_at(q):
+        poses = kin.body_poses(q.reshape(1, -1))
+        out = []
+        for sole in soles:
+            pose = poses[labels.index(sole["body"])]
+            normal = _rotate(pose[3:], np.asarray(sole["rotation"])[:, 2])
+            out.append((float(normal[2]), float(_sole_corners(pose, sole)[:, 2].min())))
+        return out
+
+    q, height = initial_pose(usd, pose="home")
+    assert q.tolist() == pytest.approx([desc.home_pose[n] for n in joints])
+    (n_l, z_l), (n_r, z_r) = soles_at(q)
+    assert min(n_l, n_r) > np.cos(np.radians(0.1))  # level
+    assert abs(z_l - z_r) < 5e-4
+    assert height == pytest.approx(-min(z_l, z_r), abs=1e-6)
+    assert height == pytest.approx(standing_base_height(usd, desc, soles, q))
+    for c, name in enumerate(joints):
+        lo, hi = desc.calibration_travel(name)
+        assert lo <= float(q[c]) <= hi, name
+    standing = soles_at(torch.tensor([desc.joints[n].standing_offset_rad for n in joints], dtype=torch.float64))
+    assert max(n for n, _ in standing) < np.cos(np.radians(5))  # pitched toes-down
 
 @pytest.mark.physics
 @pytest.mark.parametrize("solver", ["mjwarp", "kamino"])
@@ -142,15 +182,16 @@ def test_cuda_graph_step_matches_eager(usd):
 @pytest.mark.physics
 @pytest.mark.parametrize("solver", ["mjwarp", "kamino"])
 def test_a_joint_pushed_into_its_stop_stays_at_it(usd, solver):
-    """40 Nm into the hip abduction stop sinks less than 2 mrad past it: MuJoCo's own limit constraint on MJWarp
-    (profile joint_limits: mujoco; Newton's force-space default lets it sink 11 mrad), the hard stop on Kamino."""
+    """40 Nm into the waist yaw stop sinks less than 2 mrad past it: MuJoCo's own limit constraint on MJWarp
+    (profile joint_limits: mujoco), the hard stop on Kamino. The waist turns about a vertical axis, so gravity adds
+    no torque of its own."""
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.sim import SimCore
 
     sim = SimCore(usd, device="cpu", fixed_base=True, solver=solver)
     try:
-        j = list(sim.desc.joints).index("leg_abduction_l")
-        lo, hi = sim.desc.calibration_travel("leg_abduction_l")
+        j = list(sim.desc.joints).index("waist_upperbody_yaw")
+        lo, hi = sim.desc.calibration_travel("waist_upperbody_yaw")
         q, qd = sim.joint_state()
         q = q.clone()
         q[0, j] = hi - 0.01

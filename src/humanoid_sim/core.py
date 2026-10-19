@@ -23,6 +23,7 @@ import torch
 from humanoid_sim.devices.bank import DriveBank, DriveOutput
 from humanoid_sim.devices.demand import JVPT_PER_SI_GAIN, DriveDemand
 from humanoid_sim.devices.envelope import TorqueSpeedEnvelope
+from humanoid_sim.devices.feedback import DriveFeedback
 from humanoid_sim.devices.shaping import outside_stable_region, shaped_position_target
 from humanoid_sim.model.description import Description
 from humanoid_sim.timing.clock import NS_PER_MS, check_period
@@ -36,16 +37,6 @@ class PlantCfg:
     queue_capacity: int = 4
     device: str = "cpu"
     dtype: torch.dtype = torch.float32
-
-
-@dataclass
-class DriveFeedback:
-    """Physical drive-frame feedback ``[E, D]``: what Controls' fake bank accepts (``fake_bank_feedback``)."""
-
-    position_rad: torch.Tensor
-    velocity_rad_s: torch.Tensor
-    applied_torque_nm: torch.Tensor
-    demanded_torque_nm: torch.Tensor
 
 
 class PlantCore:
@@ -84,11 +75,16 @@ class PlantCore:
         self.external_torque.index_fill_(0, env_ids, 0.0)
 
     def submit(self, demand: DriveDemand, arrival_ns: torch.Tensor, env_mask: torch.Tensor | None = None):
-        # The solver gains are the baseline drive gains, so shaping is stable up to twice those.
-        self.gain_warnings |= outside_stable_region(
-            demand.p_gain_raw.to(self.cfg.dtype) / JVPT_PER_SI_GAIN,
-            demand.d_gain_raw.to(self.cfg.dtype) / JVPT_PER_SI_GAIN,
+        # The solver gains are the baseline drive gains, so shaping is stable up to twice those. The check uses
+        # the realized gains (randomized scales included) of the envs this demand reaches.
+        bank = self.bank
+        flagged = outside_stable_region(
+            demand.p_gain_raw.to(self.cfg.dtype) / JVPT_PER_SI_GAIN * bank.p_scale,
+            demand.d_gain_raw.to(self.cfg.dtype) / JVPT_PER_SI_GAIN * bank.d_scale,
             self.drive_stiffness, self.drive_damping) & demand.torque_enabled
+        if env_mask is not None:
+            flagged &= env_mask.unsqueeze(1)
+        self.gain_warnings |= flagged
         self.bank.submit(demand, arrival_ns, env_mask)
 
     # -- stepping ---------------------------------------------------------------------------------

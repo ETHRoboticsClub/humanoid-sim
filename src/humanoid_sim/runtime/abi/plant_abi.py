@@ -69,9 +69,12 @@ SOLES = 2  # left, right
 STATE_CREATING, STATE_READY, STATE_ENDED = 0, 1, 2
 
 # Mailbox commands. Arguments are a JSON object:
-# RESET            {"pose": "standing" | "current"} or {"joint_pos": {name: rad}, "base_pose": [x,y,z,qx,qy,qz,qw]}
+# RESET            {"pose": "home" | "standing" | "current"} or {"joint_pos": {name: rad}, "base_pose": [x,y,z,qx,qy,qz,qw]}
 # PAUSE, RESUME    {}: while paused physics stops and feedback keeps being written
-# SET_SUPPORT      {"support": "free"} or {"support": "gantry", ...Gantry.hang_tension or hang_cable arguments}
+# SET_SUPPORT      {"support": "free"}; {"support": "gantry", "tension_breakpoints_s_n": [[s, N], ...],
+#                  "attachment_local_m": [x,y,z] | null, "attachment_bodies": [name, ...] | null}; or a cable,
+#                  {"support": "gantry", "attachment_local_m": [x,y,z], "cable": {"overhead_distance_m": m,
+#                  "length_breakpoints_s_m": [[s, m], ...], "stiffness_n_m": k, "damping_n_s_m": c}}
 # APPLY_DISTURBANCE {"body": name, "force_n": [x,y,z], "torque_nm": [x,y,z], "duration_s": s}, or a torque on one
 #                  joint outside the drive's feedback: {"joint" | "drive" (1:1): name, "torque_nm": Nm,
 #                  "frequency_hz": f (0: constant), "duration_s": s | null (until cleared)}; torque_nm 0 clears it
@@ -402,6 +405,7 @@ class Segment:
         path = Path(path)
         tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
         fd = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o660)
+        os.fchmod(fd, 0o660)  # owner and group read-write whatever the umask, so a client in the group can attach
         os.ftruncate(fd, SEGMENT_BYTES)
         mm = mmap.mmap(fd, SEGMENT_BYTES)
         seg = cls(path, mm, fd)

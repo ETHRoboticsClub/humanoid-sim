@@ -52,6 +52,20 @@ def test_freeze_latches_on_entry_and_off_is_zero():
     assert out.applied.item() == 0 and out.enabled_fraction.item() == 0
 
 
+def test_freeze_latches_when_it_arrives_not_when_queued():
+    bank = _bank()
+    bank.submit(_jvpt(0.0), torch.tensor([0]))
+    bank.compute(0, STEP, torch.tensor([[0.5]], dtype=D64), torch.zeros(1, 1, dtype=D64))
+    d = _jvpt(0.0)
+    d.mode[:] = MODE_FREEZE
+    bank.submit(d, torch.tensor([3 * STEP]))  # queued now, in force from the start of the fourth step
+    bank.compute(STEP, 2 * STEP, torch.tensor([[0.4]], dtype=D64), torch.zeros(1, 1, dtype=D64))
+    bank.compute(2 * STEP, 3 * STEP, torch.tensor([[0.3]], dtype=D64), torch.zeros(1, 1, dtype=D64))
+    bank.compute(3 * STEP, 4 * STEP, torch.tensor([[0.2]], dtype=D64), torch.zeros(1, 1, dtype=D64))
+    out = bank.compute(4 * STEP, 5 * STEP, torch.tensor([[0.1]], dtype=D64), torch.zeros(1, 1, dtype=D64))
+    assert out.demanded.item() == pytest.approx(320 * (0.2 - 0.1))  # held where it was when freeze began
+
+
 def test_i_gain_is_refused_as_fault():
     bank = _bank()
     d = _jvpt(0.1)
@@ -114,3 +128,15 @@ def test_drive_deviations_and_per_drive_arrival():
     # Drive 1: off for the first half, then 320 * (2.0 - 0.02) demanded, capped at half the 140 Nm peak.
     assert out.demanded[0, 1].item() == pytest.approx(0.5 * 320.0 * 1.98)
     assert out.applied[0, 1].item() == pytest.approx(0.5 * 70.0)
+
+
+def test_zero_torque_scale_applies_no_torque():
+    """A full power sag (torque scale 0) leaves the drive law's demand and applies nothing, without NaNs."""
+    bank = _bank()
+    bank.torque_scale.zero_()
+    bank.submit(_jvpt(0.0), torch.tensor([0]))
+    out = bank.compute(0, STEP, torch.zeros(1, 1, dtype=D64), torch.zeros(1, 1, dtype=D64))
+    assert out.applied.item() == 0.0 and out.demanded.item() == 0.0
+    bank.submit(_jvpt(0.1), torch.tensor([STEP]))
+    out = bank.compute(STEP, 2 * STEP, torch.zeros(1, 1, dtype=D64), torch.zeros(1, 1, dtype=D64))
+    assert out.applied.item() == 0.0 and out.demanded.item() == pytest.approx(32.0)

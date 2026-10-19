@@ -94,3 +94,30 @@ def test_force_push_accelerates_the_robot_horizontally(usd):
         assert (dx[1] @ heading).item() == pytest.approx(expect.item(), rel=0.15)  # off-COM push: some turns
     finally:
         sim_utils.SimulationContext.clear_instance()
+
+
+def test_a_robot_holding_the_home_pose_stands(usd):
+    """The home pose at the baseline gains stands on flat ground; the description's standing pose, whose soles
+    are not level, does not (it tips over within about a second)."""
+    import isaaclab.sim as sim_utils
+
+    from humanoid_sim.devices.demand import DriveDemand
+    from humanoid_sim.train.plant import RobotPlant
+
+    sim, scene = _scene(usd, 1)  # the default pose: home
+    try:
+        robot = scene["robot"]
+        plant = RobotPlant(robot, imu=scene["imu"], contacts=scene["contacts"])
+        default = robot.data.default_joint_pos.torch
+        q = default[:, [list(robot.joint_names).index(n) for n in plant.core.map.joint_names]]
+        core = plant.core
+        drive_q, _, _ = core.map.drive_state(q, torch.zeros_like(q))
+        hold = DriveDemand.jvpt(drive_q, core.drive_stiffness.expand(1, -1), core.drive_damping.expand(1, -1))
+        plant.reset(torch.arange(1), demand=hold)
+        _step(sim, scene, plant, int(1.5e9 / plant.period_ns))
+        pose = plant.truth().root_pose_w[0]
+        assert pose[2].item() > 0.85
+        assert pose[3:6].abs().max().item() < 0.05  # upright: small quaternion x, y, z
+        assert (plant.truth().contact_forces_w[0, :, 2].sum() > 400).item()
+    finally:
+        sim_utils.SimulationContext.clear_instance()

@@ -18,7 +18,7 @@ jobs:
         with:
           version: "0.13.1"
       - run: uv sync --python 3.12 --extra dev --extra newton
-      - run: uv run ruff check src tests spikes
+      - run: uv run ruff check src tests spikes examples docs
       - run: uv run pytest -m "not physics and not data"
   isaaclab-image:
     # Builds the Isaac Lab image, the robot assets, and runs the physics tests on the CPU.
@@ -33,7 +33,7 @@ jobs:
           docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci build-asset
           docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci build-asset --base-joints
           docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci \
-            bash -c "uv pip install -q --python /opt/isaaclab-venv/bin/python pytest && pytest -m physics"
+            pytest -m physics
   controls-pins:
     # humanoid-urdf and ankle_kinematics must be at the commits Controls pins on CONTROLS_REF (a repository
     # variable; default master).

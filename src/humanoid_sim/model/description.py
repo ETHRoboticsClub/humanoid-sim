@@ -1,13 +1,14 @@
 """Robot description: humanoid-urdf, read hash-verified, never copied.
 
 Every robot fact this package uses comes through here: URDF, ``actuators.yaml`` (drives, signs, gains,
-envelopes, ankle geometry). The digest covers both files and is recorded with every output so a
-result can be traced to the exact description.
+envelopes, ankle geometry) and the home pose. The digest covers the URDF and ``actuators.yaml``; it and the
+description's git revision are recorded with every output so a result can be traced to the exact description.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 from dataclasses import dataclass
@@ -20,10 +21,12 @@ from humanoid_sim.transmissions.ankle import AnkleTransmission, mirror_right
 
 ACTUATORS_SCHEMA = "ethrc-actuators/v1"
 
-# Robot id → directory in humanoid-urdf and the ament package inside it.
+# Robot id → directory in humanoid-urdf, the ament package inside it, and the table that rebases the CAD export to
+# the URDF's zero (the source of the home pose, see Description.home_pose).
 ROBOTS = {
-    "ethrc_v1": ("ethrc_v1", "URDF_5_description"),
+    "ethrc_v1": ("ethrc_v1", "URDF_6_description", "tools/urdf6_zero_rebase.json"),
 }
+REBASE_SCHEMA = "ethrc-urdf-zero-rebase/v1"
 
 
 @dataclass(frozen=True)
@@ -63,10 +66,11 @@ class Description:
             raise ValueError(f"unknown robot {robot!r}; known: {sorted(ROBOTS)}")
         self.robot = robot
         self.root = root
-        directory, package = ROBOTS[robot]
+        directory, package, rebase = ROBOTS[robot]
         self.robot_dir = root / directory
         self.package_dir = self.robot_dir / package
         self.actuators_path = self.robot_dir / "actuators.yaml"
+        self.rebase_path = self.robot_dir / rebase
         self.table = yaml.safe_load(self.actuators_path.read_text())
         if self.table.get("schema") != ACTUATORS_SCHEMA:
             raise ValueError(f"{self.actuators_path}: schema {self.table.get('schema')!r} != {ACTUATORS_SCHEMA}")
@@ -118,6 +122,19 @@ class Description:
                 effort_peak=float(j["effort"]), velocity=float(j["velocity"]),
             )
         return out
+
+    @cached_property
+    def home_pose(self) -> dict[str, float]:
+        """URDF joint positions (rad) of the home pose: the pose the CAD is exported in, legs straight and both
+        soles level. The URDF's zero is the calibration pose instead; humanoid-urdf rebases the export to it and
+        records each joint's export angle at the calibration pose (``q_star_rad``), so home is its negative."""
+        table = json.loads(self.rebase_path.read_text())
+        if table.get("schema") != REBASE_SCHEMA or table.get("coordinates") != "source_urdf_joint_radians":
+            raise ValueError(f"{self.rebase_path}: expected a {REBASE_SCHEMA} table in source URDF joint radians")
+        missing = sorted(set(self.joints) - set(table["joints"]))
+        if missing:
+            raise ValueError(f"{self.rebase_path} lacks joints {missing}")
+        return {n: -float(table["joints"][n]["q_star_rad"]) for n in self.joints}
 
     @cached_property
     def drives(self) -> dict[str, Drive]:

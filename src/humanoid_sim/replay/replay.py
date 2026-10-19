@@ -1,4 +1,4 @@
-"""Drive-level replay of an excitation capture on a fixed base.
+"""Drive-level replay of an excitation capture.
 
 Each drive is fed its recorded position demand (0x6062, linearly interpolated from the ~200 Hz PDO
 samples, arriving without added latency: it is already what the drive used) at the recorded gains, JVPT
@@ -6,7 +6,7 @@ mode, no feed-forward or target velocity (as in the capture). The sim's drive-fr
 and applied torque are scored against the drive's own measurements at the same times.
 
 Base: the capture was taken on a gantry that lets the base swing, mostly in yaw (tens of degrees, IMU
-|ω| up to ~1 rad/s). A fixed-base replay ignores that motion; with a base mode (on the asset built with base
+|ω| up to about 1.8 rad/s). A fixed-base replay ignores that motion; with a base mode (on the asset built with base
 joints) the base follows the capture's IMU (:class:`~humanoid_sim.replay.base.BaseMotion`).
 """
 

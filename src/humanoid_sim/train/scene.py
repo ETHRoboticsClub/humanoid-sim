@@ -7,8 +7,16 @@
 * ``contacts``: a contact sensor on every body (net forces with history, air time);
 * ``ground``: the flat ground at the profile's friction, unless a ``terrain`` config is given.
 
-The robot's default state is the standing pose, upright, its lowest sole corner on the ground
-(:func:`~humanoid_sim.model.kinematics.standing_base_height`), so ``reset_scene_to_default`` puts it on its feet.
+The robot's default state is upright, its lowest sole corner on the ground
+(:func:`~humanoid_sim.model.kinematics.standing_base_height`), so ``reset_scene_to_default`` puts it on its feet,
+in one of two poses (``pose``):
+
+* ``"home"`` (default): the description's home pose (:attr:`~humanoid_sim.model.description.Description.home_pose`),
+  the pose the CAD is exported in: legs straight, both soles level and at the same height.
+* ``"standing"``: the description's standing pose, the one captured on the robot. Under an upright base its soles
+  are not level (pitched by 10° and 17°), so a robot holding it rigidly tips over within about a second.
+
+The articulation's ``data.default_joint_pos`` holds the chosen pose, for a task's action offsets.
 
 :func:`robot_sim_cfg` gives the ``SimulationCfg``: one physics step per period on a Newton solver (``mjwarp`` or
 ``kamino``), from the profile. humanoid-learning builds its environment config from these and steps the plant through
@@ -21,16 +29,18 @@ from pathlib import Path
 
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
-from humanoid_sim.model.joint_properties import JointProperties
+from humanoid_sim.model.poses import POSES, STANDING_CLEARANCE_M, initial_pose
 from humanoid_sim.physics.isaaclab import contact_sensor_cfg, imu_sensor_cfg
+from humanoid_sim.physics.joint_properties import JointProperties
 
-STANDING_CLEARANCE_M = 0.001  # spawn the soles just above the ground
+__all__ = ["POSES", "STANDING_CLEARANCE_M", "initial_pose", "plant_joint_properties", "robot_scene_cfg",
+           "robot_sim_cfg"]
 
 
 def plant_joint_properties(robot: str = "ethrc_v1") -> JointProperties:
     """The solver properties of the description's joints (constant PD ``k0, d0``, passive terms, limits)."""
     from humanoid_sim.core import PlantCfg, PlantCore
-    from humanoid_sim.model.joint_properties import joint_properties
+    from humanoid_sim.physics.joint_properties import joint_properties
 
     desc = Description.load(robot)
     joints = list(desc.joints)
@@ -39,19 +49,19 @@ def plant_joint_properties(robot: str = "ethrc_v1") -> JointProperties:
 
 def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_spacing: float = 2.5,
                     terrain=None, ground_friction: float | None = None, imu: bool = True, contacts: bool = True,
-                    self_collision: bool | None = None):
+                    self_collision: bool | None = None, pose: str = "home"):
     """Scene config with the robot, its sensors and the ground (or ``terrain``, an Isaac Lab
-    ``TerrainImporterCfg``). With robot friction randomized, pass ``ground_friction=0``: the solver takes the larger
-    friction of the two shapes in contact."""
+    ``TerrainImporterCfg``), the robot on its feet in ``pose`` (see :data:`POSES`). With robot friction
+    randomized, pass ``ground_friction=0``: the solver takes the larger friction of the two shapes in contact."""
     from isaaclab.scene import InteractiveSceneCfg
     from isaaclab.utils import configclass
 
-    from humanoid_sim.model.asset import asset_meta
-    from humanoid_sim.model.kinematics import standing_base_height
     from humanoid_sim.physics.isaaclab import articulation_cfg, ground_cfg
 
     profile = load_profile(robot)
-    height = standing_base_height(usd, Description.load(robot), asset_meta(usd)["sole_boxes"])
+    q, height = initial_pose(usd, robot, pose)
+    props = plant_joint_properties(robot)
+    names = list(Description.load(robot).joints)
 
     @configclass
     class RobotSceneCfg(InteractiveSceneCfg):
@@ -59,8 +69,9 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
 
     cfg = RobotSceneCfg(num_envs=num_envs, env_spacing=env_spacing, replicate_physics=True)
     cfg.robot = articulation_cfg(
-        usd, plant_joint_properties(robot), base_height_m=height + STANDING_CLEARANCE_M, contact_sensors=contacts,
-        self_collision=profile["physics"]["self_collision"] if self_collision is None else self_collision)
+        usd, props, base_height_m=height + STANDING_CLEARANCE_M, contact_sensors=contacts,
+        self_collision=profile["physics"]["self_collision"] if self_collision is None else self_collision,
+        joint_pos=[float(q[names.index(n)]) for n in props.names])
     if terrain is not None:
         cfg.terrain = terrain
     else:

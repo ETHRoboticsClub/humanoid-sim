@@ -25,6 +25,11 @@ def test_parse_and_validate():
     assert (s.select, s.kind, s.startup) == ("torso", "physics", True)
     d = ParamSpec.from_dict({"param": "latency", "drives": "d.*", "dist": "uniform", "range": [0.01, 0.02], "op": "set"})
     assert (d.kind, d.startup) == ("device", False)
+    g = ParamSpec.from_dict({"param": "imu_gyro_bias", "select": "z", "dist": "uniform", "range": [-0.01, 0.01],
+                             "op": "set"})
+    assert g.select == "z"
+    with pytest.raises(ValueError, match="'bodies'"):
+        ParamSpec.from_dict({"param": "body_mass", "select": "torso", "dist": "uniform", "range": [1, 5], "op": "add"})
     with pytest.raises(ValueError, match="unknown parameter"):
         ParamSpec.from_dict({"param": "mass", "dist": "uniform", "range": [0, 1], "op": "add"})
     with pytest.raises(ValueError, match="solver parameter"):

@@ -7,6 +7,7 @@
                                                    drive-level replay, scored against the capture;
                                                    base following the capture's IMU yaw (default), or fixed
     humanoid-sim view-replay <replay-dir> --save x.rrd   sim and real robot + every drive signal in Rerun
+    humanoid-sim view-runtime <segment> [--save x.rrd]   watch a running `serve` in Rerun (read-only)
     humanoid-sim bench --num-envs N [--train]      real-time factor / throughput (Isaac Lab / Newton); --train runs
                                                    the Train-Time API scene (sensors, randomization); --runtime
                                                    the real-time host's step
@@ -89,6 +90,15 @@ def cmd_replay(args) -> int:
     for d in res.drives:
         print(f"{d:22s} {summary['rms_position_rad'][d] * 1e3:7.2f} mrad  (real-demand "
               f"{summary['tracking_rms_rad'][d] * 1e3:6.2f})")
+    return 0
+
+
+def cmd_view_runtime(args) -> int:
+    from humanoid_sim.runtime.view import view_runtime
+
+    frames = view_runtime(args.segment, _usd(args), rrd=args.save, connect=args.connect, fps=args.fps,
+                          seconds=args.seconds, wait_s=args.wait, robot=args.robot)
+    print(f"{frames} frames" + (f" -> {args.save}" if args.save else ""))
     return 0
 
 
@@ -270,10 +280,21 @@ def main(argv: list[str] | None = None) -> int:
 
     v = sub.add_parser("view-replay", help="Rerun recording of a replay: sim and real robot, all drive signals")
     v.add_argument("trace", help="replay output directory (trace.npz + summary.json)")
-    v.add_argument("--save", default=None, help="write an .rrd file instead of streaming")
+    v.add_argument("--save", default=None, help="write an .rrd file instead of spawning a viewer")
     v.add_argument("--connect", default=None, help="stream to a running viewer, e.g. rerun+http://127.0.0.1:9876/proxy")
     v.add_argument("--fps", type=float, default=50.0)
     v.set_defaults(func=cmd_view_replay)
+
+    vr = sub.add_parser("view-runtime", help="watch a running `serve` in Rerun: the robot and its signals (read-only)")
+    vr.add_argument("segment", help="the segment file `serve --segment` publishes")
+    vr.add_argument("--save", default=None, help="write an .rrd file instead of spawning a viewer")
+    vr.add_argument("--connect", default=None, help="stream to a running viewer, e.g. rerun+http://127.0.0.1:9876/proxy")
+    vr.add_argument("--fps", type=float, default=30.0, help="frames read from the segment per second")
+    vr.add_argument("--seconds", type=float, default=None, help="stop after this long (default: until the server goes)")
+    vr.add_argument("--wait", type=float, default=60.0,
+                    help="seconds to wait for the segment to appear (the next session of a --persist host is "
+                         "followed if it starts within 10 s)")
+    vr.set_defaults(func=cmd_view_runtime)
 
     be = sub.add_parser("bench")
     be.add_argument("--num-envs", type=int, default=1)
@@ -310,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
     fd = sub.add_parser("fit-delay", help="scan the delay between recorded drive demands and the drive acting on "
                                           "them, by batched replay")
     fd.add_argument("captures", nargs="+")
-    fd.add_argument("--delays-ms", nargs=3, type=float, default=[-6.0, 10.0, 0.5], metavar=("FROM", "TO", "STEP"))
+    fd.add_argument("--delays-ms", nargs=3, type=float, default=[-10.0, 10.0, 0.5], metavar=("FROM", "TO", "STEP"))
     fd.add_argument("--duration", type=float, default=None)
     fd.add_argument("--base", choices=("yaw", "orientation", "fixed"), default="yaw")
     fd.add_argument("--device", default="cuda:0")

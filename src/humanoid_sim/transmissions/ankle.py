@@ -3,7 +3,7 @@
 The ankle is simulated as two hinges (pitch about +Y, then roll about +X: the URDF tree). Two crank
 drives move the foot through rods. This module maps between the hinge state and the crank state:
 
-* ``cranks(q)``: hinge angles → crank angles (analytic circle–sphere IK on the branch connected to the
+* ``cranks(q)``: hinge angles → crank angles (analytic circle-sphere IK on the branch connected to the
   linkage neutral, as in humanoid-urdf ``ankle_model``);
 * ``jacobian(q)``: ``dθ/dq`` from the rod constraints (as in ``ankle_kinematics.joint_to_motor_jacobian``);
 * crank torque → hinge torque is ``Jᵀ τ``; hinge velocity → crank velocity is ``J q̇``.
