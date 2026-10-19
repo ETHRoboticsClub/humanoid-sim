@@ -1,11 +1,12 @@
 # The world around the robot
 
-Around the robot, humanoid-sim has a ground (a flat plane, or in training a heightfield terrain, a surface given as a grid of heights), an optional [support](glossary.md#support) that holds the robot up, and external [disturbances](glossary.md#disturbance). The code is in `src/humanoid_sim/world/` and in the scene builders that use it: `robot_scene_cfg` for training (`src/humanoid_sim/train/scene.py`) and `SimCore` (`src/humanoid_sim/sim.py`) for replays and the real-time runtime.
+Around the robot, humanoid-sim has a ground (a flat plane, or in training a heightfield terrain, a surface given as a grid of heights), optional static boxes standing on it (a room's walls and furniture, such as Controls' hangar), an optional [support](glossary.md#support) that holds the robot up, and external [disturbances](glossary.md#disturbance). The code is in `src/humanoid_sim/world/` and in the scene builders that use it: `robot_scene_cfg` for training (`src/humanoid_sim/train/scene.py`) and `SimCore` (`src/humanoid_sim/sim.py`) for replays and the real-time runtime.
 
 | Feature | Training | Replay | Runtime (`serve`) |
 |---|---|---|---|
 | Flat ground | default; friction set by `ground_friction` | profile friction | profile friction |
 | Heightfield terrain | `robot_scene_cfg(..., terrain=...)` | none | none |
+| Static boxes (walls, furniture) | `robot_scene_cfg(..., scene=...)` | none | `--scene` and `--spawn` |
 | Start pose | `robot_scene_cfg(..., pose=...)`: `"home"` (default) or `"standing"` | the capture's first measured drive positions | the profile's `poses.start` (V1 `standing`, G1 `home`) or `--pose`; `RESET` can pick either |
 | Free base | always | none | `--support free` |
 | Fixed base | none | `--base fixed` | `--support suspended` (default) |
@@ -84,6 +85,73 @@ height field collision overflow, number of collisions >= 50 - please adjust reso
 MJWarp tests each robot shape against the heightfield cells under it, collects up to 50 candidate contacts per shape and heightfield pair (MuJoCo's `mjMAXCONPAIR`) and keeps up to four of them. A large hull lying flat across many cells finds more than 50 candidates. The cells after the 50th are skipped for that pair in that step, so the part of the shape over them can sink into the terrain until the shape covers fewer cells. For a fallen robot that the task is about to reset this is harmless. A sole box (0.25 by 0.09 m) covers too few cells to reach the cap at the default grid, so robots standing on their soles do not cause the message. It is one reason to keep the heightfield grid coarse (`horizontal_scale_m`, 0.1 m by default): a finer grid puts more cells under every body. A task that needs a lying robot's contacts, such as getting up, needs a grid coarse enough that a lying torso stays under the cap.
 
 The message is separate from MJWarp's `nconmax` and `njmax` overflow warnings, which mean the contact or constraint buffers of the step ran out (`physics` block of `profiles/ethrc_v1.yaml`).
+
+## Static boxes
+
+A room enters the scene as static boxes fitted to its walls and furniture. They stand on the flat ground, which stays the walking surface. The physics cannot collide the robot with a scan's triangle mesh (see [Heightfield terrain](#heightfield-terrain)), but it collides boxes like any convex shape. The code is in `src/humanoid_sim/world/boxes.py`.
+
+Controls' hangar is such a room. Its MuJoCo simulation stands the robot among 470 boxes fitted to a scan of the ETHRC hangar: 82 wall slabs and one or a few blocks per piece of furniture, all turned by the same 1.75° about the vertical. The boxes are in Controls' `ros2_ws/src/sim/ethrc_sim/environments/hangar/hangar_proxy.npz` (a git-lfs file: run `git lfs pull` in the Controls checkout), and its spawn point, `HANGAR_SPAWN` in `ethrc_sim/environments.py`, is (-4.42, 3.48) m, open floor 1.35 m from the nearest box. humanoid-sim does not copy the file: you pass its path.
+
+### The file
+
+An `.npz` in metres and radians, z up, with the floor at z = 0:
+
+| Array | Shape | Meaning |
+|---|---|---|
+| `center` | `[N, 3]` | Box centres in the file's frame |
+| `half` | `[N, 3]` | Half extents along the box's own axes |
+| `yaw` | scalar or `[N]` | Rotation of each box about the vertical through its centre: one value for every box, or one per box |
+| `rgb` | `[N, 3]`, optional | Colour in [0, 1], for drawing |
+| `wall` | `[N]` bool, optional | Which boxes are walls; they are drawn light grey |
+
+Other arrays are ignored, such as Controls' `floor_corners`, the outline of its scan's floor. `StaticBoxes.load(path, spawn_m)` reads a file and refuses a git-lfs pointer, a box without a positive half extent in every axis, mismatched shapes or non-finite values.
+
+### Placement
+
+`spawn_m` is the point of the file's frame, (x, y) in metres, that goes to the world origin, where the robot starts. Every box is moved by `-spawn_m` and keeps its yaw about its own centre. This is how Controls' MuJoCo scene places the hangar (`add_environment` in `ethrc_sim/environments.py` at 44353e2b), so with the same spawn point a box is at the same world coordinates in both simulators. `tests/test_static_boxes.py` checks this corner by corner, against MuJoCo's own kinematics on boxes added as Controls adds them, both for the file as loaded and for the shapes the solver ends up with.
+
+The truth (base pose, body poses) is in the world frame. A point of the file's frame is the world point plus `spawn_m`, which is how a client maps the truth onto a map drawn in the file's frame.
+
+### In a scene
+
+The boxes become USD `Cube` prims with the physics collision API, under `/World/StaticBoxes`, each with the ground's friction and no restitution, and with the box's colour as its display colour. They are outside the environment namespace, so the solver has one set of static shapes that every environment's world collides with at the same world coordinates. For that reason a scene with boxes starts every environment's robot at the world origin: each environment is its own solver world, so robots at one spot never touch each other.
+
+| Front end | How |
+|---|---|
+| Training | `robot_scene_cfg(n, usd, scene=StaticBoxes.load(path, spawn_m))`. `env_spacing` becomes 0 and may not be set to anything else, and a `terrain` is refused: the boxes stand on the flat ground. Pass `ground_friction=0` as usual when friction is randomized on the robot; the boxes take the same value. |
+| `SimCore` | `SimCore(usd, ..., scene=StaticBoxes.load(path, spawn_m))` |
+| Runtime | `humanoid-sim serve ... --scene PATH --spawn X Y`. A spawn point inside a box is refused. The descriptor's `scene` names the file, its SHA-256, the number of boxes, the spawn point and the spawn's clearance (see [runtime.md](runtime.md#descriptor)). |
+| Benchmarks | `humanoid-sim bench ... --scene PATH --spawn X Y`, for each workload |
+
+A robot standing at the spawn point of the hangar:
+
+```bash
+python examples/scene_stand.py --scene <controls>/ros2_ws/src/sim/ethrc_sim/environments/hangar/hangar_proxy.npz \
+  --spawn -4.42 3.48 --seconds 10 --device cuda:0 --rrd outputs/hangar_v1.rrd
+```
+
+![The V1 standing at the hangar's spawn point among its boxes](images/world-hangar.png)
+
+`SceneRecorder` draws the boxes as one mesh at `/world/scene` and sizes the ground square to reach 2 m beyond them. `view-runtime` draws a host's boxes too, when the descriptor's file is readable where the viewer runs and has the same digest.
+
+### What the boxes cost
+
+Measured on one L40S with the hangar's 470 boxes and every robot at the spawn point, holding the home pose at the baseline gains:
+
+- Contacts. A robot clear of the boxes has none with them: a standing V1 had 16 contacts per world and a G1 lying on the floor 8, with and without the hangar, and no step overflowed `nconmax` or `njmax`. A robot that leans on or lies across boxes adds its contacts with them to the same pool (`nconmax` in the profile's `physics` block, an average per world shared by all worlds).
+- Broadphase. MJWarp's all-pairs broadphase tests every robot shape against every box in every world: per world, the V1's 290 candidate pairs become 12,040 and the G1's 36 become 16,956.
+- Physics time per step (the scene write, the solver step with collision detection, the scene update):
+
+| Robots | Without boxes | With the hangar |
+|---|---|---|
+| 1 V1 | 0.43 ms | 0.43 ms |
+| 4,096 V1 | 1.49 ms | 1.86 ms |
+| 16,384 V1 | 5.58 ms | 7.01 ms |
+| 4,096 G1, lying on the floor | 1.90 ms | 2.69 ms |
+
+- The runtime host (`humanoid-sim bench --runtime`, one free V1): 1.37 ms per step without boxes and 1.36 ms with the hangar, 2.9 times faster than real time either way.
+
+The hangar costs nothing in the runtime, and in training about a quarter more physics time per step for the V1 (two fifths for the G1, which has more shapes). With the plant's work around the physics, the whole step of 16,384 V1s grows from 7.5 to 8.9 ms.
 
 ## Supports
 
@@ -213,7 +281,8 @@ A `RESET` command clears all active disturbances. Faults (`INJECT_FAULT`: encode
 
 ## What is not modeled
 
-- There is no hangar or other environment geometry. Controls' MuJoCo simulation stands the robot in a reconstruction of the ETHRC hangar by default; here the world is a bare plane, or heightfield tiles in training.
+- A room is boxes only. The scan itself (Controls' textured mesh and its Gaussian splat) is not drawn or collided, and there are no other static shapes (cylinders, meshes).
+- Static boxes stand on the flat ground; they cannot be combined with a heightfield terrain, and every environment of a scene with boxes starts at the spawn point.
 - There is no triangle-mesh terrain (stairs with vertical risers, mesh obstacles), for the collision reason above.
 - Replays and the runtime have no terrain; they always use the flat ground at the profile's friction.
 - The training scene has no fixed-base or base-joint option; supports in training are limited to a `Gantry` your task applies.

@@ -21,6 +21,7 @@ The benchmarks need Isaac Lab, so they run in the Docker image or on a GPU node,
 | `--no-self-collision` | off | default, `--train` | Turn off contacts between the robot's own bodies |
 | `--train` | off | | Run the training workload |
 | `--runtime` | off | | Run the runtime workload; it takes precedence over `--train` |
+| `--scene PATH`, `--spawn X Y` | none, `0 0` | all | Stand the robots among the static boxes in `PATH`, every robot at the spawn point (see [world.md](world.md#static-boxes)); the JSON gets a `scene` entry |
 
 Options the workload does not use are ignored without a warning. The global options `--robot`, `--assets`, `--usd` and `--solver` go before `bench`, for example `humanoid-sim --usd path/to/robot.usda bench --num-envs 4096`.
 

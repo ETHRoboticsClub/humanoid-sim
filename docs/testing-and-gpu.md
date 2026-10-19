@@ -26,6 +26,7 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 | `test_runtime_host.py` | `humanoid-sim serve` end to end with the test as client, for every robot: round trip, prescribed pose, detach and next session, demand intake, joint disturbance, back-driven disabled drive; the G1's motor slots and soles | `physics` |
 | `test_runtime_view.py` | `view-runtime` recording frames from a segment that a stand-in host writes through the ABI, for every robot (no physics; needs Newton, Rerun and the built assets) | |
 | `test_solvers.py` | Solver selection from the profile and its overrides, and the errors for unknown or unconfigured solvers | |
+| `test_static_boxes.py` | Static boxes: the file read and placed where Controls' MuJoCo hangar places them (corner by corner against MuJoCo's kinematics, which needs the `kinematics-check` extra), spawn clearance, refused files, the drawn mesh; in the solver, one shared set of box shapes at the same corners, robots in every env standing on a box, and the runtime host standing the robot among boxes | 3 tests `physics` |
 | `test_supports.py` | Gantry programs, and rope tension and cable length on every robot | the rope tests `physics` |
 | `test_sysid.py` | The passive-fit search space and CMA-ES | |
 | `test_train_env.py` | The Train-Time API in a manager-based Isaac Lab environment with two robots, for every robot | `physics` |
@@ -56,7 +57,7 @@ The `data` tests look for captures in the directory named by `HUMANOID_SIM_DATAS
 | Image, everything | see below, `pytest` | Every test the machine can run |
 | GPU node | the `e2e` SkyPilot task | Everything, including the CUDA and capture tests |
 
-Natively you need the `dev` and `newton` extras (`uv sync --extra dev --extra newton`); without `newton`, the tests that need scipy or Newton skip. On an Apple silicon Mac with the `newton` and `viz` extras and the plain asset built, the native command reports 118 passed and 59 deselected (the `physics` and `data` tests) in about 35 s.
+Natively you need the `dev`, `newton` and `kinematics-check` extras (`uv sync --extra dev --extra newton --extra kinematics-check`), as CI installs them; without `newton`, the tests that need scipy or Newton skip, and without `kinematics-check` (MuJoCo, for kinematics only) the static-box placement tests skip. On an Apple silicon Mac with those extras, the `viz` extra and both robots' plain assets built, the native command reports 115 passed and 26 deselected (the `physics` and `data` tests) in about 35 s.
 
 The image includes pytest (`docker/Dockerfile` installs `pytest>=9,<10`). Build the V1's two assets and both G1s' first, or most physics tests skip. This is the `isaaclab-image` CI job's sequence:
 

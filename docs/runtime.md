@@ -32,6 +32,8 @@ humanoid-sim serve --segment /run/hsim/plant --support suspended
 | `--persist` | off | When a client detaches or is lost, reset the robot and serve the next client on a new session, until stopped. |
 | `--max-steps N` | none | Physics periods per session, paused periods included. Reaching it ends the process, with or without `--persist`. |
 | `--seed` | `0` | Seed of the IMU's random generator (white noise, sample phase, burst timing). |
+| `--scene PATH` | none | Static boxes around the robot, such as the walls and furniture of Controls' hangar (see [world.md](world.md#static-boxes)). |
+| `--spawn X Y` | `0 0` | With `--scene`: the scene point (m) the robot starts at, placed at the world origin. A spawn point inside a box is refused. |
 
 Four options of the top-level parser go before `serve`: `--solver` (`mjwarp` or `kamino`, default the profile's), `--robot` (default `ethrc_v1`, also written to the header's `robot_id`), `--assets` (default `outputs/assets`, relative to the working directory) and `--usd` (a robot USD to use instead of the built asset). Without `--usd`, `serve` exits with a message if the asset for the current description and profile is not built.
 
@@ -210,6 +212,7 @@ The descriptor region holds one JSON object (sorted keys, at most 16,384 bytes) 
 | `commands` | Command codes to names, `{"1": "reset", ..., "9": "set_fidelity"}` |
 | `faults` | `encoder_freeze`, `imu_spike`, `imu_bias`, `power_sag` |
 | `fidelity_gaps` | What the runtime does not model (`FIDELITY_GAPS` in `host.py`) |
+| `scene` | Null, or with `--scene`: `file`, its `sha256`, the number of `boxes`, `spawn_m` and `spawn_clearance_m` (the horizontal distance from the spawn point to the nearest box). The truth is in the world frame, whose origin is the scene point `spawn_m`. |
 
 The fidelity gaps the runtime publishes:
 
