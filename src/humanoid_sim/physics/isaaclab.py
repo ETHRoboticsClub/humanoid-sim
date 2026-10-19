@@ -24,6 +24,7 @@ import torch
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.urdf import BASE_JOINTS
 from humanoid_sim.physics.joint_properties import JointProperties
+from humanoid_sim.world.boxes import StaticBoxes
 
 # Base-joint PD. Each joint carries the whole robot (a few kg m² about yaw, ~10 about pitch and roll at the
 # pelvis), so 1e5 Nm/rad holds a 30 Nm waist reaction to 0.3 mrad and stays below the explicit-stiffness
@@ -54,6 +55,7 @@ class IsaacLabCfg:
     ground_friction: float = 1.0
     imu: bool = False  # the IMU sensor at the description's mount
     contacts: bool = False  # a contact sensor on every body
+    scene: StaticBoxes | None = None  # static boxes around the robot (every env's robot then starts at the origin)
     rerun: bool = False
     rerun_rrd: str | None = None
 
@@ -256,7 +258,8 @@ def simulation_cfg(physics: dict, *, device: str, period_s: float, solver: str |
 
 
 class IsaacLabRobot:
-    """Scene with ground and robot; exposes joint state, target writes and stepping as torch tensors."""
+    """Scene with ground, robot and any static boxes; exposes joint state, target writes and stepping as torch
+    tensors."""
 
     def __init__(self, desc: Description, usd_path: Path, cfg: IsaacLabCfg, *, props: JointProperties):
         import isaaclab.sim as sim_utils
@@ -270,8 +273,14 @@ class IsaacLabRobot:
         class SceneCfg(InteractiveSceneCfg):
             pass
 
-        scene_cfg = SceneCfg(num_envs=cfg.num_envs, env_spacing=cfg.env_spacing_m, replicate_physics=True)
+        # The boxes are one set of shapes every env's world collides with, at the same coordinates.
+        spacing = 0.0 if cfg.scene is not None else cfg.env_spacing_m
+        scene_cfg = SceneCfg(num_envs=cfg.num_envs, env_spacing=spacing, replicate_physics=True)
         scene_cfg.ground = ground_cfg(cfg.ground_friction)
+        if cfg.scene is not None:
+            from humanoid_sim.world.boxes import static_boxes_cfg
+
+            scene_cfg.static_boxes = static_boxes_cfg(cfg.scene.file, cfg.scene.spawn_m, friction=cfg.ground_friction)
         scene_cfg.robot = articulation_cfg(usd_path, props, fixed_base=cfg.fixed_base, base_joints=cfg.base_joints,
                                            self_collision=cfg.self_collision, base_height_m=cfg.base_height_m,
                                            contact_sensors=cfg.contacts)
