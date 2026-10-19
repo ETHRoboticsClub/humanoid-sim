@@ -34,7 +34,7 @@ run: |
   humanoid-sim build-asset | tail -1
   humanoid-sim build-asset --base-joints | tail -1
   pytest -q 2>&1 | tee "$out/pytest.log" | tail -15
-  humanoid-sim bench --runtime --device cuda:0 --steps 5000 > "$out/runtime.log" 2>&1
+  humanoid-sim bench --runtime --device cuda:0 --steps 2000 > "$out/runtime.log" 2>&1
   sed -n '/^{/,/^}/p' "$out/runtime.log" | tee "$out/runtime.json"
   humanoid-sim bench --train --num-envs 4096 --device cuda:0 --steps 500 > "$out/train_4096.log" 2>&1
   sed -n '/^{/,/^}/p' "$out/train_4096.log" | tee "$out/train_4096.json"

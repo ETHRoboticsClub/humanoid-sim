@@ -14,7 +14,8 @@ in one of two poses (``pose``):
 * ``"standing"``: the description's standing pose. Under an upright base its soles are not level (10° and 17°),
   so a robot holding it rigidly tips over within about a second.
 * ``"flat_feet"``: :func:`~humanoid_sim.model.kinematics.flat_foot_pose`, the standing pose with both soles
-  level and at the same height. A robot holding it at the baseline gains stands.
+  level and at the same height. A robot holding it at the baseline gains stands for about 10 s on flat ground,
+  then leans over slowly: a held pose is not balance.
 
 The articulation's ``data.default_joint_pos`` holds the chosen pose, for a task's action offsets.
 
