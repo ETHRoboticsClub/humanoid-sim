@@ -8,8 +8,8 @@ the baseline gains on a free base.
 
 Workload: free base on flat ground, every drive holding the home pose at baseline gains, with a new
 demand every 20 ms (the policy period) carrying a small random target perturbation. ``fraction_envs_up`` is the
-share of robots whose base is still above 0.7 m at the end: a fallen robot has more contacts and steps at a
-different cost. Timing
+share of robots whose base is still above 3/4 of its standing height at the end: a fallen robot has more contacts
+and steps at a different cost. Timing
 covers the full step (plant + solver), after a warm-up. On CUDA the steady-state loop runs under
 ``torch.cuda.set_sync_debug_mode("error")``, so any torch-side host sync fails the benchmark.
 """
@@ -80,14 +80,14 @@ def run_bench(args, usd: Path) -> dict:
     q, _ = sim.joint_state()
     sim_s = args.steps * sim.period_ns / NS_PER_S
     upright = (q - q0).abs().amax(dim=1).lt(0.5).float().mean().item()
-    up = sim.backend.robot.data.root_link_pose_w.torch[:, 2].gt(0.7).float().mean().item()
+    up = sim.backend.robot.data.root_link_pose_w.torch[:, 2].gt(0.75 * height).float().mean().item()
     return {
         "physics": f"isaaclab/{sim.solver}", "device": device, "num_envs": args.num_envs, "period_ns": sim.period_ns,
         "steps": args.steps, "wall_s": wall, "rtf_per_env": sim_s / wall,
         "env_steps_per_s": args.num_envs * args.steps / wall,
         "sim_seconds_per_wall_second": args.num_envs * sim_s / wall,
         "fraction_envs_near_pose": upright, "fraction_envs_up": up,
-        "self_collision": not getattr(args, "no_self_collision", False), "host_syncs": "none (torch sync debug mode)" if cuda else "n/a",
+        "robot": args.robot, "self_collision": sim.backend.cfg.self_collision, "host_syncs": "none (torch sync debug mode)" if cuda else "n/a",
     }
 
 
@@ -136,7 +136,8 @@ def run_runtime_bench(args, usd: Path) -> dict:
             host.close()
     step_s = wall / args.steps
     each_ms = np.diff(walls, prepend=t) * 1e3
-    return {"workload": "runtime host, a new demand every step", "device": args.device, "steps": args.steps,
+    return {"workload": "runtime host, a new demand every step", "robot": args.robot, "device": args.device,
+            "steps": args.steps,
             "ms_per_step": step_s * 1e3, "ms_p99": float(np.percentile(each_ms, 99)), "ms_max": float(each_ms.max()),
             "steps_over_period": int((each_ms > host.period_ns / 1e6).sum()),
             "real_time_factor": host.period_ns / NS_PER_S / step_s, "cuda_graph": host.sim._graphs is not None,

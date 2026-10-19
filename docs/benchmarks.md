@@ -56,8 +56,9 @@ Isaac Lab captures its solver step as a CUDA graph (a recorded sequence of GPU k
 | `env_steps_per_s` | Robot-steps per wall second: `num_envs` x `steps` / `wall_s` |
 | `sim_seconds_per_wall_second` | Simulated seconds of all robots together per wall second: `num_envs` x `rtf_per_env` |
 | `fraction_envs_near_pose` | Share of robots whose every joint ended within 0.5 rad of where it started. It checks the joints only. |
-| `fraction_envs_up` | Share of robots whose base is above 0.7 m at the end. A fallen robot has more contacts and steps at a different cost, so compare runs only when this is 1.0. |
-| `self_collision` | `false` with `--no-self-collision`, otherwise `true` |
+| `fraction_envs_up` | Share of robots whose base is above 3/4 of its standing height at the end. A fallen robot has more contacts and steps at a different cost, so compare runs only when this is 1.0. |
+| `robot` | The robot benchmarked (`--robot`) |
+| `self_collision` | `false` with `--no-self-collision`, otherwise the profile's `physics.self_collision` |
 | `host_syncs` | `none (torch sync debug mode)` on CUDA, `n/a` on the CPU |
 
 ## Training benchmark (`--train`)
@@ -67,27 +68,27 @@ The training workload builds the scene a training environment uses ([training.md
 | Parameter | Draw |
 |---|---|
 | Body masses | Scaled by 0.9 to 1.1 |
-| Payload on the body `Component171_1` | 0 to 4.5 kg added |
+| Payload on the heaviest body (the V1's `Component171_1`, the G1's `torso_link`) | 0 to 4.5 kg added |
 | Joint armature | Scaled by 0.8 to 1.2 |
 | Friction coefficient of every robot shape | Set between 0.3 and 1.0 |
 | Drive stiffness and damping | Scaled by 0.9 to 1.1 |
 | Torque limits | Scaled by 0.85 to 1.0 |
-| Latency from demand sent to demand in force | 10 to 20 ms, plus another 10 to 20 ms on the four ankle drives |
-| Encoder offsets | Between -0.026 and 0.026 rad on every drive, plus between -0.14 and 0.14 rad on the drives matching `maxonHEJ50L_ANK.*` (the left ankle cranks) |
+| Latency from demand sent to demand in force | 10 to 20 ms, plus another 10 to 20 ms on a robot's ankle crank drives (the V1's four) |
+| Encoder offsets | Between -0.026 and 0.026 rad on every drive, plus between -0.14 and 0.14 rad on the left ankle's crank drives (the V1's) |
 | IMU gyro bias | Standard deviation 0.0015 rad/s |
 
-The robots start in the home pose (the scene's default) and hold it. Every 20 ms the benchmark reads `measured()` and `truth()`, resets about one in fifty robots as if their episodes had ended (`RobotPlant.reset` back to the default state: joints, base pose and velocity, drives off, sensors emptied, device parameters drawn again), and submits a demand for the home pose for every robot. Every 4 ms it runs the plant, writes the scene to the simulation, steps physics and updates the scene. As in the default workload, 50 warm-up steps are not timed.
+The robots start in the home pose (the scene's default) and hold it. The V1 stands; the G1 tips over within about 1.3 s of every reset ([training.md](training.md#the-initial-pose)), so its robots spend much of the run on the ground and `fraction_envs_up` stays low. Every 20 ms the benchmark reads `measured()` and `truth()`, resets about one in fifty robots as if their episodes had ended (`RobotPlant.reset` back to the default state: joints, base pose and velocity, drives off, sensors emptied, device parameters drawn again), and submits a demand for the home pose for every robot. Every 4 ms it runs the plant, writes the scene to the simulation, steps physics and updates the scene. As in the default workload, 50 warm-up steps are not timed.
 
 | Field | Meaning |
 |---|---|
 | `workload` | `train` |
-| `device`, `num_envs`, `steps`, `wall_s` | As in the default workload |
+| `robot`, `device`, `num_envs`, `steps`, `wall_s` | As in the default workload |
 | `env_steps_per_s` | Robot physics steps per wall second |
 | `sim_seconds_per_wall_second` | Simulated seconds of all robots together per wall second |
-| `self_collision` | `false` with `--no-self-collision`, otherwise `true` |
+| `self_collision` | `false` with `--no-self-collision`, otherwise the profile's `physics.self_collision` |
 | `host_syncs` | `none (torch sync debug mode)` on CUDA, `n/a` on the CPU |
 | `checksum_finite` | `true` when every value read from `measured()` and `truth()` stayed finite (no NaN or infinity) |
-| `fraction_envs_up` | Share of robots whose base is above 0.7 m at the end |
+| `fraction_envs_up` | Share of robots whose base is above 3/4 of its standing height at the end |
 
 ## Runtime benchmark (`--runtime`)
 
@@ -100,7 +101,7 @@ The steps are not paced: they run back to back as fast as the host can go, so th
 | Field | Meaning |
 |---|---|
 | `workload` | `runtime host, a new demand every step` |
-| `device`, `steps` | As in the default workload |
+| `robot`, `device`, `steps` | As in the default workload |
 | `ms_per_step` | Mean wall time of one step, in milliseconds |
 | `ms_p99` | 99th percentile of the per-step wall time: one step in a hundred took longer |
 | `ms_max` | Longest step |
