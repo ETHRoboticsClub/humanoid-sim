@@ -89,8 +89,8 @@ class RobotPlant:
         self.latency_ns = torch.zeros(e, d, dtype=torch.int64, device=self.device)
         self._targets = robot.data.default_joint_pos.torch.clone()
         self._physics_manager = physics_manager
-        # Every env starts at the articulation's default joint state: the standing pose. (At spawn the joints
-        # sit at the URDF zero, the calibration pose.)
+        # Every env starts at the articulation's default joint state, the pose the scene chose (standing or flat
+        # feet). (At spawn the joints sit at the URDF zero, the calibration pose.)
         robot.write_joint_state_to_sim_index(position=self._targets.clone(), velocity=torch.zeros_like(self._targets))
 
         h = cfg.feedback_history

@@ -156,6 +156,12 @@ def test_prescribed_pose_with_floor_clearance_and_sole_truth(tmp_path):
         assert np.allclose(face.mean(axis=1), truth["sole"]["position_m"][:, :2], atol=0.15)
         with pytest.raises(ValueError, match="floor_clearance_m"):
             host._prescribe({"floor_clearance_m": 0.002})
+        host._prescribe({"release": True})
+        assert host._reset({"pose": "flat_feet"}) is not None  # both soles level, on the ground
+        host._publish_truth()
+        _, truth = host.seg.regions["truth"].read()
+        assert (truth["sole"]["plate_face_height_span_m"] < 0.002).all()
+        assert truth["sole"]["lowest_z_m"] == pytest.approx([0.001, 0.001], abs=0.001)
     finally:
         host.close()
 

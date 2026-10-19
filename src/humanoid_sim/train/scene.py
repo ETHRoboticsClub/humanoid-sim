@@ -7,8 +7,16 @@
 * ``contacts``: a contact sensor on every body (net forces with history, air time);
 * ``ground``: the flat ground at the profile's friction, unless a ``terrain`` config is given.
 
-The robot's default state is the standing pose, upright, its lowest sole corner on the ground
-(:func:`~humanoid_sim.model.kinematics.standing_base_height`), so ``reset_scene_to_default`` puts it on its feet.
+The robot's default state is upright, its lowest sole corner on the ground
+(:func:`~humanoid_sim.model.kinematics.standing_base_height`), so ``reset_scene_to_default`` puts it on its feet,
+in one of two poses (``pose``):
+
+* ``"standing"``: the description's standing pose. Under an upright base its soles are not level (10° and 17°),
+  so a robot holding it rigidly tips over within about a second.
+* ``"flat_feet"``: :func:`~humanoid_sim.model.kinematics.flat_foot_pose`, the standing pose with both soles
+  level and at the same height. A robot holding it at the baseline gains stands.
+
+The articulation's ``data.default_joint_pos`` holds the chosen pose, for a task's action offsets.
 
 :func:`robot_sim_cfg` gives the ``SimulationCfg``: one physics step per period on Newton's MJWarp solver, from
 the profile. humanoid-learning builds its environment config from these and steps the plant through
@@ -37,21 +45,43 @@ def plant_joint_properties(robot: str = "ethrc_v1") -> JointProperties:
     return joint_properties(PlantCore(desc, joints, 1, PlantCfg(robot=robot)), joints)
 
 
+POSES = ("standing", "flat_feet")
+
+
+def initial_pose(usd: Path, robot: str = "ethrc_v1", pose: str = "standing"):
+    """Joint positions ``[J]`` (description order) of ``pose`` (see :data:`POSES`) and the upright base height at
+    which its lowest sole corner touches the ground."""
+    import torch
+
+    from humanoid_sim.model.asset import asset_meta
+    from humanoid_sim.model.kinematics import flat_foot_pose, standing_base_height
+
+    desc = Description.load(robot)
+    soles = asset_meta(usd)["sole_boxes"]
+    if pose == "standing":
+        q = torch.tensor([desc.joints[n].standing_offset_rad for n in desc.joints], dtype=torch.float64)
+    elif pose == "flat_feet":
+        q = flat_foot_pose(usd, desc, soles)
+    else:
+        raise ValueError(f"unknown pose {pose!r}; known: {POSES}")
+    return q, standing_base_height(usd, desc, soles, q)
+
+
 def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_spacing: float = 2.5,
                     terrain=None, ground_friction: float | None = None, imu: bool = True, contacts: bool = True,
-                    self_collision: bool | None = None):
+                    self_collision: bool | None = None, pose: str = "standing"):
     """Scene config with the robot, its sensors and the ground (or ``terrain``, an Isaac Lab
-    ``TerrainImporterCfg``). With robot friction randomized, pass ``ground_friction=0``: MJWarp takes the larger
-    friction of the two shapes in contact."""
+    ``TerrainImporterCfg``), the robot on its feet in ``pose`` (see :data:`POSES`). With robot friction
+    randomized, pass ``ground_friction=0``: MJWarp takes the larger friction of the two shapes in contact."""
     from isaaclab.scene import InteractiveSceneCfg
     from isaaclab.utils import configclass
 
-    from humanoid_sim.model.asset import asset_meta
-    from humanoid_sim.model.kinematics import standing_base_height
     from humanoid_sim.physics.isaaclab import articulation_cfg, ground_cfg
 
     profile = load_profile(robot)
-    height = standing_base_height(usd, Description.load(robot), asset_meta(usd)["sole_boxes"])
+    q, height = initial_pose(usd, robot, pose)
+    props = plant_joint_properties(robot)
+    names = list(Description.load(robot).joints)
 
     @configclass
     class RobotSceneCfg(InteractiveSceneCfg):
@@ -59,8 +89,9 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
 
     cfg = RobotSceneCfg(num_envs=num_envs, env_spacing=env_spacing, replicate_physics=True)
     cfg.robot = articulation_cfg(
-        usd, plant_joint_properties(robot), base_height_m=height + STANDING_CLEARANCE_M, contact_sensors=contacts,
-        self_collision=profile["physics"]["self_collision"] if self_collision is None else self_collision)
+        usd, props, base_height_m=height + STANDING_CLEARANCE_M, contact_sensors=contacts,
+        self_collision=profile["physics"]["self_collision"] if self_collision is None else self_collision,
+        joint_pos=[float(q[names.index(n)]) for n in props.names])
     if terrain is not None:
         cfg.terrain = terrain
     else:

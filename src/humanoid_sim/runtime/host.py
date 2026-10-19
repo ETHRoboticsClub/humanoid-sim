@@ -152,6 +152,10 @@ class RuntimeHost:
                                      cuda_graph=cuda, compile=compile and cuda)
         self.desc = self.sim.desc
         self.robot = self.sim.backend.robot
+        from humanoid_sim.train.scene import initial_pose
+
+        # The flat-foot pose for RESET {"pose": "flat_feet"}: solved here (seconds on a CPU), not in the loop.
+        self._flat_feet_pose = initial_pose(usd, robot, "flat_feet")
         self.period_ns = self.sim.period_ns
         self.drives = self.sim.plant.map.drive_names
         self.joints = list(self.desc.joints)
@@ -335,6 +339,17 @@ class RuntimeHost:
             base = torch.tensor([[0.0, 0.0, self.standing_height_m, 0.0, 0.0, 0.0, 1.0]], device=self.device)
         return q, base
 
+    def _flat_feet(self) -> tuple[torch.Tensor, torch.Tensor | None]:
+        from humanoid_sim.train.scene import STANDING_CLEARANCE_M
+
+        q_desc, height = self._flat_feet_pose
+        names = list(self.desc.joints)
+        q = torch.tensor([[float(q_desc[names.index(n)]) for n in self.joints]], device=self.device)
+        base = None
+        if self.support != "suspended":
+            base = torch.tensor([[0.0, 0.0, height + STANDING_CLEARANCE_M, 0.0, 0.0, 0.0, 1.0]], device=self.device)
+        return q, base
+
     def _reset(self, args: dict) -> str:
         if "joint_pos" in args:
             q, base = self._joint_vector(args["joint_pos"]), None
@@ -342,6 +357,8 @@ class RuntimeHost:
                 base = self._base_pose(args["base_pose"])
         elif args.get("pose", "standing") == "standing":
             q, base = self._standing()
+        elif args["pose"] == "flat_feet":
+            q, base = self._flat_feet()
         elif args["pose"] == "current":
             q, base = self.sim.joint_state()[0], None
         else:
@@ -460,6 +477,10 @@ class RuntimeHost:
             d = self.drives.index(drive)
         duration = args.get("duration_s")
         end = None if duration is None else self.sim.t_ns + int(round(float(duration) * NS_PER_S))
+        if not math.isfinite(value):
+            raise ValueError(f"{fault} value must be finite")
+        if fault == "power_sag" and not 0.0 <= value <= 1.0:
+            raise ValueError("power_sag value is the torque scale, in [0, 1]")
         key = (fault, d)
         self._clear_fault(key)
         if value == (1.0 if fault == "power_sag" else 0.0):  # the value that means no fault
@@ -475,10 +496,6 @@ class RuntimeHost:
             self.sim.imu.accel_bias += value
             self._faults[key] = (end if end is not None else self.sim.t_ns + self.period_ns, value)
         elif fault == "power_sag":
-        if not math.isfinite(value):
-            raise ValueError(f"{fault} value must be finite")
-        if fault == "power_sag" and not 0.0 <= value <= 1.0:
-            raise ValueError("power_sag value is the torque scale, in [0, 1]")
             self.sim.plant.bank.torque_scale.fill_(value)
             self._faults[key] = (end, value)
         return f"{fault} active"

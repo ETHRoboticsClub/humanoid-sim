@@ -35,6 +35,40 @@ def test_kinematic_model_mass_and_bodies(usd):
     assert kin.model.body_count == 23
 
 
+
+def test_flat_foot_pose_levels_both_soles_at_one_height(usd):
+    pytest.importorskip("newton")
+    pytest.importorskip("pxr")
+    import numpy as np
+
+    from humanoid_sim.model.asset import asset_meta
+    from humanoid_sim.model.kinematics import (
+        RobotKinematics,
+        _sole_corners,
+        _sole_normal,
+        flat_foot_pose,
+        standing_base_height,
+    )
+
+    desc = Description.load()
+    soles = asset_meta(usd)["sole_boxes"]
+    q = flat_foot_pose(usd, desc, soles)
+    joints = list(desc.joints)
+    kin = RobotKinematics(usd, joints, base_height_m=0.0)
+    poses = kin.body_poses(q.reshape(1, -1))
+    labels = [lbl.rsplit("/", 1)[-1] for lbl in kin.model.body_label]
+    bottoms = []
+    for sole in soles:
+        pose = poses[labels.index(sole["body"])]
+        assert _sole_normal(pose, sole)[2] > 1 - 1e-6  # level
+        bottoms.append(_sole_corners(pose, sole)[:, 2].min())
+    assert abs(bottoms[0] - bottoms[1]) < 5e-4
+    assert standing_base_height(usd, desc, soles, q) == pytest.approx(-min(bottoms), abs=1e-6)
+    moved = {n for n, a, b in zip(joints, q.tolist(), [desc.joints[n].standing_offset_rad for n in joints])
+             if abs(a - b) > 1e-9}
+    assert moved <= {f"{j}_{s}" for j in ("leg_flexion", "knee", "foot_pitch", "foot_roll") for s in "lr"}
+    assert np.isfinite(q.numpy()).all()
+
 @pytest.mark.physics
 def test_holds_standing_on_fixed_base(usd, request):
     pytest.importorskip("isaaclab_newton")
@@ -138,6 +172,7 @@ def test_cuda_graph_step_matches_eager(usd):
         assert (seq[:8].diff() == -1).all() and gyro[:8].std() > 0  # samples delivered, noise drawn per replay
 
 
+@pytest.mark.physics
 def test_a_joint_pushed_into_its_stop_stays_at_it(usd):
     """MuJoCo's own limit constraint (profile joint_limits: mujoco): 40 Nm into the hip abduction stop sinks less
     than 2 mrad past it (Newton's force-space default lets it sink 11 mrad)."""
@@ -159,4 +194,3 @@ def test_a_joint_pushed_into_its_stop_stays_at_it(usd):
         assert -0.001 < past < 0.002, past
     finally:
         sim.close()
-@pytest.mark.physics

@@ -79,9 +79,11 @@ def _per_joint(names, values):
 
 
 def articulation_cfg(usd_path: Path, props: JointProperties, *, fixed_base: bool = False, base_joints: bool = False,
-                     self_collision: bool = True, base_height_m: float = 1.0, contact_sensors: bool = False):
+                     self_collision: bool = True, base_height_m: float = 1.0, contact_sensors: bool = False,
+                     joint_pos: list[float] | None = None):
     """The robot as an Isaac Lab articulation: constant solver PD ``k0, d0`` and the description's passive
-    properties per joint, standing pose; base joints (if the asset has them) on a stiff PD."""
+    properties per joint, initially at ``joint_pos`` (``props.names`` order; default: the standing pose); base
+    joints (if the asset has them) on a stiff PD."""
     import isaaclab.sim as sim_utils
     from isaaclab.actuators import ImplicitActuatorCfg
     from isaaclab.assets import ArticulationCfg
@@ -95,7 +97,7 @@ def articulation_cfg(usd_path: Path, props: JointProperties, *, fixed_base: bool
         viscous_friction=_per_joint(joints, props.passive_damping),
         joint_effort_limit=_per_joint(joints, props.effort_limit),
     )}
-    joint_pos = _per_joint(joints, props.standing)
+    joint_pos = _per_joint(joints, props.standing if joint_pos is None else joint_pos)
     if base_joints:
         names = [name for name, _ in BASE_JOINTS]
         actuators["base"] = ImplicitActuatorCfg(
