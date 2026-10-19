@@ -1,10 +1,11 @@
-// Runtime segment ABI between humanoid-sim's real-time host and a client that plays the robot's devices: the same
-// layout as plant_abi.py (which documents the protocol). Self-contained C11/C++17; vendored unchanged by Controls.
+// Runtime segment ABI between humanoid-sim's real-time host and a client that plays the robot's
+// devices: the same layout as plant_abi.py (which documents the protocol). Self-contained
+// C11/C++17; vendored unchanged by Controls.
 //
-// Every region starts with seq (u64) and crc (u32). A writer makes seq odd, writes the payload (the bytes
-// after the 16-byte region head), stores the CRC-32 (zlib) of the payload and makes seq even again, with
-// release ordering. A reader copies the payload between two equal, even acquire-loads of seq and checks the
-// CRC. Little-endian, natural alignment, every region on a 64-byte boundary.
+// Every region starts with seq (u64) and crc (u32). A writer makes seq odd, writes the payload (the
+// bytes after the 16-byte region head), stores the CRC-32 (zlib) of the payload and makes seq even
+// again, with release ordering. A reader copies the payload between two equal, even acquire-loads
+// of seq and checks the CRC. Little-endian, natural alignment, every region on a 64-byte boundary.
 #pragma once
 
 #include <stddef.h>
@@ -61,9 +62,10 @@ typedef struct {
 // Drive laws.
 #define HSIM_LAW_DISABLED 0u // no torque
 #define HSIM_LAW_PD 1u       // kp (target - q) + kd (target_velocity - v) + feedforward
-#define HSIM_LAW_FREEZE 2u   // PD about the position read on entering FREEZE, no velocity target or feedforward
+#define HSIM_LAW_FREEZE 2u   // PD about the reading on entering FREEZE, no target velocity or ff
 
-// A drive's demand, SI and vendor-neutral: a client converts its device's command at its own boundary.
+// A drive's demand, SI and vendor-neutral: a client converts its device's command at its own
+// boundary.
 typedef struct {
   uint8_t law;
   uint8_t _pad0[7];
@@ -78,9 +80,9 @@ typedef struct {
 } HsimDriveFeedback;
 
 typedef struct {
-  uint64_t seq;       // per-session sample number, from 1
-  int64_t sample_ns;  // measurement time, sim time
-  int64_t stamp_ns;   // host-receipt time, sim time
+  uint64_t seq;      // per-session sample number, from 1
+  int64_t sample_ns; // measurement time, sim time
+  int64_t stamp_ns;  // host-receipt time, sim time
   double gyro_rad_s[3];
   double specific_force_m_s2[3];
 } HsimImuSample;
@@ -95,9 +97,9 @@ typedef struct {
   double face_xy_m[4][2]; // the plate's bottom-face corners, world x and y
 } HsimSole;
 
-#define HSIM_REGION_HEAD \
-  uint64_t seq;          \
-  uint32_t crc;          \
+#define HSIM_REGION_HEAD                                                                           \
+  uint64_t seq;                                                                                    \
+  uint32_t crc;                                                                                    \
   uint32_t _pad0;
 
 typedef struct {
@@ -143,7 +145,8 @@ typedef struct {
 typedef struct {
   HSIM_REGION_HEAD
   int64_t sim_time_ns;
-  double base_position_m[3], base_quat_xyzw[4], base_lin_vel_m_s[3], base_ang_vel_rad_s[3], com_m[3];
+  double base_position_m[3], base_quat_xyzw[4], base_lin_vel_m_s[3], base_ang_vel_rad_s[3],
+      com_m[3];
   double gantry_tension_n, mass_kg;
   uint32_t num_joints, _pad1;
   double joint_pos_rad[HSIM_PLANT_MAX_JOINTS], joint_vel_rad_s[HSIM_PLANT_MAX_JOINTS];

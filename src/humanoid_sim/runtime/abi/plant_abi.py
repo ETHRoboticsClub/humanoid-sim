@@ -409,7 +409,8 @@ class Segment:
         path = Path(path)
         tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
         fd = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o660)
-        os.fchmod(fd, 0o660)  # owner and group read-write whatever the umask, so a client in the group can attach
+        # Owner and group read-write whatever the umask, so a client in the group can attach.
+        os.fchmod(fd, 0o660)
         os.ftruncate(fd, SEGMENT_BYTES)
         mm = mmap.mmap(fd, SEGMENT_BYTES)
         seg = cls(path, mm, fd)
@@ -601,16 +602,21 @@ class Segment:
         raise TimeoutError(f"no ack for command {seq} within {timeout_s} s")
 
 
-def pd_demand(target_position_rad, stiffness_nm_per_rad, damping_nm_s_per_rad, *, law: int = LAW_PD,
-              **fields) -> dict[str, np.ndarray]:
+def pd_demand(
+    target_position_rad, stiffness_nm_per_rad, damping_nm_s_per_rad, *, law: int = LAW_PD, **fields
+) -> dict[str, np.ndarray]:
     """Per-drive arrays for :func:`demands_record`: every drive on ``law`` about its target at the given gains, no
     velocity target, feed-forward or torque limit unless ``fields`` names them."""
     target = np.asarray(target_position_rad, dtype=np.float64)
     n = len(target)
     demand = {name: np.zeros(n) for name in DRIVE_DEMAND.names if not name.startswith("_")}
-    demand |= {"law": np.full(n, law), "target_position_rad": target.copy(), "torque_limit_nm": np.full(n, np.inf),
-               "stiffness_nm_per_rad": np.broadcast_to(stiffness_nm_per_rad, n).astype(np.float64),
-               "damping_nm_s_per_rad": np.broadcast_to(damping_nm_s_per_rad, n).astype(np.float64)}
+    demand |= {
+        "law": np.full(n, law),
+        "target_position_rad": target.copy(),
+        "torque_limit_nm": np.full(n, np.inf),
+        "stiffness_nm_per_rad": np.broadcast_to(stiffness_nm_per_rad, n).astype(np.float64),
+        "damping_nm_s_per_rad": np.broadcast_to(damping_nm_s_per_rad, n).astype(np.float64),
+    }
     return demand | {k: np.broadcast_to(v, n).copy() for k, v in fields.items()}
 
 
