@@ -168,8 +168,10 @@ class RuntimeHost:
         self._backdrive_joint_ids = [self.robot.joint_names.index(self.joints[j]) for _, j in one_to_one]
         self._friction_on = torch.tensor([[self.desc.joints[self.joints[j]].friction for _, j in one_to_one]],
                                          device=self.device)
-        self._friction_off = torch.tensor([[float(self.desc.family(self.desc.drives[self.drives[k]].family)[
-            "backdrive_torque"]) for k, _ in one_to_one]], device=self.device)
+        # A family without a recorded backdrive_torque keeps the enabled friction.
+        self._friction_off = torch.tensor([[float(self.desc.family_value(
+            self.desc.drives[self.drives[k]].family, "backdrive_torque",
+            self.desc.joints[self.joints[j]].friction)) for k, j in one_to_one]], device=self.device)
         self._drive_off: np.ndarray | None = None
         # Device-to-host copies: into pinned buffers, waited for on a blocking event (the host thread sleeps
         # instead of spinning while the GPU finishes: it shares the machine with Controls).

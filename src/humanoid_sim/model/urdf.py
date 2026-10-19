@@ -129,7 +129,7 @@ class PreparedUrdf:
     def __init__(self, desc: Description, profile: dict):
         self.desc = desc
         self.model_cfg = profile["model"]
-        self.source = desc.package_dir / self.model_cfg["urdf"]
+        self.source = desc.package_dir / self.model_cfg.get("urdf", desc.table["urdf"])
         self.tree = ET.parse(self.source)
         self.root = self.tree.getroot()
         self.welded: list[str] = []
@@ -190,7 +190,9 @@ class PreparedUrdf:
                 yield from self._fixed_subtree(j.find("child").get("link"), tf @ _origin(j.find("origin")))
 
     def add_sole_boxes(self) -> None:
-        sole = self.model_cfg["sole"]
+        sole = self.model_cfg.get("sole")
+        if sole is None:  # the URDF's own foot collision shapes
+            return
         for side, joint_name in sole["joints"].items():
             joint = next(j for j in self._joints if j.get("name") == joint_name)
             body = joint.find("child").get("link")

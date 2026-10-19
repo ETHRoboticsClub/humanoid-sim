@@ -47,7 +47,8 @@ class PlantCore:
         dev, dt = cfg.device, cfg.dtype
         self.map = DriveJointMap(desc, joint_names, device=dev, dtype=dt)
         drives = [desc.drives[n] for n in self.map.drive_names]
-        self.envelope = TorqueSpeedEnvelope([desc.torque_speed(d.family) for d in drives], device=dev, dtype=dt)
+        self.envelope = TorqueSpeedEnvelope([desc.torque_speed(d.family) for d in drives],
+                                            braking=[desc.braking_limit(d.name) for d in drives], device=dev, dtype=dt)
         self.bank = DriveBank(self.envelope, num_envs, self.map.num_drives, queue_capacity=cfg.queue_capacity,
                               device=dev, dtype=dt)
         self.drive_stiffness = torch.tensor([d.baseline_stiffness for d in drives], device=dev, dtype=dt)

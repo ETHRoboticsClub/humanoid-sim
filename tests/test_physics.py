@@ -44,8 +44,8 @@ def test_home_pose_levels_both_soles_at_one_height(usd):
     import numpy as np
 
     from humanoid_sim.model.asset import asset_meta
-    from humanoid_sim.model.kinematics import RobotKinematics, _rotate, _sole_corners, standing_base_height
-    from humanoid_sim.model.poses import initial_pose
+    from humanoid_sim.model.kinematics import RobotKinematics, _rotate, _sole_corners, lowest_collision_z
+    from humanoid_sim.model.poses import home_pose, initial_pose
 
     desc = Description.load()
     soles = asset_meta(usd)["sole_boxes"]
@@ -63,12 +63,13 @@ def test_home_pose_levels_both_soles_at_one_height(usd):
         return out
 
     q, height = initial_pose(usd, pose="home")
-    assert q.tolist() == pytest.approx([desc.home_pose[n] for n in joints])
+    home = home_pose(desc, load_profile("ethrc_v1"))
+    assert q.tolist() == pytest.approx([home[n] for n in joints])
     (n_l, z_l), (n_r, z_r) = soles_at(q)
     assert min(n_l, n_r) > np.cos(np.radians(0.1))  # level
     assert abs(z_l - z_r) < 5e-4
-    assert height == pytest.approx(-min(z_l, z_r), abs=1e-6)
-    assert height == pytest.approx(standing_base_height(usd, desc, soles, q))
+    assert height == pytest.approx(-min(z_l, z_r), abs=1e-4)  # the soles are the lowest collision shapes
+    assert height == pytest.approx(-lowest_collision_z(kin, kin.body_poses(q.reshape(1, -1))))
     for c, name in enumerate(joints):
         lo, hi = desc.calibration_travel(name)
         assert lo <= float(q[c]) <= hi, name

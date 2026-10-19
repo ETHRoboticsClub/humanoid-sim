@@ -5,7 +5,8 @@ Mirroring across the sagittal plane maps joint positions ``q`` to ``q'`` about t
 or roll joint, +1 for a pitch joint). Velocities, torques and deviations map with the signs alone. Derived
 from the description:
 
-* pairs: joints named ``*_l`` / ``*_r``; drives follow their joints, the ankle cranks pair upper with upper;
+* pairs: joints named ``*_l`` / ``*_r`` or ``left_*`` / ``right_*``; drives follow their joints, linkage cranks
+  pair upper with upper;
 * the sagittal plane: the plane between the first pair's joint frames, snapped to the nearest base axis;
 * joint signs: a rotation axis is a pseudovector, so its mirror image is ``-M a`` (``M`` the reflection); the
   sign is +1 where the partner's axis equals that image, -1 where it is its opposite;
@@ -64,12 +65,21 @@ def _apply(x, perm, sign):
     return out
 
 
+_SIDES = (("_l", "_r", "suffix"), ("left_", "right_", "prefix"))
+
+
 def _partner(name: str) -> str | None:
-    if name.endswith("_l"):
-        return name[:-2] + "_r"
-    if name.endswith("_r"):
-        return name[:-2] + "_l"
+    for left, right, where in _SIDES:
+        for this, other in ((left, right), (right, left)):
+            if where == "suffix" and name.endswith(this):
+                return name[: -len(this)] + other
+            if where == "prefix" and name.startswith(this):
+                return other + name[len(this):]
     return None
+
+
+def _is_left(name: str) -> bool:
+    return name.endswith("_l") or name.startswith("left_")
 
 
 def _joint_positions(urdf_path, q: dict[str, float]) -> dict[str, np.ndarray]:
@@ -133,7 +143,9 @@ def _joint_frames(urdf_path) -> dict[str, tuple[np.ndarray, np.ndarray]]:
 def mirror_map(desc: Description) -> MirrorMap:
     frames = _joint_frames(desc.urdf_path)
     joints = list(desc.joints)
-    first = next(n for n in joints if _partner(n) in desc.joints and n.endswith("_l"))
+    first = next((n for n in joints if _partner(n) in desc.joints and _is_left(n)), None)
+    if first is None:
+        raise ValueError(f"{desc.robot}: no left/right joint pair (*_l/*_r or left_*/right_*)")
     gap = frames[first][0] - frames[_partner(first)][0]
     lateral = int(np.argmax(np.abs(gap)))
     if abs(gap[lateral]) / np.linalg.norm(gap) < AXIS_TOLERANCE:
@@ -158,8 +170,8 @@ def mirror_map(desc: Description) -> MirrorMap:
 
     drives = list(desc.drives)
     d_perm, d_sign = [], []
-    cranks = {side: desc.ankle_cranks(side) for side in ("l", "r")}
-    crank_sign = _crank_signs(desc, joints, perm, sign)
+    cranks = {lk.side: (lk.upper, lk.lower) for lk in desc.linkages}
+    crank_sign = _crank_signs(desc, joints, perm, sign) if cranks else []
     for name in drives:
         d = desc.drives[name]
         if d.crank is None:

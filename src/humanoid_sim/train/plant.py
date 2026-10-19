@@ -100,7 +100,7 @@ class RobotPlant:
         self._hist_ns = torch.full((e, h), -1, dtype=torch.int64, device=self.device)
 
         self.reporting = None
-        if cfg.reporting:
+        if cfg.reporting and self.profile.get("devices", {}).get("encoders"):  # else exact values
             from humanoid_sim.devices.reporting import DriveReporting
 
             self.reporting = DriveReporting.for_drives(self.desc, self.drives, self.profile, device=self.device,

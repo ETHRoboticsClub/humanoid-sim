@@ -1,0 +1,64 @@
+# Defaults every robot's profile is merged over (load_profile): profiles/<robot>.yaml overrides them key by key, and
+# a robot without a profile file runs on these alone. Robot facts are NOT here: they come from third_party/humanoid-urdf.
+schema: humanoid-sim-profile/v1
+
+model:
+  # The URDF to build, relative to the robot's ament package. Default: the one actuators.yaml names.
+  # Movable URDF joints without an actuators.yaml entry are welded at zero.
+  weld_unlisted_joints: true
+  # One convex hull per body (see model/urdf.py); per_mesh makes one hull per URDF collision mesh.
+  collision_hulls: per_body
+  # Friction of the flat ground.
+  ground_friction: 1.0
+  # No sole boxes (model.sole), contact excludes (model.contact_excludes) or self-collision sets
+  # (model.self_collision) unless the robot's profile names them.
+
+# Named poses (model/poses.py). home: a pose the description records, as {export: <zero-rebase table>} or
+# {preset: <preset_id in position-presets.yaml>}; zero: the URDF's zero.
+poses:
+  home: zero
+
+# Drive feedback as reported. Without devices.encoders the training plant reports exact values.
+devices: {}
+
+physics:
+  period_ns: 4000000          # 250 Hz
+  # Newton solver stepping the robot: mjwarp or kamino. Each has its own block below.
+  solver: mjwarp
+  self_collision: true
+  mjwarp:
+    integrator: implicitfast  # implicit in the damping: stable with the stiff ankle-crank PD at 4 ms
+    cone: pyramidal
+    iterations: 100
+    ls_iterations: 50
+    # Buffers. nconmax is a per-world average (the contact pool is shared by all worlds), njmax a per-world
+    # maximum. With per-body hulls a standing robot needs about 30 contacts, a fallen one up to about 390
+    # constraint rows. MJWarp prints an overflow warning when either runs out.
+    njmax: 400
+    nconmax: 64
+    # Joint stops: MuJoCo's own limit constraint (solref 0.02 s, damping ratio 1), as Controls' MJCF has it.
+    # Newton's force-space default (1e4 Nm/rad) is softer for the legs: 40 Nm on the hip abduction sinks 11 mrad
+    # past its stop (under 2 mrad here), and Controls' range survey found that stop 4 mrad out. The real stops'
+    # stiffness is not measured (modeled).
+    joint_limits: mujoco
+  # Kamino (beta in Newton 1.6): maximal coordinates, hard joint-limit and contact constraints, P-ADMM forward
+  # dynamics, contacts from Newton's collision pipeline. Contact friction mixes by the larger coefficient, as
+  # MJWarp does. Not yet checked against MJWarp or the captures (modeled).
+  kamino:
+    integrator: euler  # moreau needs Kamino's own collision detector
+    iterations: 100
+    # Contact buffer per world, the same for every world; Newton drops contacts beyond it. An estimate (about
+    # 100 contacts for a fallen robot, from MJWarp's constraint rows), not counted on Kamino.
+    max_contacts_per_world: 128
+
+sensors:
+  imu:
+    # Mount: the description's imu_joint. A sample every 2 ms, delivered as it is taken, without noise: what a
+    # robot that publishes its IMU with every state message at 500 Hz looks like until its timing is measured.
+    sample_period_ns: 2000000
+    burst_period_ns: [2000000, 2000000]
+    in_burst_spacing_ns: 0
+    gyro_noise_density_rad_s_sqrt_hz: 0.0
+    accel_noise_density_m_s2_sqrt_hz: 0.0
+
+solver_gains: baseline        # constant per-episode PD = the description's baseline gains

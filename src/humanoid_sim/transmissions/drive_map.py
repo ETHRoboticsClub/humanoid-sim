@@ -2,8 +2,8 @@
 
 * 1:1 drives: ``q_drive = sign · q_joint`` (URDF zero is the calibration pose, the drive's frame);
   ``τ_joint = sign · τ_drive``.
-* Ankle cranks: crank angles from the hinge state through :class:`AnkleTransmission`;
-  ``τ_hinges = Jᵀ τ_cranks``.
+* Linkage cranks (the ETHRC ankles, when the description has them): crank angles from the hinge state through
+  :class:`AnkleTransmission`; ``τ_hinges = Jᵀ τ_cranks``.
 
 This is the plant side of Controls' ``Plant.physical_motor_feedback`` / ``Plant.step`` transmission.
 """
@@ -37,15 +37,14 @@ class DriveJointMap:
         self._lin_j = torch.tensor(lin_j, device=device, dtype=torch.long)
         self._lin_s = torch.tensor(lin_s, device=device, dtype=dtype)
         self.ankles = []
-        for side in ("l", "r"):
-            upper, lower = desc.ankle_cranks(side)
-            if upper not in self.drive_names:
+        for lk in desc.linkages:
+            if lk.upper not in self.drive_names:
                 continue
             self.ankles.append((
-                side,
-                torch.tensor([self.drive_names.index(upper), self.drive_names.index(lower)], device=device),
-                torch.tensor([jidx[f"foot_pitch_{side}"], jidx[f"foot_roll_{side}"]], device=device),
-                desc.ankle_transmission(side, device=device, dtype=dtype),
+                lk.side,
+                torch.tensor([self.drive_names.index(lk.upper), self.drive_names.index(lk.lower)], device=device),
+                torch.tensor([jidx[j] for j in lk.joints], device=device),
+                desc.ankle_transmission(lk.side, device=device, dtype=dtype),
             ))
         self.actuated_joints = torch.tensor(
             sorted(lin_j + [int(j) for a in self.ankles for j in a[2]]), device=device, dtype=torch.long)
