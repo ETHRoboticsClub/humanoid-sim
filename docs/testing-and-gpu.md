@@ -56,7 +56,7 @@ The `data` tests look for captures in the directory named by `HUMANOID_SIM_DATAS
 | Image, everything | see below, `pytest` | Every test the machine can run |
 | GPU node | the `e2e` SkyPilot task | Everything, including the CUDA and capture tests |
 
-Natively you need the `dev` and `newton` extras (`uv sync --extra dev --extra newton`); without `newton`, the tests that need scipy or Newton skip. On an Apple silicon Mac with the `newton` and `viz` extras and the plain asset built, the native command reports 77 passed and 22 deselected (the `physics` and `data` tests) in about 20 s.
+Natively you need the `dev` and `newton` extras (`uv sync --extra dev --extra newton`); without `newton`, the tests that need scipy or Newton skip. On an Apple silicon Mac with the `newton` and `viz` extras and the plain asset built, the native command reports 118 passed and 59 deselected (the `physics` and `data` tests) in about 35 s.
 
 The image includes pytest (`docker/Dockerfile` installs `pytest>=9,<10`). Build the V1's two assets and both G1s' first, or most physics tests skip. This is the `isaaclab-image` CI job's sequence:
 
@@ -77,7 +77,7 @@ docker run --rm -v "$PWD":/workspace/humanoid-sim -v "$(dirname "$PWD")/datasets
   -w /workspace/humanoid-sim humanoid-sim:dev pytest
 ```
 
-To run one file or one test, name it: `pytest tests/test_world.py` or `pytest -k cable`. On Warp's CPU device the physics tests are slow. In the arm64 image on an Apple silicon Mac, with both assets built and Warp's kernel cache kept on a volume (`-v hsim-warp-cache:/cache`), the whole suite gives 95 passed and 4 skipped in about 3 minutes: the CUDA-graph test, and three capture tests that need the captures mounted. Without the cache volume every run compiles the kernels again and takes longer.
+To run one file or one test, name it: `pytest tests/test_world.py` or `pytest -k cable`. On Warp's CPU device the physics tests are slow. In the arm64 image on an Apple silicon Mac, with the four assets built and Warp's kernel cache kept on a volume (`-v hsim-warp-cache:/cache`), the whole suite gives 170 passed and 6 skipped in about 6 minutes: the CUDA-graph test for each robot, and three capture tests that need the captures mounted. Without the cache volume every run compiles the kernels again and takes longer.
 
 Two tests exercise CUDA graphs, the captured GPU step the runtime host uses: `test_physics.py::test_cuda_graph_step_matches_eager` skips without CUDA, and `test_runtime_host.py::test_demand_intake_queues_what_the_record_says` checks the graphed demand intake only when CUDA is available. The `e2e` task runs both on a GPU.
 
@@ -218,7 +218,7 @@ The `e2e` task exercises the whole repository on one GPU: everything CI cannot r
 | A replay of every capture, at the replay defaults | `humanoid-sim replay <capture> --device cuda:0` | `replay/<capture>/`, `replay_<capture>.log` |
 | The examples: training scenes recorded to Rerun, and a runtime session driven by `examples/runtime_client.py` and recorded by `view-runtime` | see the task file | `shots/*.rrd`, `serve.log`, `runtime_client.log`, `view_runtime.log` |
 
-The script runs with `set -euo pipefail`, so the first step that fails ends the job and the later outputs are missing; the pytest summary line is printed last. [benchmarks.md](benchmarks.md#reference-numbers) explains the benchmark figures and lists those of the latest run. In the run of 2026-10-18 on an A10G every test passed and none skipped (90 tests at that revision, in about 4 minutes).
+The script runs with `set -euo pipefail`, so the first step that fails ends the job and the later outputs are missing; the pytest summary line is printed last. [benchmarks.md](benchmarks.md#reference-numbers) explains the benchmark figures and lists those of the latest run. In the run of 2026-10-20 on an L40S every test passed and none skipped (177 tests at that revision, in about 10 minutes).
 
 Launch it detached and follow the log, as in the commands above. The outputs stay on the node: fetch them with `rsync` within 10 minutes of the job ending, before autostop stops the machine, or restart the stopped machine with `sky start hsim-e2e` and fetch them then. Launching the task again instead clears `outputs/e2e/` first. The `.rrd` recordings open locally with `uv run rerun <file>.rrd` and the `viz` extra.
 
