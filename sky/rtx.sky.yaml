@@ -1,0 +1,41 @@
+# A GPU node for the RTX sensors: builds the kitless image (docker/Dockerfile) and the Isaac Sim image on top of it
+# (docker/Dockerfile.kit), with Controls' hangar files mounted for the scene. RTX needs RT cores: L40S, A10G or L4
+# (not A100/H100), and Kit wants 32 GB of RAM or more.
+#   sky launch -y -d -c hsim-rtx -i 30 sky/rtx.sky.yaml       (setup builds both images: about 40 minutes)
+#   sky exec hsim-rtx --env CMD="python examples/rtx_sensors.py ..." sky/rtx.sky.yaml
+#   rsync -avz hsim-rtx:sky_workdir/outputs/rtx/ outputs/rtx/
+name: humanoid-sim-rtx
+workdir: .
+
+resources:
+  cloud: aws
+  accelerators: {L40S:1, A10G:1, L4:1}
+  cpus: 8+
+  memory: 60+
+  disk_size: 300
+
+file_mounts:
+  /data/hangar: ../../ETHRC-Humanoid-Controls/ros2_ws/src/sim/ethrc_sim/environments/hangar
+
+envs:
+  CMD: "nvidia-smi"
+
+setup: |
+  set -euo pipefail
+  nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
+  cd "$HOME/sky_workdir"
+  sudo docker build -q -t humanoid-sim:local -f docker/Dockerfile . | tail -1
+  sudo docker build -q -t humanoid-sim:kit -f docker/Dockerfile.kit --build-arg BASE_IMAGE=humanoid-sim:local . | tail -1
+  sudo docker image ls humanoid-sim
+
+run: |
+  set -euo pipefail
+  cd "$HOME/sky_workdir"
+  # Kit compiles its RTX shaders on the first start (about 8 minutes on an L40S); these keep them between runs.
+  mkdir -p outputs/rtx "$HOME/cache/kit" "$HOME/cache/warp" "$HOME/cache/nvidia" "$HOME/cache/nv"
+  sudo docker run --rm --gpus all --network host --ipc host \
+    -e NVIDIA_DRIVER_CAPABILITIES=all -e PYTHONPATH=/workspace/humanoid-sim/src \
+    -v "$PWD":/workspace/humanoid-sim -v /data/hangar:/data/hangar:ro \
+    -v "$HOME/cache/kit":/opt/isaaclab-venv/lib/python3.12/site-packages/isaacsim/kit/cache -v "$HOME/cache/warp":/cache/warp \
+    -v "$HOME/cache/nvidia":/root/.cache/nvidia -v "$HOME/cache/nv":/root/.nv -v /dev/shm:/dev/shm \
+    -w /workspace/humanoid-sim --entrypoint "" humanoid-sim:kit bash -c "$CMD"

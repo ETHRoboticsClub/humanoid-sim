@@ -174,6 +174,16 @@ python examples/scene_stand.py --scene $H/hangar_proxy.npz --spawn -4.42 3.48 --
   --rrd outputs/hangar_v1_scan.rrd
 ```
 
+### The splat, for cameras
+
+Controls' hangar also has a Gaussian splat of the room, `hangar_splat.ply` (4.5 million Gaussians, a standard 3D Gaussian Splatting PLY). `humanoid-sim splat-usd` writes it as an OpenUSD `ParticleField3DGaussianSplat`, which Isaac Sim's RTX cameras render ([rtx-sensors.md](rtx-sensors.md)) and Newton's Warp renderer reads too. It is placed like the boxes and the scan: moved by `-spawn`, without rotation or scale. The code is in `src/humanoid_sim/world/splat.py`; its docstring gives the PLY's conventions and how each is converted.
+
+```bash
+humanoid-sim splat-usd $H/hangar_splat.ply outputs/rtx/hangar_splat.usdc --spawn -4.42 3.48 --half
+```
+
+`--half` stores the colour coefficients at half precision (the hangar's file is then 632 MB, written in about 10 s); `--sh-degree` drops the higher spherical-harmonic degrees, which shade by viewing direction. Physics never sees the splat. `tests/test_splat.py` writes a PLY from known Gaussians and reads the USD back through the schema and through Newton.
+
 ### What the boxes cost
 
 Measured on one L40S with the hangar's 470 boxes and every robot at the spawn point, holding the home pose at the baseline gains:
@@ -321,7 +331,7 @@ A `RESET` command clears all active disturbances. Faults (`INJECT_FAULT`: encode
 
 ## What is not modeled
 
-- A room collides as boxes only. Its scan is drawn as a textured mesh but never collided, the Gaussian splat of the hangar is not drawn, and there are no other static shapes (cylinders, meshes).
+- A room collides as boxes only. Its scan is drawn as a textured mesh but never collided, the Gaussian splat of the hangar is drawn only by the RTX cameras ([rtx-sensors.md](rtx-sensors.md)), and there are no other static shapes (cylinders, meshes).
 - Static boxes stand on the flat ground; they cannot be combined with a heightfield terrain, and every environment of a scene with boxes starts at the spawn point.
 - There is no triangle-mesh terrain (stairs with vertical risers, mesh obstacles), for the collision reason above.
 - Replays and the runtime have no terrain; they always use the flat ground at the profile's friction.

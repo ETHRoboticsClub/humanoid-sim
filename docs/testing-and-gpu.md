@@ -45,6 +45,7 @@ The markers are declared in `pyproject.toml`.
 |---|---|---|
 | `physics` | Steps physics through Isaac Lab and a Newton solver (MJWarp; the standing and joint-stop tests also run on Kamino) | The image, or a GPU node set up by `sky/setup.sh` |
 | `data` | Reads the `exc-*` captures | Anywhere the captures are; one of the three is also `physics` |
+| `rtx` | Renders cameras and lidars through Isaac Sim's RTX ([rtx-sensors.md](rtx-sensors.md)) | The Isaac Sim image on an RTX GPU (`sky/rtx.sky.yaml`), in a process of its own |
 
 The `data` tests look for captures in the directory named by `HUMANOID_SIM_DATASETS`. When it is unset they use `datasets/humanoid-v1` next to the checkout (`../datasets/humanoid-v1` from the repository root). Without captures the `data` tests skip.
 
@@ -178,6 +179,7 @@ The node's copy of the checkout is updated by `sky launch` and `sky exec`. Local
 | `sky/bench.sky.yaml` | L40S | `hsim-bench` | Builds both assets. Runs the physics benchmark at 1, 4096, 8192 and 16384 envs with self-collision and at 4096 and 16384 without, the training benchmark at 1, 4096 and 16384 envs, all at 500 steps, and one replay. | `outputs/bench/` |
 | `sky/replay.sky.yaml` | L40S | `hsim-bench` | Builds both assets. Replays three captures at 4 ms with `implicitfast`, 4 ms with `euler` and 1 ms with `implicitfast`, one process per capture in parallel. | `outputs/replay-mjwarp/` |
 | `sky/sysid.sky.yaml` | L40S | `hsim-bench` | Builds the `--base-joints` asset. Runs `fit-passive` with 512 envs and 20 generations on the low-band capture and scores the fit on the two high-band ones, then fits on a high-band capture and scores on the low-band one. | `outputs/sysid/fit-on-low/`, `outputs/sysid/fit-on-high/` |
+| `sky/rtx.sky.yaml` | L40S, A10G or L4 | `hsim-rtx` | Builds the kitless image and the Isaac Sim image on top of it, with Controls' hangar mounted at `/data/hangar`. Runs `$CMD` in the Isaac Sim image. See [rtx-sensors.md](rtx-sensors.md#running-it). | `outputs/rtx/` |
 | `sky/e2e.sky.yaml` | A10G or L4, whichever has capacity | `hsim-e2e` | Builds the V1's two assets and both G1s'. Runs the whole test suite with the captures, the runtime benchmark for 2000 steps and the training benchmark at 4096 envs for the V1 and the G1, replays every capture, and runs the examples. See [The end-to-end check](#the-end-to-end-check-skye2eskyyaml). | `outputs/e2e/` (cleared at the start of each run) |
 
 Each task's `envs` block holds its settings, for example `STEPS`, `ENV_COUNTS` and `REPLAY` in the bench task, `RUNS` in the replay task, and `NUM_ENVS`, `GENERATIONS`, `DURATION` and `BOUND` in the sysid task. Override one at launch with `--env`, for example `--env STEPS=1000`. The bench task's `SPIKE=1` also runs the closed-chain ankle spike in `spikes/closed_chain/`.

@@ -1,0 +1,45 @@
+# humanoid-sim with Isaac Sim (Kit) for RTX sensors: cameras and lidar rendered by RTX while Newton/MJWarp runs the
+# physics. Built on the kitless image (docker/Dockerfile), which training and every other workload keep using. Isaac
+# Sim comes from Isaac Lab's own `isaacsim` extra, resolved from Isaac Lab's frozen uv.lock at the pinned commit, so
+# it lands in the same environment without re-resolving it. linux/amd64 hosts with an RTX-capable NVIDIA GPU (RT
+# cores: L40S, L4, A10G; not A100/H100) and driver 580.65.06 or newer.
+#   docker build -t humanoid-sim:local -f docker/Dockerfile .
+#   docker build -t humanoid-sim:kit -f docker/Dockerfile.kit --build-arg BASE_IMAGE=humanoid-sim:local .
+ARG BASE_IMAGE=humanoid-sim:local
+FROM ${BASE_IMAGE}
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# NVIDIA's Isaac Sim / Omniverse EULA: the team accepted it on 2026-10-20 for this image. Kit reads
+# these to start without its interactive prompt (Isaac Lab docs/source/setup/installation/index.rst, docker/.env.base).
+ENV OMNI_KIT_ACCEPT_EULA=YES ACCEPT_EULA=Y
+
+# Libraries Kit's windowing and RTX loaders open even headless.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libglu1-mesa libxcursor1 libxi6 libxinerama1 libxkbcommon0 libxrandr2 libxss1 libxtst6 libnss3 \
+      libasound2t64 libdbus-1-3 libfontconfig1 libfreetype6 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/isaaclab
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --inexact --extra importers --extra rerun --extra viser --extra isaacsim \
+    && python -c "import isaacsim, isaaclab_physx; print('isaacsim', isaacsim.__file__)"
+
+# Cyclone DDS for the emulated Unitree lidar (src/humanoid_sim/sensors/unitree_lidar.py): its Python binding has no
+# wheel for Python 3.12, so the C library is built here at the binding's version and the binding against it.
+ARG CYCLONEDDS_VERSION=0.10.5
+RUN git clone -q --depth 1 --branch "${CYCLONEDDS_VERSION}" https://github.com/eclipse-cyclonedds/cyclonedds.git \
+      /tmp/cyclonedds \
+    && cmake -S /tmp/cyclonedds -B /tmp/cyclonedds/build -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/opt/cyclonedds -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF -DENABLE_SSL=OFF \
+      -DBUILD_IDLC=ON > /dev/null \
+    && cmake --build /tmp/cyclonedds/build --target install -j"$(nproc)" > /dev/null \
+    && rm -rf /tmp/cyclonedds \
+    && echo /opt/cyclonedds/lib > /etc/ld.so.conf.d/cyclonedds.conf && ldconfig
+ENV CYCLONEDDS_HOME=/opt/cyclonedds
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -q --python "${VIRTUAL_ENV}/bin/python" "cyclonedds==${CYCLONEDDS_VERSION}" \
+    && python -c "import cyclonedds.domain, cyclonedds.idl; print('cyclonedds', cyclonedds.domain.__file__)"
+# Kit keeps its compiled RTX shaders in isaacsim/kit/cache in the venv (it does not read OMNI_KIT_CACHE_DIR), and the
+# driver keeps its own in /root/.nv: sky/rtx.sky.yaml mounts host directories on both to keep them between runs.
+WORKDIR /workspace
+LABEL org.ethrc.isaacsim.version=6.2.0.0

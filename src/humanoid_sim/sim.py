@@ -47,7 +47,8 @@ class SimCore:
                  solver: str | None = None, integrator: str | None = None, rerun: bool = False, rerun_rrd: str | None = None,
                  self_collision: bool | None = None, base_joints: bool = False, imu: bool = False,
                  contacts: bool = False, seed: int = 0, cuda_graph: bool = False, compile: bool = False,
-                 imu_history: int | None = None, scene: StaticBoxes | None = None):
+                 imu_history: int | None = None, scene: StaticBoxes | None = None,
+                 entities: dict | None = None, render_each_step: bool = True):
         check_asset_robot(usd_path, robot)
         self.desc = Description.load(robot)
         self.profile = load_profile(robot)
@@ -68,7 +69,9 @@ class SimCore:
             integrator=self.integrator, fixed_base=fixed_base, base_height_m=base_height_m,
             self_collision=phys["self_collision"] if self_collision is None else self_collision,
             base_joints=base_joints, ground_friction=self.profile["model"]["ground_friction"],
-            imu=imu, contacts=contacts, rerun=rerun, rerun_rrd=rerun_rrd, scene=scene), props=props)
+            imu=imu, contacts=contacts, rerun=rerun, rerun_rrd=rerun_rrd, scene=scene, entities=entities,
+            render_each_step=render_each_step),
+            props=props)
         self.scene = scene
         order = [self.backend.joint_names.index(n) for n in joints]
         self._to_plant = torch.tensor(order, device=self.plant.cfg.device)

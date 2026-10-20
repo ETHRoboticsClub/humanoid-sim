@@ -47,6 +47,39 @@ models:
     streams: [rgb, mono_left, mono_right, depth]
     stereo_baseline_m: 0.075
 
+  realsense-d435i:
+    kind: camera
+    product: Intel RealSense D435i
+    # Streams as Controls' realsense adapter opens them (ethrc_cameras/realsense_backend.py: colour, the infrared
+    # pair, and depth registered to the left infrared imager, which is the camera frame's origin). Intel RealSense
+    # D400 Series datasheet: 50 mm stereo baseline; depth from 0.28 m (min-Z at 1280 x 720) to about 10 m (how far
+    # depends on the scene). The colour imager's place is modeled: about 15 mm from the left imager towards the right
+    # one, as D435 units' factory extrinsics report it; a unit's calibration replaces it.
+    source: Intel RealSense D400 Series datasheet; Controls ethrc_cameras realsense backend; colour offset modeled
+    streams: [rgb, mono_left, mono_right, depth]
+    stereo_baseline_m: 0.050
+    stream_kinds: {rgb: color, mono_left: mono, mono_right: mono, depth: depth}
+    stream_offsets_m:
+      rgb: [0.0, -0.015, 0.0]
+      mono_left: [0.0, 0.0, 0.0]
+      mono_right: [0.0, -0.050, 0.0]
+      depth: [0.0, 0.0, 0.0]
+    depth_range_m: [0.28, 10.0]
+
+  zed-mini:
+    kind: camera
+    product: Stereolabs ZED Mini
+    # Streams as Controls' zed backend opens them (ethrc_cameras/zed_backend.py: each eye grey, the luma of the
+    # side-by-side YUYV frame); the left eye is the camera frame's origin. Stereolabs ZED Mini datasheet: 63 mm
+    # baseline, the right eye nominally one baseline to the right; a unit's factory calibration replaces it.
+    source: Stereolabs ZED Mini datasheet; Controls ethrc_cameras zed backend
+    streams: [left, right]
+    stereo_baseline_m: 0.063
+    stream_kinds: {left: mono, right: mono}
+    stream_offsets_m:
+      left: [0.0, 0.0, 0.0]
+      right: [0.0, -0.063, 0.0]
+
   livox-mid360:
     kind: lidar
     product: Livox Mid-360

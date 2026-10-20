@@ -13,9 +13,13 @@ Each sensor is an instance of a named model. `profiles/sensors.yaml` is the cata
 | `mti-610` | `imu` | Xsens (Movella) MTi-610 | V1 |
 | `unitree-g1-imu` | `imu` | Unitree G1 body IMU (figures unmeasured: an ideal sensor) | G1 |
 | `oak-d-w` | `camera` | Luxonis OAK-D-W | V1 |
+| `realsense-d435i` | `camera` | Intel RealSense D435i | (no rig yet) |
+| `zed-mini` | `camera` | Stereolabs ZED Mini | (no rig yet) |
 | `livox-mid360` | `lidar` | Livox Mid-360 | G1 |
 
-What a rig entry sets depends on the kind. An `imu` takes its configured `sample_period_ns` and its delivery to the host (`burst_period_ns`, `in_burst_spacing_ns`). A `camera` takes its resolution, `frame_period_ns` and the unit's pinhole calibration per stream. A `lidar` takes nothing beyond its frame. A key that belongs to the model, such as a noise density, is rejected in a rig entry.
+A camera model lists its streams as Controls' backend for the product publishes them, and may give each stream's kind (`stream_kinds`: `color`, `mono` or `depth`), its optical centre in the camera frame (`stream_offsets_m`, nominal) and the depth range (`depth_range_m`).
+
+What a rig entry sets depends on the kind. An `imu` takes its configured `sample_period_ns` and its delivery to the host (`burst_period_ns`, `in_burst_spacing_ns`). A `camera` takes its resolution, `frame_period_ns` and the unit's calibration per stream: its pinhole `intrinsics` `[fx, fy, cx, cy]` (OpenCV's convention), and where the unit's calibration gives them its lens `distortion` (`{model: plumb_bob | equidistant, coefficients: [...]}`) and its optical centre (`stream_offsets_m`, in place of the model's nominal one). A `lidar` takes nothing beyond its frame. A key that belongs to the model, such as a noise density, is rejected in a rig entry.
 
 ```yaml
 # profiles/ethrc_v1.yaml
@@ -35,7 +39,7 @@ sensors:
     intrinsics: {rgb: [283.09, 282.81, 325.97, 198.38], mono_left: [283.60, 283.56, 321.74, 196.77]}
 ```
 
-The plant simulates the instance named `imu`, which must sit at the child of the URDF's `imu_joint` (the mount the physics uses). Cameras and lidars are declared, with their specs and mounts, and not simulated yet; `SensorRig.unsimulated()` names them. `ImuDeliveryCfg.for_robot(desc, profile)` loads the rig, checks every frame against the description and returns the IMU's configuration:
+The plant simulates the instance named `imu`, which must sit at the child of the URDF's `imu_joint` (the mount the physics uses). Cameras and lidars are simulated only by the RTX sensors in the Isaac Sim image ([rtx-sensors.md](rtx-sensors.md)): every lidar, and a camera whose model places and names the kind of every stream and whose rig entry calibrates every stream (`Sensor.rtx_ready`). `SensorRig.unsimulated()` names what the plant does not simulate, `SensorRig.unsimulated(rtx=True)` what nothing does. `ImuDeliveryCfg.for_robot(desc, profile)` loads the rig, checks every frame against the description and returns the IMU's configuration:
 
 ```python
 from humanoid_sim.model.asset import load_profile
@@ -46,6 +50,7 @@ rig = SensorRig.load(load_profile("g1_29dof_with_hand_rev_1_0"))
 rig.check_frames(Description.load("g1_29dof_with_hand_rev_1_0"))
 rig.imu.model.name        # 'unitree-g1-imu'
 rig.unsimulated()         # ['mid360']
+rig.unsimulated(rtx=True) # []: the RTX sensors simulate the Mid-360
 ```
 
 Frames and units are as in [drives.md](drives.md#frames): drive quantities in rad, rad/s and Nm at the drive output (crank angle for the ankle cranks), joint quantities in URDF joint coordinates, all times in integer nanoseconds on the plant clock.
