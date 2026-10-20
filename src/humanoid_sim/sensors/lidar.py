@@ -90,7 +90,7 @@ def lidar_attributes(model, *, noise: bool) -> dict:
 
 
 class RtxLidar:
-    """The rig lidar ``sensor`` (a :class:`~humanoid_sim.sensors.models.Sensor`) mounted at ``mount`` under the body
+    """The rig lidar ``sensor`` (a :class:`~humanoid_sim.sensors.models.Lidar`) mounted at ``mount`` under the body
     prim ``body_prim``; :meth:`read` after every render."""
 
     def __init__(self, sensor, mount: Mount, body_prim: str, *, noise: bool = True):
@@ -100,14 +100,13 @@ class RtxLidar:
         import isaacsim.sensors.experimental.rtx as rtx
 
         self.sensor = sensor
-        self.model = sensor.model
         self.path = f"{body_prim}/{sensor.name}"
         self._rtx = rtx
-        az, el, fire_ns = pattern_states(self.model)
+        az, el, fire_ns = pattern_states(sensor)
         self.pattern = {"azimuth_deg": -az, "elevation_deg": el, "fire_ns": fire_ns}
         self.fire_ns = fire_ns
-        self.period_ns = self.model.frame_period_ns
-        attributes = lidar_attributes(self.model, noise=noise)
+        self.period_ns = sensor.frame_period_ns
+        attributes = lidar_attributes(sensor, noise=noise)
         self.lidar = rtx.Lidar(self.path, attributes=attributes, accumulate_outputs=None, aux_output_level="BASIC")
         x, y, z, w = mount.rotation_xyzw
         self.lidar.set_local_poses(translations=np.array([mount.translation_m]), orientations=np.array([[w, x, y, z]]))

@@ -19,18 +19,3 @@ physics:
   # Self-collision off, as Isaac Lab's own G1 articulations have it (isaaclab_assets robots/unitree.py,
   # G1_29DOF_CFG: enabled_self_collisions=False). The URDF's convex hulls of neighbouring links overlap at rest.
   self_collision: false
-
-# The G1's sensors: the body IMU at imu_joint, the Livox Mid-360 at mid360_joint (Unitree's service publishes its
-# sweeps; Controls reads them). The torso IMU, the Mid-360's own IMU and the head D435 are not in the rig: Controls
-# reads none of them (on the lab unit, 2026-10-20, the camera service finds no camera).
-sensors:
-  imu:
-    model: unitree-g1-imu
-    frame: imu_link
-    # A sample every 2 ms, delivered as it is taken: LowState at 500 Hz (modeled; the delivery is unmeasured).
-    sample_period_ns: 2000000
-    burst_period_ns: [2000000, 2000000]
-    in_burst_spacing_ns: 0
-  mid360:
-    model: livox-mid360
-    frame: mid360_link

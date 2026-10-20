@@ -2,10 +2,10 @@
 physics, renders when a sensor is due and hands the result to its outputs (the camera feed rings, Unitree's lidar
 topic, a Rerun recording, PNG frames). Kit must already be up (``rtx.start_kit``).
 
-The sensors are the robot's rig (its profile's ``sensors``, ``sensors/models.py``), with the instances of an extra
-``sensors`` block added when given (``SessionCfg.sensors``: a YAML file with the same layout, for sensors the profile
-does not declare). Every camera and lidar the RTX sensors can simulate (``Sensor.rtx_ready``) is simulated; the
-others are listed in ``SensorSession.unsimulated``.
+The sensors are the robot's rig (``sensors/rigs.py``), with an extra rig's added when one is named
+(``SessionCfg.sensors``: one of ``rigs.EXTRAS``, for sensors the robot's rig does not declare). Every camera and
+lidar the RTX sensors can simulate (``Sensor.rtx_ready``) is simulated; the others are listed in
+``SensorSession.unsimulated``.
 
 Timing: the physics steps every period (4 ms) and the stage renders every camera period (33 ms at 30 Hz; the lidar's
 sweep period without cameras) at the plant time, which Kit's timeline follows. Each render gives every camera stream
@@ -33,7 +33,7 @@ from humanoid_sim.sensors.rtx import DOME_INTENSITY
 @dataclass
 class SessionCfg:
     robot: str = "g1_29dof_with_hand_rev_1_0"
-    sensors: str | None = None  # a YAML file with a ``sensors`` block of instances to add to the robot's rig
+    sensors: str | None = None  # an extra rig (rigs.EXTRAS) whose sensors join the robot's
     scene: str | None = None  # static boxes (.npz)
     spawn_m: tuple[float, float] = (0.0, 0.0)
     splat: str | None = None  # the room's splat as USD
@@ -59,8 +59,8 @@ class SensorSession:
         from humanoid_sim.model.asset import asset_dir, load_profile
         from humanoid_sim.model.description import Description
         from humanoid_sim.model.poses import STANDING_CLEARANCE_M, initial_pose
-        from humanoid_sim.sensors import rtx
-        from humanoid_sim.sensors.geometry import Mount, camera_spec, load_rig
+        from humanoid_sim.sensors import rigs, rtx
+        from humanoid_sim.sensors.geometry import Mount, camera_spec
         from humanoid_sim.sim import SimCore
         from humanoid_sim.world.boxes import StaticBoxes
 
@@ -68,7 +68,7 @@ class SensorSession:
         desc = Description.load(cfg.robot)
         out = asset_dir(desc, load_profile(cfg.robot), Path(cfg.assets))
         self.usd = out / json.loads((out / "asset.json").read_text())["usd"]
-        self.rig = load_rig(cfg.robot, desc, cfg.sensors)
+        self.rig = rigs.load(cfg.robot, desc, cfg.sensors)
         ready = [s for s in self.rig.sensors.values() if s.kind in RTX_KINDS and s.rtx_ready]
         cameras = [s for s in ready if s.kind == "camera"] if cfg.cameras else []
         lidars = [s for s in ready if s.kind == "lidar"] if cfg.lidar else []
@@ -131,7 +131,7 @@ class SensorSession:
             from humanoid_sim.sensors.unitree_lidar import UNITREE_MODEL, UnitreeLidarPublisher
 
             # Unitree's service publishes its robot's Mid-360: the rig lidar of that model.
-            if any(lidar.model.name == UNITREE_MODEL for lidar in self.lidars):
+            if any(lidar.sensor.model == UNITREE_MODEL for lidar in self.lidars):
                 self.publisher = UnitreeLidarPublisher(cfg.lidar_domain)
         self.recorder = None
         if cfg.rrd:
@@ -226,7 +226,7 @@ class SensorSession:
         self._last_sweep[lidar.sensor.name] = (lidar, sweep)
         if self.sweeps is not None:
             self.sweeps.append(sweep)
-        if self.publisher and lidar.model.name == UNITREE_MODEL:
+        if self.publisher and lidar.sensor.model == UNITREE_MODEL:
             t = time.perf_counter()
             stamp_ns = int(ros_time_s(sweep.start_ns, self.sim.t_ns) * 1e9)
             self.publisher.publish(pack_sweep(sweep.points_m, sweep.hit, sweep.time_s, stamp_ns))

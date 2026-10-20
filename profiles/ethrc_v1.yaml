@@ -61,25 +61,4 @@ devices:
     HEJ70-48-50: {counts_per_revolution: 16384}
     HEJ50-48-30: {counts_per_revolution: 16384}
 
-# The V1's sensors, as on the robot (2026-10-20): the MTi-610 on CAN at imu_joint, the OAK-D-W at camera0. No lidar.
-sensors:
-  imu:
-    model: mti-610
-    frame: imu_link
-    # Configured at 400 Hz (Controls imu_bringup.launch.py); delivery as /rt/imu shows it on the exc-* captures:
-    # ~365 samples/s, received in bursts every 13.9-17.6 ms (p1-p99), stamped 13 us apart.
-    sample_period_ns: 2740000
-    burst_period_ns: [13900000, 17600000]
-    in_burst_spacing_ns: 13000
-  camera0:
-    model: oak-d-w
-    frame: camera0_camera
-    # As Controls' camera service opens it, with the unit's calibration (camera_info on the V1, 2026-10-20).
-    width: 640
-    height: 400
-    frame_period_ns: 33333333
-    intrinsics:
-      rgb: [283.087462, 282.805448, 325.969479, 198.375709]
-      mono_left: [283.604271, 283.556541, 321.744194, 196.769579]
-
 solver_gains: baseline        # constant per-episode PD = humanoid-urdf baseline_position_gains (ankles via J at standing)

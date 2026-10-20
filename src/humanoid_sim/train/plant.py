@@ -34,7 +34,8 @@ from humanoid_sim.devices.feedback import DriveFeedback
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.randomization import PARAMS, ParamSpec, Randomizer, parse_specs
-from humanoid_sim.sensors.imu import ImuDelivery, ImuDeliveryCfg, ImuSamples
+from humanoid_sim.sensors import rigs
+from humanoid_sim.sensors.imu import ImuDelivery, ImuSamples
 from humanoid_sim.timing.clock import NS_PER_S
 
 
@@ -107,7 +108,7 @@ class RobotPlant:
                                                        seed=cfg.seed + 2)
         self.imu = None
         if imu is not None:
-            self.imu = ImuDelivery(ImuDeliveryCfg.for_robot(self.desc, self.profile), e,
+            self.imu = ImuDelivery(rigs.imu(self.desc).delivery_cfg(), e,
                                    device=self.device, seed=cfg.seed + 1)
             self.imu.reset(torch.arange(e, device=self.device), 0)
 

@@ -1,11 +1,11 @@
 """A robot with its rig's RTX sensors in a scene: on the G1 the Mid-360 of its rig, and with ``--sensors
-examples/g1_cameras.yaml`` the ZED Mini and D435i cameras that file adds, rendered by Isaac Sim while Newton runs the
+g1-cameras`` the ZED Mini and D435i cameras that extra rig adds (``sensors/rigs.py``), rendered by Isaac Sim while Newton runs the
 physics, published as Controls reads them and recorded to Rerun. Runs in the Isaac Sim image (docker/Dockerfile.kit)
 on an RTX GPU.
 
     H=/data/hangar   # Controls' ros2_ws/src/sim/ethrc_sim/environments/hangar
     humanoid-sim splat-usd $H/hangar_splat.ply outputs/rtx/hangar_splat.usdc --spawn -4.42 3.48 --half
-    python examples/rtx_sensors.py --sensors examples/g1_cameras.yaml --scene $H/hangar_proxy.npz --spawn -4.42 3.48 \\
+    python examples/rtx_sensors.py --sensors g1-cameras --scene $H/hangar_proxy.npz --spawn -4.42 3.48 \\
         --splat outputs/rtx/hangar_splat.usdc --scan-mesh $H/hangar_visual.obj \\
         --seconds 10 --feeds /dev/shm/ethrc-camera-feed --lidar-domain 0 \\
         --rrd outputs/rtx/g1_hangar_sensors.rrd --images outputs/rtx/frames
@@ -31,7 +31,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--robot", default=ROBOT)
     p.add_argument("--sensors", default=None,
-                   help="a YAML file with a `sensors` block of instances to add to the robot's rig")
+                   help="an extra rig whose sensors join the robot's (humanoid_sim.sensors.rigs.EXTRAS, e.g. g1-cameras)")
     p.add_argument("--scene", default=None, help="static boxes (.npz, world/boxes.py)")
     p.add_argument("--spawn", nargs=2, type=float, default=(0.0, 0.0), metavar=("X", "Y"))
     p.add_argument("--splat", default=None, help="the room's Gaussian splat as USD (humanoid-sim splat-usd)")

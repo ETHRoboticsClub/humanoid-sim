@@ -1,8 +1,7 @@
-"""Where a rig's cameras and lidars sit and what they see, built from the sensor catalog and the robot's rig
-(``sensors/models.py``): the RTX sensors (``sensors/rtx.py``, ``sensors/lidar.py``) render them and the feeds
+"""Where a rig's cameras and lidars sit and what they see, built from the rig's sensor models
+(``sensors/models.py``, ``sensors/rigs.py``): the RTX sensors (``sensors/rtx.py``, ``sensors/lidar.py``) render them and the feeds
 (``sensors/feeds.py``) publish them in the layouts Controls reads. Nothing about a product or a unit is written here.
 
-* :func:`load_rig`: a robot's rig, with instances from another ``sensors`` block added.
 * :class:`Mount`: a sensor's frame (its rig ``frame``, a URDF link) composed through fixed joints onto the body the
   physics keeps (the asset build merges fixed links into their parent body: ``d435_link`` rides on ``torso_link``).
 * :func:`camera_spec`: a rig camera's streams, each with its kind and encoding as Controls' backend publishes it, its
@@ -179,22 +178,6 @@ class Stream:
         return T
 
 
-def load_rig(robot: str, desc, extra: str | Path | None = None):
-    """The robot's rig (:class:`~humanoid_sim.sensors.models.SensorRig`) with the instances of the ``sensors`` block
-    in the YAML file ``extra`` added (sensors its profile does not declare), every frame checked against the
-    description ``desc``."""
-    import yaml
-
-    from humanoid_sim.model.asset import load_profile
-    from humanoid_sim.sensors.models import SensorRig
-
-    rig = SensorRig.load(load_profile(robot))
-    if extra:
-        rig = rig.merged(yaml.safe_load(Path(extra).read_text())["sensors"])
-    rig.check_frames(desc)
-    return rig
-
-
 @dataclass(frozen=True)
 class CameraSpec:
     """A rig camera as its feed publishes it."""
@@ -212,33 +195,33 @@ class CameraSpec:
 ENCODINGS = {"color": "bgr8", "mono": "mono8", "depth": "16UC1"}  # Controls' FRAME_ENCODINGS, by stream kind
 
 
-def camera_spec(sensor) -> CameraSpec:
-    """The camera spec of a rig camera (:class:`~humanoid_sim.sensors.models.Sensor`) the RTX sensors can simulate
-    (``Sensor.rtx_ready``)."""
-    if not sensor.rtx_ready:
-        raise ValueError(f"camera {sensor.name!r} ({sensor.model.name}): not every stream has a kind, a place and "
-                         "intrinsics")
-    m, c = sensor.model, sensor.config
-    offsets = {**(m.stream_offsets_m or {}), **(c.stream_offsets_m or {})}
-    stereo = m.stereo_baseline_m is not None
+def camera_spec(camera) -> CameraSpec:
+    """The camera spec of a rig camera (:class:`~humanoid_sim.sensors.models.Camera`) the RTX sensors can simulate
+    (``Camera.rtx_ready``)."""
+    c = camera
+    if not c.name:
+        raise ValueError(f"{c!r} is in no rig: its feed takes the rig's name")
+    if not c.rtx_ready:
+        raise ValueError(f"camera {c.name!r} ({c.model}): not every stream has a kind, a place and intrinsics")
+    stereo = c.stereo_baseline_m is not None
     streams = []
-    for name in m.streams:
-        kind = m.stream_kinds[name]
+    for name in c.streams:
+        kind = c.stream_kinds[name]
         fx, fy, cx, cy = c.intrinsics[name]
-        d = (c.distortion or {}).get(name)
-        lens = Lens(c.width, c.height, fx, fy, cx, cy, d["model"] if d else "none",
-                    tuple(d["coefficients"]) if d else ())
-        streams.append(Stream(name, kind, ENCODINGS[kind], 1e9 / c.frame_period_ns, lens, tuple(offsets[name]),
+        model, coefficients = c.distortion.get(name, ("none", ()))
+        lens = Lens(c.width, c.height, fx, fy, cx, cy, model, tuple(coefficients))
+        streams.append(Stream(name, kind, ENCODINGS[kind], 1e9 / c.frame_period_ns, lens,
+                              tuple(c.stream_offsets_m[name]),
                               sync_group="stereo" if stereo and kind == "mono" else "",
                               depth_source="stereo" if stereo and kind == "depth" else "",
-                              range_m=tuple(m.depth_range_m) if kind == "depth" else (0.0, math.inf)))
-    return CameraSpec(f"sim-{sensor.name}", m.product, sensor.frame, tuple(streams),
-                      f"{sensor.name}-{m.name}-{c.width}x{c.height}")
+                              range_m=tuple(c.depth_range_m) if kind == "depth" else (0.0, math.inf)))
+    return CameraSpec(f"sim-{c.name}", c.product, c.frame, tuple(streams),
+                      f"{c.name}-{c.model}-{c.width}x{c.height}")
 
 
 def scan_pattern(model, sweep: int) -> tuple[np.ndarray, np.ndarray]:
     """Unit ray directions ``[N, 3]`` in the sensor frame and each ray's firing time ``[N]`` (s after the sweep's
-    start, evenly over the sweep) for sweep number ``sweep`` of a lidar model (``LidarModel``): its points per sweep
+    start, evenly over the sweep) for sweep number ``sweep`` of a lidar (:class:`~humanoid_sim.sensors.models.Lidar`): its points per sweep
     over its band of elevation and its horizontal field. The Mid-360 scans a non-repetitive rosette; this
     approximates it by a 2-D Halton sequence (bases 2 and 3) mapped uniformly over the band's solid angle and continued
     from sweep to sweep, so no direction repeats and coverage fills in over time as the Mid-360's does."""

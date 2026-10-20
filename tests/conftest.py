@@ -55,7 +55,9 @@ def urdf_mass_kg(robot: str) -> float:
 
 def imu_samples_per_s(robot: str) -> float:
     """Mean IMU delivery rate of the robot's profile: one sample every ``sample_period_ns``."""
-    return 1e9 / load_profile(robot)["sensors"]["imu"]["sample_period_ns"]
+    from humanoid_sim.sensors import rigs
+
+    return 1e9 / rigs.rig(robot).imu.sample_period_ns
 
 
 def gravity_torque(usd, joints, q, base_height_m):
