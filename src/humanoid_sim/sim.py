@@ -77,9 +77,10 @@ class SimCore:
         self._state_written = True  # joint state changed outside a step: the plant's post-step state is stale
         self.imu = None
         if imu:
-            from humanoid_sim.sensors.imu import ImuDelivery, ImuDeliveryCfg
+            from humanoid_sim.sensors import rigs
+            from humanoid_sim.sensors.imu import ImuDelivery
 
-            cfg = ImuDeliveryCfg.for_robot(self.desc, self.profile)
+            cfg = rigs.imu(self.desc).delivery_cfg()
             if imu_history is not None:
                 cfg = dataclasses.replace(cfg, history=imu_history)
             self.imu = ImuDelivery(cfg, num_envs, device=device, seed=seed)

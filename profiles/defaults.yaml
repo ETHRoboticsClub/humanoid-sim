@@ -53,8 +53,4 @@ physics:
     # 100 contacts for a fallen robot, from MJWarp's constraint rows), not counted on Kamino.
     max_contacts_per_world: 128
 
-# The robot's sensors (src/humanoid_sim/sensors/models.py): per instance, a model from profiles/sensors.yaml, the URDF
-# link it sits at and what the robot sets around it. The plant simulates the instance named `imu`. None by default.
-sensors: {}
-
 solver_gains: baseline        # constant per-episode PD = the description's baseline gains

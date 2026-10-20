@@ -6,46 +6,37 @@ Drive feedback and IMU samples are measured signals, the ones the real robot has
 
 ## Sensor models and the rig
 
-Each sensor is an instance of a named model. `profiles/sensors.yaml` is the catalog: one entry per product, with its kind and the behaviour the product has wherever it is mounted, each figure with its source. A robot's profile lists its rig under `sensors`: per instance, the model, the URDF link it sits at, and what the robot sets around it. Naming a model gives its whole behaviour; no product figure is written in a robot's profile. `SensorRig` and the typed models are in `src/humanoid_sim/sensors/models.py`.
+`src/humanoid_sim/sensors/models.py` has one class per sensor product. A kind's base class (`Imu`, `Camera`, `Lidar`) declares what a product of that kind is described by, with defaults that make an ideal sensor; a product subclasses it and sets its own figures as class attributes, each with its `source`. An instance is that product mounted on a robot: the URDF link it sits at and what the robot sets around it. Instantiating a product gives its whole behaviour.
 
-| Model | Kind | Product | On |
+| Class | Base | Product | On |
 |---|---|---|---|
-| `mti-610` | `imu` | Xsens (Movella) MTi-610 | V1 |
-| `unitree-g1-imu` | `imu` | Unitree G1 body IMU (figures unmeasured: an ideal sensor) | G1 |
-| `oak-d-w` | `camera` | Luxonis OAK-D-W | V1 |
-| `livox-mid360` | `lidar` | Livox Mid-360 | G1 |
+| `Mti610` | `Imu` | Xsens (Movella) MTi-610 | V1 |
+| `UnitreeG1Imu` | `Imu` | Unitree G1 body IMU (figures unmeasured: an ideal sensor) | G1 |
+| `OakDW` | `Camera` | Luxonis OAK-D-W | V1 |
+| `LivoxMid360` | `Lidar` | Livox Mid-360 | G1 |
 
-What a rig entry sets depends on the kind. An `imu` takes its configured `sample_period_ns` and its delivery to the host (`burst_period_ns`, `in_burst_spacing_ns`). A `camera` takes its resolution, `frame_period_ns` and the unit's pinhole calibration per stream. A `lidar` takes nothing beyond its frame. A key that belongs to the model, such as a noise density, is rejected in a rig entry.
+What an instance takes depends on the kind. An `Imu` takes its configured `sample_period_ns` and its delivery to the host (`burst_period_ns`, `in_burst_spacing_ns`; by default every sample as it is taken). A `Camera` takes its resolution, `frame_period_ns` and the unit's pinhole calibration per stream. A `Lidar` takes only its frame.
 
-```yaml
-# profiles/ethrc_v1.yaml
-sensors:
-  imu:
-    model: mti-610
-    frame: imu_link
-    sample_period_ns: 2740000
-    burst_period_ns: [13900000, 17600000]
-    in_burst_spacing_ns: 13000
-  camera0:
-    model: oak-d-w
-    frame: camera0_camera
-    width: 640
-    height: 400
-    frame_period_ns: 33333333
-    intrinsics: {rgb: [283.09, 282.81, 325.97, 198.38], mono_left: [283.60, 283.56, 321.74, 196.77]}
-```
-
-The plant simulates the instance named `imu`, which must sit at the child of the URDF's `imu_joint` (the mount the physics uses). Cameras and lidars are declared, with their specs and mounts, and not simulated yet; `SensorRig.unsimulated()` names them. `ImuDeliveryCfg.for_robot(desc, profile)` loads the rig, checks every frame against the description and returns the IMU's configuration:
+Each robot's rig is in `src/humanoid_sim/sensors/rigs.py`: a `Rig` of named instances, as on the robot.
 
 ```python
-from humanoid_sim.model.asset import load_profile
-from humanoid_sim.model.description import Description
-from humanoid_sim.sensors.models import SensorRig
+def ethrc_v1() -> Rig:
+    return Rig(
+        imu=Mti610("imu_link", sample_period_ns=2_740_000, burst_period_ns=(13_900_000, 17_600_000),
+                   in_burst_spacing_ns=13_000),
+        camera0=OakDW("camera0_camera", width=640, height=400, frame_period_ns=33_333_333, intrinsics={...}),
+    )
+```
 
-rig = SensorRig.load(load_profile("g1_29dof_with_hand_rev_1_0"))
-rig.check_frames(Description.load("g1_29dof_with_hand_rev_1_0"))
-rig.imu.model.name        # 'unitree-g1-imu'
-rig.unsimulated()         # ['mid360']
+The plant simulates the instance named `imu`, which must sit at the child of the URDF's `imu_joint` (the mount the physics uses); a robot without a rig has no IMU. Cameras and lidars are declared, with their specs and mounts, and not simulated yet; `Rig.unsimulated()` names them. `rigs.imu(desc)` checks the robot's rig against its description and returns its IMU; `delivery_cfg()` gives what `ImuDelivery` runs:
+
+```python
+from humanoid_sim.model.description import Description
+from humanoid_sim.sensors import rigs
+
+imu = rigs.imu(Description.load("ethrc_v1"))  # Mti610(frame='imu_link')
+cfg = imu.delivery_cfg()                      # ImuDeliveryCfg(sample_period_ns=2740000, ...)
+rigs.rig("g1_29dof_with_hand_rev_1_0").unsimulated()  # ['mid360']
 ```
 
 Frames and units are as in [drives.md](drives.md#frames): drive quantities in rad, rad/s and Nm at the drive output (crank angle for the ankle cranks), joint quantities in URDF joint coordinates, all times in integer nanoseconds on the plant clock.

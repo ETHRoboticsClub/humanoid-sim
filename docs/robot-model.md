@@ -198,7 +198,7 @@ outputs/assets/ethrc_v1/<key>/
   asset.json             provenance and build record
 ```
 
-`build_asset` returns the existing USD without rebuilding when `asset.json` is present and `--force` is not given. A change to `actuators.yaml`, to `URDF_6.urdf`, to the selected URDF variant or to anything in the profile's `model` block produces a new key, so the old asset stays on disk and commands ask for a build. Changes to the `physics`, `devices` and `sensors` blocks are applied at spawn or run time and need no rebuild. Mesh file contents are not part of the key, nor are build steps that leave the prepared URDF text unchanged (the converter settings, the authoring of contact excludes); after changing either, rebuild with `--force`.
+`build_asset` returns the existing USD without rebuilding when `asset.json` is present and `--force` is not given. A change to `actuators.yaml`, to `URDF_6.urdf`, to the selected URDF variant or to anything in the profile's `model` block produces a new key, so the old asset stays on disk and commands ask for a build. Changes to the `physics` and `devices` blocks are applied at spawn or run time and need no rebuild. Mesh file contents are not part of the key, nor are build steps that leave the prepared URDF text unchanged (the converter settings, the authoring of contact excludes); after changing either, rebuild with `--force`.
 
 | `asset.json` field | Content |
 |---|---|
@@ -371,7 +371,6 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `physics.kamino.integrator` | `solver_cfg` | `euler`, the only one allowed: `moreau` needs Kamino's own collision detector, which is not used here. |
 | `physics.kamino.iterations` | `solver_cfg` | Iteration limit of Kamino's P-ADMM dynamics solver. |
 | `physics.kamino.max_contacts_per_world` | `solver_cfg` | Contact buffer per world (128, an estimate); Newton drops contacts beyond it. |
-| `sensors.<name>` | `SensorRig`, `ImuDeliveryCfg.for_robot` | The robot's sensors (none by default: a robot needs a rig with an `imu` to simulate one): per instance a model from `profiles/sensors.yaml`, the URDF link it sits at and what the robot sets around it (an IMU's sample period and delivery, a camera's resolution and calibration). The plant simulates the instance named `imu`. See [sensors.md](sensors.md#sensor-models-and-the-rig). |
 | `solver_gains` | nothing | Records that the solver PD is the description's baseline gains. |
 
 Only the `model` block is part of the asset key. The `physics` block is described in more detail in [world.md](world.md) and [testing-and-gpu.md](testing-and-gpu.md).
@@ -383,9 +382,8 @@ The repository rule is that robot facts live in humanoid-urdf. A few currently l
 | Entry | Fact | Source |
 |---|---|---|
 | `devices.encoders` | Output encoder counts per revolution per drive family (4096 for HEJ 90, 16384 for HEJ 70 and HEJ 50) | Controls `ethercat_device_configurator` device configurations, `Hardware.position_encoder_resolution` |
-| `sensors` | Which sensor sits at which link (the V1: MTi-610 and OAK-D-W; the G1: its body IMU and a Mid-360) | the robots' running stacks, 2026-10-20 |
-| `sensors.imu.sample_period_ns`, `burst_period_ns`, `in_burst_spacing_ns` | How IMU samples reach the host | V1: measured on the `exc-*` captures; G1: modeled (LowState at 500 Hz) |
-| `sensors.camera0.intrinsics` | The V1 OAK-D-W's calibration | its `camera_info` on the V1 |
+
+Each robot's sensors, with how its IMU samples reach the host and its camera calibration, are in `src/humanoid_sim/sensors/rigs.py`, each figure with its source (see [sensors.md](sensors.md#sensor-models-and-the-rig)).
 
 The rest of `model` (the URDF variant, sole box parameters, contact excludes, ground friction) mirrors how Controls builds its MuJoCo model; those are modeling choices.
 
