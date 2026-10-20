@@ -79,3 +79,21 @@ def gravity_torque(usd, joints, q, base_height_m):
         dq[j] = h
         tau[j] = -(energy(q + dq) - energy(q - dq)) / (2 * h)
     return tau
+
+
+@pytest.fixture(scope="session")
+def controls_cameras():
+    """Controls' ``ethrc_cameras`` package (ROS-free modules only) from the checkout ``HUMANOID_SIM_CONTROLS`` names,
+    as the oracle for what humanoid-sim's sensor feeds write; skips when the variable is unset."""
+    import importlib
+    import os
+    import sys
+
+    root = os.environ.get("HUMANOID_SIM_CONTROLS")
+    if not root:
+        pytest.skip("HUMANOID_SIM_CONTROLS (a Controls checkout) not set")
+    package = Path(root) / "ros2_ws" / "src" / "drivers" / "ethrc_cameras"
+    if not (package / "ethrc_cameras" / "sim_feed.py").is_file():
+        pytest.skip(f"no ethrc_cameras in {root}")
+    sys.path.insert(0, str(package))
+    return importlib.import_module("ethrc_cameras")

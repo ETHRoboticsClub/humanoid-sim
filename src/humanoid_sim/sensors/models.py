@@ -6,8 +6,10 @@ its rig under ``sensors``: per instance, the model it is, the URDF link it sits 
 it (an IMU's configured sample period and how its samples reach the host; a camera's resolution, rate and
 calibration). Naming a model gives its whole behaviour; nothing about a product is spelled in a robot's profile.
 
-The plant simulates the rig's ``imu`` (:mod:`humanoid_sim.sensors.imu`). Cameras and lidars are declared with
-their specs and not simulated yet; :meth:`SensorRig.unsimulated` names them.
+The plant simulates the rig's ``imu`` (:mod:`humanoid_sim.sensors.imu`). Cameras and lidars are simulated only by
+the RTX sensors in the Isaac Sim image (:mod:`humanoid_sim.sensors.rtx`): a lidar always, a camera when its model
+places every stream and its rig entry calibrates every stream. :meth:`SensorRig.unsimulated` names the rest, for the
+plant alone or with the RTX sensors.
 """
 
 from __future__ import annotations
@@ -19,6 +21,9 @@ import yaml
 
 CATALOG_SCHEMA = "humanoid-sim-sensors/v1"
 SIMULATED_KINDS = ("imu",)
+RTX_KINDS = ("camera", "lidar")  # what the RTX sensors (Isaac Sim image) simulate
+DISTORTION_MODELS = {"plumb_bob": 5, "equidistant": 4}
+STREAM_KINDS = ("color", "mono", "depth")  # coefficients: OpenCV's k1 k2 p1 p2 k3, fisheye k1..k4
 
 
 @dataclass(frozen=True)
@@ -41,11 +46,28 @@ class ImuModel:
 
 @dataclass(frozen=True)
 class CameraModel:
+    """A camera product. Its frame is its reference imager's optical centre (x forward, y left, z up, as Controls'
+    camera calibration has it); ``stream_offsets_m`` places every stream's optical centre in it, nominally (a unit's
+    calibration in the rig replaces them). ``stream_kinds`` gives each stream as Controls' backend publishes it:
+    ``color``, ``mono`` (grey) or ``depth`` (metres along the optical axis, within ``depth_range_m``)."""
+
     name: str
     product: str
     source: str
     streams: tuple[str, ...]
     stereo_baseline_m: float | None = None
+    stream_kinds: dict[str, str] | None = None
+    stream_offsets_m: dict[str, tuple[float, float, float]] | None = None
+    depth_range_m: tuple[float, float] | None = None
+
+    def __post_init__(self):
+        where = f"camera model {self.name!r}"
+        _check_offsets(self.stream_offsets_m or {}, self.streams, where)
+        kinds = self.stream_kinds or {}
+        if set(kinds) - set(self.streams) or not set(kinds.values()) <= set(STREAM_KINDS):
+            raise ValueError(f"{where}: stream_kinds {kinds}: expected streams it has, each one of {STREAM_KINDS}")
+        if self.depth_range_m is not None and not 0 <= self.depth_range_m[0] < self.depth_range_m[1]:
+            raise ValueError(f"camera model {self.name!r}: depth_range_m {self.depth_range_m}: expected [min, max]")
 
 
 @dataclass(frozen=True)
@@ -89,12 +111,16 @@ class ImuConfig:
 @dataclass(frozen=True)
 class CameraConfig:
     """How the robot runs its camera: every stream at one resolution and rate; per stream the unit's pinhole
-    calibration ``(fx, fy, cx, cy)`` in pixels."""
+    calibration ``(fx, fy, cx, cy)`` in pixels (OpenCV's: pixel (u, v) centred at u, v), its lens distortion
+    (``{model: plumb_bob | equidistant, coefficients: [...]}``, none when absent) and, where the unit's calibration
+    gives it, its optical centre in the camera frame (``stream_offsets_m``, replacing the model's nominal one)."""
 
     width: int
     height: int
     frame_period_ns: int
     intrinsics: dict[str, tuple[float, float, float, float]]
+    distortion: dict[str, dict] | None = None
+    stream_offsets_m: dict[str, tuple[float, float, float]] | None = None
 
     def __post_init__(self):
         _check(self, positive_ns=("frame_period_ns",))
@@ -103,11 +129,25 @@ class CameraConfig:
         for stream, k in self.intrinsics.items():
             if len(k) != 4:
                 raise ValueError(f"intrinsics {stream!r}: expected [fx, fy, cx, cy]")
+        for stream, d in (self.distortion or {}).items():
+            n = DISTORTION_MODELS.get(d.get("model") if isinstance(d, dict) else None)
+            if n is None or set(d) != {"model", "coefficients"} or len(d["coefficients"]) != n:
+                raise ValueError(f"distortion {stream!r}: expected {{model: one of {sorted(DISTORTION_MODELS)}, "
+                                 f"coefficients: [...]}} with the model's number of coefficients")
+        _check_offsets(self.stream_offsets_m or {}, None, "camera stream_offsets_m")
 
 
 @dataclass(frozen=True)
 class LidarConfig:
     pass
+
+
+def _check_offsets(offsets: dict, streams, where: str) -> None:
+    for stream, xyz in offsets.items():
+        if streams is not None and stream not in streams:
+            raise ValueError(f"{where}: offset for a stream it does not have: {stream!r}")
+        if len(xyz) != 3:
+            raise ValueError(f"{where}: offset {stream!r}: expected [x, y, z] m")
 
 
 def _is_ns(v) -> bool:
@@ -139,6 +179,20 @@ class Sensor:
     @property
     def simulated(self) -> bool:
         return self.kind in SIMULATED_KINDS
+
+    @property
+    def rtx_ready(self) -> bool:
+        """Whether the RTX sensors can simulate it: a lidar always; a camera whose every stream has a kind, an optical
+        centre and intrinsics, and a depth range when one is depth."""
+        if self.kind == "lidar":
+            return True
+        if self.kind != "camera":
+            return False
+        m, streams = self.model, set(self.model.streams)
+        placed = {*(m.stream_offsets_m or {}), *(self.config.stream_offsets_m or {})}
+        kinds = m.stream_kinds or {}
+        return (streams <= set(self.config.intrinsics) and streams <= placed and streams <= set(kinds)
+                and ("depth" not in kinds.values() or m.depth_range_m is not None))
 
 
 def _built(cls, block: dict, where: str, **given):
@@ -206,9 +260,11 @@ class SensorRig:
             model = catalog[model_name]
             kind = next(k for k, c in MODELS.items() if isinstance(model, c))
             config = _built(CONFIGS[kind], block, where)
-            if kind == "camera" and set(config.intrinsics) - set(model.streams):
-                raise ValueError(f"{where}: intrinsics for streams a {model.name} does not have: "
-                                 f"{sorted(set(config.intrinsics) - set(model.streams))}")
+            if kind == "camera":
+                given = set(config.intrinsics) | set(config.distortion or {}) | set(config.stream_offsets_m or {})
+                if given - set(model.streams):
+                    raise ValueError(f"{where}: calibration for streams a {model.name} does not have: "
+                                     f"{sorted(given - set(model.streams))}")
             sensors[name] = Sensor(name, kind, model, frame, config)
         return cls(sensors)
 
@@ -220,8 +276,18 @@ class SensorRig:
             raise ValueError(f"the rig has no IMU named 'imu'; it has {sorted(self.sensors)}")
         return sensor
 
-    def unsimulated(self) -> list[str]:
-        return [n for n, s in self.sensors.items() if not s.simulated]
+    def unsimulated(self, rtx: bool = False) -> list[str]:
+        """The instances nothing simulates: by the plant alone, or with ``rtx`` the RTX sensors as well."""
+        return [n for n, s in self.sensors.items()
+                if not (s.simulated or (rtx and s.kind in RTX_KINDS and s.rtx_ready))]
+
+    def merged(self, profile_sensors: dict, catalog: dict | None = None) -> SensorRig:
+        """This rig with the instances of another ``sensors`` block added (the block's names must be new)."""
+        extra = SensorRig.load({"robot": "extra", "sensors": profile_sensors}, catalog)
+        clash = sorted(set(extra.sensors) & set(self.sensors))
+        if clash:
+            raise ValueError(f"sensors {clash} are already in the rig")
+        return SensorRig({**self.sensors, **extra.sensors})
 
     def check_frames(self, desc) -> None:
         """Every sensor sits at a link of the description, and the IMU at the one the physics mounts it on (the
@@ -234,5 +300,5 @@ class SensorRig:
             raise ValueError(f"the IMU sits at {self.imu.frame!r}, but imu_joint mounts {desc.imu_link()!r}")
 
 
-__all__ = ["CameraConfig", "CameraModel", "ImuConfig", "ImuModel", "LidarConfig", "LidarModel", "Sensor",
+__all__ = ["CameraConfig", "CameraModel", "ImuConfig", "ImuModel", "LidarConfig", "LidarModel", "RTX_KINDS", "Sensor",
            "SensorRig", "load_catalog"]
