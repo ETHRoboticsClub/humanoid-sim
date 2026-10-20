@@ -1,21 +1,20 @@
-"""Where the G1's cameras and lidar sit and what they see (``sensors/geometry.py``), built from the sensor catalog and
+"""Where the G1's cameras and lidar sit and what they see (``sensors/geometry.py``), built from the sensor models and
 the rig: mounts against the numbers humanoid-urdf's ``PROVENANCE.md`` records for the lab unit, each lens against
 projections worked out by hand for points at known angles, and the lidar's pattern against its model's figures."""
 
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from humanoid_sim.model.description import Description
-from humanoid_sim.sensors import geometry
-from humanoid_sim.sensors.models import load_catalog
+from humanoid_sim.sensors import geometry, rigs
+from humanoid_sim.sensors.models import LivoxMid360, OakDW
 
 G1 = "g1_29dof_with_hand_rev_1_0"
-CAMERAS = Path(__file__).resolve().parents[1] / "examples" / "g1_cameras.yaml"
+CAMERAS = "g1-cameras"  # sensors/rigs.py EXTRAS
 
 
 @pytest.fixture(scope="module")
@@ -25,7 +24,7 @@ def desc():
 
 @pytest.fixture(scope="module")
 def rig(desc):
-    return geometry.load_rig(G1, desc, CAMERAS)
+    return rigs.load(G1, desc, CAMERAS)
 
 
 def test_the_mounts_are_the_lab_units(desc, rig):
@@ -119,12 +118,8 @@ def test_a_point_ahead_of_each_camera_lands_on_its_principal_point(desc, rig):
 
 
 def test_a_camera_without_every_stream_placed_is_refused(rig):
-    oak = load_catalog()["oak-d-w"]  # the V1's: its catalog entry places no stream
-    assert oak.stream_offsets_m is None
-    from humanoid_sim.model.asset import load_profile
-    from humanoid_sim.sensors.models import SensorRig
-
-    v1 = SensorRig.load(load_profile("ethrc_v1"))
+    assert OakDW.nominal_offsets_m == {} and OakDW.stream_kinds == {}  # the V1's: its model places no stream
+    v1 = rigs.rig("ethrc_v1")
     assert not v1.sensors["camera0"].rtx_ready and v1.unsimulated(rtx=True) == ["camera0"]
     with pytest.raises(ValueError, match="not every stream"):
         geometry.camera_spec(v1.sensors["camera0"])
@@ -133,7 +128,7 @@ def test_a_camera_without_every_stream_placed_is_refused(rig):
 
 
 def test_the_scan_pattern_covers_its_field_and_never_repeats():
-    model = load_catalog()["livox-mid360"]
+    model = LivoxMid360
     d0, t0 = geometry.scan_pattern(model, 0)
     d1, _ = geometry.scan_pattern(model, 1)
     # 200,000 points a second in 100 ms frames.

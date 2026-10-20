@@ -217,7 +217,9 @@ def test_cuda_graph_step_matches_eager(robot):
     compiled, _ = run(True, compile=True)
     # Fused kernels reorder float operations; the difference feeds back through the physics.
     assert torch.allclose(eager, compiled, rtol=1e-3, atol=1e-3)
-    noisy = load_profile(robot)["sensors"]["imu"]["gyro_noise_density_rad_s_sqrt_hz"] > 0
+    from humanoid_sim.sensors import rigs
+
+    noisy = rigs.rig(robot).imu.gyro_noise_density_rad_s_sqrt_hz > 0
     for compile in (False, True):
         _, (seq, gyro) = run(True, imu=True, compile=compile)
         assert (seq[:8].diff() == -1).all()  # samples delivered, newest first

@@ -1,5 +1,5 @@
 """The G1's RTX sensors against geometry worked out independently: a room of boxes with targets, the robot welded at
-the origin, its rig's Mid-360 and the cameras ``examples/g1_cameras.yaml`` adds. Each camera's image of a target is
+the origin, its rig's Mid-360 and the cameras the ``g1-cameras`` extra rig adds. Each camera's image of a target is
 the set of pixels whose rays, cast through the mount (the numbers humanoid-urdf's ``PROVENANCE.md`` records) and the
 lens (the ZED Mini's factory calibration, the D435i's datasheet fields of view), meet it; the D435i's depth is the
 analytic distance to the room; every lidar return lies at the range where its ray meets the room, fired at its
@@ -31,7 +31,7 @@ from rtx_oracles import box_coverage, box_mask, mask_centroid, ray_box_distance,
 pytestmark = pytest.mark.rtx
 
 G1 = "g1_29dof_with_hand_rev_1_0"
-CAMERAS = Path(__file__).resolve().parents[1] / "examples" / "g1_cameras.yaml"
+CAMERAS = "g1-cameras"  # sensors/rigs.py EXTRAS
 SETTLE_S = 1.0  # the welded robot's arms and waist settle on their hold within this; images and sweeps after it
 
 # Mounts in torso_link, humanoid-urdf PROVENANCE.md: position (m) and URDF rpy (rad).
@@ -223,9 +223,9 @@ def test_every_lidar_return_lies_where_its_ray_meets_the_room(run):
 
 
 def test_lidar_rays_follow_the_pattern_and_its_timing(run):
-    from humanoid_sim.sensors.models import load_catalog
+    from humanoid_sim.sensors.models import LivoxMid360
 
-    model = load_catalog()["livox-mid360"]
+    model = LivoxMid360
     sweeps = run["sweeps"]
     assert len(sweeps) >= 2
     period = model.frame_period_ns / 1e9

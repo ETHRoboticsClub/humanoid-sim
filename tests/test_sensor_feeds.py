@@ -5,18 +5,17 @@ open with the headers the descriptor implies, and every published frame comes ba
 from __future__ import annotations
 
 import importlib
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from humanoid_sim.model.description import Description
-from humanoid_sim.sensors import feeds
-from humanoid_sim.sensors.geometry import camera_spec, load_rig
+from humanoid_sim.sensors import feeds, rigs
+from humanoid_sim.sensors.geometry import camera_spec
 
 G1 = "g1_29dof_with_hand_rev_1_0"
-CAMERAS = Path(__file__).resolve().parents[1] / "examples" / "g1_cameras.yaml"
-SPECS = [camera_spec(s) for s in load_rig(G1, Description.load(G1), CAMERAS).sensors.values()
+CAMERAS = "g1-cameras"  # sensors/rigs.py EXTRAS
+SPECS = [camera_spec(s) for s in rigs.load(G1, Description.load(G1), CAMERAS).sensors.values()
          if s.kind == "camera"]
 
 

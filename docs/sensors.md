@@ -6,51 +6,42 @@ Drive feedback and IMU samples are measured signals, the ones the real robot has
 
 ## Sensor models and the rig
 
-Each sensor is an instance of a named model. `profiles/sensors.yaml` is the catalog: one entry per product, with its kind and the behaviour the product has wherever it is mounted, each figure with its source. A robot's profile lists its rig under `sensors`: per instance, the model, the URDF link it sits at, and what the robot sets around it. Naming a model gives its whole behaviour; no product figure is written in a robot's profile. `SensorRig` and the typed models are in `src/humanoid_sim/sensors/models.py`.
+`src/humanoid_sim/sensors/models.py` has one class per sensor product. A kind's base class (`Imu`, `Camera`, `Lidar`) declares what a product of that kind is described by, with defaults that make an ideal sensor; a product subclasses it and sets its own figures as class attributes, each with its `source`. An instance is that product mounted on a robot: the URDF link it sits at and what the robot sets around it. Instantiating a product gives its whole behaviour.
 
-| Model | Kind | Product | On |
+| Class | Kind | Product | On |
 |---|---|---|---|
-| `mti-610` | `imu` | Xsens (Movella) MTi-610 | V1 |
-| `unitree-g1-imu` | `imu` | Unitree G1 body IMU (figures unmeasured: an ideal sensor) | G1 |
-| `oak-d-w` | `camera` | Luxonis OAK-D-W | V1 |
-| `realsense-d435i` | `camera` | Intel RealSense D435i | (no rig yet) |
-| `zed-mini` | `camera` | Stereolabs ZED Mini | (no rig yet) |
-| `livox-mid360` | `lidar` | Livox Mid-360 | G1 |
+| `Mti610` | `imu` | Xsens (Movella) MTi-610 | V1 |
+| `UnitreeG1Imu` | `imu` | Unitree G1 body IMU (figures unmeasured: an ideal sensor) | G1 |
+| `OakDW` | `camera` | Luxonis OAK-D-W | V1 |
+| `RealSenseD435i` | `camera` | Intel RealSense D435i | the `g1-cameras` extra rig |
+| `ZedMini` | `camera` | Stereolabs ZED Mini | the `g1-cameras` extra rig |
+| `LivoxMid360` | `lidar` | Livox Mid-360 | G1 |
 
-A camera model lists its streams as Controls' backend for the product publishes them, and may give each stream's kind (`stream_kinds`: `color`, `mono` or `depth`), its optical centre in the camera frame (`stream_offsets_m`, nominal) and the depth range (`depth_range_m`).
+A camera class lists its streams as Controls' backend for the product publishes them, and may give each stream's kind (`stream_kinds`: `color`, `mono` or `depth`), its nominal optical centre in the camera frame (`nominal_offsets_m`) and the depth range (`depth_range_m`).
 
-What a rig entry sets depends on the kind. An `imu` takes its configured `sample_period_ns` and its delivery to the host (`burst_period_ns`, `in_burst_spacing_ns`). A `camera` takes its resolution, `frame_period_ns` and the unit's calibration per stream: its pinhole `intrinsics` `[fx, fy, cx, cy]` (OpenCV's convention), and where the unit's calibration gives them its lens `distortion` (`{model: plumb_bob | equidistant, coefficients: [...]}`) and its optical centre (`stream_offsets_m`, in place of the model's nominal one). A `lidar` takes nothing beyond its frame. A key that belongs to the model, such as a noise density, is rejected in a rig entry.
+What an instance takes depends on the kind. An `Imu` takes its configured `sample_period_ns` and its delivery to the host (`burst_period_ns`, `in_burst_spacing_ns`; by default every sample as it is taken). A `Camera` takes its resolution, `frame_period_ns` and the unit's calibration per stream: its pinhole `intrinsics` `(fx, fy, cx, cy)` (OpenCV's convention), and where the unit's calibration gives them its lens `distortion` (`(model, coefficients)`, model `plumb_bob` or `equidistant`) and its optical centre (`stream_offsets_m`, in place of the nominal one). A `Lidar` takes only its frame. Figures are checked when a class is defined, an instance's values when it is made.
 
-```yaml
-# profiles/ethrc_v1.yaml
-sensors:
-  imu:
-    model: mti-610
-    frame: imu_link
-    sample_period_ns: 2740000
-    burst_period_ns: [13900000, 17600000]
-    in_burst_spacing_ns: 13000
-  camera0:
-    model: oak-d-w
-    frame: camera0_camera
-    width: 640
-    height: 400
-    frame_period_ns: 33333333
-    intrinsics: {rgb: [283.09, 282.81, 325.97, 198.38], mono_left: [283.60, 283.56, 321.74, 196.77]}
-```
-
-The plant simulates the instance named `imu`, which must sit at the child of the URDF's `imu_joint` (the mount the physics uses). Cameras and lidars are simulated only by the RTX sensors in the Isaac Sim image ([rtx-sensors.md](rtx-sensors.md)): every lidar, and a camera whose model places and names the kind of every stream and whose rig entry calibrates every stream (`Sensor.rtx_ready`). `SensorRig.unsimulated()` names what the plant does not simulate, `SensorRig.unsimulated(rtx=True)` what nothing does. `ImuDeliveryCfg.for_robot(desc, profile)` loads the rig, checks every frame against the description and returns the IMU's configuration:
+A `Rig` names a robot's instances. Each robot's rig is in `src/humanoid_sim/sensors/rigs.py`, as on the robot; `rigs.EXTRAS` holds rigs that add sensors a robot's rig does not declare, by name (`g1-cameras`: the ZED Mini and D435i the lab G1 is reported to carry).
 
 ```python
-from humanoid_sim.model.asset import load_profile
-from humanoid_sim.model.description import Description
-from humanoid_sim.sensors.models import SensorRig
+def ethrc_v1() -> Rig:
+    return Rig(
+        imu=Mti610("imu_link", sample_period_ns=2_500_000),  # 400 Hz over CAN, each sample as it is sent
+        camera0=OakDW("camera0_camera", width=640, height=400, frame_period_ns=33_333_333, intrinsics={...}),
+    )
+```
 
-rig = SensorRig.load(load_profile("g1_29dof_with_hand_rev_1_0"))
-rig.check_frames(Description.load("g1_29dof_with_hand_rev_1_0"))
-rig.imu.model.name        # 'unitree-g1-imu'
-rig.unsimulated()         # ['mid360']
-rig.unsimulated(rtx=True) # []: the RTX sensors simulate the Mid-360
+The plant simulates the instance named `imu`, which must sit at the child of the URDF's `imu_joint` (the mount the physics uses); a robot without a rig has no IMU. Cameras and lidars are simulated only by the RTX sensors in the Isaac Sim image ([rtx-sensors.md](rtx-sensors.md)): every lidar, and a camera whose class places and names the kind of every stream and whose instance calibrates every stream (`Camera.rtx_ready`). `Rig.unsimulated()` names what the plant does not simulate, `Rig.unsimulated(rtx=True)` what nothing does. `rigs.load(robot, desc, extra)` builds a robot's rig with an extra rig added and checks every frame against the description; `rigs.imu(desc)` returns its IMU, whose `delivery_cfg()` is what `ImuDelivery` runs:
+
+```python
+from humanoid_sim.model.description import Description
+from humanoid_sim.sensors import rigs
+
+desc = Description.load("g1_29dof_with_hand_rev_1_0")
+rigs.imu(desc)                                  # UnitreeG1Imu(frame='imu_link')
+rig = rigs.load(desc.robot, desc, "g1-cameras")
+rig.unsimulated()                               # ['mid360', 'zed', 'd435']
+rig.unsimulated(rtx=True)                       # []: the RTX sensors simulate them all
 ```
 
 Frames and units are as in [drives.md](drives.md#frames): drive quantities in rad, rad/s and Nm at the drive output (crank angle for the ankle cranks), joint quantities in URDF joint coordinates, all times in integer nanoseconds on the plant clock.
@@ -137,7 +128,7 @@ The plant advances the IMU at the start of every physics step, to that step's st
 
 ### Sampling and errors
 
-The sensor takes a sample every `sample_period_ns` (on the V1 2.74 ms, about 365 Hz) on its own clock, with a random phase per env drawn at reset. Each sample's value is linearly interpolated between the two step-boundary readings around it.
+The sensor takes a sample every `sample_period_ns` (on the V1 2.5 ms, 400 Hz) on its own clock, with a random phase per env drawn at reset. Each sample's value is linearly interpolated between the two step-boundary readings around it.
 
 Each sample and axis gets Gaussian white noise with `σ = density · √(sample rate)`. The densities are the model's; for the MTi-610 its leaflet's (as Controls' `ethrc_ssot/imu_sensors.py` carries them):
 
@@ -168,13 +159,13 @@ Each selected axis gets its own draw; `"per_target": False` shares one draw acro
 
 ### Delivery
 
-On the V1 the samples wait in a serial buffer and reach the host in [bursts](glossary.md#imu-burst). The plant reproduces the delivery the rig gives, here the V1's as seen in its captures (the G1's rig delivers every sample as it is taken):
+The plant delivers samples as the rig says. Both robots' rigs deliver every sample as it is taken: the V1's MTi-610 sends each one over CAN (measured on the V1: 400 samples/s, 2.47 ms apart at the median, none missed), the G1's LowState carries each one (modeled). A sensor whose host reads it in [bursts](glossary.md#imu-burst) is described by the burst parameters:
 
 - Measured samples wait in a pending buffer of 16 samples (`ImuDeliveryCfg.pending`); if it fills, the oldest pending sample is dropped.
-- A burst arrives every `burst_period_ns`, drawn uniformly from 13.9 to 17.6 ms for each burst, starting from a random phase per env. It delivers every pending sample measured by the burst time.
-- Delivered samples get host-receipt stamps: the oldest sample of a burst is stamped at the burst time and each newer one `in_burst_spacing_ns` = 13 µs later.
+- A burst arrives every `burst_period_ns`, drawn uniformly from its range for each burst, starting from a random phase per env. It delivers every pending sample measured by the burst time.
+- Delivered samples get host-receipt stamps: the oldest sample of a burst is stamped at the burst time and each newer one `in_burst_spacing_ns` later.
 
-A burst carries 5 to 7 samples, and a consumer that reads "the latest sample" sees it up to one burst period late.
+A consumer that reads "the latest sample" then sees it up to one burst period late. The V1's earlier serial path did this (bursts every 13.9 to 17.6 ms, 13 µs apart, on the `exc-*` captures), and replays of those captures still read it.
 
 ### `ImuSamples`
 

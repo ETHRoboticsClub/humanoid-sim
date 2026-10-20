@@ -1,17 +1,17 @@
-"""The RTX lidar's emitter states and prim attributes (``sensors/lidar.py``) against the catalog's Mid-360 and the
+"""The RTX lidar's emitter states and prim attributes (``sensors/lidar.py``) against the Mid-360 model and the
 scan pattern: no Kit needed."""
 
 import numpy as np
 import pytest
 
 from humanoid_sim.sensors import geometry
-from humanoid_sim.sensors.models import load_catalog
+from humanoid_sim.sensors.models import LivoxMid360
 
 
 def test_the_rtx_emitter_states_fire_the_pattern():
     from humanoid_sim.sensors import lidar
 
-    model = load_catalog()["livox-mid360"]
+    model = LivoxMid360
     az, el, fire_ns = lidar.pattern_states(model, sweeps=2)
     # One state per sweep of 20,000 rays, fired evenly through the sweep's 100 ms.
     assert az.shape == el.shape == (2, 20_000) and fire_ns.shape == (20_000,)

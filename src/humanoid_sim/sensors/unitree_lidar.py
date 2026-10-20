@@ -31,7 +31,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-UNITREE_MODEL = "livox-mid360"  # the catalog model of the lidar Unitree's service publishes
+from humanoid_sim.sensors.models import LivoxMid360
+
+UNITREE_MODEL = LivoxMid360.model  # the lidar Unitree's service publishes
 TOPIC = "rt/utlidar/cloud_livox_mid360"
 FRAME_ID = "livox_frame"
 DOMAIN_ID = 0
