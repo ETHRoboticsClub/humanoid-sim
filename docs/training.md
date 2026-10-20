@@ -389,6 +389,7 @@ The full table is `PARAMS` in `src/humanoid_sim/randomization/spec.py`. E is the
 | `joint_armature` | physics | `[E, 22]` | kg m² | model values | Reflected rotor inertia |
 | `joint_friction` | physics | `[E, 22]` | N m | model values | Coulomb friction (MJWarp frictionloss) |
 | `joint_damping` | physics | `[E, 22]` | N m s/rad | model values | Passive viscous damping |
+| `joint_friction_ratio` | device | `[E, 22]` | ratio | description's dynamic / static | Dynamic over static Coulomb friction, in [0, 1] ([drives.md](drives.md#dynamic-friction)) |
 | `friction` | physics | `[E, 1]` | coefficient | robot shape friction | Friction coefficient of every robot shape |
 | `drive_stiffness` | device | `[E, 22]` | ratio | 1 | Realized P gain over the demanded one |
 | `drive_damping` | device | `[E, 22]` | ratio | 1 | Realized D gain over the demanded one |

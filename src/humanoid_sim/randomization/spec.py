@@ -46,6 +46,7 @@ PARAMS: dict[str, Param] = {
     "joint_armature": Param("physics", "joint", unit="kg m²", doc="reflected rotor inertia"),
     "joint_friction": Param("physics", "joint", unit="N m", doc="Coulomb joint friction"),
     "joint_damping": Param("physics", "joint", unit="N m s/rad", doc="passive viscous damping"),
+    "joint_friction_ratio": Param("device", "joint", doc="dynamic over static Coulomb joint friction, in [0, 1]"),
     "friction": Param("physics", "env", doc="friction coefficient of every robot shape"),
     "drive_stiffness": Param("device", "drive", doc="drive's realized P gain over the demanded one"),
     "drive_damping": Param("device", "drive", doc="drive's realized D gain over the demanded one"),

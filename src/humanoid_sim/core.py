@@ -4,7 +4,8 @@ One physics step ``[t0, t0 + period)``:
 
 1. joint state → drive-frame state (1:1 signs, ankle crank transmission);
 2. drive bank: demands in force during the step (arrival-blended) → demanded and applied drive torque;
-3. drive torque → joint torque (``sign``, ankle ``Jᵀ``), plus any external joint torque (:attr:`external_torque`);
+3. drive torque → joint torque (``sign``, ankle ``Jᵀ``), plus any external joint torque (:attr:`external_torque`)
+   and the sliding-friction relief (below);
 4. joint torque → position target for the constant solver PD (target shaping);
 5. after the solver step: drive-frame feedback (position, velocity, applied and demanded torque).
 
@@ -12,6 +13,12 @@ The physics backend owns stepping; this class owns no solver state. Step 1 of a 
 of the previous step converted, so :meth:`PlantCore.feedback` keeps the drive-frame state and
 :meth:`PlantCore.pre_physics` takes it (``state``) instead of running the transmission again. Times may be 0-d
 int64 device tensors (CUDA graphs).
+
+Dynamic friction: the solver's Coulomb friction is the static one (it holds a joint at rest up to that torque). A
+joint whose dynamic friction is lower gets the difference back while it slides, ``relief · tanh(q̇ / v_s)``, so
+the net friction while moving is the dynamic one. :attr:`friction_relief` is ``static − dynamic`` per env and
+joint (the description's by default). A joint whose 1:1 drive is off gets none: its friction is the back-drive
+torque the runtime host writes.
 """
 
 from __future__ import annotations
@@ -28,6 +35,10 @@ from humanoid_sim.devices.shaping import outside_stable_region, shaped_position_
 from humanoid_sim.model.description import Description
 from humanoid_sim.timing.clock import NS_PER_MS, check_period
 from humanoid_sim.transmissions.drive_map import DriveJointMap
+
+# Speed below which the solver's static friction takes over from the relief (tanh scale). Modeled: the drives'
+# breakaway speed is not measured.
+SLIDING_VELOCITY_RAD_S = 0.02
 
 
 @dataclass
@@ -67,6 +78,10 @@ class PlantCore:
         # External torque on each joint [E, J] (a test's disturbance), on top of the drives' and outside their
         # feedback. Written in place.
         self.external_torque = torch.zeros(num_envs, len(joint_names), device=dev, dtype=dt)
+        # Static minus dynamic Coulomb friction [E, J] (Nm), returned to a sliding joint. Written in place.
+        relief = [desc.joints[n].friction - desc.joints[n].dynamic_friction if n in desc.joints else 0.0
+                  for n in joint_names]
+        self.friction_relief = torch.tensor(relief, device=dev, dtype=dt).expand(num_envs, -1).clone()
 
     # -- demands ----------------------------------------------------------------------------------
 
@@ -95,11 +110,17 @@ class PlantCore:
         drive-frame state of ``q, qd`` if already computed (``DriveJointMap.drive_state``)."""
         qdrv, vdrv, self._jacs = state if state is not None else self.map.drive_state(q, qd)
         out = self._keep("last", self.bank.compute(t0_ns, t0_ns + self.cfg.physics_period_ns, qdrv, vdrv))
-        tau = self.map.joint_torque(out.applied, self._jacs) + self.external_torque
+        tau = self.map.joint_torque(out.applied, self._jacs) + self.external_torque + self._relief(qd, out)
         target = q.clone()
         a = self.actuated
         target[:, a] = shaped_position_target(q[:, a], qd[:, a], tau[:, a], self.k0[:, a], self.d0[:, a])
         return target
+
+    def _relief(self, qd: torch.Tensor, out: DriveOutput) -> torch.Tensor:
+        """Sliding-friction relief ``[E, J]`` at joint velocity ``qd``; none on joints whose 1:1 drive is off."""
+        on = torch.ones_like(qd)
+        on[:, self.map._lin_j] = out.enabled_fraction[:, self.map._lin_d].to(qd.dtype)
+        return self.friction_relief * torch.tanh(qd / SLIDING_VELOCITY_RAD_S) * on
 
     def feedback(self, q: torch.Tensor, qd: torch.Tensor) -> DriveFeedback:
         """Drive-frame feedback after the step (state ``q, q̇``; torques of the step just taken). The drive-frame

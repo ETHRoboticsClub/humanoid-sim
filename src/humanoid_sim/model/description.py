@@ -64,9 +64,10 @@ class Joint:
     standing_offset_rad: float
     armature: float  # joint-space value (armature_joint for the ankle hinges)
     damping: float  # passive viscous, Nm s/rad (the joint's, else its motor family's)
-    friction: float  # passive Coulomb, Nm (the joint's, else its motor family's)
+    friction: float  # passive Coulomb, Nm (the joint's, else its motor family's): static, what holds a joint at rest
     effort_peak: float
     velocity: float
+    dynamic_friction: float  # Coulomb friction while sliding, Nm (``dynamic_friction``, else ``friction``)
 
 
 @dataclass(frozen=True)
@@ -144,12 +145,18 @@ class Description:
                     raise ValueError(f"{name}: no {key!r} on the joint or its family")
                 return float(v)
 
+            friction = value("friction")
+            # A family's dynamic friction goes with the family's static one, never with a joint's own.
+            own = "friction" in j
+            dynamic = float(j.get("dynamic_friction", friction if own else family.get("dynamic_friction", friction)))
+            if not 0.0 <= dynamic <= friction:
+                raise ValueError(f"{name}: dynamic_friction {dynamic} outside [0, friction {friction}]")
             out[name] = Joint(
                 name=name, region=j["region"], device=j.get("device", name), sign=int(j["sign"]),
                 standing_offset_rad=float(j["standing_offset_rad"]),
                 armature=float(j["armature_joint"]) if "armature_joint" in j else value("armature"),
-                damping=value("damping"), friction=value("friction"),
-                effort_peak=float(j["effort"]), velocity=float(j["velocity"]),
+                damping=value("damping"), friction=friction,
+                effort_peak=float(j["effort"]), velocity=float(j["velocity"]), dynamic_friction=dynamic,
             )
         return out
 
