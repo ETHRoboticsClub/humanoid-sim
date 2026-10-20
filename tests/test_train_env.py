@@ -9,7 +9,7 @@ from humanoid_sim.model.description import Description
 pytestmark = pytest.mark.physics
 
 
-def _env(robot, num_envs=2):
+def _env(robot, num_envs=2, compute_delay=None):
     pytest.importorskip("isaaclab_newton")
     import isaaclab.envs.mdp as mdp
     from isaaclab.envs import ManagerBasedRLEnv, ManagerBasedRLEnvCfg
@@ -47,7 +47,8 @@ def _env(robot, num_envs=2):
 
     @configclass
     class Actions:
-        drives = PlantActionCfg(class_type=HoldStanding, action_dim=len(Description.load(robot).drives), plant=None)
+        drives = PlantActionCfg(class_type=HoldStanding, action_dim=len(Description.load(robot).drives), plant=None,
+                                compute_delay=compute_delay)
 
     @configclass
     class Observations:
@@ -144,3 +145,31 @@ def test_manager_based_env_steps_the_plant(robot):
         assert (plant.imu.samples.count < imu_samples_per_s(robot) * 0.1).all()
     finally:
         env.close()
+
+
+def test_the_measured_compute_time_delays_each_demand():
+    """With the G1 profile's measured PolicyCore time, each step's demand leaves that long after the tick and
+    arrives one drive latency later."""
+    from humanoid_sim.timing.compute import ComputeDelay
+
+    robot = "g1_29dof_with_hand_rev_1_0"
+    spec = ("policy_core", "housekeeping")
+    env = _env(robot, num_envs=4, compute_delay=spec)
+    try:
+        term = env.action_manager.get_term("drives")
+        plant, queue = term.plant, term.plant.core.bank.queue
+        measured = ComputeDelay.from_profile(plant.profile, *spec)
+        env.reset()
+        drives = len(plant.drives)
+        for _ in range(3):
+            env.step(torch.zeros(4, drives))
+        t = plant.t_ns
+        term.process_actions(torch.zeros(4, drives))  # what env.step does first: the demand for this tick
+        delay = term.last_compute_delay_ns
+        assert ((delay >= measured.ns[0]) & (delay <= measured.ns[-1])).all()
+        slot = (queue.count - 1).view(-1, 1, 1).expand(-1, 1, drives)
+        arrival = queue.arrival.gather(1, slot).squeeze(1)
+        assert torch.equal(arrival, t + delay.unsqueeze(1) + plant.latency_ns)
+    finally:
+        env.close()
+

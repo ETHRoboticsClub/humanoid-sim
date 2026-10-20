@@ -11,6 +11,7 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 | `test_ankle_transmission.py` | The torch ankle transmission (cranks, Jacobian, inverse) against `ankle_kinematics` at Controls' pin and against humanoid-urdf's ankle model | |
 | `test_arrival.py` | The arrival queue: a demand acts from its arrival time, time-weighted inside a step, in order, with overflow counted | |
 | `test_base_motion.py` | Base motion from an IMU trace: Euler angles and rates, burst sample times | |
+| `test_compute_delay.py` | The measured policy compute time: inverting the quantile distribution, draws against it (a DKW bound), quantiles of samples, reading a benchmark report, and the G1 profile's block against the report it came from | 1 test `data` (`HUMANOID_SIM_G1_COMPUTE`) |
 | `test_delay.py` | Demand-delay scan: drive regions, and a replay with each env's demands shifted by its own delay | 1 test `physics` and `data` |
 | `test_devices.py` | The drive bank: the PD law against Controls' plant, envelope clipping, freeze (the held position latched when the freeze demand arrives), a disabled drive, target shaping, arrival | |
 | `test_envelope.py` | Torque-speed envelope interpolation in all four quadrants | |
@@ -28,7 +29,7 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 | `test_solvers.py` | Solver selection from the profile and its overrides, and the errors for unknown or unconfigured solvers | |
 | `test_supports.py` | Gantry programs, and rope tension and cable length on every robot | the rope tests `physics` |
 | `test_sysid.py` | The passive-fit search space and CMA-ES | |
-| `test_train_env.py` | The Train-Time API in a manager-based Isaac Lab environment with two robots, for every robot | `physics` |
+| `test_train_env.py` | The Train-Time API in a manager-based Isaac Lab environment with two robots, for every robot; on the G1 with hands, the profile's measured compute time delaying each demand's arrival | `physics` |
 | `test_world.py` | For every robot: landing on a bumpy heightfield and staying on top, force pushes, and holding the home pose on flat ground, which stands only when the ankles are stiffer than the body's toppling stiffness (the V1 stands, the G1 tips over) | `physics` |
 
 A test skips when something it needs is missing: Isaac Lab (`isaaclab_newton`), Newton, the Rerun SDK, scipy, the built robot asset, the captures, CUDA or a C compiler. The skip reason names it, and pytest prints every reason at the end of the run (`-ra` is set in `pyproject.toml`). A physics run without the built assets therefore passes with most tests skipped; read the skip summary after a physics run.

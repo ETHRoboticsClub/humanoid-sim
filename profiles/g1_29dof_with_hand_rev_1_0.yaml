@@ -1,5 +1,6 @@
 # Plant modeling choices for the Unitree G1 29-DoF rev 1.0 with hands (the G1 Controls launches), merged over
 # profiles/defaults.yaml. Robot facts are NOT here: they come from third_party/humanoid-urdf/g1_29dof_with_hand_rev_1_0.
+# The `platform` block holds what was measured on the lab unit's computer running Controls, with its source.
 schema: humanoid-sim-profile/v1
 robot: g1_29dof_with_hand_rev_1_0
 
@@ -19,3 +20,89 @@ physics:
   # Self-collision off, as Isaac Lab's own G1 articulations have it (isaaclab_assets robots/unitree.py,
   # G1_29DOF_CFG: enabled_self_collisions=False). The URDF's convex hulls of neighbouring links overlap at rest.
   self_collision: false
+
+# The robot computer's policy compute time: from a control tick to the moment the policy's demand leaves for the
+# drives, measured per call on the lab unit by Controls' policy-compute benchmark (paced at the policy period,
+# SCHED_FIFO on the isolated control CPU, with the stack down; loads: idle, housekeeping CPUs busy, and those plus
+# the GPU busy). The raw report is kept with the datasets (datasets/g1-lab-1/compute-2026-10-20, the files'
+# sha256 below). Written by `humanoid-sim compute-profile`; regenerate it rather than editing the numbers.
+# Training draws a demand's sent time from one workload and load (PlantActionCfg.compute_delay, training.md).
+platform:
+  compute:
+    source:
+      tool: Controls scripts/robot/policy_compute_bench.py @ 9e23bd72 (feat/g1-compute-bench)
+      unit: lab G1 g1-lab-1, Orin NX
+      controls: 44353e2b
+      report:
+        schema: ethrc-policy-compute-bench/v1
+        started: '2026-10-20T08:25:23+00:00'
+        finished: '2026-10-20T08:42:35+00:00'
+        files:
+          policy-compute.json: 26af05c32414f25bc34c3ef673cf388fef2461d53d3d500e3162a0c8d83ab395
+          policy-compute.npz: b5f62395a368ca23a9098ea7eba1c38158a671aedc945976bfc4690f018f1238
+      machine:
+        gpu: orin-sm87
+        kernel: 5.15.148-tegra
+        description: g1_29dof_with_hand_rev_1_0_description
+        versions:
+          python: 3.10.12
+          numpy: 2.2.6
+          torch: 2.14.0+cpu
+          onnxruntime: 1.24.0
+          tensorrt: 10.3.0
+      placement:
+        control_cpu: 5
+        isolated: [5, 6, 7]
+        housekeeping: [0, 1, 2, 3, 4]
+        fifo_priority: 20
+      series: 'response_ns of the paced runs: from the control tick to the step''s answer'
+    policy_period_ns: 20000000
+    quantiles: [0.0, 0.001, 0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99, 0.999, 1.0]
+    workloads:
+      policy_core:
+        bench: isaac-step g1_walk_bundle [cpu]
+        doc: 'Controls'' isaac-manager PolicyCore step (observation, network, targets) of a 12-joint G1 walking bundle: 235
+          inputs, MLP 512-256-128, torch on the CPU, one thread'
+        loads:
+          housekeeping:
+            run: paced control-cpu housekeeping
+            samples: 1000
+            ns: [1373425, 1379743, 1392963, 1409962, 1435406, 1449536, 1472970, 1538758, 1611532, 1756168, 1794263]
+          idle:
+            run: paced control-cpu idle
+            samples: 1000
+            ns: [1244369, 1247555, 1251799, 1256945, 1266072, 1274244, 1285529, 1319242, 1402389, 1602131, 1798638]
+      sonic_lowlatency_tensorrt:
+        bench: sonic-step gear-sonic-lowlatency [tensorrt]
+        doc: a GEAR-SONIC runtime step (its step networks) of gear-sonic-lowlatency on TensorRT; the planner runs apart, every
+          100 ms
+        loads:
+          housekeeping:
+            run: paced control-cpu housekeeping
+            samples: 1000
+            ns: [3858721, 4018920, 4032675, 4048602, 4063675, 4074514, 4088600, 4116712, 4142343, 4301218, 4484271]
+          housekeeping+gpu:
+            run: paced control-cpu housekeeping+gpu
+            samples: 1000
+            ns: [3967709, 3976658, 4089960, 4134615, 4235262, 4460772, 6173253, 7765786, 8268704, 8408158, 8447845]
+          idle:
+            run: paced control-cpu idle
+            samples: 1000
+            ns: [3778653, 3779991, 3792400, 3806824, 3821494, 3829010, 3837542, 3857426, 3874657, 3955264, 4008335]
+      sonic_v1_1_tensorrt:
+        bench: sonic-step gear-sonic-v1.1 [tensorrt]
+        doc: a GEAR-SONIC runtime step (its step networks) of gear-sonic-v1.1 on TensorRT; the planner runs apart, every 100
+          ms
+        loads:
+          housekeeping:
+            run: paced control-cpu housekeeping
+            samples: 1000
+            ns: [4026548, 4138025, 4183466, 4210005, 4227134, 4238414, 4251219, 4279054, 4303098, 4344307, 4575663]
+          housekeeping+gpu:
+            run: paced control-cpu housekeeping+gpu
+            samples: 1000
+            ns: [4138649, 4164540, 4254810, 4285236, 4398608, 4608486, 6319518, 7776774, 8413664, 8512529, 8567010]
+          idle:
+            run: paced control-cpu idle
+            samples: 1000
+            ns: [3907152, 3916015, 3926177, 3941262, 3956860, 3964488, 3973092, 3991887, 4006122, 4057658, 4136143]

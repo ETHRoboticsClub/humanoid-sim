@@ -18,6 +18,9 @@
     humanoid-sim serve --segment PATH [--support suspended|free]
                                                    one robot in real time behind the runtime segment, for
                                                    Controls' plant host
+    humanoid-sim compute-profile <report-dir> --workload NAME BENCH DOC ... --unit U --controls C --tool T
+                                                   a profile's platform.compute block from Controls' policy-compute
+                                                   benchmark report (measured policy compute times)
 """
 
 from __future__ import annotations
@@ -249,6 +252,25 @@ def cmd_fit_delay(args) -> int:
     return 0
 
 
+def cmd_compute_profile(args) -> int:
+    import yaml
+
+    from humanoid_sim.timing.compute import profile_block
+
+    workloads = {name: {"bench": bench, "doc": doc} for name, bench, doc in args.workload}
+    block = profile_block(Path(args.report), workloads, unit=args.unit, controls=args.controls, tool=args.tool)
+    class Dumper(yaml.SafeDumper):  # lists of numbers on one line, as the profiles write them
+        pass
+
+    def scalars(dumper, data):
+        flow = all(not isinstance(v, (list, dict)) for v in data)
+        return dumper.represent_sequence("tag:yaml.org,2002:seq", data, flow_style=flow)
+
+    Dumper.add_representer(list, scalars)
+    yaml.dump({"platform": {"compute": block}}, sys.stdout, Dumper=Dumper, sort_keys=False, width=120)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="humanoid-sim", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -355,6 +377,16 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--max-steps", type=int, default=None, help="periods per session")
     sv.add_argument("--seed", type=int, default=0)
     sv.set_defaults(func=cmd_serve)
+
+    cp = sub.add_parser("compute-profile", help="a profile's platform.compute block from Controls' policy-compute "
+                                                "benchmark report")
+    cp.add_argument("report", help="the folder with policy-compute.json and policy-compute.npz")
+    cp.add_argument("--workload", nargs=3, action="append", required=True, metavar=("NAME", "BENCH", "DOC"),
+                    help="a profile name, the benchmark's workload name and what it is (repeatable)")
+    cp.add_argument("--unit", required=True, help="the robot the benchmark ran on")
+    cp.add_argument("--controls", required=True, help="Controls' commit on that robot")
+    cp.add_argument("--tool", required=True, help="the benchmark script and its commit")
+    cp.set_defaults(func=cmd_compute_profile)
 
     args = p.parse_args(argv)
     if args.command is None:

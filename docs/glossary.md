@@ -38,6 +38,10 @@ The pose in which every drive reads zero. URDF joint zero is the calibration pos
 
 A recording from the real robot, such as the excitation captures `datasets/humanoid-v1/exc-*`: drive demands and feedback at about 200 Hz per drive, IMU samples and the gains in force. Replays read them.
 
+### Compute delay
+
+The time the robot's computer takes from a control tick to the policy's demand: reading the inputs, the network and the targets. Measured on the robot by Controls' policy-compute benchmark and kept in the profile (`platform.compute`); training adds it to each demand's sent time. See [training.md](training.md#the-policys-compute-time).
+
 ### Decimation
 
 How many physics steps one policy step spans in an Isaac Lab environment. With the 4 ms [physics period](#physics-period) and a decimation of 5, the policy runs every 20 ms.

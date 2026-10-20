@@ -375,6 +375,7 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `physics.kamino.max_contacts_per_world` | `solver_cfg` | Contact buffer per world (128, an estimate); Newton drops contacts beyond it. |
 | `sensors.imu.*` | `ImuDeliveryCfg.from_profile` | IMU sample period, burst delivery timing and noise densities. See [sensors.md](sensors.md). |
 | `solver_gains` | nothing | Records that the solver PD is the description's baseline gains. |
+| `platform.compute` | `ComputeDelay.from_profile`, `PlantAction` | The robot computer's measured policy compute time per workload and load: quantiles of the time from a control tick to the policy's demand, with the measurement's source. Written by `humanoid-sim compute-profile` from Controls' policy-compute benchmark; see [training.md](training.md#the-policys-compute-time). Only the G1 with hands has one. |
 
 Only the `model` block is part of the asset key. The `physics` block is described in more detail in [world.md](world.md) and [testing-and-gpu.md](testing-and-gpu.md).
 

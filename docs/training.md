@@ -266,6 +266,27 @@ Positions are in the [drive frame](glossary.md#drive-frame). For a 1:1 drive tha
 
 The [baseline gains](glossary.md#baseline-gains) (`plant.core.drive_stiffness`, `plant.core.drive_damping`, from humanoid-urdf) are also the solver gains. Target shaping is guaranteed stable for demanded gains up to twice the baseline; `plant.core.gain_warnings` (`[E, 22]` bool, cleared at reset) marks drives that received an enabled demand above that.
 
+### The policy's compute time
+
+On the robot a policy reads its inputs at a control tick and sends its demand when its computation is done, so the demand leaves its compute time after the tick. `PlantActionCfg.compute_delay` adds that time to the `sent_ns` that `demands()` returns, drawn per env and per step:
+
+```python
+drives = PlantActionCfg(class_type=MyPolicyAction, action_dim=29, compute_delay=("policy_core", "housekeeping"))
+```
+
+The pair names a workload and a load in the robot profile's `platform.compute` block. Each entry holds quantiles of the measured time from the tick to the policy's answer. A draw inverts that distribution with linear interpolation between the quantiles (`ComputeDelay.at` in `src/humanoid_sim/timing/compute.py`), so draws stay inside the measured range and keep its tail. A `ComputeDelay` object can be passed instead of the pair, for example `ComputeDelay.constant(ns)`. The last draws are `term.last_compute_delay_ns` (`[E]`, int64). Without `compute_delay`, demands leave at the time `demands()` gives.
+
+The G1 with hands has these workloads, measured on the lab unit's Orin NX at the 20 ms policy period, on the isolated control CPU under SCHED_FIFO, with the stack down:
+
+| Workload | What it times | Loads |
+|---|---|---|
+| `policy_core` | Controls' isaac-manager PolicyCore step (observation, network, targets) of a 12-joint walking bundle, torch on the CPU | `idle`, `housekeeping` |
+| `sonic_lowlatency_tensorrt`, `sonic_v1_1_tensorrt` | A GEAR-SONIC runtime step (its step networks) on TensorRT; the planner runs apart | `idle`, `housekeeping`, `housekeeping+gpu` |
+
+`housekeeping` keeps the housekeeping CPUs busy during the run, and `housekeeping+gpu` loads the GPU as well. The numbers and their source (the benchmark's commit, the unit, Controls' commit, the report's sha256) are in `profiles/g1_29dof_with_hand_rev_1_0.yaml`. `humanoid-sim compute-profile` writes the block from a benchmark report, and `tests/test_compute_delay.py` checks that the profile's numbers are the ones the report gives when the report is present (`HUMANOID_SIM_G1_COMPUTE`, default `datasets/g1-lab-1/compute-2026-10-20` beside the checkout).
+
+The compute time is not the whole command path. The time from the loop host's demand to the drive acting on it (the bridge, the board, the motor) is still the `latency` parameter, and the age of the feedback the policy reads is the policy task's own setting. The runtime adds no compute time: there, Controls computes its demands itself.
+
 ## Reading the plant
 
 ### `measured()`
