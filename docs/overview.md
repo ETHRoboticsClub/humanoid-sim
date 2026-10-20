@@ -74,7 +74,7 @@ flowchart TB
 2. Modeling choices live in `profiles/<robot>.yaml` over `profiles/defaults.yaml`: physics period (4 ms), solver settings, contact excludes, IMU delivery timing, the home pose. Each Controls-derived value names its source.
 3. The plant (`PlantCore` in `src/humanoid_sim/core.py`) is batched torch code over `[envs, drives]`. Per physics step it takes the drive demands that have arrived, evaluates each drive's control law and torque limits, maps drive quantities to joint quantities through the transmissions (most joints have their own drive; at each ankle two crank drives move the pitch and roll hinges together through a linkage), and writes a position target for the solver. [drives.md](drives.md) covers this in detail.
 4. Physics is an Isaac Lab articulation stepped by a Newton solver (MJWarp, or Kamino when selected), on CUDA. Warp's CPU device runs the same code for tests, slowly.
-5. Sensors turn the physical state into what the robot reports: positions quantized to encoder counts, torques to mNm, and IMU samples delivered in bursts with noise. See [sensors.md](sensors.md).
+5. Sensors turn the physical state into what the robot reports: positions quantized to encoder counts, torques to mNm, and IMU samples with noise, delivered as the rig's IMU delivers them. See [sensors.md](sensors.md).
 
 ## Three front ends
 

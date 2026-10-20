@@ -44,13 +44,13 @@ def test_every_rig_sits_on_its_description(robot):
     assert cfg.pending * cfg.sample_period_ns >= cfg.burst_period_ns[1]
 
 
-def test_the_v1_carries_the_mti_610_and_an_oak_d_w():
+def test_the_v1_carries_the_mti_610_on_can_and_an_oak_d_w():
     rig = rigs.rig("ethrc_v1")
     assert {n: type(s) for n, s in rig.sensors.items()} == {"imu": Mti610, "camera0": OakDW}
     assert rig.unsimulated() == ["camera0"] and rig.unsimulated(rtx=True) == ["camera0"]
     cfg = rig.imu.delivery_cfg()
     assert cfg.gyro_turn_on_bias == Mti610.gyro_turn_on_bias_rad_s
-    assert (cfg.sample_period_ns, cfg.burst_period_ns) == (2_740_000, (13_900_000, 17_600_000))
+    assert (cfg.sample_period_ns, cfg.burst_period_ns) == (2_500_000, (2_500_000, 2_500_000))  # 400 Hz, no bursts
 
 
 @pytest.mark.parametrize("robot", ["g1_29dof_rev_1_0", "g1_29dof_with_hand_rev_1_0"])

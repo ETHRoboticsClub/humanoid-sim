@@ -104,7 +104,7 @@ The pose the CAD model is exported in: legs straight, arms down, both soles leve
 
 ### IMU burst
 
-The IMU samples at about 365 Hz, but the host receives them in bursts every 13.9 to 17.6 ms. The sim reproduces that delivery pattern (`sensors/imu.py`); see [sensors.md](sensors.md).
+Samples that reach the host several at a time rather than one by one. The V1's IMU did this on its earlier serial path (about 365 Hz, in bursts every 13.9 to 17.6 ms, as on the `exc-*` captures); over CAN it delivers each sample as it is sent. The sim models bursts with `burst_period_ns` (`sensors/imu.py`); see [sensors.md](sensors.md#delivery).
 
 ### Isaac Lab
 
