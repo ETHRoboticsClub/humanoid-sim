@@ -238,3 +238,28 @@ def test_block_search_converges_on_separable_drives(monkeypatch):
     r = pace.fit(sim, [None], space, list(range(len(drives))), generations=60, base_motion=None, log=lambda *a, **k: None)
     assert r["objective"] < 0.02 * r["objective_start"]
     assert np.abs(np.asarray(r["x"]) - target).max() < 0.05
+
+
+def test_command_demand_rms_falls_back_to_position_and_reports_offsets(plant):
+    from humanoid_sim.replay.exc import CommandTrace, DriveTrace, sample_hold
+    from humanoid_sim.replay.replay import command_demand_rms, drive_targets
+
+    joints = list(plant.desc.joints)
+    t_cmd = np.arange(100, dtype=np.int64) * 20_000_000
+    cmds = CommandTrace(t_cmd, joints, 0.05 * np.sin(np.arange(100)[:, None] / 7 + np.arange(len(joints))[None]))
+    targets, _ = drive_targets(plant, cmds)
+    t = np.arange(0, 99 * 20_000_000, 5_000_000, dtype=np.int64)
+    nan = np.full(t.shape, np.nan)
+
+    class Cap:
+        def commands(self):
+            return cmds
+
+        def pdo(self):
+            return {d: DriveTrace(d, t, {"position_demand_rad": nan,
+                                         "native_position_rad": sample_hold(t_cmd, targets[:, i], t - 4_000_000) + 0.1})
+                    for i, d in enumerate(plant.map.drive_names)}
+
+    r = command_demand_rms(Cap(), plant, np.arange(0, 8_000_001, 1_000_000))
+    assert set(r["against"].values()) == {"native_position_rad"}
+    assert all(m == pytest.approx(0.1) for m in r["mean_at_best_rad"].values())

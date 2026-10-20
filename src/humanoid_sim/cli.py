@@ -250,8 +250,17 @@ def cmd_fit_pace(args) -> int:
     rebuild = {c.dataset_id: command_demand_rms(c, plant, shifts) for c in captures + held}
     for cid, r in rebuild.items():
         worst = max(r["rms_at_best_rad"], key=lambda d: r["rms_at_best_rad"][d])
+        position = sorted(d for d, f in r["against"].items() if f != "position_demand_rad")
         print(f"{cid}: rebuilt targets vs 0x6062 best at {r['best_shift_ns'] / 1e6:g} ms, worst "
-              f"{worst} {r['rms_at_best_rad'][worst] * 1e3:.3f} mrad", flush=True)
+              f"{worst} {r['rms_at_best_rad'][worst] * 1e3:.3f} mrad"
+              + (f" (vs measured position: {', '.join(position)})" if position else ""), flush=True)
+        off = {d: m for d, m in r["mean_at_best_rad"].items()
+               if drives.index(d) in scored and abs(m) > args.bias_bound_mrad * 1e-3}
+        if off:
+            raise SystemExit(f"{cid}: rebuilt targets sit beyond the bias bound from the drives' "
+                             f"{'demand' if not position else 'demand or position'} on "
+                             + ", ".join(f"{d} ({m * 1e3:+.0f} mrad)" for d, m in sorted(off.items()))
+                             + "; the capture's zeros or signs differ from the description's (or --skip-drives them)")
     base = args.base if moving else None
     t = time.time()
     result = fit(sim, captures, space, scored, generations=args.generations, base_motion=base,

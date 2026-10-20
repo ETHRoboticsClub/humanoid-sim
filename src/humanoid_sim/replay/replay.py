@@ -108,21 +108,31 @@ def drive_targets(plant: PlantCore, commands: CommandTrace) -> tuple[np.ndarray,
 
 def command_demand_rms(capture, plant: PlantCore, shifts_ns: np.ndarray) -> dict:
     """How well the rebuilt targets explain the drives' own demands: per shift ``s`` and drive, the RMS of 0x6062
-    minus the target sent ``s`` earlier (zero-order hold). Near zero at some shift when the rebuild matches the
-    master, up to the drive's interpolation and any slew."""
+    minus the target sent ``s`` earlier (zero-order hold), and the mean at the best shift. Near zero at some shift
+    when the rebuild matches the master, up to the drive's interpolation and any slew. A drive without 0x6062 is
+    compared with its measured position instead, which adds its tracking error (``against``); a large mean there
+    still shows a zero or sign that differs from the description's."""
     targets, t_cmd = drive_targets(plant, capture.commands())
     pdo = capture.pdo()
     drives = plant.map.drive_names
-    out = np.zeros((len(shifts_ns), len(drives)))
+    rms = np.full((len(shifts_ns), len(drives)), np.nan)
+    mean = np.full_like(rms, np.nan)
+    against = {}
     for i, d in enumerate(drives):
-        t, demand = pdo[d].t_ns, pdo[d]["position_demand_rad"]
-        keep = (t >= t_cmd[0]) & np.isfinite(demand)
+        field = "position_demand_rad" if np.isfinite(pdo[d]["position_demand_rad"]).any() else "native_position_rad"
+        against[d] = field
+        t, ref = pdo[d].t_ns, pdo[d][field]
+        keep = (t >= t_cmd[0] + int(max(shifts_ns))) & np.isfinite(ref)
         for k, s in enumerate(shifts_ns):
-            err = demand[keep] - sample_hold(t_cmd, targets[:, i], t[keep] - int(s))
-            out[k, i] = float(np.sqrt(np.mean(err ** 2))) if err.size else np.nan
-    best = np.nanargmin(np.nanmean(out, axis=1))
-    return {"shifts_ns": [int(s) for s in shifts_ns], "drives": drives, "rms_rad": out.tolist(),
-            "best_shift_ns": int(shifts_ns[best]), "rms_at_best_rad": dict(zip(drives, out[best].tolist(), strict=True))}
+            err = ref[keep] - sample_hold(t_cmd, targets[:, i], t[keep] - int(s))
+            if err.size:
+                rms[k, i], mean[k, i] = float(np.sqrt(np.mean(err ** 2))), float(np.mean(err))
+    if np.isnan(rms).all():
+        raise ValueError("no feedback after the first command frame to check the rebuilt targets against")
+    best = int(np.nanargmin(np.nanmean(rms, axis=1)))
+    return {"shifts_ns": [int(s) for s in shifts_ns], "drives": drives, "against": against, "rms_rad": rms.tolist(),
+            "best_shift_ns": int(shifts_ns[best]), "rms_at_best_rad": dict(zip(drives, rms[best].tolist(), strict=True)),
+            "mean_at_best_rad": dict(zip(drives, mean[best].tolist(), strict=True))}
 
 
 @dataclass
