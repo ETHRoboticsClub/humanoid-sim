@@ -327,9 +327,32 @@ A candidate is a point of [-1, 1]^dim: the description's value times `bound^x` f
 
 ### Replaying from the commands
 
-The delay is the time from a command leaving the loop host to the drive acting on it, which is the plant's `latency` in training. Fitting it needs the targets the EtherCAT master sent, not the drives' 0x6062 demand, which already includes the delay. No topic carries the per-drive targets the master writes, so `drive_targets` in `src/humanoid_sim/replay/replay.py` rebuilds them from the joint-space command frames as the master does (Controls `standalone.cpp` `bodyDriveTargets`): `sign · (q + standing_offset)` for a 1:1 drive, and the crank inverse kinematics of the hinges for an ankle. The replay (`source="command"`) submits each frame at its stamp; it takes effect one latency later through the drive queue, as demands do in training. The master's velocity slew is not modeled: it passes a target through unchanged when one bus step reaches it, and the rebuild check below shows where it did not.
+The delay is the time from a command leaving the loop host to the drive acting on it, which is the plant's `latency` in training. Fitting it needs the targets the EtherCAT master sent, not the drives' 0x6062 demand, which already includes the delay. No topic carries the per-drive targets the master writes, so `drive_targets` in `src/humanoid_sim/replay/replay.py` rebuilds them from the joint-space command frames as the master does (Controls `standalone.cpp` `bodyDriveTargets`): `sign · (q + standing_offset)` for a 1:1 drive, and the crank inverse kinematics of the hinges for an ankle. The replay (`source="command"`) submits each frame at its stamp; it takes effect one latency later through the drive queue, as demands do in training. The master's velocity slew is not modeled: it passes a target through unchanged when one bus step reaches it, and the rebuild check ([the capture contract](#the-capture-contract)) shows where it did not.
 
-Before fitting, `fit-pace` checks the rebuild against each capture (`command_demand_rms`). For shifts of 0 to 40 ms it compares each drive's 0x6062 with the target sent that much earlier, and prints the best shift and the worst drive's RMS there. That RMS should be near zero, up to the drive's interpolation. A large value means the rebuild does not match the master (for example an ankle convention), and the fit is not to be trusted. A drive that does not report 0x6062 (Controls' fake bus) is compared with its measured position instead, which adds its tracking error. `fit-pace` refuses a capture when a scored drive's mean difference at the best shift exceeds the bias bound: its zero or sign differs from the description's, as in captures recorded before a zero was moved. The numbers are in `command_rebuild` in the output.
+### The capture contract
+
+A capture or bag is fit only if it meets the contract below. `check-bag` checks it without physics, on any machine with the `bag` extra, and `fit-pace` runs the same checks (`check_capture` in `src/humanoid_sim/sysid/contract.py`) and refuses before replaying anything:
+
+```bash
+humanoid-sim check-bag <capture-or-bag>... [--base yaw|orientation|fixed] [--delay-ms 0 20] [--bias-bound-mrad 20] [--skip-drives ...]
+```
+
+It prints each capture's feedback, commands and rebuild numbers, then its errors and warnings, and exits 1 if any capture has an error. The options mean what they mean to `fit-pace`; give it the ones the fit will get.
+
+| The capture must | Checked as |
+|---|---|
+| Hold feedback from every drive of the description, with finite positions | Error otherwise |
+| Report 0x6062 on every scored drive. Controls' EtherCAT master does; its fake bus does not | Error otherwise |
+| Hold gains that are applied on every drive and do not change, ramp or fail while it runs | Error otherwise |
+| Hold the IMU, unless the fit runs with `--base fixed` | Error otherwise |
+| Hold COMMAND frames that name every joint, overlapping the feedback for at least 5 s. Stamps on different clocks fail this | Error otherwise |
+| Be recorded with the zeros and signs of the description humanoid-sim pins | Error when a scored drive's 0x6062 differs from the rebuilt targets on average by more than the bias bound |
+| Show a delay inside the fit's range | Error when the rebuilt targets best explain 0x6062 at a shift outside `--delay-ms` |
+| Stream without gaps | Warning for a gap over 50 ms |
+
+The rebuild check scans shifts from 10 ms below to 10 ms above the delay range. At each shift it compares every drive's 0x6062 with the target sent that much earlier (`command_demand_rms`). At the best shift the RMS should be near zero, up to the drive's interpolation; a large value means the rebuild does not match the master (for example an ankle convention). A drive without 0x6062 is compared with its measured position instead, which adds its tracking error; the zero check still applies, the delay check does not. The numbers are in `command_rebuild` in the output.
+
+Two things are not in the data, and the contract cannot check them: that the robot hung on the gantry, and which excitation band a capture holds. Pass the captures of one band to fit and another's as `--holdout`.
 
 ### Output
 

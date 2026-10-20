@@ -19,6 +19,9 @@
                                                    fit PACE 0.2.0's actuator model (armature, damping, static and
                                                    dynamic friction, encoder bias, command delay) to excitation
                                                    captures or rosbags, replayed from their command frames
+    humanoid-sim check-bag <capture>... [--base yaw|orientation|fixed]
+                                                   check captures or rosbags against what a PACE fit needs
+                                                   (no physics); fit-pace runs the same checks first
     humanoid-sim pace-selftest --num-envs N --generations G
                                                    plant known PACE parameters, record a chirp on a fixed base and
                                                    fit it back: checks the model is identifiable and the fit wired
@@ -213,15 +216,51 @@ def open_capture(path: str):
     return ExcitationCapture(p)
 
 
+def _check_captures(args, captures: list) -> dict:
+    """Every capture against the PACE capture contract on a CPU plant of the description, printed; the checks by
+    dataset id. ``--skip-drives`` leaves drives out of what is scored."""
+    import torch
+
+    from humanoid_sim.core import PlantCfg, PlantCore
+    from humanoid_sim.model.description import Description
+    from humanoid_sim.sysid.contract import check_capture
+
+    desc = Description.load(args.robot)
+    plant = PlantCore(desc, list(desc.joints), 1, PlantCfg(dtype=torch.float64))
+    skip = set(args.skip_drives)
+    unknown = skip - set(plant.map.drive_names)
+    if unknown:
+        raise SystemExit(f"--skip-drives: unknown drives {sorted(unknown)}")
+    checks = {}
+    for c in captures:
+        chk = checks[c.dataset_id] = check_capture(
+            c, plant, bias_bound_rad=args.bias_bound_mrad / 1e3,
+            delay_bounds_ns=tuple(int(round(v * 1e6)) for v in args.delay_ms),
+            scored=[d for d in plant.map.drive_names if d not in skip], need_imu=args.base != "fixed")
+        print(chk.report(), flush=True)
+    return checks
+
+
+def cmd_check_bag(args) -> int:
+    checks = _check_captures(args, [open_capture(c) for c in args.captures])
+    return 0 if all(c.ok for c in checks.values()) else 1
+
+
 def cmd_fit_pace(args) -> int:
     import math
 
     import numpy as np
 
-    from humanoid_sim.replay.replay import command_demand_rms
     from humanoid_sim.sim import SimCore
     from humanoid_sim.sysid.pace import PaceSpace, evaluate, fit, save, start_values
 
+    captures = [open_capture(c) for c in args.captures]
+    held = [open_capture(c) for c in args.holdout]
+    checks = _check_captures(args, captures + held)
+    refused = [cid for cid, chk in checks.items() if not chk.ok]
+    if refused:
+        raise SystemExit(f"refused captures {refused} (see above; --skip-drives leaves a drive out)")
+    rebuild = {cid: chk.rebuild for cid, chk in checks.items()}
     moving = args.base != "fixed"
     sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, num_envs=args.num_envs,
                   fixed_base=not moving, base_joints=moving, solver=args.solver)
@@ -239,28 +278,7 @@ def cmd_fit_pace(args) -> int:
             raise SystemExit(f"--fix {item}: PARAM.NAME, PARAM one of {sorted(set(sizes) - {'delay'})}")
         fixed.setdefault(param, np.zeros(sizes[param], dtype=bool))[names.index(name)] = True
     space = PaceSpace(joints, drives, start_values(sim.desc, joints), fixed=fixed, **kw)
-    skip = set(args.skip_drives)
-    unknown = skip - set(drives)
-    if unknown:
-        raise SystemExit(f"--skip-drives: unknown drives {sorted(unknown)}")
-    scored = [i for i, d in enumerate(drives) if d not in skip]
-    captures = [open_capture(c) for c in args.captures]
-    held = [open_capture(c) for c in args.holdout]
-    shifts = np.arange(0, 40_000_001, 1_000_000)
-    rebuild = {c.dataset_id: command_demand_rms(c, plant, shifts) for c in captures + held}
-    for cid, r in rebuild.items():
-        worst = max(r["rms_at_best_rad"], key=lambda d: r["rms_at_best_rad"][d])
-        position = sorted(d for d, f in r["against"].items() if f != "position_demand_rad")
-        print(f"{cid}: rebuilt targets vs 0x6062 best at {r['best_shift_ns'] / 1e6:g} ms, worst "
-              f"{worst} {r['rms_at_best_rad'][worst] * 1e3:.3f} mrad"
-              + (f" (vs measured position: {', '.join(position)})" if position else ""), flush=True)
-        off = {d: m for d, m in r["mean_at_best_rad"].items()
-               if drives.index(d) in scored and abs(m) > args.bias_bound_mrad * 1e-3}
-        if off:
-            raise SystemExit(f"{cid}: rebuilt targets sit beyond the bias bound from the drives' "
-                             f"{'demand' if not position else 'demand or position'} on "
-                             + ", ".join(f"{d} ({m * 1e3:+.0f} mrad)" for d, m in sorted(off.items()))
-                             + "; the capture's zeros or signs differ from the description's (or --skip-drives them)")
+    scored = [i for i, d in enumerate(drives) if d not in set(args.skip_drives)]
     base = args.base if moving else None
     t = time.time()
     result = fit(sim, captures, space, scored, generations=args.generations, base_motion=base,
@@ -519,6 +537,15 @@ def main(argv: list[str] | None = None) -> int:
     fd.add_argument("--device", default="cuda:0")
     fd.add_argument("--out", default="outputs/sysid")
     fd.set_defaults(func=cmd_fit_delay)
+
+    cb = sub.add_parser("check-bag", help="check captures or rosbags against what a PACE fit needs, without physics")
+    cb.add_argument("captures", nargs="+", help="exc-* capture directories or rosbag2 directories")
+    cb.add_argument("--base", choices=("yaw", "orientation", "fixed"), default="yaw",
+                    help="the fit's base (anything but fixed needs the IMU)")
+    cb.add_argument("--bias-bound-mrad", type=float, default=20.0, help="as fit-pace's")
+    cb.add_argument("--delay-ms", nargs=2, type=float, default=[0.0, 20.0], metavar=("FROM", "TO"), help="as fit-pace's")
+    cb.add_argument("--skip-drives", nargs="*", default=[], help="drives the fit leaves out")
+    cb.set_defaults(func=cmd_check_bag)
 
     fpc = sub.add_parser("fit-pace", help="fit PACE 0.2.0's actuator model to captures or rosbags, from their "
                                           "command frames")

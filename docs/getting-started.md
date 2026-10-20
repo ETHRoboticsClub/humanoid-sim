@@ -15,6 +15,7 @@ humanoid-sim runs in three places. The contract tests and the viewers run native
 | Replay a capture | arm64 image, short runs | Image, short runs | Image | `replay` and `e2e` tasks |
 | View a replay in Rerun | Native | Native | Native | Fetch the output and view it locally |
 | `fit-passive`, `fit-delay` | Small runs only | Small runs only | Image | `sysid` task (`fit-passive`) |
+| `check-bag` | Native | Native | Native | Not needed |
 | `fit-pace`, `pace-selftest` | Small runs only | Small runs only | Image | `pace` task |
 | Training environment | arm64 image, a few envs | Image, a few envs | Image | `bench` and `e2e` tasks benchmark it |
 | Benchmarks | Runs; the numbers mean little | Runs; the numbers mean little | Image | `bench` and `e2e` tasks |
@@ -76,7 +77,7 @@ The core dependencies are numpy, torch and PyYAML. Each extra adds a group of op
 | `dev` | pytest, ruff | Running the tests and the linter |
 | `newton` | Newton, Warp, newton-usd-schemas, usd-core, trimesh, scipy, pycollada and resolve-robotics-uri-py | Host kinematics: the replay and runtime viewers, model checks and the kinematics tests. Newton here never steps physics. |
 | `viz` | rerun-sdk, pyarrow | `humanoid-sim view-replay`, `humanoid-sim view-runtime` and Rerun signal logs |
-| `bag` | rosbags | Reading Controls' rosbag2 recordings (`fit-pace` on a bag, `tests/test_bag_reader.py`). The image and the GPU nodes install it. |
+| `bag` | rosbags | Reading Controls' rosbag2 recordings (`check-bag` and `fit-pace` on a bag, `tests/test_bag_reader.py`). The image and the GPU nodes install it. |
 | `kinematics-check` | MuJoCo | Cross-checking kinematics against Controls' MJCF by hand. No test or command needs it. |
 
 `uv sync` installs exactly the extras you name and removes the others, so name every extra you want in one command. `uv run <command>` runs a command in that environment and leaves the installed extras in place.
