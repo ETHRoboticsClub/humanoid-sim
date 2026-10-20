@@ -3,7 +3,8 @@ feedback, IMU, soles, gantry and lateness as time series.
 
 It only reads the segment (seqlock reads of the descriptor, feedback and truth regions); it never writes
 demands or commands, so it can watch a session a client such as Controls is driving. Time is the sim's
-``sim_time_ns``. Entity paths: ``/world/robot/<body>``, ``/sim/0/drives/<drive>/{position,velocity,applied_torque,
+``sim_time_ns``. Entity paths: ``/world/robot/<body>``, ``/world/scene/{scan,floor,boxes}`` (the host's scan, or its
+static boxes, when its scene files are readable here with the same digests), ``/sim/0/drives/<drive>/{position,velocity,applied_torque,
 demanded_torque}``, ``/sim/0/imu/{gyro,specific_force}/{x,y,z}``, ``/sim/0/soles/<side>/normal_force``,
 ``/sim/0/base/height``, ``/sim/0/gantry/tension``, ``/sim/0/host/{late_steps,keeping_up}``.
 """
@@ -19,16 +20,18 @@ import torch
 from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.signals.log import SignalLog
 from humanoid_sim.signals.robot import RobotMeshes
+from humanoid_sim.signals.scene import log_scene
 
 ROBOT_COLOR = (190, 190, 200, 255)
 
 
-def blueprint(drives: list[str]):
+def blueprint(drives: list[str], sky: tuple[float, float, float] | None = None):
     import rerun.blueprint as rrb
 
+    background = None if sky is None else rrb.Background(color=[round(255 * c) for c in sky])
     return rrb.Blueprint(
         rrb.Horizontal(
-            rrb.Spatial3DView(name="Robot", origin="/world"),
+            rrb.Spatial3DView(name="Robot", origin="/world", background=background),
             rrb.Vertical(
                 rrb.Tabs(
                     rrb.TimeSeriesView(name="Drive position", origin="/sim/0/drives",
@@ -69,7 +72,7 @@ class RuntimeView:
     """Reads one segment and logs what it shows, one frame per :meth:`frame` call."""
 
     def __init__(self, segment: str | Path, usd: Path, log: SignalLog, *, wait_s: float = 60.0,
-                 robot: str = "ethrc_v1"):
+                 robot: str = "ethrc_v1", draw: str | None = None, detail: str = "live"):
         from humanoid_sim.model.description import Description
         from humanoid_sim.model.kinematics import RobotKinematics
 
@@ -81,6 +84,13 @@ class RuntimeView:
         desc = self.seg.descriptor()
         self.drives, self.joints = desc["drives"], desc["joints"]
         self.soles = desc.get("soles", [])
+        self.scene = self._scene(desc.get("scene"))
+        # The scan when the host has one readable here and nothing else is asked for, else the boxes.
+        self.draw = None if self.scene is None else (
+            draw or ("scan" if self.scene.scan is not None else "boxes"))
+        if self.draw == "scan" and self.scene.scan is None:
+            raise ValueError("the host's scene has no scan readable here; draw its boxes")
+        self.detail = detail
         self.kin = RobotKinematics(usd, self.joints, base_height_m=0.0)
         self.meshes = RobotMeshes(self.kin.model)
         self.log, self.rr = log, log.rr
@@ -92,12 +102,33 @@ class RuntimeView:
     def log_static(self) -> None:
         rr = self.rr
         self.meshes.log_static("/world/robot", ROBOT_COLOR)
+        if self.scene is not None:
+            log_scene(rr, self.scene, draw=self.draw, detail=self.detail)
         for d in self.drives:
             for name in ("position", "velocity", "applied_torque", "demanded_torque"):
                 rr.log(f"/sim/0/drives/{d}/{name}", rr.SeriesLines(names=[d]), static=True)
         for group in ("gyro", "specific_force"):
             for axis, color in zip("xyz", ((220, 80, 80), (80, 180, 80), (80, 120, 220))):
                 rr.log(f"/sim/0/imu/{group}/{axis}", rr.SeriesLines(names=[axis], colors=[color]), static=True)
+
+    @staticmethod
+    def _scene(record: dict | None):
+        """The host's scene, when its boxes file is readable here with the same digest; with its scan when those
+        files are readable here with the same digests too."""
+        from humanoid_sim.world.boxes import StaticBoxes
+        from humanoid_sim.world.scan import ScanFiles
+
+        if not record or not Path(record["file"]).is_file():
+            return None
+        scan = None
+        files = {k: v for k, v in (record.get("scan") or {}).items() if v}
+        if files and all(Path(v["file"]).is_file() for v in files.values()):
+            got = ScanFiles.of(files["mesh"]["file"], files["texture"]["file"],
+                               files["floor_texture"]["file"] if "floor_texture" in files else None)
+            if all(got.sha256[v["file"]] == v["sha256"] for v in files.values()):
+                scan = got
+        boxes = StaticBoxes.load(record["file"], record["spawn_m"], scan=scan)
+        return boxes if boxes.sha256 == record["sha256"] else None
 
     def _read(self, region: str):
         try:
@@ -162,13 +193,18 @@ FOLLOW_S = 10.0  # how long to wait for the next session of a `serve --persist` 
 
 def view_runtime(segment: str | Path, usd: Path, *, rrd: str | None = None, connect: str | None = None,
                  fps: float = 30.0, seconds: float | None = None, wait_s: float = 60.0,
-                 robot: str = "ethrc_v1") -> int:
+                 robot: str = "ethrc_v1", draw: str | None = None, detail: str | None = None) -> int:
     """Watch ``segment`` (waiting up to ``wait_s`` for it to appear) until its host is gone or for ``seconds``;
     a new session at the same path within ``FOLLOW_S`` of the last one ending is followed. Returns the number of
-    robot frames logged. Writes to ``rrd``, streams to ``connect``, or spawns a viewer when neither is given."""
+    robot frames logged. Writes to ``rrd``, streams to ``connect``, or spawns a viewer when neither is given. The
+    host's scene is drawn as ``draw`` says (``scan`` or ``boxes``; the scan when it has one readable here) at
+    ``detail`` (``full`` into a file, ``live`` otherwise, unless given)."""
+    from humanoid_sim.world.scan import SKY_RGB
+
     log = SignalLog("humanoid-sim runtime", init=True)
-    view = RuntimeView(segment, usd, log, wait_s=wait_s, robot=robot)
-    bp = blueprint(view.drives)
+    view = RuntimeView(segment, usd, log, wait_s=wait_s, robot=robot, draw=draw,
+                       detail=detail or ("full" if rrd else "live"))
+    bp = blueprint(view.drives, sky=SKY_RGB if view.draw == "scan" else None)
     if rrd:
         log.rr.save(rrd, default_blueprint=bp)
     elif connect:
