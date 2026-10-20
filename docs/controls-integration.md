@@ -79,7 +79,7 @@ It steps the right elbow 0.2 rad with every drive in JVPT at its baseline gains 
 
 ## The IMU
 
-The sim delivers the MTi-610's raw samples in the feedback region: the 32 latest, newest first, each with its `seq`, its measurement time `sample_ns` and its host-receipt time `stamp_ns` in plant time, the gyro and the specific force in the sensor frame, arriving in bursts as the robot's MTi-610 delivers them ([runtime.md](runtime.md#feedback)). Controls reads them on one of two paths, selected with launch.py `--imu-path`:
+The sim delivers the raw samples of the rig's IMU in the feedback region: on the V1 the MTi-610, with the errors of its catalog model and the sample period and burst delivery of the V1's rig ([sensors.md](sensors.md#sensor-models-and-the-rig)). The region holds the 32 latest, newest first, each with its `seq`, its measurement time `sample_ns` and its host-receipt time `stamp_ns` in plant time, the gyro and the specific force in the sensor frame ([runtime.md](runtime.md#feedback)). The descriptor's `imu` names the rig's IMU (`model`, `product`, `frame` and its delivery; ABI 2.1). Controls reads them on one of two paths, selected with launch.py `--imu-path`:
 
 | `--imu-path` | Reader | What publishes `/rt/imu` |
 |---|---|---|
@@ -88,7 +88,7 @@ The sim delivers the MTi-610's raw samples in the feedback region: the 32 latest
 
 `xsens_sim` takes each sample once, oldest first, and publishes it as the Xsens driver publishes the MTi-610: `sensor_msgs/Imu` on `/imu/data` (remapped to `/imu/data_raw`), frame `imu_link`, no orientation (`orientation_covariance[0]` is -1), the gyro and the specific force as the sim wrote them, covariances from the driver's stddev parameters. It stamps each sample at its receipt time, the driver's `time_option` 2: `stamp_ns` mapped onto `CLOCK_MONOTONIC` with the latest feedback record (`written_mono_ns - (sim_time_ns - stamp_ns)`), then onto the ROS clock. It only reads the segment, beside the plant process that is the session's client, and when the session ends it waits for the next one at the same path. Madgwick then estimates the orientation from the raw samples and `ethrc_imu_relay` turns it into the base frame, as on the robot.
 
-The relay's IMU identity on the device path is the robot's: the description's `imu_joint` revision, marked verified because the sim's chip sits exactly at the description's mount. The sim's MTi-610 white noise stays on unless the session's fidelity preset is `minimal`.
+`xsens_sim` emulates the MTi-610 only: it reads the descriptor's `imu.model` and refuses a sim whose rig names another IMU, or none (a sim before ABI 2.1). The model's errors (white noise, turn-on bias, drift) stay on unless the session's fidelity preset is `minimal`. The relay's IMU identity on the device path is the robot's: the description's `imu_joint` revision, marked verified because the sim's chip sits exactly at the description's mount.
 
 A change to the samples' fields, rate or burst timing reaches the robot's IMU chain unchanged on the device path, so it changes what Madgwick, and a policy behind it, sees in simulation.
 
@@ -116,7 +116,7 @@ python3 scripts/sim/launch.py --headless --hands none --clock wall --bus fake-co
 | `--clock plant\|wall` | `plant` with `--hands none`, otherwise `wall` | The fake-coe lane runs on the wall clock: pass `--clock wall` with `--hands none`, since launch.py refuses `plant` with `--bus fake-coe` |
 | `--bank-host python\|cpp` | `python` | The plant process ([The C++ bank host](#the-c-bank-host)) |
 | `--imu-path link\|device` | `link` | The IMU path ([The IMU](#the-imu)); `device` needs `--bank-host cpp` |
-| `--fidelity minimal\|real` | `plant_relay`'s (`real`) | On the link path, `plant_relay`'s IMU model, the sim's own IMU running ideal. On the device path, `minimal` turns the sim's IMU noise off and `real` keeps it. |
+| `--fidelity minimal\|real` | `plant_relay`'s (`real`) | On the link path, `plant_relay`'s IMU model, the sim's own IMU running ideal. On the device path, `minimal` turns the IMU model's errors off and `real` keeps them. |
 
 `--environment` shapes the MuJoCo plant and does nothing on humanoid-sim. `--imu-mount-rpy` models the link path's IMU and is refused on the device path.
 

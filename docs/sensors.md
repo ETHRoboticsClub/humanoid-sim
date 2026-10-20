@@ -21,7 +21,7 @@ A camera class lists its streams as Controls' backend for the product publishes 
 
 What an instance takes depends on the kind. An `Imu` takes its configured `sample_period_ns` and its delivery to the host (`burst_period_ns`, `in_burst_spacing_ns`; by default every sample as it is taken). A `Camera` takes its resolution, `frame_period_ns` and the unit's calibration per stream: its pinhole `intrinsics` `(fx, fy, cx, cy)` (OpenCV's convention), and where the unit's calibration gives them its lens `distortion` (`(model, coefficients)`, model `plumb_bob` or `equidistant`) and its optical centre (`stream_offsets_m`, in place of the nominal one). A `Lidar` takes only its frame. Figures are checked when a class is defined, an instance's values when it is made.
 
-A `Rig` names a robot's instances. Each robot's rig is in `src/humanoid_sim/sensors/rigs.py`, as on the robot; `rigs.EXTRAS` holds rigs that add sensors a robot's rig does not declare, by name (`g1-cameras`: the ZED Mini and D435i the lab G1 is reported to carry).
+A `Rig` names a robot's instances. Each robot's rig is in `src/humanoid_sim/sensors/rigs.py`, as on the robot; `rigs.EXTRAS` holds rigs that add sensors a robot's rig does not declare, by name (`g1-cameras`: the ZED Mini and D435i the lab G1 is reported to carry). The runtime names the rig's IMU in its descriptor (`imu`: model, product, frame and delivery; [runtime.md](runtime.md#descriptor)), so a client such as Controls' `xsens_sim` can check which device its samples come from.
 
 ```python
 def ethrc_v1() -> Rig:
