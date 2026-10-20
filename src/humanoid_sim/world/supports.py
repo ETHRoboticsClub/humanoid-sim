@@ -82,6 +82,12 @@ class Gantry:
         self.tension_n = torch.zeros(e, device=dev)  # applied on the last step, total
         self.distance_m = torch.zeros(e, device=dev)  # cable: harness point to anchor
         self.active = False  # host-side; False only when no env has a rope, so apply() can skip the work
+        # Host side as well: the most points any rope uses, so apply() pushes only those. Each step's work reuses
+        # these buffers: the rope runs on the runtime's real-time path, where every kernel launch counts.
+        self._points_used = 0
+        self._point_index = torch.arange(max_points, device=dev)
+        self._t_ns = torch.zeros(e, dtype=torch.int64, device=dev)
+        self._force = torch.zeros(e, max_points, 3, device=dev)
 
     # -- configuration (host side, at reset or on request) ----------------------------------------
 
@@ -146,6 +152,7 @@ class Gantry:
         self.num_points[env_ids] = pts.shape[1]
         self.mode[env_ids] = TENSION
         self.active = True
+        self._points_used = max(self._points_used, pts.shape[1])
 
     def hang_cable(self, env_ids: torch.Tensor, t_ns: int, *, attachment_b, overhead_m: float,
                    length_breakpoints_s_m: Sequence[tuple[float, float]], stiffness_n_m: float,
@@ -170,6 +177,7 @@ class Gantry:
         self.damping[env_ids] = damping_n_s_m
         self.mode[env_ids] = CABLE
         self.active = True
+        self._points_used = max(self._points_used, 1)
 
     def release(self, env_ids: torch.Tensor) -> None:
         self.mode.index_fill_(0, env_ids, NONE)
@@ -177,6 +185,7 @@ class Gantry:
         self.distance_m.index_fill_(0, env_ids, 0.0)
         if len(env_ids) == self.num_envs:
             self.active = False
+            self._points_used = 0
 
     # -- every physics step -----------------------------------------------------------------------
 
@@ -186,16 +195,15 @@ class Gantry:
             return
         root = self.robot.data.body_link_pose_w.torch[self._all, self.body_ids]
         vel = self.robot.data.body_link_vel_w.torch[self._all, self.body_ids]
-        e, p = self.points_b.shape[:2]
-        pts_w = root[:, None, :3] + _quat_rotate(root[:, None, 3:].expand(-1, p, -1), self.points_b)
-        value = interp_program(torch.full((e,), t_ns, dtype=torch.int64, device=self.device), self.program_ns,
-                               self.program)
+        p = self._points_used
+        points_b = self.points_b[:, :p]
+        pts_w = root[:, None, :3] + _quat_rotate(root[:, None, 3:].expand(-1, p, -1), points_b)
+        value = interp_program(self._t_ns.fill_(t_ns), self.program_ns, self.program)
 
         # Tension program: vertical, split evenly over the env's points.
         share = torch.where(self.mode == TENSION, value, 0.0) / self.num_points.to(value.dtype)
-        used = torch.arange(p, device=self.device)[None, :] < self.num_points[:, None]
-        force = torch.zeros(e, p, 3, device=self.device)
-        force[..., 2] = share[:, None] * used
+        force = self._force[:, :p].zero_()
+        force[..., 2] = share[:, None] * (self._point_index[None, :p] < self.num_points[:, None])
 
         # Cable: along the rope from point 0 to the anchor, beyond the unstretched length.
         line = self.anchor_w - pts_w[:, 0]
@@ -211,9 +219,9 @@ class Gantry:
         self.tension_n = torch.where(self.mode == CABLE, cable, share * self.num_points.to(value.dtype))
         self.distance_m = torch.where(self.mode == CABLE, dist, 0.0)
         composer = self.robot.instantaneous_wrench_composer
+        one_body = len(self._harness_bodies) == 1
         for b, body in self._harness_bodies.items():
-            on_b = force * (self.body_ids == b).to(force.dtype)[:, None, None]
+            on_b = force if one_body else force * (self.body_ids == b).to(force.dtype)[:, None, None]
             for i in range(p):
-                composer.add_forces_and_torques_index(forces=on_b[:, i:i + 1], torques=torch.zeros_like(on_b[:, i:i + 1]),
-                                                      positions=pts_w[:, i:i + 1], body_ids=body, env_ids=self._all,
-                                                      is_global=True)
+                composer.add_forces_and_torques_index(forces=on_b[:, i:i + 1], positions=pts_w[:, i:i + 1],
+                                                      body_ids=body, env_ids=self._all, is_global=True)
