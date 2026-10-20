@@ -79,7 +79,7 @@ class SimCore:
         if imu:
             from humanoid_sim.sensors.imu import ImuDelivery, ImuDeliveryCfg
 
-            cfg = ImuDeliveryCfg.from_profile(self.profile["sensors"]["imu"])
+            cfg = ImuDeliveryCfg.for_robot(self.desc, self.profile)
             if imu_history is not None:
                 cfg = dataclasses.replace(cfg, history=imu_history)
             self.imu = ImuDelivery(cfg, num_envs, device=device, seed=seed)

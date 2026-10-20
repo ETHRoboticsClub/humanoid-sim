@@ -130,7 +130,7 @@ src/humanoid_sim/
   devices/         drive law, torque-speed envelope, faults
   transmissions/   drive frame <-> joint frame, the ankle linkage
   core.py          the plant: batched over [envs, drives], shared by every front end
-  sensors/         encoders and IMU delivery
+  sensors/         sensor models and rigs, IMU delivery
   physics/         the Isaac Lab articulation on MJWarp and its solver joint properties
   randomization/   parameter specs and draws
   world/           terrain, pushes, gantry

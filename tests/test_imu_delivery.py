@@ -116,3 +116,45 @@ def test_reset_clears_an_env_only():
     assert (imu.samples.stamp_ns[1] == -1).all() and (imu.samples.stamp_ns[0, :5] >= 0).all()
     _run(imu, 50, lambda t: (z, z), t0=50 * STEP)
     assert imu.samples.seq[1, 0].item() == imu.samples.count[1].item()
+
+
+def test_turn_on_bias_is_drawn_per_env_at_reset():
+    e = 4000
+    cfg = ImuDeliveryCfg(**{**CFG.__dict__, "gyro_turn_on_bias": 1.5e-3, "accel_turn_on_bias": 0.02})
+    imu = ImuDelivery(cfg, e, dtype=torch.float64)
+    imu.reset(torch.arange(e), 0)
+    std = imu.turn_on.std(dim=0)
+    assert torch.allclose(std[:3], torch.full((3,), 1.5e-3, dtype=torch.float64), rtol=0.05)
+    assert torch.allclose(std[3:], torch.full((3,), 0.02, dtype=torch.float64), rtol=0.05)
+    before = imu.turn_on.clone()
+    imu.reset(torch.tensor([0]), 0)
+    assert not torch.equal(imu.turn_on[0], before[0]) and torch.equal(imu.turn_on[1:], before[1:])
+    # A sample at rest reads the bias (no white noise configured).
+    z = torch.zeros(e, 3, dtype=torch.float64)
+    _run(imu, 10, lambda t: (z, z))
+    assert torch.allclose(imu.samples.gyro[:, 0], imu.turn_on[:, :3], atol=1e-12)
+
+
+def test_bias_drift_is_stationary_and_decorrelates():
+    e, tau_ns = 2000, 200_000_000
+    cfg = ImuDeliveryCfg(**{**CFG.__dict__, "gyro_bias_instability": 1e-3, "bias_correlation_time_ns": tau_ns})
+    imu = ImuDelivery(cfg, e, dtype=torch.float64)
+    imu.reset(torch.arange(e), 0)
+    z = torch.zeros(e, 3, dtype=torch.float64)
+    start = imu.drift[:, 0].clone()
+    _run(imu, 100, lambda t: (z, z))  # 0.4 s, two correlation times
+    end = imu.drift[:, 0]
+    assert end.std().item() == pytest.approx(1e-3, rel=0.1)
+    assert torch.corrcoef(torch.stack([start, end]))[0, 1].item() == pytest.approx(math.exp(-2), abs=0.06)
+    assert imu.samples.gyro[:, 0, 0].std().item() == pytest.approx(1e-3, rel=0.1)  # the samples carry it
+
+
+def test_noise_off_also_drops_the_models_bias():
+    cfg = ImuDeliveryCfg(**{**CFG.__dict__, "gyro_turn_on_bias": 1e-2, "gyro_bias_instability": 1e-3})
+    imu = ImuDelivery(cfg, 3, dtype=torch.float64)
+    imu.reset(torch.arange(3), 0)
+    imu.gyro_bias[:] = 0.5  # the randomization's bias stays
+    imu.set_noise(False)
+    z = torch.zeros(3, 3, dtype=torch.float64)
+    _run(imu, 20, lambda t: (z, z))
+    assert torch.allclose(imu.samples.gyro[:, 0], torch.full((3, 3), 0.5, dtype=torch.float64), atol=1e-12)
