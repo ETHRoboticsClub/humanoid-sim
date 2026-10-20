@@ -4,6 +4,50 @@ The plant reports three kinds of signal: [drive feedback](glossary.md#feedback) 
 
 Drive feedback and IMU samples are measured signals, the ones the real robot has. Truth exists only in simulation. A policy's inputs are built from measured signals only: `RobotPlant.measured()` in training and the feedback region in the runtime. Truth is for critics, rewards, terminations and tests. The plant has no sensor the robot lacks, and processing on top of the raw signals, such as orientation filtering (Madgwick) and the standing frame, belongs to the consumer, which on the robot is Controls.
 
+## Sensor models and the rig
+
+Each sensor is an instance of a named model. `profiles/sensors.yaml` is the catalog: one entry per product, with its kind and the behaviour the product has wherever it is mounted, each figure with its source. A robot's profile lists its rig under `sensors`: per instance, the model, the URDF link it sits at, and what the robot sets around it. Naming a model gives its whole behaviour; no product figure is written in a robot's profile. `SensorRig` and the typed models are in `src/humanoid_sim/sensors/models.py`.
+
+| Model | Kind | Product | On |
+|---|---|---|---|
+| `mti-610` | `imu` | Xsens (Movella) MTi-610 | V1 |
+| `unitree-g1-imu` | `imu` | Unitree G1 body IMU (figures unmeasured: an ideal sensor) | G1 |
+| `oak-d-w` | `camera` | Luxonis OAK-D-W | V1 |
+| `livox-mid360` | `lidar` | Livox Mid-360 | G1 |
+
+What a rig entry sets depends on the kind. An `imu` takes its configured `sample_period_ns` and its delivery to the host (`burst_period_ns`, `in_burst_spacing_ns`). A `camera` takes its resolution, `frame_period_ns` and the unit's pinhole calibration per stream. A `lidar` takes nothing beyond its frame. A key that belongs to the model, such as a noise density, is rejected in a rig entry.
+
+```yaml
+# profiles/ethrc_v1.yaml
+sensors:
+  imu:
+    model: mti-610
+    frame: imu_link
+    sample_period_ns: 2740000
+    burst_period_ns: [13900000, 17600000]
+    in_burst_spacing_ns: 13000
+  camera0:
+    model: oak-d-w
+    frame: camera0_camera
+    width: 640
+    height: 400
+    frame_period_ns: 33333333
+    intrinsics: {rgb: [283.09, 282.81, 325.97, 198.38], mono_left: [283.60, 283.56, 321.74, 196.77]}
+```
+
+The plant simulates the instance named `imu`, which must sit at the child of the URDF's `imu_joint` (the mount the physics uses). Cameras and lidars are declared, with their specs and mounts, and not simulated yet; `SensorRig.unsimulated()` names them. `ImuDeliveryCfg.for_robot(desc, profile)` loads the rig, checks every frame against the description and returns the IMU's configuration:
+
+```python
+from humanoid_sim.model.asset import load_profile
+from humanoid_sim.model.description import Description
+from humanoid_sim.sensors.models import SensorRig
+
+rig = SensorRig.load(load_profile("g1_29dof_with_hand_rev_1_0"))
+rig.check_frames(Description.load("g1_29dof_with_hand_rev_1_0"))
+rig.imu.model.name        # 'unitree-g1-imu'
+rig.unsimulated()         # ['mid360']
+```
+
 Frames and units are as in [drives.md](drives.md#frames): drive quantities in rad, rad/s and Nm at the drive output (crank angle for the ankle cranks), joint quantities in URDF joint coordinates, all times in integer nanoseconds on the plant clock.
 
 ## Drive feedback
@@ -78,7 +122,7 @@ gyro = m.imu.gyro[:, 0]           # [E, 3] rad/s, newest delivered sample
 
 ## IMU
 
-The robot's IMU is an MTi-610. `ImuDelivery` in `src/humanoid_sim/sensors/imu.py` turns the ideal readings of Isaac Lab's IMU sensor into raw samples as the robot's host receives them.
+The plant simulates the rig's `imu`: on the V1 an MTi-610, on the G1 its body IMU. `ImuDelivery` in `src/humanoid_sim/sensors/imu.py` turns the ideal readings of Isaac Lab's IMU sensor into raw samples as the robot's host receives them.
 
 ### Mount and ideal input
 
@@ -88,16 +132,21 @@ The plant advances the IMU at the start of every physics step, to that step's st
 
 ### Sampling and errors
 
-The sensor takes a sample every `sample_period_ns` = 2.74 ms (about 365 Hz) on its own clock, with a random phase per env drawn at reset. Each sample's value is linearly interpolated between the two step-boundary readings around it.
+The sensor takes a sample every `sample_period_ns` (on the V1 2.74 ms, about 365 Hz) on its own clock, with a random phase per env drawn at reset. Each sample's value is linearly interpolated between the two step-boundary readings around it.
 
-Each sample and axis gets Gaussian white noise with `σ = density · √(sample rate)`. The densities are the MTi-610 datasheet figures (from Controls' `ethrc_ssot/imu_sensors.py`), set in `profiles/ethrc_v1.yaml` under `sensors.imu`:
+Each sample and axis gets Gaussian white noise with `σ = density · √(sample rate)`. The densities are the model's; for the MTi-610 its leaflet's (as Controls' `ethrc_ssot/imu_sensors.py` carries them):
 
 | Channel | Density | σ per sample |
 |---|---|---|
 | Gyro | 1.2217e-4 rad/s/√Hz (0.007 °/s/√Hz) | 2.33e-3 rad/s |
 | Accelerometer | 5.884e-4 m/s²/√Hz (60 µg/√Hz) | 0.0112 m/s² |
 
-Each env also has a gyro bias `gyro_bias` (rad/s), an accelerometer bias `accel_bias` (m/s²) and a `misalignment` (a rotation vector in rad: the sensor's rotation in its mount). A sample is `R(misalignment) · ideal + bias + noise`. In training the three come from the `imu_gyro_bias`, `imu_accel_bias` and `imu_misalignment` [randomization](training.md#randomization) parameters and stay constant through an episode; there is no bias drift. In the runtime they are zero unless an `imu_bias` or `imu_spike` fault is injected (see [drives.md](drives.md#physical-faults)).
+The model also gives the sensor a bias, per axis and env:
+
+- Turn-on bias (`turn_on`): drawn at every reset from a normal distribution with the model's 1σ (`gyro_turn_on_bias_rad_s`, `accel_turn_on_bias_m_s2`), constant until the next reset. The MTi-610's gyro figure, 1.5e-3 rad/s, is modeled from the size of the bias at one power-on of the V1 (the spread across power-ons is unmeasured); its accelerometer figure is unmeasured (0). The runtime redraws it at every IMU reset, not only at power-on.
+- In-run drift (`drift`): a first-order Gauss-Markov process advanced every sample, whose stationary σ is the model's bias instability (`gyro_bias_instability_rad_s`, `accel_bias_instability_m_s2`: for the MTi-610 8 °/h and 15 µg) and whose correlation time is `bias_correlation_time_ns` (100 s, modeled). A reset draws it from its stationary distribution.
+
+On top of the model, each env has a gyro bias `gyro_bias` (rad/s), an accelerometer bias `accel_bias` (m/s²) and a `misalignment` (a rotation vector in rad: the sensor's rotation in its mount). A sample is `R(misalignment) · ideal + bias + turn_on + drift + noise`. In training the three come from the `imu_gyro_bias`, `imu_accel_bias` and `imu_misalignment` [randomization](training.md#randomization) parameters and stay constant through an episode; a task adds them to widen what the model gives. In the runtime they are zero unless an `imu_bias` or `imu_spike` fault is injected (see [drives.md](drives.md#physical-faults)).
 
 Each of the three is a vector over the sensor axes `x`, `y` and `z`. A spec draws every axis unless its `select` key, a regular expression over the axis names, picks some. The dict form takes `select` as `ParamSpec` does:
 
@@ -114,7 +163,7 @@ Each selected axis gets its own draw; `"per_target": False` shares one draw acro
 
 ### Delivery
 
-On the robot the samples wait in a serial buffer and reach the host in [bursts](glossary.md#imu-burst). The plant reproduces the delivery seen in the robot's captures:
+On the V1 the samples wait in a serial buffer and reach the host in [bursts](glossary.md#imu-burst). The plant reproduces the delivery the rig gives, here the V1's as seen in its captures (the G1's rig delivers every sample as it is taken):
 
 - Measured samples wait in a pending buffer of 16 samples (`ImuDeliveryCfg.pending`); if it fills, the oldest pending sample is dropped.
 - A burst arrives every `burst_period_ns`, drawn uniformly from 13.9 to 17.6 ms for each burst, starting from a random phase per env. It delivers every pending sample measured by the burst time.
@@ -142,7 +191,7 @@ The tensors are updated in place every step; clone what you keep. A reset (`ImuD
 
 ### Ideal or real IMU
 
-`ImuDelivery.set_noise(enabled)` turns the white noise off (an ideal sensor) or back on, in place, so it also works inside a captured CUDA graph. The sample clock, interpolation, burst delivery and any bias stay as they are. The runtime exposes it as the `SET_FIDELITY` mailbox command; every session starts with `"real"`:
+`ImuDelivery.set_noise(enabled)` turns the model's errors (white noise, turn-on bias, drift) off (an ideal sensor) or back on, in place, so it also works inside a captured CUDA graph. The sample clock, interpolation, burst delivery and the randomized or injected bias stay as they are. The runtime exposes it as the `SET_FIDELITY` mailbox command; every session starts with `"real"`:
 
 ```python
 from humanoid_sim.runtime.abi import plant_abi as abi

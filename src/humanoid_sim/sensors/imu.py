@@ -6,8 +6,10 @@ samples, newest first, each with its measurement time and its host-receipt stamp
 
 * **Sampling.** Samples are measured on the sensor's own clock every ``sample_period_ns`` (a random phase per
   env), linearly interpolated between step boundaries.
-* **Errors.** Per sample: white noise of ``density · √(output rate)``. Per env (the plant's randomization):
-  bias and a small misalignment rotation of the sensor in its mount.
+* **Errors.** Per sample: white noise of ``density · √(output rate)``. The sensor model's bias: a turn-on bias
+  drawn per env at every reset, plus an in-run drift (first-order Gauss-Markov with the model's bias instability
+  as its stationary sigma), advanced per sample. On top, per env from the plant's randomization: a bias and a
+  small misalignment rotation of the sensor in its mount.
 * **Delivery.** Samples wait in the serial buffer and reach the host in bursts, every ``burst_period_ns``
   (uniform per burst), stamped on receipt ``in_burst_spacing_ns`` apart. A consumer that reads "the latest
   sample" sees it up to one burst period late.
@@ -31,16 +33,38 @@ class ImuDeliveryCfg:
     in_burst_spacing_ns: int
     gyro_noise_density: float  # rad/s/√Hz
     accel_noise_density: float  # m/s²/√Hz
+    gyro_turn_on_bias: float = 0.0  # rad/s, per axis, 1 sigma
+    accel_turn_on_bias: float = 0.0  # m/s²
+    gyro_bias_instability: float = 0.0  # rad/s, stationary sigma of the drift
+    accel_bias_instability: float = 0.0  # m/s²
+    bias_correlation_time_ns: int = 100_000_000_000
     history: int = 16  # delivered samples kept per env
     pending: int = 16  # samples a burst can carry
 
     @classmethod
-    def from_profile(cls, block: dict) -> ImuDeliveryCfg:
-        return cls(sample_period_ns=int(block["sample_period_ns"]),
-                   burst_period_ns=tuple(int(v) for v in block["burst_period_ns"]),
-                   in_burst_spacing_ns=int(block["in_burst_spacing_ns"]),
-                   gyro_noise_density=float(block["gyro_noise_density_rad_s_sqrt_hz"]),
-                   accel_noise_density=float(block["accel_noise_density_m_s2_sqrt_hz"]))
+    def from_sensor(cls, sensor) -> ImuDeliveryCfg:
+        """The whole IMU of a rig entry (:class:`~humanoid_sim.sensors.models.Sensor`): its model's errors, the
+        robot's sample period and delivery."""
+        m, c = sensor.model, sensor.config
+        return cls(sample_period_ns=int(c.sample_period_ns),
+                   burst_period_ns=tuple(int(v) for v in c.burst_period_ns),
+                   in_burst_spacing_ns=int(c.in_burst_spacing_ns),
+                   gyro_noise_density=float(m.gyro_noise_density_rad_s_sqrt_hz),
+                   accel_noise_density=float(m.accel_noise_density_m_s2_sqrt_hz),
+                   gyro_turn_on_bias=float(m.gyro_turn_on_bias_rad_s),
+                   accel_turn_on_bias=float(m.accel_turn_on_bias_m_s2),
+                   gyro_bias_instability=float(m.gyro_bias_instability_rad_s),
+                   accel_bias_instability=float(m.accel_bias_instability_m_s2),
+                   bias_correlation_time_ns=int(m.bias_correlation_time_ns))
+
+    @classmethod
+    def for_robot(cls, desc, profile: dict) -> ImuDeliveryCfg:
+        """The IMU of the robot's rig, checked against its description."""
+        from humanoid_sim.sensors.models import SensorRig
+
+        rig = SensorRig.load(profile)
+        rig.check_frames(desc)
+        return cls.from_sensor(rig.imu)
 
 
 @dataclass
@@ -82,7 +106,16 @@ class ImuDelivery:
         self._sigma = torch.tensor([self.gyro_sigma] * 3 + [self.accel_sigma] * 3, **f)
         self._nominal_sigma = self._sigma.clone()
         i64 = dict(device=self.device, dtype=torch.int64)
-        # Errors (written by the plant's randomization).
+        # The model's bias: turn-on (drawn at reset) and in-run drift, gyro then accelerometer axes.
+        self._turn_on_sigma = torch.tensor([cfg.gyro_turn_on_bias] * 3 + [cfg.accel_turn_on_bias] * 3, **f)
+        self._drift_sigma = torch.tensor([cfg.gyro_bias_instability] * 3 + [cfg.accel_bias_instability] * 3, **f)
+        a = math.exp(-cfg.sample_period_ns / cfg.bias_correlation_time_ns)
+        self._drift_decay = a
+        self._drift_kick = self._drift_sigma * math.sqrt(1.0 - a * a)
+        self._model_errors = torch.ones((), **f)  # 0: an ideal sensor (set_noise)
+        self.turn_on = torch.zeros(e, 6, **f)
+        self.drift = torch.zeros(e, 6, **f)
+        # Errors written by the plant's randomization (and the runtime's faults), on top of the model's.
         self.gyro_bias = torch.zeros(e, 3, **f)
         self.accel_bias = torch.zeros(e, 3, **f)
         self.misalignment = torch.zeros(e, 3, **f)
@@ -106,6 +139,9 @@ class ImuDelivery:
 
     # -- schedule ---------------------------------------------------------------------------------
 
+    def _normal(self, n: int) -> torch.Tensor:
+        return torch.randn(n, 6, generator=self.generator, device=self.device, dtype=self.dtype)
+
     def _uniform_ns(self, n: int, lo: int, hi: int) -> torch.Tensor:
         u = torch.rand(n, generator=self.generator, device=self.device, dtype=torch.float64)
         return (lo + (hi - lo) * u).round().to(torch.int64)
@@ -115,6 +151,8 @@ class ImuDelivery:
         """Restart ``env_ids`` at ``t_ns``: empty buffers, random sample phase and burst phase. Sequence numbers
         restart from 1 unless ``keep_seq`` (the runtime keeps them rising, as a client tracks the last one seen)."""
         n = len(env_ids)
+        self.turn_on[env_ids] = self._normal(n) * self._turn_on_sigma
+        self.drift[env_ids] = self._normal(n) * self._drift_sigma  # from the stationary distribution
         self.next_sample[env_ids] = t_ns + self._uniform_ns(n, 0, self.cfg.sample_period_ns)
         self.next_burst[env_ids] = t_ns + self._uniform_ns(n, 0, self.cfg.burst_period_ns[1])
         if not keep_seq:
@@ -131,9 +169,10 @@ class ImuDelivery:
     # -- stepping ---------------------------------------------------------------------------------
 
     def set_noise(self, enabled: bool) -> None:
-        """White noise on (the configured densities) or off (an ideal sensor), from the next sample. In place, so
-        a captured step sees it."""
+        """The model's errors (white noise, turn-on bias, drift) on, or off (an ideal sensor), from the next
+        sample. In place, so a captured step sees it."""
         self._sigma.copy_(self._nominal_sigma if enabled else torch.zeros_like(self._sigma))
+        self._model_errors.fill_(1.0 if enabled else 0.0)
 
     def step(self, t_ns: int | torch.Tensor, gyro: torch.Tensor, specific_force: torch.Tensor, *,
              period_ns: int | None = None) -> None:
@@ -171,10 +210,12 @@ class ImuDelivery:
             self._prev_ns.fill_(t1)
 
     def _measure(self, due: torch.Tensor, at_ns: torch.Tensor, ideal: torch.Tensor, r: torch.Tensor) -> None:
+        drifted = self._drift_decay * self.drift + self._normal(self.num_envs) * self._drift_kick
+        self.drift.copy_(torch.where(due.unsqueeze(1), drifted, self.drift))
         gyro = (r @ ideal[:, :3].unsqueeze(-1)).squeeze(-1) + self.gyro_bias
         acc = (r @ ideal[:, 3:].unsqueeze(-1)).squeeze(-1) + self.accel_bias
-        noise = torch.randn(self.num_envs, 6, generator=self.generator, device=self.device, dtype=self.dtype)
-        sample = torch.cat([gyro, acc], dim=1) + noise * self._sigma
+        model_bias = (self.turn_on + self.drift) * self._model_errors
+        sample = torch.cat([gyro, acc], dim=1) + model_bias + self._normal(self.num_envs) * self._sigma
         self.seq.add_(due.long())
         full = due & (self.pending_count >= self.cfg.pending)
         self._drop_oldest_pending(full)

@@ -50,7 +50,6 @@ def test_the_profile_merges_over_the_defaults(robot):
     profile = load_profile(robot)
     assert profile["robot"] == robot
     assert profile["physics"]["solver"] in profile["physics"]
-    assert profile["sensors"]["imu"]["sample_period_ns"] > 0
 
 
 @pytest.mark.parametrize("robot", ROBOTS)

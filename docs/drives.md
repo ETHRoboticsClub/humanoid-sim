@@ -298,6 +298,6 @@ The runtime publishes its known gaps in the segment descriptor (`FIDELITY_GAPS` 
 - There are no drive current, thermal or backlash models. The applied torque is the envelope-clipped control law.
 - The passive joint parameters of the upper body (waist, shoulders, elbows) are the description's values and have not been identified from captures.
 - The ankle is two hinges, pitch and roll, driven through the crank transmission. There is no closed chain.
-- IMU white noise is the MTi-610 datasheet figure (`SET_FIDELITY` ideal turns it off). There is no bias drift.
+- IMU errors are the rig's model's: white noise, a turn-on bias and a slow drift (`SET_FIDELITY` ideal turns them off). See [sensors.md](sensors.md#sampling-and-errors).
 
 For the drive model this means the applied torque follows the law within the step, with no current-loop dynamics, and a drive can hold its peak torque indefinitely. Gearbox losses are only the joints' Coulomb friction and viscous damping from actuators.yaml, plus the back-drive friction of an off drive in the runtime. There is no integral term. The crank position windows in actuators.yaml are not enforced by the plant; the ankle hinges have joint stops at their ±30° position limits.

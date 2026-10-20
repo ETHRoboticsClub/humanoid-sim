@@ -53,14 +53,8 @@ physics:
     # 100 contacts for a fallen robot, from MJWarp's constraint rows), not counted on Kamino.
     max_contacts_per_world: 128
 
-sensors:
-  imu:
-    # Mount: the description's imu_joint. A sample every 2 ms, delivered as it is taken, without noise: what a
-    # robot that publishes its IMU with every state message at 500 Hz looks like until its timing is measured.
-    sample_period_ns: 2000000
-    burst_period_ns: [2000000, 2000000]
-    in_burst_spacing_ns: 0
-    gyro_noise_density_rad_s_sqrt_hz: 0.0
-    accel_noise_density_m_s2_sqrt_hz: 0.0
+# The robot's sensors (src/humanoid_sim/sensors/models.py): per instance, a model from profiles/sensors.yaml, the URDF
+# link it sits at and what the robot sets around it. The plant simulates the instance named `imu`. None by default.
+sensors: {}
 
 solver_gains: baseline        # constant per-episode PD = the description's baseline gains

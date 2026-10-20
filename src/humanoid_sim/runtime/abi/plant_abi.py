@@ -84,7 +84,7 @@ STATE_CREATING, STATE_READY, STATE_ENDED = 0, 1, 2
 # PRESCRIBE_POSE   {"joint_pos": {...}, "base_pose": [...] | null, "floor_clearance_m": m | null}: hold a pose
 #                  (the base dropped so its lowest sole corner sits that far above the floor); {"release": true}
 # DETACH           {}: the client is leaving; the sim acks and ends the session
-# SET_FIDELITY     {"imu": "ideal" | "real"}: the IMU without or with its white noise, for this session; every
+# SET_FIDELITY     {"imu": "ideal" | "real"}: the IMU without or with its model errors, for this session; every
 #                  session starts real
 CMD_NONE = 0
 CMD_RESET = 1

@@ -59,7 +59,8 @@ FIDELITY_GAPS = [
     "drive current, thermal and backlash models absent; applied torque is the envelope-clipped control law",
     "upper-body passive joint parameters (waist, shoulders, elbows) are description values, not identified",
     "ankle as pitch and roll hinges driven through the crank transmission (no closed chain)",
-    "IMU white noise as the MTi-610 datasheet gives it (SET_FIDELITY ideal turns it off); no bias drift",
+    "IMU errors from the rig's model: white noise, turn-on bias, Gauss-Markov drift (SET_FIDELITY ideal turns them "
+    "off); the turn-on bias is redrawn at every IMU reset, not only at power-on",
 ]
 
 

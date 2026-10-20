@@ -216,7 +216,7 @@ The fidelity gaps the runtime publishes:
 - drive current, thermal and backlash models absent; applied torque is the envelope-clipped control law
 - upper-body passive joint parameters (waist, shoulders, elbows) are description values, not identified
 - ankle as pitch and roll hinges driven through the crank transmission (no closed chain)
-- IMU white noise as the MTi-610 datasheet gives it (SET_FIDELITY ideal turns it off); no bias drift
+- IMU errors from the rig's model: white noise, turn-on bias, Gauss-Markov drift (SET_FIDELITY ideal turns them off); the turn-on bias is redrawn at every IMU reset, not only at power-on
 
 ### Demands
 
@@ -264,7 +264,7 @@ The host writes the feedback region every period, paused or not.
 
 Drive feedback is SI in the physical drive-output frame, as Controls' `fake_bank_feedback` takes it. `applied` is the torque after the torque-speed envelope and the cap, `demanded` the control law's output before them.
 
-Each IMU sample has `seq` (u64), `sample_ns` (measurement time) and `stamp_ns` (host-receipt time), both plant time, then `gyro_rad_s[3]` and `specific_force_m_s2[3]` in the sensor frame. The samples arrive in bursts, as the robot's MTi-610 delivers them to its computer: about 365 samples per second, in bursts every 13.9 to 17.6 ms (see [sensors.md](sensors.md)). The host keeps the 32 latest delivered samples (`IMU_SAMPLES`), so `imu_count` reaches 32 about 0.1 s of plant time after the IMU was reset (32 samples 2.74 ms apart, plus the wait for the next burst).
+Each IMU sample has `seq` (u64), `sample_ns` (measurement time) and `stamp_ns` (host-receipt time), both plant time, then `gyro_rad_s[3]` and `specific_force_m_s2[3]` in the sensor frame. The samples arrive as the rig's IMU delivers them; on the V1, as its MTi-610 does: about 365 samples per second, in bursts every 13.9 to 17.6 ms (see [sensors.md](sensors.md)). The host keeps the 32 latest delivered samples (`IMU_SAMPLES`), so on the V1 `imu_count` reaches 32 about 0.1 s of plant time after the IMU was reset (32 samples 2.74 ms apart, plus the wait for the next burst).
 
 `seq` numbers the samples in the order they were measured. It starts at 1 when the host starts and keeps rising for the life of the process: `RESET` and a new session do not restart it, and samples measured but not yet delivered when the IMU is reset are dropped, so the numbers can skip across a reset. A client reading every bus cycle takes the samples whose `seq` is above the last one it saw, oldest first, and keeps its last-seen number across a `RESET`. `imu_count` and `imu_total` do start again from 0 after a reset.
 

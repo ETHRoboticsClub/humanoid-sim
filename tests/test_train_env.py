@@ -135,7 +135,8 @@ def test_manager_based_env_steps_the_plant():
         rest = env.scene["imu"].data.ang_vel_b.torch.norm(dim=1) < 0.05
         assert rest.any()
         assert torch.allclose(sensor[rest], up_chip[rest], atol=0.3)
-        # The plant delivers what the sensor measured (noise only: no bias or misalignment drawn).
+        # The plant delivers what the sensor measured: noise and the MTi-610's accelerometer drift (0.15 mm/s²),
+        # no randomized bias or misalignment.
         latest = plant.measured().imu.specific_force[:, 0]
         assert torch.allclose(latest[rest], sensor[rest], atol=0.05)
         lat = plant.params()["latency"]

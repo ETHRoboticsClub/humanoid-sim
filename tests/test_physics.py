@@ -138,7 +138,8 @@ def test_imu_delivers_raw_samples_on_a_fixed_base(usd, request):
     n = int(s.count[0])
     assert 50 <= n <= 90
     assert s.specific_force[0, 0].norm().item() == pytest.approx(9.81, abs=0.1)  # at rest: gravity only
-    assert s.gyro[0, 0].norm().item() < 0.01
+    model_bias = sim.imu.turn_on[0, :3] + sim.imu.drift[0, :3]  # the MTi-610's turn-on bias and drift
+    assert (s.gyro[0, 0] - model_bias).norm().item() < 0.01
     assert (s.stamp_ns[0, :8] >= s.sample_ns[0, :8]).all()
     assert sim.backend.contacts is not None
 

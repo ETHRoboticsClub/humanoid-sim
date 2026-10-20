@@ -107,7 +107,7 @@ class RobotPlant:
                                                        seed=cfg.seed + 2)
         self.imu = None
         if imu is not None:
-            self.imu = ImuDelivery(ImuDeliveryCfg.from_profile(self.profile["sensors"]["imu"]), e,
+            self.imu = ImuDelivery(ImuDeliveryCfg.for_robot(self.desc, self.profile), e,
                                    device=self.device, seed=cfg.seed + 1)
             self.imu.reset(torch.arange(e, device=self.device), 0)
 

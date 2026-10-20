@@ -267,14 +267,30 @@ class Description:
             raise ValueError(f"{name}: mechanical stop lies inside the position limit")
         return stop_lo, stop_hi
 
-    def imu_mount(self) -> tuple[str, tuple[float, ...], tuple[float, ...]]:
-        """The IMU's parent link and its pose there (xyz in m, URDF rpy in rad): the URDF's ``imu_joint``."""
+    def link_names(self) -> set[str]:
+        import xml.etree.ElementTree as ET
+
+        return {link.get("name") for link in ET.parse(self.urdf_path).getroot().findall("link")}
+
+    def _imu_joint(self):
         import xml.etree.ElementTree as ET
 
         joint = next((j for j in ET.parse(self.urdf_path).getroot().findall("joint")
                       if j.get("name") == "imu_joint"), None)
         if joint is None:
             raise ValueError(f"{self.urdf_path.name} has no imu_joint")
+        return joint
+
+    def imu_link(self) -> str:
+        """The IMU's own link: the child of the URDF's ``imu_joint``."""
+        child = self._imu_joint().find("child")
+        if child is None:
+            raise ValueError(f"{self.urdf_path.name}: imu_joint has no child")
+        return child.get("link")
+
+    def imu_mount(self) -> tuple[str, tuple[float, ...], tuple[float, ...]]:
+        """The IMU's parent link and its pose there (xyz in m, URDF rpy in rad): the URDF's ``imu_joint``."""
+        joint = self._imu_joint()
         origin = joint.find("origin")
         xyz = tuple(float(v) for v in origin.get("xyz", "0 0 0").split())
         rpy = tuple(float(v) for v in origin.get("rpy", "0 0 0").split())
