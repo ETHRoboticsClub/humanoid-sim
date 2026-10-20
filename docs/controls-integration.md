@@ -2,30 +2,35 @@
 
 Controls runs humanoid-sim behind two lanes: the ETHRC V1's fake-coe lane, below, and the Unitree G1's lane ([The G1 lane](#the-g1-lane)). Each converts its robot's native device commands into the segment's SI drive demands at its own boundary, so one segment serves both.
 
-Controls' fake-coe lane runs the production EtherCAT master, the `standalone` binary of `ethercat_device_configurator` with `--transport fake-coe`, against a bank of simulated EPOS4 drives (`Epos4Slave` in Controls' `ethrc_fake_ethercat` package). The master speaks CANopen over EtherCAT (CoE) to them as it would to the robot. A separate plant host process owns that bank: each bus cycle it reads every drive's demand from the bank and gives each drive its feedback. By default the plant host steps a MuJoCo plant itself. With `--physics humanoid-sim` it converts each demand to an SI drive demand on humanoid-sim's runtime segment and hands the sim's feedback back to the bank. Everything above the drives (master, safety monitor, router, policies, robot API) is the stack that runs on the robot.
+Controls' fake-coe lane runs the production EtherCAT master, the `standalone` binary of `ethercat_device_configurator` with `--transport fake-coe`, against a bank of simulated EPOS4 drives (`Epos4Slave` in Controls' `ethrc_fake_ethercat` package). The master speaks CANopen over EtherCAT (CoE) to them as it would to the robot. A separate plant process owns that bank: each bus cycle it reads every drive's demand from the bank and gives each drive its feedback. By default the plant host steps a MuJoCo plant itself. With humanoid-sim as the plant, the plant process converts each demand to an SI drive demand on humanoid-sim's runtime segment and hands the sim's feedback back to the bank. That process is either the Python plant host or Controls' C++ bank host, which keeps Python off the bus path ([The C++ bank host](#the-c-bank-host)). The IMU reaches Controls either over Controls' plant link or, on the device IMU path, through the robot's own IMU chain ([The IMU](#the-imu)). Everything above the drives (master, safety monitor, router, policies, robot API) is the stack that runs on the robot.
 
 This page covers the Controls side. [runtime.md](runtime.md) describes `humanoid-sim serve`, the segment and the commands.
 
 ## Where it lives in Controls
 
-The V1's humanoid-sim plant is on Controls' `master`. It is the interim path: [humanoid-sim issue #5](https://github.com/ETHRoboticsClub/humanoid-sim/issues/5) tracks the C++ bank host and IMU sensor feed of Controls' `docs/sim-learning-api-plan.md` §1 that replace it. The files involved, relative to the Controls checkout:
+The Python plant host's humanoid-sim path is on Controls' `master`; the C++ bank host and the device IMU path come with Controls' `feat/sim-bank-host`. The files involved, relative to the Controls checkout:
 
 | File | Role |
 |---|---|
 | `ros2_ws/src/sim/ethrc_fake_ethercat/ethrc_fake_ethercat/plant_host.py` | The plant host; `--physics humanoid-sim` runs `run_segment` |
 | `ros2_ws/src/sim/ethrc_fake_ethercat/ethrc_fake_ethercat/sim_segment.py` | `SegmentPlant` (EPOS4 demands to SI, disturbances), `imu_truths` (the sim's IMU for the plant link), `SegmentTestControl` and `SegmentStandingTruth` (test seams and oracle) |
 | `ros2_ws/src/sim/ethrc_sim/ethrc_sim/humanoid_sim/` | Vendored `plant_abi.py` and `plant_abi.h`, `SegmentClient` (`client.py`) and the IMU mount (`frames.py`), shared with the G1 lane |
-| `scripts/sim/launch.py` | `--plant humanoid-sim --sim-segment PATH --sim-wait S` |
+| `ros2_ws/src/sim/ethrc_fake_ethercat/src/bank_host/` | `bank_host`, the C++ plant process (`--bank-host cpp`) |
+| `ros2_ws/src/sim/ethrc_fake_ethercat/ethrc_fake_ethercat/bank_host_config.py` | The config `plant_host` resolves for `bank_host` before it execs it |
+| `ros2_ws/src/sim/ethrc_fake_ethercat/src/xsens_sim/` | `xsens_sim`, the MTi-610 driver's node on the sim's raw IMU samples (`--imu-path device`) |
+| `ros2_ws/src/body/ethrc_body_bridge/launch/imu_bringup.launch.py` | The robot's IMU chain; `IMU_SIM_SEGMENT` puts `xsens_sim` in the driver's place |
+| `scripts/sim/launch.py` | `--plant humanoid-sim --sim-segment PATH --sim-wait S`, `--bank-host`, `--imu-path` |
 | `scripts/sim/humanoid_sim_lane.py` | The lane end to end in two containers |
 | `ros2_ws/src/tests/ethrc_integration_tests/test/sim_fixture.py` | `plant_options`: `ETHRC_TEST_PLANT` and `ETHRC_TEST_SIM_SEGMENT` |
-| `ros2_ws/src/sim/ethrc_fake_ethercat/test/test_sim_segment.py` | Unit tests of the segment side against a stand-in sim |
+| `ros2_ws/src/sim/ethrc_fake_ethercat/test/test_sim_segment.py` | Unit tests of the Python segment side against a stand-in sim |
+| `ros2_ws/src/sim/ethrc_fake_ethercat/test/plant_segment_test.cpp`, `test_bank_host.py`, `test_xsens_sim.py` | The C++ segment client, `bank_host` and `xsens_sim` against segment files and a stand-in sim |
 | `ros2_ws/src/sim/ethrc_fake_ethercat/test/test_sim_segment_live.py` | The adapter against a live sim (`ETHRC_TEST_HUMANOID_SIM_SEGMENT`, `ETHRC_TEST_HUMANOID_SIM_DESCRIPTION`) |
 
 The two ABI files are copied unchanged from `src/humanoid_sim/runtime/abi/`. With `HUMANOID_SIM_ROOT` set to a humanoid-sim checkout, `test_vendored_abi_matches_humanoid_sim` (in `ethrc_sim`'s tests) compares both copies byte for byte. When the ABI changes, copy both files again; a different layout hash or major version makes `Segment.open` refuse the segment.
 
 ## What the plant host does
 
-The plant host runs without ROS. It writes the IMU and its projection to Controls' plant link, a file ring that `plant_relay` republishes on ROS: `/rt/imu` through the session's IMU model (`--fidelity`), the IMU identity and `/ethrc/plant`. `run_segment` in `plant_host.py` does the following.
+This section describes the Python plant host; [The C++ bank host](#the-c-bank-host) lists where `bank_host` differs. The plant host runs without ROS. It writes the IMU and its projection to Controls' plant link, a file ring that `plant_relay` republishes on ROS: `/rt/imu` through the session's IMU model (`--fidelity`), the IMU identity and `/ethrc/plant`. `run_segment` in `plant_host.py` does the following.
 
 At startup:
 
@@ -62,6 +67,31 @@ ETHRC_TEST_HUMANOID_SIM_DESCRIPTION=/workspace/humanoid-sim/third_party/humanoid
 
 It steps the right elbow 0.2 rad with every drive in JVPT at its baseline gains and checks that the elbow gets there, that every drive, the ankle cranks included, applies `kp (target - q)` at rest, that the IMU reaches the plant link in the base frame reading gravity up on the still, upright base, each sample once, and that disabled drives apply no torque. It passes on Warp's CPU device.
 
+## The C++ bank host
+
+`plant_host --physics humanoid-sim --bank-host cpp` (launch.py `--bank-host cpp`) does the startup work above in Python, writes the result to an `ethrc-bank-host-config/v1` file next to its status file, and replaces itself with `bank_host --config FILE` (`os.execv`). From then on the process is C++, and it serves the same segment with the same commands as the Python plant host. It differs in these ways:
+
+- Its cyclic thread sleeps to absolute `CLOCK_MONOTONIC` deadlines at the bus period (`clock_nanosleep`) instead of `time.sleep`, with the same lateness accounting, and Controls can give it `SCHED_FIFO` (`--rt-priority N`).
+- Its control thread writes the status, the projection, the bank truth and transitions and the plant oracle, and serves the test seams, every status period. The cyclic thread never waits for it.
+- It converts demands with the same rules as `demand_fields` (C++ `SiDemand`), held to golden vectors generated from `demand_fields`.
+- The status reports `bank_host: "cpp"`.
+- On the device IMU path it writes no IMU to the plant link, and it sends `SET_FIDELITY` `ideal` only when the session's fidelity preset is `minimal`.
+
+## The IMU
+
+The sim delivers the MTi-610's raw samples in the feedback region: the 32 latest, newest first, each with its `seq`, its measurement time `sample_ns` and its host-receipt time `stamp_ns` in plant time, the gyro and the specific force in the sensor frame, arriving in bursts as the robot's MTi-610 delivers them ([runtime.md](runtime.md#feedback)). Controls reads them on one of two paths, selected with launch.py `--imu-path`:
+
+| `--imu-path` | Reader | What publishes `/rt/imu` |
+|---|---|---|
+| `link` (default) | The plant process | It turns each sample into the base frame through the `imu_joint` rotation, adds the truth's base orientation and writes it to the plant link; `plant_relay` publishes it through the session's IMU model (`--fidelity`). The sim's own noise is off. |
+| `device` (needs `--bank-host cpp`) | `xsens_sim` | The robot's IMU chain: `xsens_sim` in the MTi-610 driver's place, then `imu_filter_madgwick` and `ethrc_imu_relay` with the robot's parameters |
+
+`xsens_sim` takes each sample once, oldest first, and publishes it as the Xsens driver publishes the MTi-610: `sensor_msgs/Imu` on `/imu/data` (remapped to `/imu/data_raw`), frame `imu_link`, no orientation (`orientation_covariance[0]` is -1), the gyro and the specific force as the sim wrote them, covariances from the driver's stddev parameters. It stamps each sample at its receipt time, the driver's `time_option` 2: `stamp_ns` mapped onto `CLOCK_MONOTONIC` with the latest feedback record (`written_mono_ns - (sim_time_ns - stamp_ns)`), then onto the ROS clock. It only reads the segment, beside the plant process that is the session's client, and when the session ends it waits for the next one at the same path. Madgwick then estimates the orientation from the raw samples and `ethrc_imu_relay` turns it into the base frame, as on the robot.
+
+The relay's IMU identity on the device path is the robot's: the description's `imu_joint` revision, marked verified because the sim's chip sits exactly at the description's mount. The sim's MTi-610 white noise stays on unless the session's fidelity preset is `minimal`.
+
+A change to the samples' fields, rate or burst timing reaches the robot's IMU chain unchanged on the device path, so it changes what Madgwick, and a policy behind it, sees in simulation.
+
 ## Running the lane with launch.py
 
 humanoid-sim serves first, on the same machine, with its segment on a volume the Controls side also mounts:
@@ -84,9 +114,11 @@ python3 scripts/sim/launch.py --headless --hands none --clock wall --bus fake-co
 | `--sim-wait S` | `180` | How long the plant host waits for the segment to become ready. The launcher waits that long plus 30 s for the plant host to report ready. |
 | `--profile suspended\|free` | `free` | Must match the sim's `--support`. Nothing compares the two, and `serve` defaults to `suspended`. |
 | `--clock plant\|wall` | `plant` with `--hands none`, otherwise `wall` | The fake-coe lane runs on the wall clock: pass `--clock wall` with `--hands none`, since launch.py refuses `plant` with `--bus fake-coe` |
-| `--fidelity minimal\|real` | `plant_relay`'s | Selects `plant_relay`'s IMU model; the sim's own IMU runs ideal |
+| `--bank-host python\|cpp` | `python` | The plant process ([The C++ bank host](#the-c-bank-host)) |
+| `--imu-path link\|device` | `link` | The IMU path ([The IMU](#the-imu)); `device` needs `--bank-host cpp` |
+| `--fidelity minimal\|real` | `plant_relay`'s (`real`) | On the link path, `plant_relay`'s IMU model, the sim's own IMU running ideal. On the device path, `minimal` turns the sim's IMU noise off and `real` keeps it. |
 
-`--environment` and `--imu-mount-rpy` shape the MuJoCo plant; they do nothing on humanoid-sim.
+`--environment` shapes the MuJoCo plant and does nothing on humanoid-sim. `--imu-mount-rpy` models the link path's IMU and is refused on the device path.
 
 ## Running the lane check: `humanoid_sim_lane.py`
 
@@ -117,11 +149,13 @@ python3 /opt/ethrc/repository/scripts/sim/launch.py --prepared --headless --no-a
 | `--controls-image IMAGE` | required | Controls' simulation image |
 | `--device` | `cpu` | The sim's device (`--sim-image` only) |
 | `--support suspended\|free` | `suspended` | Passed to the sim and as the lane's `--profile` |
+| `--bank-host python\|cpp` | `python` | Passed to launch.py |
+| `--imu-path link\|device` | `link` | Passed to launch.py |
 | `--timeout S` | `300` | How long to wait for every drive to be enabled |
 | `--seconds S` | `60` | How long to run once they are |
 | `--keep` | off | Leave the containers and the volume |
 
-The script waits until every drive is enabled or the plant host reports a fault, runs for `--seconds`, and then reads the segment from inside the Controls container. It prints a JSON result: the plant host's status (`physics`, `cycles`, `keeping_up`, `drives`, `drives_operational`, `drives_enabled`, `drives_faulted`, `fault`) and, from the segment, `sim_steps`, `sim_time_s`, `sim_late_steps`, `imu_samples`, `pd_drives` and `max_tracking_error_rad`. `ok` is true, and the exit code 0, when there is no fault, every drive is enabled and none faulted, at least one drive runs the PD law, and the largest PD tracking error is under 0.05 rad.
+The script waits until every drive is enabled or the plant host reports a fault, runs for `--seconds`, and then reads the segment from inside the Controls container. It prints a JSON result: the plant process's status (`physics`, `bank_host`, `cycles`, `keeping_up`, `drives`, `drives_operational`, `drives_enabled`, `drives_faulted`, `fault`), the `imu_path`, and, from the segment, `sim_steps`, `sim_time_s`, `sim_late_steps`, `imu_samples`, `pd_drives` and `max_tracking_error_rad`. `ok` is true, and the exit code 0, when there is no fault, every drive is enabled and none faulted, at least one drive runs the PD law, and the largest PD tracking error is under 0.05 rad.
 
 The sim starts every session in the V1's standing pose (its profile's `poses.start`, see [runtime.md](runtime.md#the-start-pose)), where every drive lies inside the window Controls arms it in. A sim started with `--pose home` holds the knees outside theirs, and Controls refuses to arm them.
 
@@ -196,7 +230,7 @@ It steps the left knee 0.2 rad with every motor at its deploy gains and checks t
 
 The segment is a file that both processes map. Both must run on the same machine, because the protocol compares `CLOCK_MONOTONIC` values across them: the sim's client timeout, the plant host's heartbeat check and the IMU stamp mapping. Containers on one host share that clock. The file lives on a Docker named volume mounted into both containers (as `humanoid_sim_lane.py --sim-image` does) or in a host directory bind-mounted into the Controls container (`--sim-dir`).
 
-The sim creates `<path>.<pid>.tmp`, sets its mode to `0660` whatever its umask (`Segment.create` calls `fchmod`), and renames it over the path, so it needs write access to the directory. The file belongs to the sim's user and that user's group. The plant host opens the file read-write, because it writes the demands and mailbox regions, so it must run as the same user as the sim or as a member of the file's group. The mode never grants other users access. A `PermissionError` from `Segment.open` is raised at once instead of being retried until `--sim-wait`. The same holds for `humanoid-sim view-runtime`, which also opens the file read-write.
+The sim creates `<path>.<pid>.tmp`, sets its mode to `0660` whatever its umask (`Segment.create` calls `fchmod`), and renames it over the path, so it needs write access to the directory. The file belongs to the sim's user and that user's group. The plant process opens the file read-write, because it writes the demands and mailbox regions, so it must run as the same user as the sim or as a member of the file's group. `xsens_sim` opens it read-write too, though it only reads. The mode never grants other users access. A `PermissionError` from `Segment.open` is raised at once instead of being retried until `--sim-wait`. The same holds for `humanoid-sim view-runtime`, which also opens the file read-write.
 
 Both images run as root. The lane script's plain `docker run` keeps root's usual capabilities, so the Controls container can open a file created by any user. Controls' compose services, the `tests` service included, drop all capabilities (`cap_drop: [ALL]` in `containers/compose.common.yaml`), so root there gets no exemption from file permissions. Under compose, run the sim as root (its image does), as the user the Controls container runs as, or with a group that user belongs to.
 
@@ -207,4 +241,4 @@ The plant projection on `/ethrc/plant` lists what the lane does not model, in `f
 - bank test control 'disturb' reaches the sim at the status period, not on the next bus cycle (`SEGMENT_GAPS`)
 - Command path latency is the host's: the real master's software path and no modeled bus or drive delay (ethrc_sim.command_latency runs on the Python bus only) (`COMMAND_PATH_GAP`)
 
-`plant_relay` appends its IMU model's gap. Its `/rt/imu` comes from the model applied to the sim's ideal samples, not from Madgwick on raw samples as on the robot; issue #5 tracks the sensor feed that fixes this. The IMU identity reports the mount revision as `humanoid-sim-` followed by the first 16 hex digits of the description digest, with `mount_verified` false.
+On the link path `plant_relay` appends its IMU model's gap: its `/rt/imu` is the model applied to the sim's ideal samples, not Madgwick on raw samples as on the robot. Its IMU identity reports the mount revision as `humanoid-sim-` followed by the first 16 hex digits of the description digest. On the device path the IMU's gaps are the sim's own, already in the descriptor's list, and the identity is the relay's ([The IMU](#the-imu)).

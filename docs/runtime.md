@@ -272,6 +272,8 @@ Each IMU sample has `seq` (u64), `sample_ns` (measurement time) and `stamp_ns` (
 
 `seq` numbers the samples in the order they were measured. It starts at 1 when the host starts and keeps rising for the life of the process: `RESET` and a new session do not restart it, and samples measured but not yet delivered when the IMU is reset are dropped, so the numbers can skip across a reset. A client reading every bus cycle takes the samples whose `seq` is above the last one it saw, oldest first, and keeps its last-seen number across a `RESET`. `imu_count` and `imu_total` do start again from 0 after a reset.
 
+Processes other than the client may read the feedback region at the same time; they write nothing. Controls' `xsens_sim` reads the IMU samples this way and publishes them for the robot's IMU chain while the plant process drives the session ([controls-integration.md](controls-integration.md#the-imu)).
+
 ### Mailbox and ack
 
 | Region | Field | Type | Meaning |
