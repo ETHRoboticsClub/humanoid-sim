@@ -99,6 +99,8 @@ class Mti610(Imu):
     gyro_bias_instability_rad_s = 8.0 * DEG / 3600.0
     accel_bias_instability_m_s2 = 15e-6 * G0  # the worse (z) axis
     bias_correlation_time_ns = 100_000_000_000  # modeled: the leaflet gives none
+    # Not modeled yet: ranges ±2000 deg/s and ±10 g, 0.05 deg non-orthogonality, 0.1 %FS non-linearity (MTi 600-series
+    # datasheet MT1603P 2020.B). No source gives a run-to-run bias, a correlation time or an output latency.
 
 
 class UnitreeG1Imu(Imu):
@@ -109,6 +111,10 @@ class UnitreeG1Imu(Imu):
 class Camera(Sensor):
     streams: ClassVar[tuple[str, ...]]
     stereo_baseline_m: ClassVar[float | None] = None
+    mono_horizontal_fov_rad: ClassVar[float | None] = None  # unrectified
+    mono_vertical_fov_rad: ClassVar[float | None] = None
+    mono_global_shutter: ClassVar[bool | None] = None
+    depth_range_m: ClassVar[tuple[float, float] | None] = None  # the vendor's ideal range
 
     def __init__(self, frame: str, *, width: int, height: int, frame_period_ns: int,
                  intrinsics: dict[str, tuple[float, float, float, float]]):
@@ -131,9 +137,15 @@ class OakDW(Camera):
     product = "Luxonis OAK-D-W"
     # Streams as Controls' depthai backend opens them; its BNO086 is part of the device, not a body IMU. Baseline:
     # the device calibration's mono_left -> mono_right, read on the V1 (2026-10-20).
-    source = "Controls ethrc_cameras depthai backend; device calibration read on the V1"
+    # The RGB camera is an IMX378 (rolling shutter) or an OV9782 (global) by variant; which one the V1 has is unread.
+    source = ("Luxonis OAK-D W product page; streams as Controls' ethrc_cameras depthai backend opens them; "
+              "baseline also read from the V1's device calibration")
     streams = ("rgb", "mono_left", "mono_right", "depth")
     stereo_baseline_m = 0.075
+    mono_horizontal_fov_rad = 127.0 * DEG  # OV9282
+    mono_vertical_fov_rad = 79.5 * DEG
+    mono_global_shutter = True
+    depth_range_m = (0.7, 12.0)
 
 
 class Lidar(Sensor):
@@ -150,7 +162,8 @@ class Lidar(Sensor):
 
 class LivoxMid360(Lidar):
     product = "Livox Mid-360"
-    source = "Livox Mid-360 user manual (as Controls' ethrc_cameras/lidar.py MID360)"
+    # Non-repetitive scan, 4 lines (Livox's ROS driver); 905 nm; false alarms < 0.01 %.
+    source = "Livox Mid-360 User Manual v1.2 (2024.04), as Controls' ethrc_cameras/lidar.py MID360"
     frame_period_ns = 100_000_000
     point_rate_hz = 200_000.0
     range_min_m = 0.1
