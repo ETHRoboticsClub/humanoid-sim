@@ -58,6 +58,12 @@ class IsaacLabCfg:
     scene: StaticBoxes | None = None  # static boxes around the robot (every env's robot then starts at the origin)
     rerun: bool = False
     rerun_rrd: str | None = None
+    # More scene entities by name (Isaac Lab entity configs: cameras, assets), added before the scene is built, as
+    # the RTX sensors and a room's splat need (sensors/rtx.py).
+    entities: dict | None = None
+    # Render (update the visualizers, run Kit's app) after every physics step. The RTX sensors turn it off and render
+    # at their own rates (sensors/rtx.py KitRender): with Kit up a render per step costs far more than the step.
+    render_each_step: bool = True
 
 
 def solver_settings(physics: dict, solver: str | None = None) -> tuple[str, dict]:
@@ -288,6 +294,8 @@ class IsaacLabRobot:
             scene_cfg.imu = imu_sensor_cfg(desc.robot)
         if cfg.contacts:
             scene_cfg.contacts = contact_sensor_cfg(history=1, air_time=False)  # net forces now: the truth
+        for name, entity in (cfg.entities or {}).items():
+            setattr(scene_cfg, name, entity)
         visualizers = []
         if cfg.rerun:
             from isaaclab_visualizers.rerun import RerunVisualizerCfg
@@ -330,7 +338,7 @@ class IsaacLabRobot:
 
     def step(self) -> None:
         self.scene.write_data_to_sim()
-        self.sim.step()
+        self.sim.step(render=self.cfg.render_each_step)
         self.scene.update(self.cfg.period_s)
 
     def close(self) -> None:

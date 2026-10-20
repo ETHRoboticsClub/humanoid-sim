@@ -1,0 +1,295 @@
+"""A robot with its RTX sensors in a scene: builds the simulation with the rig's cameras and lidars on it, steps the
+physics, renders when a sensor is due and hands the result to its outputs (the camera feed rings, Unitree's lidar
+topic, a Rerun recording, PNG frames). Kit must already be up (``rtx.start_kit``).
+
+The sensors are the robot's rig (its profile's ``sensors``, ``sensors/models.py``), with the instances of an extra
+``sensors`` block added when given (``SessionCfg.sensors``: a YAML file with the same layout, for sensors the profile
+does not declare). Every camera and lidar the RTX sensors can simulate (``Sensor.rtx_ready``) is simulated; the
+others are listed in ``SensorSession.unsimulated``.
+
+Timing: the physics steps every period (4 ms) and the stage renders every camera period (33 ms at 30 Hz; the lidar's
+sweep period without cameras) at the plant time, which Kit's timeline follows. Each render gives every camera stream
+a frame; a lidar fires its pattern over the time since the previous render and hands over a sweep whenever one
+completes. Stamps are the realtime clock's reading at the frame's or sweep's plant time (``feeds.ros_time_s``). The
+robot is welded at its spawn point in its home pose (a G1 topples on a fixed-gain hold), feet just above the floor,
+unless ``fixed_base`` is off.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from humanoid_sim.sensors.models import RTX_KINDS
+from humanoid_sim.sensors.rtx import DOME_INTENSITY
+
+
+@dataclass
+class SessionCfg:
+    robot: str = "g1_29dof_with_hand_rev_1_0"
+    sensors: str | None = None  # a YAML file with a ``sensors`` block of instances to add to the robot's rig
+    scene: str | None = None  # static boxes (.npz)
+    spawn_m: tuple[float, float] = (0.0, 0.0)
+    splat: str | None = None  # the room's splat as USD
+    splat_intensity: float = 1.0  # its emission (rtx.set_splat_intensity)
+    scan_mesh: str | None = None  # the room's scan (OBJ), surfaces for the lidar
+    cameras: bool = True
+    lidar: bool = True
+    feeds: str | None = None
+    lidar_domain: int | None = None
+    rrd: str | None = None
+    images: str | None = None
+    lidar_noise: bool = True  # the lidar model's range and angular errors; off for exact geometry
+    light: float = DOME_INTENSITY  # the dome light (nits); 0 for none
+    keep_sweeps: int = 0  # the last sweeps to keep in ``SensorSession.sweeps``
+    device: str = "cuda:0"
+    assets: str = "outputs/assets"
+    fixed_base: bool = True
+
+
+class SensorSession:
+    def __init__(self, cfg: SessionCfg):
+        from humanoid_sim.devices.demand import DriveDemand
+        from humanoid_sim.model.asset import asset_dir, load_profile
+        from humanoid_sim.model.description import Description
+        from humanoid_sim.model.poses import STANDING_CLEARANCE_M, initial_pose
+        from humanoid_sim.sensors import rtx
+        from humanoid_sim.sensors.geometry import Mount, camera_spec, load_rig
+        from humanoid_sim.sim import SimCore
+        from humanoid_sim.world.boxes import StaticBoxes
+
+        self.cfg = cfg
+        desc = Description.load(cfg.robot)
+        out = asset_dir(desc, load_profile(cfg.robot), Path(cfg.assets))
+        self.usd = out / json.loads((out / "asset.json").read_text())["usd"]
+        self.rig = load_rig(cfg.robot, desc, cfg.sensors)
+        ready = [s for s in self.rig.sensors.values() if s.kind in RTX_KINDS and s.rtx_ready]
+        cameras = [s for s in ready if s.kind == "camera"] if cfg.cameras else []
+        lidars = [s for s in ready if s.kind == "lidar"] if cfg.lidar else []
+        simulated = {s.name for s in cameras + lidars} | {n for n, s in self.rig.sensors.items() if s.simulated}
+        self.unsimulated = [n for n in self.rig.sensors if n not in simulated]
+        self.mounts = {s.name: Mount.from_urdf(desc.urdf_path, s.frame) for s in cameras + lidars}
+        self.camera_specs = [camera_spec(s) for s in cameras]
+        bodies = rtx.body_paths(self.usd, {m.link for m in self.mounts.values()})
+        entities = rtx.camera_entities([(spec, self.mounts[s.name]) for spec, s in zip(self.camera_specs, cameras,
+                                                                                     strict=True)], bodies)
+        if cfg.light:
+            entities["dome_light"] = rtx.light_entity(cfg.light)
+        if cfg.splat:
+            entities["splat"] = rtx.splat_entity(cfg.splat)
+        self.boxes = StaticBoxes.load(cfg.scene, cfg.spawn_m) if cfg.scene else None
+        pose, height = initial_pose(self.usd, cfg.robot, "home")
+        self.sim = SimCore(self.usd, device=cfg.device, robot=cfg.robot, fixed_base=cfg.fixed_base,
+                           base_height_m=height + STANDING_CLEARANCE_M, scene=self.boxes, entities=entities,
+                           render_each_step=False)
+        if cfg.scan_mesh and lidars:
+            from humanoid_sim.sensors.lidar import add_scan_surfaces
+
+            add_scan_surfaces(cfg.scan_mesh, cfg.spawn_m)
+        if cfg.splat and self.boxes is not None:
+            # The splat shows the room as it looks; its boxes approximate it for the physics and the lidar.
+            import isaaclab.sim as sim_utils
+
+            from humanoid_sim.world.boxes import STATIC_BOXES_PRIM
+
+            rtx.hide_from_cameras(sim_utils.get_current_stage(), STATIC_BOXES_PRIM)
+            rtx.hide_from_cameras(sim_utils.get_current_stage(), GROUND_PRIM)  # the splat has the floor
+        if cfg.splat and cfg.splat_intensity != 1.0:
+            import isaaclab.sim as sim_utils
+
+            rtx.set_splat_intensity(sim_utils.get_current_stage(), cfg.splat_intensity)
+        plant = self.sim.plant
+        q = pose.to(device=plant.cfg.device, dtype=self.sim.joint_state()[0].dtype).unsqueeze(0)
+        self.sim.write_joint_state(q, torch.zeros_like(q))
+        hold, _, _ = plant.map.drive_state(q, torch.zeros_like(q))
+        plant.submit(DriveDemand.pd(hold, plant.drive_stiffness.expand(1, -1), plant.drive_damping.expand(1, -1)),
+                     torch.zeros(1, dtype=torch.long, device=hold.device))
+        self.cameras = rtx.RtxCameras(self.sim.backend, self.camera_specs) if self.camera_specs else None
+        self.lidars = []
+        if lidars:
+            from humanoid_sim.sensors.lidar import RtxLidar
+
+            self.lidars = [RtxLidar(s, self.mounts[s.name], f"{rtx.ROBOT_ROOT}/{bodies[self.mounts[s.name].link]}",
+                                    noise=cfg.lidar_noise) for s in lidars]
+        color = any(st.kind != "depth" for c in self.camera_specs for st in c.streams)
+        self.render = rtx.KitRender(self.sim.backend.sim, color=color)
+        self.last_images: dict[tuple[str, str], np.ndarray] = {}
+        self.sweeps = deque(maxlen=cfg.keep_sweeps) if cfg.keep_sweeps else None
+        self.feeds = {}
+        if cfg.feeds and self.camera_specs:
+            from humanoid_sim.sensors.feeds import CameraFeed
+
+            self.feeds = {spec.camera_id: CameraFeed(cfg.feeds, spec) for spec in self.camera_specs}
+        self.publisher = None
+        if cfg.lidar_domain is not None and self.lidars:
+            from humanoid_sim.sensors.unitree_lidar import UNITREE_MODEL, UnitreeLidarPublisher
+
+            # Unitree's service publishes its robot's Mid-360: the rig lidar of that model.
+            if any(lidar.model.name == UNITREE_MODEL for lidar in self.lidars):
+                self.publisher = UnitreeLidarPublisher(cfg.lidar_domain)
+        self.recorder = None
+        if cfg.rrd:
+            from humanoid_sim.signals.scene import SceneRecorder
+
+            self.recorder = SceneRecorder(self.sim.backend, self.usd, rrd=cfg.rrd, app_id="humanoid-sim rtx sensors",
+                                          scene=self.boxes, draw="boxes" if self.boxes else None)
+        self.counts = {"steps": 0, "renders": 0, "camera_frames": 0, "lidar_sweeps": 0, "lidar_points": 0}
+        self.ms = {"physics": [], "render": [], "camera_read": [], "lidar_read": [], "publish": []}
+        self._saved: dict[str, bool] = {}  # every image stream seen: whether it is depth
+        self._last_sweep: dict[str, tuple] = {}
+
+    # -- loop -------------------------------------------------------------------------------------------------
+
+    def run(self, seconds: float) -> None:
+        """Step ``seconds`` of plant time, rendering every camera period (or every lidar sweep without cameras)."""
+        period_ns = self.sim.period_ns
+        render_ns = min([int(round(1e9 / s.rate_hz)) for c in self.camera_specs for s in c.streams]
+                        or [lidar.period_ns for lidar in self.lidars])
+        next_render = self.sim.t_ns + render_ns
+        for _ in range(int(seconds * 1e9) // period_ns):
+            t = time.perf_counter()
+            self.sim.step()
+            self.ms["physics"].append(1e3 * (time.perf_counter() - t))
+            self.counts["steps"] += 1
+            now = self.sim.t_ns
+            if now < next_render:
+                continue
+            next_render += render_ns
+            t = time.perf_counter()
+            self.render(now)
+            if self.cameras:
+                self.cameras.update(render_ns / 1e9)
+            self.ms["render"].append(1e3 * (time.perf_counter() - t))
+            self.counts["renders"] += 1
+            if self.recorder:
+                self.recorder.frame(now)
+            if self.cameras:
+                self._cameras(now)
+            for lidar in self.lidars:
+                t = time.perf_counter()
+                sweeps = lidar.read(now)
+                self.ms["lidar_read"].append(1e3 * (time.perf_counter() - t))
+                for sweep in sweeps:
+                    self._lidar(now, lidar, sweep)
+
+    def _cameras(self, now_ns: int) -> None:
+        from humanoid_sim.sensors.feeds import depth_mm, ros_time_s
+
+        stamp = ros_time_s(now_ns, self.sim.t_ns)
+        for cam in self.camera_specs:
+            for s in cam.streams:
+                t = time.perf_counter()
+                image = self.cameras.image(cam, s)
+                self.ms["camera_read"].append(1e3 * (time.perf_counter() - t))
+                frame = depth_mm(image, s.range_m) if s.kind == "depth" else image
+                if cam.camera_id in self.feeds:
+                    t = time.perf_counter()
+                    self.feeds[cam.camera_id].publish(s.name, stamp, frame)
+                    self.ms["publish"].append(1e3 * (time.perf_counter() - t))
+                self.counts["camera_frames"] += 1
+                self.last_images[(cam.camera_id, s.name)] = image
+                self._record_image(f"{cam.camera_id}/{s.name}", image, now_ns, depth=s.kind == "depth")
+
+    def _record_image(self, key: str, image: np.ndarray, now_ns: int, *, depth: bool) -> None:
+        if self.recorder:
+            rr = self.recorder.rr
+            rr.set_time("time", duration=now_ns / 1e9)
+            if depth:
+                rr.log(f"/sensors/{key}", rr.DepthImage(np.nan_to_num(image, posinf=0.0), meter=1.0))
+            else:  # JPEG: a second of six raw streams is about 100 MB
+                rr.log(f"/sensors/{key}", rr.Image(image).compress(jpeg_quality=RRD_JPEG_QUALITY))
+        if self.cfg.images and key not in self._saved:
+            self._save_png(key, image, depth, "first")
+        self._saved[key] = depth
+
+    def _save_png(self, key: str, image: np.ndarray, depth: bool, which: str) -> None:
+        from PIL import Image
+
+        d = Path(self.cfg.images)
+        d.mkdir(parents=True, exist_ok=True)
+        if depth:
+            image = np.clip(np.nan_to_num(image, posinf=0) / DEPTH_IMAGE_RANGE_M * 255, 0, 255).astype(np.uint8)
+        Image.fromarray(image).save(d / f"{key.replace('/', '_')}_{which}.png")
+
+    def _lidar(self, now_ns: int, lidar, sweep) -> None:
+        from humanoid_sim.sensors.feeds import ros_time_s
+        from humanoid_sim.sensors.unitree_lidar import UNITREE_MODEL, pack_sweep
+
+        self.counts["lidar_sweeps"] += 1
+        self.counts["lidar_points"] += int(sweep.hit.sum())
+        self._last_sweep[lidar.sensor.name] = (lidar, sweep)
+        if self.sweeps is not None:
+            self.sweeps.append(sweep)
+        if self.publisher and lidar.model.name == UNITREE_MODEL:
+            t = time.perf_counter()
+            stamp_ns = int(ros_time_s(sweep.start_ns, self.sim.t_ns) * 1e9)
+            self.publisher.publish(pack_sweep(sweep.points_m, sweep.hit, sweep.time_s, stamp_ns))
+            self.ms["publish"].append(1e3 * (time.perf_counter() - t))
+        if self.recorder:
+            rr = self.recorder.rr
+            rr.set_time("time", duration=now_ns / 1e9)
+            rr.log(f"/sensors/{lidar.sensor.name}/points",
+                   rr.Points3D(lidar.to_world(sweep), radii=0.01, colors=(255, 120, 0)))
+
+    # -- summary ----------------------------------------------------------------------------------------------
+
+    def summary(self, wall_s: float) -> dict:
+        def stats(values):
+            if not values:
+                return None
+            a = np.asarray(values)
+            return {"n": len(a), "median": float(np.median(a)), "p95": float(np.percentile(a, 95)),
+                    "max": float(a.max())}
+
+        sim_s = self.sim.t_ns / 1e9
+        streams = sum(len(c.streams) for c in self.camera_specs)
+        return {"robot": self.cfg.robot, "sim_s": sim_s, "wall_s": wall_s, "real_time_factor": sim_s / wall_s,
+                "cameras": {c.camera_id: [s.name for s in c.streams] for c in self.camera_specs},
+                "lidars": [lidar.sensor.name for lidar in self.lidars], "unsimulated": self.unsimulated,
+                "counts": self.counts, "ms": {k: stats(v) for k, v in self.ms.items()},
+                "camera_frame_rate_hz": self.counts["camera_frames"] / max(streams, 1) / wall_s,
+                "lidar_sweep_rate_hz": self.counts["lidar_sweeps"] / max(len(self.lidars), 1) / wall_s,
+                "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+                "outputs": {"rrd": self.cfg.rrd, "images": self.cfg.images, "feeds": self.cfg.feeds,
+                            "lidar_domain": self.cfg.lidar_domain}}
+
+    def close(self) -> None:
+        if self.cfg.images:
+            for (camera_id, stream), image in self.last_images.items():
+                key = f"{camera_id}/{stream}"
+                self._save_png(key, image, self._saved[key], "last")
+            for name, (lidar, sweep) in self._last_sweep.items():
+                self._save_png(f"{name}/top", top_view(lidar.to_world(sweep), sweep.origin_w), False, "last")
+        for feed in self.feeds.values():
+            feed.close()
+        if self.recorder:
+            self.recorder.close()
+        self.sim.close()
+
+
+def top_view(points_w: np.ndarray, centre_w: np.ndarray, half_m: float = 12.0, px: int = 800) -> np.ndarray:
+    """A lidar sweep seen from above: ``px`` square around ``centre_w`` (x right, y up), each return a dot coloured by
+    its height (blue low, red high)."""
+    image = np.full((px, px, 3), 16, dtype=np.uint8)
+    rel = points_w - centre_w
+    u = ((rel[:, 0] + half_m) / (2 * half_m) * px).astype(int)
+    v = ((half_m - rel[:, 1]) / (2 * half_m) * px).astype(int)
+    keep = (u >= 0) & (u < px) & (v >= 0) & (v < px)
+    z = points_w[keep, 2]
+    h = np.clip((z - z.min()) / max(np.ptp(z), 1e-6), 0, 1) if len(z) else z
+    colour = np.stack([255 * h, 80 + 100 * (1 - abs(2 * h - 1)), 255 * (1 - h)], axis=1)
+    image[v[keep], u[keep]] = colour.astype(np.uint8)
+    return image
+
+
+DEPTH_IMAGE_RANGE_M = 10.0  # depth PNGs: black at 0 m, white at this
+RRD_JPEG_QUALITY = 90
+GROUND_PRIM = "/World/Ground"  # physics/isaaclab.ground_cfg
+
+__all__ = ["SensorSession", "SessionCfg"]
