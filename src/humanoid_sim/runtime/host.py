@@ -155,6 +155,17 @@ class _Disturbance:
     end_ns: int
 
 
+def imu_descriptor(desc) -> dict:
+    """The descriptor's ``imu``: the link ``imu_joint`` mounts it on, and the rig's IMU (its model and product, the
+    link it sits at, its sample period and delivery to the host), so a client can tell which device it reads."""
+    from humanoid_sim.sensors import rigs
+
+    imu = rigs.imu(desc)
+    return {"parent": desc.imu_mount()[0], "model": imu.model, "product": imu.product, "frame": imu.frame,
+            "sample_period_ns": imu.sample_period_ns, "burst_period_ns": list(imu.burst_period_ns),
+            "in_burst_spacing_ns": imu.in_burst_spacing_ns}
+
+
 class RuntimeHost:
     def __init__(self, segment: str | Path, usd: Path, *, device: str = "cuda:0", robot: str = "ethrc_v1",
                  solver: str | None = None, support: str = "suspended", pose: str | None = None,
@@ -302,7 +313,7 @@ class RuntimeHost:
             "units": {"drive": "physical drive-output frame (crank angle for ankle cranks), SI",
                       "joint": "URDF joint coordinates", "imu": "sensor frame, rad/s and m/s^2 (specific force)",
                       "time": "sim_time_ns and IMU stamps are plant time; *_mono_ns is CLOCK_MONOTONIC"},
-            "imu": {"parent": self.desc.imu_mount()[0]},
+            "imu": imu_descriptor(self.desc),
             "soles": [s["body"] for s in self._soles],
             "commands": {str(k): v for k, v in abi.COMMANDS.items()}, "faults": list(abi.FAULTS),
             "drive_models": self._drive_model_table(),
