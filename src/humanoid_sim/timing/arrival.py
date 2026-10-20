@@ -50,9 +50,11 @@ class ArrivalQueue:
         self._slots = torch.arange(capacity, device=self.device)
 
     def reset(self, env_ids: torch.Tensor, record: dict[str, torch.Tensor]) -> None:
-        """Clear the queue of ``env_ids`` and put ``record`` (rows for those envs) in force."""
+        """Clear the queue of ``env_ids`` and put ``record`` (rows for those envs) in force. The emptied slots
+        hold ``record`` too, so a reset queue is the same whatever was queued before it."""
         for k, v in record.items():
             self.active[k][env_ids] = v
+            self.pending[k][env_ids] = v.unsqueeze(1)
         self.arrival.index_fill_(0, env_ids, _EMPTY)
         self.count.index_fill_(0, env_ids, 0)
         self.overflows.index_fill_(0, env_ids, 0)

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from humanoid_sim.model.asset import load_profile
+from humanoid_sim.model.asset import check_asset_robot, load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.poses import POSES, STANDING_CLEARANCE_M, initial_pose
 from humanoid_sim.physics.isaaclab import contact_sensor_cfg, imu_sensor_cfg
@@ -58,6 +58,7 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
 
     from humanoid_sim.physics.isaaclab import articulation_cfg, ground_cfg
 
+    check_asset_robot(usd, robot)
     profile = load_profile(robot)
     q, height = initial_pose(usd, robot, pose)
     props = plant_joint_properties(robot)

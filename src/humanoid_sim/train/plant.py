@@ -118,12 +118,13 @@ class RobotPlant:
         self.randomizer = Randomizer(specs, {k: v for k, v in nominal.items() if k in used},
                                      {"body": list(robot.body_names), "joint": self.joints, "drive": self.drives},
                                      num_envs=e, device=self.device, seed=cfg.seed, level=cfg.level)
-        from humanoid_sim.physics.isaaclab import apply_joint_limits, running_solver
+        from humanoid_sim.physics.isaaclab import apply_heightfield_base, apply_joint_limits, running_solver
 
         if "friction" in used and physics_manager is None:
             raise ValueError("randomizing friction needs the physics manager (env.sim.physics_manager)")
         self._solver = running_solver()
         apply_joint_limits(self.profile["physics"])
+        apply_heightfield_base(self.profile["physics"])
         self._write_physics()
         self._write_device(torch.arange(e, device=self.device))
 

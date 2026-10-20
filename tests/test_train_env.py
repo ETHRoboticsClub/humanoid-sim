@@ -1,26 +1,15 @@
 """The Train-Time API in a manager-based Isaac Lab env (Warp CPU device). Runs in the Isaac Lab image."""
 
-import json
-from pathlib import Path
-
 import pytest
 import torch
+from conftest import PHYSICS_ROBOTS, built_usd, imu_samples_per_s
 
-from humanoid_sim.model.asset import asset_dir, load_profile
 from humanoid_sim.model.description import Description
 
-ASSETS = Path(__file__).resolve().parents[1] / "outputs" / "assets"
 pytestmark = pytest.mark.physics
 
 
-def _usd():
-    out = asset_dir(Description.load(), load_profile("ethrc_v1"), ASSETS)
-    if not (out / "asset.json").exists():
-        pytest.skip(f"robot asset not built ({out}); run `humanoid-sim build-asset` in the Isaac Lab image")
-    return out / json.loads((out / "asset.json").read_text())["usd"]
-
-
-def _env(num_envs=2):
+def _env(robot, num_envs=2):
     pytest.importorskip("isaaclab_newton")
     import isaaclab.envs.mdp as mdp
     from isaaclab.envs import ManagerBasedRLEnv, ManagerBasedRLEnvCfg
@@ -58,7 +47,7 @@ def _env(num_envs=2):
 
     @configclass
     class Actions:
-        drives = PlantActionCfg(class_type=HoldStanding, action_dim=22, plant=None)
+        drives = PlantActionCfg(class_type=HoldStanding, action_dim=len(Description.load(robot).drives), plant=None)
 
     @configclass
     class Observations:
@@ -94,9 +83,9 @@ def _env(num_envs=2):
     from humanoid_sim.train.plant import TrainPlantCfg
 
     cfg = EnvCfg()
-    cfg.scene = robot_scene_cfg(num_envs, _usd(), ground_friction=0.0)
-    cfg.sim = robot_sim_cfg(device="cpu")
-    cfg.actions.drives.plant = TrainPlantCfg(randomization=[
+    cfg.scene = robot_scene_cfg(num_envs, built_usd(robot), robot=robot, ground_friction=0.0)
+    cfg.sim = robot_sim_cfg(robot, device="cpu")
+    cfg.actions.drives.plant = TrainPlantCfg(robot=robot, randomization=[
         {"param": "friction", "dist": "uniform", "range": [0.5, 1.0], "op": "set"},
         {"param": "latency", "dist": "uniform", "range": [0.010, 0.020], "op": "set", "per_target": False},
         {"param": "body_inertia", "dist": "uniform", "range": [0.8, 1.2], "op": "scale"},
@@ -111,18 +100,20 @@ def _rotation(q_xyzw):
                         torch.stack([2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)], -1)], -2)
 
 
-def test_manager_based_env_steps_the_plant():
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+def test_manager_based_env_steps_the_plant(robot):
     from humanoid_sim.physics.isaaclab import _quat_xyzw
 
-    env = _env()
+    drives = len(Description.load(robot).drives)
+    env = _env(robot)
     try:
         term = env.action_manager.get_term("drives")
         plant = term.plant
         obs, _ = env.reset()
-        assert obs["policy"].shape == (2, 22 + 6)
+        assert obs["policy"].shape == (2, drives + 6)
         t0 = plant.t_ns
-        for _ in range(140):  # 2.8 s: the rigid standing pose tips over and comes to rest
-            obs, _, _, truncated, _ = env.step(torch.zeros(2, 22))
+        for _ in range(140):  # 2.8 s: holding the standing pose rigidly, it tips over and comes to rest
+            obs, _, _, truncated, _ = env.step(torch.zeros(2, drives))
             assert not truncated.any()
         assert plant.t_ns - t0 == 140 * 5 * plant.period_ns
         assert torch.isfinite(obs["policy"]).all()
@@ -148,9 +139,9 @@ def test_manager_based_env_steps_the_plant():
         # Episode end at 3 s: the reset envs start again, IMU delivery restarts from zero.
         dones = 0
         for _ in range(11):
-            _, _, _, truncated, _ = env.step(torch.zeros(2, 22))
+            _, _, _, truncated, _ = env.step(torch.zeros(2, drives))
             dones += int(truncated.sum())
         assert dones == 2
-        assert (plant.imu.samples.count < 365 * 0.1).all()
+        assert (plant.imu.samples.count < imu_samples_per_s(robot) * 0.1).all()
     finally:
         env.close()

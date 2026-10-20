@@ -99,6 +99,17 @@ def asset_meta(usd_path: Path) -> dict:
     raise FileNotFoundError(f"{usd_path} is not inside a built asset (no asset.json)")
 
 
+def check_asset_robot(usd_path: Path, robot: str) -> None:
+    """Raise when ``usd_path`` is a built asset of a robot other than ``robot``: the description of ``robot``
+    supplies the joint properties, drives and poses it is driven with. A USD outside a built asset is not checked."""
+    try:
+        built = asset_meta(usd_path)["robot"]
+    except FileNotFoundError:
+        return
+    if built != robot:
+        raise ValueError(f"{usd_path} is a {built} asset, opened for {robot!r}: pass robot={built!r}")
+
+
 def build_asset(desc: Description, profile: dict, out_root: Path, *, force: bool = False,
                 base_joints: bool = False) -> Path:
     """Build (or reuse) the robot USD; returns its path. Writes ``asset.json`` with the provenance."""

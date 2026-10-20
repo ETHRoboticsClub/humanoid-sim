@@ -1,11 +1,13 @@
 """Benchmark of the Train-Time API scene: throughput and host syncs with sensors and randomization on.
 
 Workload: the training scene (robot, IMU, contacts, flat ground) with :class:`RobotPlant` and a randomization
-like a locomotion policy's (masses and payload, armature, friction, gain and torque scales, latency, encoder
-offsets, IMU bias). Every env holds the home pose with a new demand every 20 ms (the policy period);
-reads ``measured()`` and ``truth()`` once per policy period; resets 1/50 of the envs per policy period to the
-default state (as episodes ending). ``fraction_envs_up`` is the share of robots whose base is above 0.7 m at the
-end. The steady-state loop runs under ``torch.cuda.set_sync_debug_mode("error")`` on CUDA.
+like a locomotion policy's (:func:`randomization`: masses and payload, armature, friction, gain and torque scales,
+latency, encoder offsets, IMU bias). Every env holds the home pose with a new demand every 20 ms (the policy
+period); reads ``measured()`` and ``truth()`` once per policy period; resets 1/50 of the envs per policy period to
+the default state (as episodes ending). ``fraction_envs_up`` is the share of robots whose base is above 3/4 of its
+standing height at the end (a robot whose ankles are softer than its toppling stiffness, such as the G1 at its
+deploy gains, tips over between resets). The steady-state loop runs under ``torch.cuda.set_sync_debug_mode("error")``
+on CUDA.
 """
 
 from __future__ import annotations
@@ -16,25 +18,37 @@ from pathlib import Path
 import torch
 
 from humanoid_sim.devices.demand import DriveDemand
+from humanoid_sim.model.asset import load_profile
+from humanoid_sim.model.description import Description
 from humanoid_sim.timing.clock import NS_PER_MS, NS_PER_S
 
 POLICY_PERIOD_NS = 20 * NS_PER_MS
 
-RANDOMIZATION = [
-    {"param": "body_mass", "dist": "uniform", "range": [0.9, 1.1], "op": "scale"},
-    {"param": "body_mass", "bodies": "Component171_1", "dist": "uniform", "range": [0.0, 4.5], "op": "add"},
-    {"param": "joint_armature", "dist": "uniform", "range": [0.8, 1.2], "op": "scale"},
-    {"param": "friction", "dist": "uniform", "range": [0.3, 1.0], "op": "set"},
-    {"param": "drive_stiffness", "dist": "uniform", "range": [0.9, 1.1], "op": "scale"},
-    {"param": "drive_damping", "dist": "uniform", "range": [0.9, 1.1], "op": "scale"},
-    {"param": "torque_limit", "dist": "uniform", "range": [0.85, 1.0], "op": "scale"},
-    {"param": "latency", "dist": "uniform", "range": [0.010, 0.020], "op": "set", "per_target": False},
-    {"param": "latency", "drives": ".*ANK.*", "dist": "uniform", "range": [0.010, 0.020], "op": "add",
-     "per_target": False},
-    {"param": "encoder_offset", "dist": "uniform", "range": [-0.026, 0.026], "op": "add"},
-    {"param": "encoder_offset", "drives": "maxonHEJ50L_ANK.*", "dist": "uniform", "range": [-0.14, 0.14], "op": "add"},
-    {"param": "imu_gyro_bias", "dist": "normal", "range": [0.0, 0.0015], "op": "add"},
-]
+def randomization(desc, payload_body: str) -> list[dict]:
+    """The workload's randomization for ``desc``: a payload of up to 4.5 kg on ``payload_body`` (the bench passes the
+    heaviest body: the V1's upper body, the G1's torso), and extra command latency and encoder error on the ankle
+    cranks of a robot that has them (the V1's; the larger offset on the left ankle's, whose zero is suspect)."""
+    terms = [
+        {"param": "body_mass", "dist": "uniform", "range": [0.9, 1.1], "op": "scale"},
+        {"param": "body_mass", "bodies": f"^{payload_body}$", "dist": "uniform", "range": [0.0, 4.5], "op": "add"},
+        {"param": "joint_armature", "dist": "uniform", "range": [0.8, 1.2], "op": "scale"},
+        {"param": "friction", "dist": "uniform", "range": [0.3, 1.0], "op": "set"},
+        {"param": "drive_stiffness", "dist": "uniform", "range": [0.9, 1.1], "op": "scale"},
+        {"param": "drive_damping", "dist": "uniform", "range": [0.9, 1.1], "op": "scale"},
+        {"param": "torque_limit", "dist": "uniform", "range": [0.85, 1.0], "op": "scale"},
+        {"param": "latency", "dist": "uniform", "range": [0.010, 0.020], "op": "set", "per_target": False},
+        {"param": "encoder_offset", "dist": "uniform", "range": [-0.026, 0.026], "op": "add"},
+        {"param": "imu_gyro_bias", "dist": "normal", "range": [0.0, 0.0015], "op": "add"},
+    ]
+    cranks = [n for n, d in desc.drives.items() if d.crank is not None]
+    left = [n for lk in desc.linkages if lk.side == "l" for n in (lk.upper, lk.lower)]
+    if cranks:
+        terms.insert(8, {"param": "latency", "drives": "^(" + "|".join(cranks) + ")$", "dist": "uniform",
+                         "range": [0.010, 0.020], "op": "add", "per_target": False})
+    if left:
+        terms.insert(-1, {"param": "encoder_offset", "drives": "^(" + "|".join(left) + ")$", "dist": "uniform",
+                          "range": [-0.14, 0.14], "op": "add"})
+    return terms
 
 
 def run_train_bench(args, usd: Path) -> dict:
@@ -49,9 +63,10 @@ def run_train_bench(args, usd: Path) -> dict:
     scene = instantiate(robot_scene_cfg(n, usd, robot=args.robot, ground_friction=0.0, pose="home",
                                         self_collision=False if args.no_self_collision else None))
     sim.reset()
-    plant = RobotPlant(scene["robot"], TrainPlantCfg(robot=args.robot, randomization=RANDOMIZATION),
-                       imu=scene["imu"], contacts=scene["contacts"], physics_manager=sim.physics_manager)
     robot = scene["robot"]
+    heaviest = robot.body_names[int(robot.data.body_mass.torch[0].argmax())]
+    plant = RobotPlant(robot, TrainPlantCfg(robot=args.robot, randomization=randomization(Description.load(args.robot), heaviest)),
+                       imu=scene["imu"], contacts=scene["contacts"], physics_manager=sim.physics_manager)
     q, qd = plant.joint_state()  # the scene's default pose: home
     q = q.clone()
     stand, _, _ = plant.core.map.drive_state(q, qd)
@@ -103,12 +118,13 @@ def run_train_bench(args, usd: Path) -> dict:
             torch.cuda.synchronize()
     wall = time.perf_counter() - t
     height = robot.data.root_link_pose_w.torch[:, 2] - scene.env_origins[:, 2]
-    up = height.gt(0.7).float().mean().item()
+    up = height.gt(0.75 * robot.data.default_root_pose.torch[:, 2]).float().mean().item()
     sim_utils.SimulationContext.clear_instance()
     if error:
         return {"error": "host sync in steady state", "detail": error}
     sim_s = args.steps * period_s
-    return {"workload": "train", "device": args.device, "num_envs": n, "steps": args.steps, "wall_s": wall,
-            "env_steps_per_s": n * args.steps / wall, "sim_seconds_per_wall_second": n * sim_s / wall,
-            "self_collision": not args.no_self_collision, "host_syncs": "none (torch sync debug mode)" if cuda else "n/a",
+    self_collision = False if args.no_self_collision else bool(load_profile(args.robot)["physics"]["self_collision"])
+    return {"workload": "train", "robot": args.robot, "device": args.device, "num_envs": n, "steps": args.steps,
+            "wall_s": wall, "env_steps_per_s": n * args.steps / wall, "sim_seconds_per_wall_second": n * sim_s / wall,
+            "self_collision": self_collision, "host_syncs": "none (torch sync debug mode)" if cuda else "n/a",
             "checksum_finite": bool(torch.isfinite(sink).item()), "fraction_envs_up": up}
