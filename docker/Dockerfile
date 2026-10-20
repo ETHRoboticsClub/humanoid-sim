@@ -37,7 +37,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY pyproject.toml README.md /opt/humanoid-sim/
 COPY src/ /opt/humanoid-sim/src/
 RUN uv pip install -q --python "${VIRTUAL_ENV}/bin/python" --no-deps /opt/humanoid-sim \
-    && uv pip install -q --python "${VIRTUAL_ENV}/bin/python" "pytest>=9,<10"
+    && uv pip install -q --python "${VIRTUAL_ENV}/bin/python" "pytest>=9,<10" "rosbags>=0.11,<0.12"
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/humanoid-sim-entrypoint
 ENV WARP_CACHE_PATH=/cache/warp
 WORKDIR /workspace

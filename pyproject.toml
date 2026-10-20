@@ -28,6 +28,8 @@ newton = [
     "resolve-robotics-uri-py>=0.4.0",
 ]
 viz = ["rerun-sdk>=0.29.0", "pyarrow>=23"]
+# Reading Controls' rosbag2 recordings without ROS (replay/bag.py).
+bag = ["rosbags>=0.11,<0.12"]
 # MuJoCo only for the kinematics cross-check against Controls' MJCF (never for physics).
 kinematics-check = ["mujoco>=3.3"]
 dev = ["pytest>=9,<10", "ruff>=0.17,<0.18"]
@@ -40,6 +42,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "humanoid_sim.runtime.abi" = ["plant_abi.h"]
+"humanoid_sim.replay" = ["msgs/*.msg"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
