@@ -1,12 +1,15 @@
-"""Gantry supports: a rope that holds the robot up, attached to its base.
+"""Gantry supports: a rope that holds the robot up, attached to its base or to another of its bodies.
 
 Mirrors Controls' test gantry (``ethrc_sim/support.py`` @ 447b4acb), batched over envs:
 
 * **tension program**: a vertical force, linear in time between breakpoints and held beyond both ends, split
-  evenly over points fixed in the base frame (one harness, or a rope per shoulder);
-* **slack cable**: one rope from a base-frame harness point to a world anchor ``overhead_m`` above where that
-  point was when the cable was hung. It pulls along the rope only beyond its unstretched length (also a program
-  in time): ``T = max(0, k · extension + c · extension rate)``.
+  evenly over points fixed in the harness body's frame (one harness, or a rope per shoulder);
+* **slack cable**: one rope from a harness point in the harness body's frame to a world anchor ``overhead_m``
+  above where that point was when the cable was hung. It pulls along the rope only beyond its unstretched length
+  (also a program in time): ``T = max(0, k · extension + c · extension rate)``.
+
+The harness body is the base unless a rope names another (Controls' ``attachment_body``: the lab holds the G1 by
+its torso, at the shoulder straps, so the waist carries the hanging legs).
 
 Programs start when they are hung (times relative to then). Each env has its own rope or none. Forces go
 through the articulation's instantaneous wrench composer, which Isaac Lab clears after every physics step, so
@@ -52,17 +55,21 @@ def _quat_rotate_inverse(q_xyzw: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
 
 
 class Gantry:
-    """Per-env gantry rope on the robot's base (``body``, default the articulation root)."""
+    """Per-env gantry rope on one of the robot's bodies (``body``, default the articulation root, unless a rope
+    names its own)."""
 
     def __init__(self, robot, *, body: str | None = None, max_points: int = 2, max_breakpoints: int = 8):
         self.robot = robot
         e, dev = robot.num_instances, torch.device(robot.device)
         self.num_envs, self.device = e, dev
         self.body_id = 0 if body is None else robot.body_names.index(body)
-        self._body = torch.tensor([self.body_id], device=dev)
+        # Each env's harness body, and every body a rope has been hung from (host side, so apply() knows which
+        # bodies to push without reading the per-env tensor back).
+        self.body_ids = torch.full((e,), self.body_id, dtype=torch.int64, device=dev)
+        self._harness_bodies = {self.body_id: torch.tensor([self.body_id], device=dev)}
         self._all = torch.arange(e, device=dev)
         self.mode = torch.zeros(e, dtype=torch.int64, device=dev)
-        # Base-frame rope points [E, P, 3]; `points` of them used per env (tension), point 0 (cable).
+        # Harness-frame rope points [E, P, 3]; `points` of them used per env (tension), point 0 (cable).
         self.points_b = torch.zeros(e, max_points, 3, device=dev)
         self.num_points = torch.ones(e, dtype=torch.int64, device=dev)
         self.anchor_w = torch.zeros(e, 3, device=dev)
@@ -92,10 +99,26 @@ class Gantry:
         self.program_ns[env_ids] = t_ns + torch.tensor(times, dtype=torch.int64, device=self.device)
         self.program[env_ids] = torch.tensor(values, device=self.device)
 
-    def _points(self, env_ids: torch.Tensor, attachment_b=None, attachment_bodies: Sequence[str] | None = None):
+    def _harness(self, env_ids: torch.Tensor, body: str | None) -> int:
+        """The harness body's index for a rope on ``env_ids``: ``body``, else the default; recorded per env."""
+        if body is None:
+            index = self.body_id
+        elif body in self.robot.body_names:
+            index = self.robot.body_names.index(body)
+        else:
+            raise ValueError(f"no body {body!r} to hang from")
+        if index not in self._harness_bodies:
+            self._harness_bodies[index] = torch.tensor([index], device=self.device)
+        return index
+
+    def _points(self, env_ids: torch.Tensor, body_id: int, attachment_b=None,
+                attachment_bodies: Sequence[str] | None = None):
         if attachment_bodies is not None:
             pose = self.robot.data.body_link_pose_w.torch
-            root = pose[env_ids, self.body_id]
+            root = pose[env_ids, body_id]
+            unknown = [b for b in attachment_bodies if b not in self.robot.body_names]
+            if unknown:
+                raise ValueError(f"no bodies {unknown} to attach to")
             ids = [self.robot.body_names.index(b) for b in attachment_bodies]
             rel = pose[env_ids][:, ids, :3] - root[:, None, :3]
             return _quat_rotate_inverse(root[:, None, 3:].expand(-1, len(ids), -1), rel)
@@ -105,15 +128,19 @@ class Gantry:
         return p.expand(len(env_ids), -1, -1)
 
     def hang_tension(self, env_ids: torch.Tensor, t_ns: int, breakpoints_s_n: Sequence[tuple[float, float]], *,
-                     attachment_b=None, attachment_bodies: Sequence[str] | None = None) -> None:
-        """Vertical tension over time (s, N) from ``t_ns``, split over base-frame ``attachment_b`` points or over
-        the current positions of ``attachment_bodies`` fixed in the base frame (e.g. both shoulders)."""
+                     attachment_b=None, attachment_bodies: Sequence[str] | None = None,
+                     body: str | None = None) -> None:
+        """Vertical tension over time (s, N) from ``t_ns``, split over ``attachment_b`` points in the harness
+        body's frame or over the current positions of ``attachment_bodies`` fixed in that frame (e.g. both
+        shoulders). The harness body is ``body``, else the default."""
         if any(float(n) < 0 for _, n in breakpoints_s_n):
             raise ValueError("tension must be non-negative")
-        pts = self._points(env_ids, attachment_b, attachment_bodies)
+        body_id = self._harness(env_ids, body)
+        pts = self._points(env_ids, body_id, attachment_b, attachment_bodies)
         if pts.shape[1] > self.points_b.shape[1]:
             raise ValueError(f"at most {self.points_b.shape[1]} attachment points")
         self._set_program(env_ids, t_ns, breakpoints_s_n)
+        self.body_ids[env_ids] = body_id
         self.points_b[env_ids] = 0.0
         self.points_b[env_ids, : pts.shape[1]] = pts
         self.num_points[env_ids] = pts.shape[1]
@@ -122,17 +149,19 @@ class Gantry:
 
     def hang_cable(self, env_ids: torch.Tensor, t_ns: int, *, attachment_b, overhead_m: float,
                    length_breakpoints_s_m: Sequence[tuple[float, float]], stiffness_n_m: float,
-                   damping_n_s_m: float) -> None:
-        """One cable from the base-frame harness point ``attachment_b`` to an anchor ``overhead_m`` above where
-        that point is now; unstretched length over time (s, m) from ``t_ns``."""
+                   damping_n_s_m: float, body: str | None = None) -> None:
+        """One cable from the harness point ``attachment_b`` (in the frame of ``body``, else the default) to an
+        anchor ``overhead_m`` above where that point is now; unstretched length over time (s, m) from ``t_ns``."""
         if overhead_m <= 0 or stiffness_n_m <= 0 or damping_n_s_m < 0:
             raise ValueError("cable overhead distance and stiffness must be positive, damping non-negative")
         if any(float(length) <= 0 for _, length in length_breakpoints_s_m):
             raise ValueError("cable lengths must be positive")
+        body_id = self._harness(env_ids, body)
         a = torch.as_tensor(attachment_b, dtype=torch.float32, device=self.device).reshape(3)
-        root = self.robot.data.body_link_pose_w.torch[env_ids, self.body_id]
+        root = self.robot.data.body_link_pose_w.torch[env_ids, body_id]
         point = root[:, :3] + _quat_rotate(root[:, 3:], a.expand(len(env_ids), 3))
         self._set_program(env_ids, t_ns, length_breakpoints_s_m)
+        self.body_ids[env_ids] = body_id
         self.points_b[env_ids] = 0.0
         self.points_b[env_ids, 0] = a
         self.num_points[env_ids] = 1
@@ -155,8 +184,8 @@ class Gantry:
         """Add this step's rope forces (``t_ns``: the step start, plant time)."""
         if not self.active:
             return
-        root = self.robot.data.body_link_pose_w.torch[:, self.body_id]
-        vel = self.robot.data.body_link_vel_w.torch[:, self.body_id]
+        root = self.robot.data.body_link_pose_w.torch[self._all, self.body_ids]
+        vel = self.robot.data.body_link_vel_w.torch[self._all, self.body_ids]
         e, p = self.points_b.shape[:2]
         pts_w = root[:, None, :3] + _quat_rotate(root[:, None, 3:].expand(-1, p, -1), self.points_b)
         value = interp_program(torch.full((e,), t_ns, dtype=torch.int64, device=self.device), self.program_ns,
@@ -182,7 +211,9 @@ class Gantry:
         self.tension_n = torch.where(self.mode == CABLE, cable, share * self.num_points.to(value.dtype))
         self.distance_m = torch.where(self.mode == CABLE, dist, 0.0)
         composer = self.robot.instantaneous_wrench_composer
-        for i in range(p):
-            composer.add_forces_and_torques_index(forces=force[:, i:i + 1], torques=torch.zeros_like(force[:, i:i + 1]),
-                                                  positions=pts_w[:, i:i + 1], body_ids=self._body, env_ids=self._all,
-                                                  is_global=True)
+        for b, body in self._harness_bodies.items():
+            on_b = force * (self.body_ids == b).to(force.dtype)[:, None, None]
+            for i in range(p):
+                composer.add_forces_and_torques_index(forces=on_b[:, i:i + 1], torques=torch.zeros_like(on_b[:, i:i + 1]),
+                                                      positions=pts_w[:, i:i + 1], body_ids=body, env_ids=self._all,
+                                                      is_global=True)

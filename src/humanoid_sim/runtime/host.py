@@ -417,16 +417,20 @@ class RuntimeHost:
             raise ValueError(f"unknown support {kind!r}")
         if self.support == "suspended":
             raise ValueError("the base is welded to the world in a suspended session")
+        body = args.get("attachment_body")
+        if body is not None and not isinstance(body, str):
+            raise TypeError(f"attachment_body names one body, got {body!r}")
         if "cable" in args:
             c = args["cable"]
             self.sim.gantry.hang_cable(env, self.sim.t_ns, attachment_b=args["attachment_local_m"],
                                        overhead_m=float(c["overhead_distance_m"]),
                                        length_breakpoints_s_m=c["length_breakpoints_s_m"],
-                                       stiffness_n_m=float(c["stiffness_n_m"]), damping_n_s_m=float(c["damping_n_s_m"]))
+                                       stiffness_n_m=float(c["stiffness_n_m"]), damping_n_s_m=float(c["damping_n_s_m"]),
+                                       body=body)
         else:
             self.sim.gantry.hang_tension(env, self.sim.t_ns, args["tension_breakpoints_s_n"],
                                          attachment_b=args.get("attachment_local_m"),
-                                         attachment_bodies=args.get("attachment_bodies"))
+                                         attachment_bodies=args.get("attachment_bodies"), body=body)
         return "gantry"
 
     def _disturb(self, args: dict) -> str:
