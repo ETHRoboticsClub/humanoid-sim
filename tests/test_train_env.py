@@ -151,6 +151,6 @@ def test_manager_based_env_steps_the_plant():
             _, _, _, truncated, _ = env.step(torch.zeros(2, 22))
             dones += int(truncated.sum())
         assert dones == 2
-        assert (plant.imu.samples.count < 365 * 0.1).all()
+        assert (plant.imu.samples.count < 400 * 0.1).all()
     finally:
         env.close()

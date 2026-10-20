@@ -22,8 +22,7 @@ Each robot's rig is in `src/humanoid_sim/sensors/rigs.py`: a `Rig` of named inst
 ```python
 def ethrc_v1() -> Rig:
     return Rig(
-        imu=Mti610("imu_link", sample_period_ns=2_740_000, burst_period_ns=(13_900_000, 17_600_000),
-                   in_burst_spacing_ns=13_000),
+        imu=Mti610("imu_link", sample_period_ns=2_500_000),  # 400 Hz over CAN, each sample as it is sent
         camera0=OakDW("camera0_camera", width=640, height=400, frame_period_ns=33_333_333, intrinsics={...}),
     )
 ```
@@ -35,7 +34,7 @@ from humanoid_sim.model.description import Description
 from humanoid_sim.sensors import rigs
 
 imu = rigs.imu(Description.load("ethrc_v1"))  # Mti610(frame='imu_link')
-cfg = imu.delivery_cfg()                      # ImuDeliveryCfg(sample_period_ns=2740000, ...)
+cfg = imu.delivery_cfg()                      # ImuDeliveryCfg(sample_period_ns=2500000, ...)
 rigs.rig("g1_29dof_with_hand_rev_1_0").unsimulated()  # ['mid360']
 ```
 
@@ -123,7 +122,7 @@ The plant advances the IMU at the start of every physics step, to that step's st
 
 ### Sampling and errors
 
-The sensor takes a sample every `sample_period_ns` (on the V1 2.74 ms, about 365 Hz) on its own clock, with a random phase per env drawn at reset. Each sample's value is linearly interpolated between the two step-boundary readings around it.
+The sensor takes a sample every `sample_period_ns` (on the V1 2.5 ms, 400 Hz) on its own clock, with a random phase per env drawn at reset. Each sample's value is linearly interpolated between the two step-boundary readings around it.
 
 Each sample and axis gets Gaussian white noise with `σ = density · √(sample rate)`. The densities are the model's; for the MTi-610 its leaflet's (as Controls' `ethrc_ssot/imu_sensors.py` carries them):
 
@@ -154,13 +153,13 @@ Each selected axis gets its own draw; `"per_target": False` shares one draw acro
 
 ### Delivery
 
-On the V1 the samples wait in a serial buffer and reach the host in [bursts](glossary.md#imu-burst). The plant reproduces the delivery the rig gives, here the V1's as seen in its captures (the G1's rig delivers every sample as it is taken):
+The plant delivers samples as the rig says. Both robots' rigs deliver every sample as it is taken: the V1's MTi-610 sends each one over CAN (measured on the V1: 400 samples/s, 2.47 ms apart at the median, none missed), the G1's LowState carries each one (modeled). A sensor whose host reads it in [bursts](glossary.md#imu-burst) is described by the burst parameters:
 
 - Measured samples wait in a pending buffer of 16 samples (`ImuDeliveryCfg.pending`); if it fills, the oldest pending sample is dropped.
-- A burst arrives every `burst_period_ns`, drawn uniformly from 13.9 to 17.6 ms for each burst, starting from a random phase per env. It delivers every pending sample measured by the burst time.
-- Delivered samples get host-receipt stamps: the oldest sample of a burst is stamped at the burst time and each newer one `in_burst_spacing_ns` = 13 µs later.
+- A burst arrives every `burst_period_ns`, drawn uniformly from its range for each burst, starting from a random phase per env. It delivers every pending sample measured by the burst time.
+- Delivered samples get host-receipt stamps: the oldest sample of a burst is stamped at the burst time and each newer one `in_burst_spacing_ns` later.
 
-A burst carries 5 to 7 samples, and a consumer that reads "the latest sample" sees it up to one burst period late.
+A consumer that reads "the latest sample" then sees it up to one burst period late. The V1's earlier serial path did this (bursts every 13.9 to 17.6 ms, 13 µs apart, on the `exc-*` captures), and replays of those captures still read it.
 
 ### `ImuSamples`
 

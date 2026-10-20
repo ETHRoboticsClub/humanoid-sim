@@ -132,7 +132,7 @@ def test_imu_delivers_raw_samples_on_a_fixed_base(usd, request):
 
     sim = SimCore(usd, device="cpu", fixed_base=True, imu=True, contacts=True)
     request.addfinalizer(sim.close)
-    for _ in range(50):  # 0.2 s: ~73 samples at ~365/s, in bursts
+    for _ in range(50):  # 0.2 s: ~80 samples at 400/s
         sim.step()
     s = sim.imu.samples
     n = int(s.count[0])

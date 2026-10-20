@@ -39,7 +39,7 @@ def test_the_v1_carries_the_mti_610_and_an_oak_d_w():
     assert rig.unsimulated() == ["camera0"]
     cfg = rig.imu.delivery_cfg()
     assert cfg.gyro_turn_on_bias == Mti610.gyro_turn_on_bias_rad_s
-    assert (cfg.sample_period_ns, cfg.burst_period_ns) == (2_740_000, (13_900_000, 17_600_000))
+    assert (cfg.sample_period_ns, cfg.burst_period_ns) == (2_500_000, (2_500_000, 2_500_000))
 
 
 @pytest.mark.parametrize("robot", ["g1_29dof_rev_1_0", "g1_29dof_with_hand_rev_1_0"])

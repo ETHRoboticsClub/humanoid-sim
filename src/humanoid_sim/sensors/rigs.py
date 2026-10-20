@@ -9,10 +9,10 @@ from humanoid_sim.sensors.models import Imu, LivoxMid360, Mti610, OakDW, Rig, Un
 
 def ethrc_v1() -> Rig:
     return Rig(
-        # Configured at 400 Hz (Controls imu_bringup.launch.py); delivery as /rt/imu shows it on the exc-* captures:
-        # ~365 samples/s, received in bursts every 13.9-17.6 ms (p1-p99), stamped 13 us apart.
-        imu=Mti610("imu_link", sample_period_ns=2_740_000, burst_period_ns=(13_900_000, 17_600_000),
-                   in_burst_spacing_ns=13_000),
+        # 400 Hz over CAN (Controls ethrc_mti_can), each sample reaching the host as it is sent: kernel stamps of
+        # /imu/data_raw on the V1 (2026-10-20, 2000 samples) are 2.47 ms apart (median; p1 2.33, p99 3.12 ms), none
+        # missed. The exc-* captures' bursts were the earlier serial path.
+        imu=Mti610("imu_link", sample_period_ns=2_500_000),
         # As Controls' camera service opens it, with the unit's calibration (camera_info on the V1, 2026-10-20).
         camera0=OakDW("camera0_camera", width=640, height=400, frame_period_ns=33_333_333,
                       intrinsics={"rgb": (283.087462, 282.805448, 325.969479, 198.375709),
