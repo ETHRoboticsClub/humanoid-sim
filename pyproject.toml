@@ -47,6 +47,7 @@ addopts = "-ra"
 markers = [
     "physics: steps physics through Isaac Lab / Newton (run in the Isaac Lab image)",
     "data: needs datasets/humanoid-v1 exc-* captures (HUMANOID_SIM_DATASETS)",
+    "rtx: renders RTX sensors through Isaac Sim (Kit): the Isaac Sim image (docker/Dockerfile.kit) on an RTX GPU",
 ]
 
 [tool.ruff]

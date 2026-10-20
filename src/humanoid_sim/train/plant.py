@@ -34,8 +34,7 @@ from humanoid_sim.devices.feedback import DriveFeedback
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.randomization import PARAMS, ParamSpec, Randomizer, parse_specs
-from humanoid_sim.sensors import rigs
-from humanoid_sim.sensors.imu import ImuDelivery, ImuSamples
+from humanoid_sim.sensors.imu import ImuDelivery, ImuDeliveryCfg, ImuSamples
 from humanoid_sim.timing.clock import NS_PER_S
 
 
@@ -108,7 +107,7 @@ class RobotPlant:
                                                        seed=cfg.seed + 2)
         self.imu = None
         if imu is not None:
-            self.imu = ImuDelivery(rigs.imu(self.desc).delivery_cfg(), e,
+            self.imu = ImuDelivery(ImuDeliveryCfg.for_robot(self.desc, self.profile), e,
                                    device=self.device, seed=cfg.seed + 1)
             self.imu.reset(torch.arange(e, device=self.device), 0)
 
@@ -119,12 +118,13 @@ class RobotPlant:
         self.randomizer = Randomizer(specs, {k: v for k, v in nominal.items() if k in used},
                                      {"body": list(robot.body_names), "joint": self.joints, "drive": self.drives},
                                      num_envs=e, device=self.device, seed=cfg.seed, level=cfg.level)
-        from humanoid_sim.physics.isaaclab import apply_joint_limits, running_solver
+        from humanoid_sim.physics.isaaclab import apply_heightfield_base, apply_joint_limits, running_solver
 
         if "friction" in used and physics_manager is None:
             raise ValueError("randomizing friction needs the physics manager (env.sim.physics_manager)")
         self._solver = running_solver()
         apply_joint_limits(self.profile["physics"])
+        apply_heightfield_base(self.profile["physics"])
         self._write_physics()
         self._write_device(torch.arange(e, device=self.device))
 

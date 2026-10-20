@@ -43,6 +43,10 @@ physics:
     # past its stop (under 2 mrad here), and Controls' range survey found that stop 4 mrad out. The real stops'
     # stiffness is not measured (modeled).
     joint_limits: mujoco
+    # Depth of the solid base under a heightfield's lowest point. Newton exports heightfields to MuJoCo with a
+    # 0.1 mm base, through which a shape sinking into the lowest cells is pushed out downwards (a G1 foot sphere
+    # landing on a rough tile falls through). Deeper than any shape sinks; nothing lies under the terrain.
+    heightfield_base_m: 1.0
   # Kamino (beta in Newton 1.6): maximal coordinates, hard joint-limit and contact constraints, P-ADMM forward
   # dynamics, contacts from Newton's collision pipeline. Contact friction mixes by the larger coefficient, as
   # MJWarp does. Not yet checked against MJWarp or the captures (modeled).
@@ -52,5 +56,9 @@ physics:
     # Contact buffer per world, the same for every world; Newton drops contacts beyond it. An estimate (about
     # 100 contacts for a fallen robot, from MJWarp's constraint rows), not counted on Kamino.
     max_contacts_per_world: 128
+
+# The robot's sensors (src/humanoid_sim/sensors/models.py): per instance, a model from profiles/sensors.yaml, the URDF
+# link it sits at and what the robot sets around it. The plant simulates the instance named `imu`. None by default.
+sensors: {}
 
 solver_gains: baseline        # constant per-episode PD = the description's baseline gains

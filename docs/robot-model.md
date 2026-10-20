@@ -34,8 +34,9 @@ Nothing in the code names a robot. What differs between them comes from the desc
 | Feet | a sole plate fitted to each foot's lowest face (`model.sole`) | four 5 mm spheres per foot, bounded by a sole box for the truth (`model.sole.fit: bounds`) |
 | Self-collision | on, with Controls' contact excludes | off, as Isaac Lab's own G1 has it |
 | IMU | the URDF's `imu_joint` | the URDF's `imu_joint`, on the pelvis |
+| Holding the home pose at the baseline gains | stands: its crank-driven ankles are about 4.6 times as stiff in pitch as the stiffness at which its body topples | tips over within about 1.3 s: its ankles (40 Nm/rad each) are about 0.4 times as stiff as that (about 210 Nm/rad), so the G1 needs a policy to stand |
 
-`tests/test_robots.py` runs over every robot `robots()` finds: inventory, profile merge, the prepared URDF, sole boxes, mirror pairs, the home pose inside the travel, and the plant at the home pose. `tests/test_runtime_host.py::test_the_host_serves_the_g1` serves the G1 through the runtime segment.
+`tests/test_robots.py` runs over every robot `robots()` finds: inventory, profile merge, the prepared URDF, sole boxes, mirror pairs, the home pose inside the travel, and the plant at the home pose. The physics, world, training, gantry, runtime and runtime-view tests run on the V1 and both G1s (`PHYSICS_ROBOTS` in `tests/conftest.py`); what they expect of each robot comes from its description, profile and host kinematics: mass and body count from the URDF, gravity sag from the drives' stiffness, the IMU rate from the profile, the joint-stop sink from MuJoCo's soft-limit law, the toppling stiffness from the centre of mass. `tests/test_runtime_host.py::test_the_host_serves_the_g1` also checks the G1's motor slots and soles through the runtime segment.
 
 ### Adding a robot
 
@@ -198,7 +199,7 @@ outputs/assets/ethrc_v1/<key>/
   asset.json             provenance and build record
 ```
 
-`build_asset` returns the existing USD without rebuilding when `asset.json` is present and `--force` is not given. A change to `actuators.yaml`, to `URDF_6.urdf`, to the selected URDF variant or to anything in the profile's `model` block produces a new key, so the old asset stays on disk and commands ask for a build. Changes to the `physics` and `devices` blocks are applied at spawn or run time and need no rebuild. Mesh file contents are not part of the key, nor are build steps that leave the prepared URDF text unchanged (the converter settings, the authoring of contact excludes); after changing either, rebuild with `--force`.
+`build_asset` returns the existing USD without rebuilding when `asset.json` is present and `--force` is not given. A change to `actuators.yaml`, to `URDF_6.urdf`, to the selected URDF variant or to anything in the profile's `model` block produces a new key, so the old asset stays on disk and commands ask for a build. Changes to the `physics`, `devices` and `sensors` blocks are applied at spawn or run time and need no rebuild. Mesh file contents are not part of the key, nor are build steps that leave the prepared URDF text unchanged (the converter settings, the authoring of contact excludes); after changing either, rebuild with `--force`.
 
 | `asset.json` field | Content |
 |---|---|
@@ -368,9 +369,11 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `physics.mjwarp.iterations`, `.ls_iterations` | `solver_cfg` | Solver and line-search iteration limits. |
 | `physics.mjwarp.njmax`, `.nconmax` | `solver_cfg` | MJWarp buffers: constraint rows per world (a maximum) and contacts per world (an average; the pool is shared by all worlds). |
 | `physics.mjwarp.joint_limits` | `apply_joint_limits` | `mujoco`: MuJoCo's own joint-limit constraint, as Controls' MJCF has it. `newton`: Newton's force-space default, softer for the legs. |
+| `physics.mjwarp.heightfield_base_m` | `apply_heightfield_base` | Depth of the solid base under a heightfield's lowest point, 1.0 m (see [world.md](world.md#the-heightfields-base)). |
 | `physics.kamino.integrator` | `solver_cfg` | `euler`, the only one allowed: `moreau` needs Kamino's own collision detector, which is not used here. |
 | `physics.kamino.iterations` | `solver_cfg` | Iteration limit of Kamino's P-ADMM dynamics solver. |
 | `physics.kamino.max_contacts_per_world` | `solver_cfg` | Contact buffer per world (128, an estimate); Newton drops contacts beyond it. |
+| `sensors.<name>` | `SensorRig`, `ImuDeliveryCfg.for_robot` | The robot's sensors (none by default: a robot needs a rig with an `imu` to simulate one): per instance a model from `profiles/sensors.yaml`, the URDF link it sits at and what the robot sets around it (an IMU's sample period and delivery, a camera's resolution and calibration). The plant simulates the instance named `imu`. See [sensors.md](sensors.md#sensor-models-and-the-rig). |
 | `solver_gains` | nothing | Records that the solver PD is the description's baseline gains. |
 
 Only the `model` block is part of the asset key. The `physics` block is described in more detail in [world.md](world.md) and [testing-and-gpu.md](testing-and-gpu.md).
@@ -382,8 +385,9 @@ The repository rule is that robot facts live in humanoid-urdf. A few currently l
 | Entry | Fact | Source |
 |---|---|---|
 | `devices.encoders` | Output encoder counts per revolution per drive family (4096 for HEJ 90, 16384 for HEJ 70 and HEJ 50) | Controls `ethercat_device_configurator` device configurations, `Hardware.position_encoder_resolution` |
-
-Each robot's sensors, with how its IMU samples reach the host and its camera calibration, are in `src/humanoid_sim/sensors/rigs.py`, each figure with its source (see [sensors.md](sensors.md#sensor-models-and-the-rig)).
+| `sensors` | Which sensor sits at which link (the V1: MTi-610 and OAK-D-W; the G1: its body IMU and a Mid-360) | the robots' running stacks, 2026-10-20 |
+| `sensors.imu.sample_period_ns`, `burst_period_ns`, `in_burst_spacing_ns` | How IMU samples reach the host | V1: measured on the `exc-*` captures; G1: modeled (LowState at 500 Hz) |
+| `sensors.camera0.intrinsics` | The V1 OAK-D-W's calibration | its `camera_info` on the V1 |
 
 The rest of `model` (the URDF variant, sole box parameters, contact excludes, ground friction) mirrors how Controls builds its MuJoCo model; those are modeling choices.
 

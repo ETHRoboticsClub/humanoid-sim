@@ -18,22 +18,24 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 | `test_imu_delivery.py` | IMU sampling on the sensor clock, burst delivery, bias, misalignment and noise, per-env reset | |
 | `test_mirror.py` | The left/right mirror map against URDF forward kinematics | |
 | `test_model_build.py` | The prepared URDF: inventory, welds, limits, sole boxes, digest, body tree, collision meshes, self-collision sets, base joints | |
-| `test_physics.py` | The built asset: mass and bodies and the home pose (both soles level and at one height) with host kinematics; on MJWarp, holding a standing pose, base joints following a prescribed yaw, raw IMU samples, CUDA-graph step against eager, the waist pushed into its stop staying there; standing and the stop on both MJWarp and Kamino | 7 tests `physics`, 2 unmarked (see below) |
+| `test_physics.py` | Every robot in `PHYSICS_ROBOTS` (the V1 and both G1s, `tests/conftest.py`): the built asset's mass and bodies against the URDF and the home pose (both soles level and at one height) with host kinematics; on MJWarp, the pose held on a welded base sagging by gravity over the drives' stiffness, raw IMU samples at the profile's rate, CUDA-graph step against eager, the waist pushed into its stop sinking as MuJoCo's soft limit allows; the hold and the stop also on Kamino. The V1 alone: its standing pose's pitched soles, base joints following a prescribed yaw | `physics` but for 3 (see below) |
 | `test_plant_log.py` | `RobotPlant.log` writing signals at plant time | |
 | `test_randomization.py` | Randomization specs: parsing, selection (bodies, drives, an IMU axis), composition, scopes, levels, reproducibility | |
 | `test_reporting.py` | Drive reporting in encoder counts, velocity and torque, against values Controls' fake drive tests pin | |
 | `test_runtime_abi.py` | The runtime segment: C header against the Python layout (needs a C compiler), identity checks, torn-record rejection, mailbox and demand records, concurrent reads | |
-| `test_runtime_host.py` | `humanoid-sim serve` end to end with the test as client: round trip, prescribed pose, detach and next session, demand intake, joint disturbance, back-driven disabled drive | `physics` |
-| `test_runtime_view.py` | `view-runtime` recording frames from a segment that a stand-in host writes through the ABI (no physics; needs Newton, Rerun and the built asset) | |
+| `test_runtime_host.py` | `humanoid-sim serve` end to end with the test as client, for every robot: round trip, prescribed pose, detach and next session, demand intake, joint disturbance, back-driven disabled drive; the G1's motor slots and soles | `physics` |
+| `test_runtime_view.py` | `view-runtime` recording frames from a segment that a stand-in host writes through the ABI, for every robot (no physics; needs Newton, Rerun and the built assets) | |
 | `test_solvers.py` | Solver selection from the profile and its overrides, and the errors for unknown or unconfigured solvers | |
-| `test_supports.py` | Gantry programs, and rope tension and cable length on the robot | 2 tests `physics` |
+| `test_scan.py` | A scan's look: each face corner's position and the texel it shows, and the floor quad with its texture, against a MuJoCo world built as Controls builds its `hangar_scan`; the floor on the boxes' ground; the live detail's merged vertices and colours; the descriptor's digests; refused files | |
+| `test_static_boxes.py` | Static boxes: the file read and placed where Controls' MuJoCo hangar places them (corner by corner against MuJoCo's kinematics, which needs the `kinematics-check` extra), spawn clearance, refused files, the drawn mesh; in the solver, one shared set of box shapes at the same corners, robots in every env standing on a box, and the runtime host standing the robot among boxes | 3 tests `physics` |
+| `test_supports.py` | Gantry programs, and rope tension and cable length on every robot | the rope tests `physics` |
 | `test_sysid.py` | The passive-fit search space and CMA-ES | |
-| `test_train_env.py` | The Train-Time API in a manager-based Isaac Lab environment with two robots | `physics` |
-| `test_world.py` | A heightfield terrain under the feet, force pushes, and a robot holding the home pose standing on flat ground | `physics` |
+| `test_train_env.py` | The Train-Time API in a manager-based Isaac Lab environment with two robots, for every robot | `physics` |
+| `test_world.py` | For every robot: landing on a bumpy heightfield and staying on top, force pushes, and holding the home pose on flat ground, which stands only when the ankles are stiffer than the body's toppling stiffness (the V1 stands, the G1 tips over) | `physics` |
 
 A test skips when something it needs is missing: Isaac Lab (`isaaclab_newton`), Newton, the Rerun SDK, scipy, the built robot asset, the captures, CUDA or a C compiler. The skip reason names it, and pytest prints every reason at the end of the run (`-ra` is set in `pyproject.toml`). A physics run without the built assets therefore passes with most tests skipped; read the skip summary after a physics run.
 
-Three tests need the built plain asset but carry no marker, because they use host kinematics (Newton, with the `newton` extra) and step no physics: `test_kinematic_model_mass_and_bodies` and `test_home_pose_levels_both_soles_at_one_height` in `test_physics.py`, and `test_view_runtime_records_frames_from_a_segment` in `test_runtime_view.py`, which also needs the Rerun SDK (the `viz` extra). They run natively once the asset exists in `outputs/assets/`, and skip without it. None of them runs in CI: the `cpu-contracts` job has no asset, and the `isaaclab-image` job selects `-m physics`. All three run under a plain `pytest` in the image and in the `e2e` task.
+Four tests need the built plain assets but carry no marker, because they use host kinematics (Newton, with the `newton` extra) and step no physics: `test_kinematic_model_mass_and_bodies`, `test_home_pose_levels_both_soles_at_one_height` and `test_the_v1_standing_pose_pitches_its_soles` in `test_physics.py`, and `test_view_runtime_records_frames_from_a_segment` in `test_runtime_view.py`, which also needs the Rerun SDK (the `viz` extra). They run natively once the asset exists in `outputs/assets/`, and skip without it. None of them runs in CI: the `cpu-contracts` job has no asset, and the `isaaclab-image` job selects `-m physics`. All three run under a plain `pytest` in the image and in the `e2e` task.
 
 ## Markers
 
@@ -43,6 +45,7 @@ The markers are declared in `pyproject.toml`.
 |---|---|---|
 | `physics` | Steps physics through Isaac Lab and a Newton solver (MJWarp; the standing and joint-stop tests also run on Kamino) | The image, or a GPU node set up by `sky/setup.sh` |
 | `data` | Reads the `exc-*` captures | Anywhere the captures are; one of the three is also `physics` |
+| `rtx` | Renders cameras and lidars through Isaac Sim's RTX ([rtx-sensors.md](rtx-sensors.md)) | The Isaac Sim image on an RTX GPU (`sky/rtx.sky.yaml`), in a process of its own |
 
 The `data` tests look for captures in the directory named by `HUMANOID_SIM_DATASETS`. When it is unset they use `datasets/humanoid-v1` next to the checkout (`../datasets/humanoid-v1` from the repository root). Without captures the `data` tests skip.
 
@@ -56,13 +59,16 @@ The `data` tests look for captures in the directory named by `HUMANOID_SIM_DATAS
 | Image, everything | see below, `pytest` | Every test the machine can run |
 | GPU node | the `e2e` SkyPilot task | Everything, including the CUDA and capture tests |
 
-Natively you need the `dev` and `newton` extras (`uv sync --extra dev --extra newton`); without `newton`, the tests that need scipy or Newton skip. On an Apple silicon Mac with the `newton` and `viz` extras and the plain asset built, the native command reports 77 passed and 22 deselected (the `physics` and `data` tests) in about 20 s.
+Natively you need the `dev`, `newton`, `kinematics-check` and `viz` extras (`uv sync --extra dev --extra newton --extra kinematics-check --extra viz`), as CI installs them; without `newton`, the tests that need scipy or Newton skip, without `kinematics-check` (MuJoCo, for kinematics only) the static-box and scan placement tests skip, and without `viz` (Rerun, and Pillow for images) the scan tests skip. On an Apple silicon Mac with those extras and both robots' plain assets built, the native command reports 146 passed and 62 deselected (the `physics` and `data` tests) in about 20 s.
 
-The image includes pytest (`docker/Dockerfile` installs `pytest>=9,<10`). Build both robot assets first, or most physics tests skip. This is the `isaaclab-image` CI job's sequence:
+The image includes pytest (`docker/Dockerfile` installs `pytest>=9,<10`). Build the V1's two assets and both G1s' first, or most physics tests skip. This is the `isaaclab-image` CI job's sequence:
 
 ```bash
 docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:dev build-asset
 docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:dev build-asset --base-joints
+for r in g1_29dof_rev_1_0 g1_29dof_with_hand_rev_1_0; do
+  docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:dev --robot "$r" build-asset
+done
 docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:dev \
   pytest -m physics
 ```
@@ -74,7 +80,7 @@ docker run --rm -v "$PWD":/workspace/humanoid-sim -v "$(dirname "$PWD")/datasets
   -w /workspace/humanoid-sim humanoid-sim:dev pytest
 ```
 
-To run one file or one test, name it: `pytest tests/test_world.py` or `pytest -k cable`. On Warp's CPU device the physics tests are slow. In the arm64 image on an Apple silicon Mac, with both assets built and Warp's kernel cache kept on a volume (`-v hsim-warp-cache:/cache`), the whole suite gives 95 passed and 4 skipped in about 3 minutes: the CUDA-graph test, and three capture tests that need the captures mounted. Without the cache volume every run compiles the kernels again and takes longer.
+To run one file or one test, name it: `pytest tests/test_world.py` or `pytest -k cable`. On Warp's CPU device the physics tests are slow. In the arm64 image on an Apple silicon Mac, with the four assets built and Warp's kernel cache kept on a volume (`-v hsim-warp-cache:/cache`), the whole suite gives 202 passed and 6 skipped in about 5 minutes: the CUDA-graph test for each robot, and three capture tests that need the captures mounted. Without the cache volume every run compiles the kernels again and takes longer.
 
 Two tests exercise CUDA graphs, the captured GPU step the runtime host uses: `test_physics.py::test_cuda_graph_step_matches_eager` skips without CUDA, and `test_runtime_host.py::test_demand_intake_queues_what_the_record_says` checks the graphed demand intake only when CUDA is available. The `e2e` task runs both on a GPU.
 
@@ -91,7 +97,7 @@ uv run ruff check src tests spikes examples docs
 | Job | Runner | Steps |
 |---|---|---|
 | `cpu-contracts` | `ubuntu-24.04` (x86) and `ubuntu-24.04-arm`, each its own job | Check out with submodules, install uv 0.13.1, `uv sync --python 3.12 --extra dev --extra newton`, `uv run ruff check src tests spikes examples docs`, `uv run pytest -m "not physics and not data"` |
-| `isaaclab-image` | `ubuntu-24.04` (x86) | Check out with submodules, `docker build -f docker/Dockerfile -t humanoid-sim:ci .` (amd64), build both assets, run `pytest -m physics` in the image on Warp's CPU device |
+| `isaaclab-image` | `ubuntu-24.04` (x86) | Check out with submodules, `docker build -f docker/Dockerfile -t humanoid-sim:ci .` (amd64), build the V1's two assets and both G1s', run `pytest -m physics` in the image on Warp's CPU device |
 | `controls-pins` | `ubuntu-24.04` | Compare the submodule commits with the ones Controls pins |
 
 No CI runner has a GPU or the captures. The `data` tests run wherever the captures are (natively, in the image or in the `e2e` task), and the CUDA tests only on a GPU node, through the `e2e` task.
@@ -173,7 +179,8 @@ The node's copy of the checkout is updated by `sky launch` and `sky exec`. Local
 | `sky/bench.sky.yaml` | L40S | `hsim-bench` | Builds both assets. Runs the physics benchmark at 1, 4096, 8192 and 16384 envs with self-collision and at 4096 and 16384 without, the training benchmark at 1, 4096 and 16384 envs, all at 500 steps, and one replay. | `outputs/bench/` |
 | `sky/replay.sky.yaml` | L40S | `hsim-bench` | Builds both assets. Replays three captures at 4 ms with `implicitfast`, 4 ms with `euler` and 1 ms with `implicitfast`, one process per capture in parallel. | `outputs/replay-mjwarp/` |
 | `sky/sysid.sky.yaml` | L40S | `hsim-bench` | Builds the `--base-joints` asset. Runs `fit-passive` with 512 envs and 20 generations on the low-band capture and scores the fit on the two high-band ones, then fits on a high-band capture and scores on the low-band one. | `outputs/sysid/fit-on-low/`, `outputs/sysid/fit-on-high/` |
-| `sky/e2e.sky.yaml` | A10G or L4, whichever has capacity | `hsim-e2e` | Builds both assets. Runs the whole test suite with the captures, the runtime benchmark for 2000 steps and the training benchmark at 4096 envs, replays every capture, and runs the examples. See [The end-to-end check](#the-end-to-end-check-skye2eskyyaml). | `outputs/e2e/` (cleared at the start of each run) |
+| `sky/rtx.sky.yaml` | L40S, A10G or L4 | `hsim-rtx` | Builds the kitless image and the Isaac Sim image on top of it, with Controls' hangar mounted at `/data/hangar`. Runs `$CMD` in the Isaac Sim image. See [rtx-sensors.md](rtx-sensors.md#running-it). | `outputs/rtx/` |
+| `sky/e2e.sky.yaml` | A10G or L4, whichever has capacity | `hsim-e2e` | Builds the V1's two assets and both G1s'. Runs the whole test suite with the captures, the runtime benchmark for 2000 steps and the training benchmark at 4096 envs for the V1 and the G1, replays every capture, and runs the examples. See [The end-to-end check](#the-end-to-end-check-skye2eskyyaml). | `outputs/e2e/` (cleared at the start of each run) |
 
 Each task's `envs` block holds its settings, for example `STEPS`, `ENV_COUNTS` and `REPLAY` in the bench task, `RUNS` in the replay task, and `NUM_ENVS`, `GENERATIONS`, `DURATION` and `BOUND` in the sysid task. Override one at launch with `--env`, for example `--env STEPS=1000`. The bench task's `SPIKE=1` also runs the closed-chain ankle spike in `spikes/closed_chain/`.
 
@@ -205,17 +212,17 @@ rsync -avz hsim-e2e:sky_workdir/outputs/e2e/ outputs/e2e-gpu/
 
 ### The end-to-end check: `sky/e2e.sky.yaml`
 
-The `e2e` task exercises the whole repository on one GPU: everything CI cannot run, plus the benchmarks and the examples. Its setup runs `sky/setup.sh` and installs pytest into `~/il-venv`; the captures are mounted at `/data/humanoid-v1` and `HUMANOID_SIM_DATASETS` points there. The run script clears `outputs/e2e/`, builds both assets, and then runs, in order:
+The `e2e` task exercises the whole repository on one GPU: everything CI cannot run, plus the benchmarks and the examples. Its setup runs `sky/setup.sh` and installs pytest into `~/il-venv`; the captures are mounted at `/data/humanoid-v1` and `HUMANOID_SIM_DATASETS` points there. The run script clears `outputs/e2e/`, builds the V1's two assets and both G1s', and then runs, in order:
 
 | Step | Command | Outputs in `outputs/e2e/` |
 |---|---|---|
 | Whole test suite, no marker filter, so the CUDA and capture tests run too | `pytest -q` | `pytest.log` |
-| Runtime benchmark | `humanoid-sim bench --runtime --device cuda:0 --steps 2000` | `runtime.log`, `runtime.json` |
-| Training benchmark | `humanoid-sim bench --train --num-envs 4096 --device cuda:0 --steps 500` | `train_4096.log`, `train_4096.json` |
+| Runtime benchmark, for the V1 and the G1 Controls runs | `humanoid-sim --robot <robot> bench --runtime --device cuda:0 --steps 2000` | `runtime.log`, `runtime.json`; the G1's with the suffix `_g1_29dof_with_hand_rev_1_0` |
+| Training benchmark, for the same two | `humanoid-sim --robot <robot> bench --train --num-envs 4096 --device cuda:0 --steps 500` | `train_4096.log`, `train_4096.json`; the G1's suffixed likewise |
 | A replay of every capture, at the replay defaults | `humanoid-sim replay <capture> --device cuda:0` | `replay/<capture>/`, `replay_<capture>.log` |
 | The examples: training scenes recorded to Rerun, and a runtime session driven by `examples/runtime_client.py` and recorded by `view-runtime` | see the task file | `shots/*.rrd`, `serve.log`, `runtime_client.log`, `view_runtime.log` |
 
-The script runs with `set -euo pipefail`, so the first step that fails ends the job and the later outputs are missing; the pytest summary line is printed last. [benchmarks.md](benchmarks.md#reference-numbers) explains the benchmark figures and lists those of the latest run. In the run of 2026-10-18 on an A10G every test passed and none skipped (90 tests at that revision, in about 4 minutes).
+The script runs with `set -euo pipefail`, so the first step that fails ends the job and the later outputs are missing; the pytest summary line is printed last. [benchmarks.md](benchmarks.md#reference-numbers) explains the benchmark figures and lists those of the latest run. In the run of 2026-10-20 on an L40S every test passed and none skipped (177 tests at that revision, in about 10 minutes).
 
 Launch it detached and follow the log, as in the commands above. The outputs stay on the node: fetch them with `rsync` within 10 minutes of the job ending, before autostop stops the machine, or restart the stopped machine with `sky start hsim-e2e` and fetch them then. Launching the task again instead clears `outputs/e2e/` first. The `.rrd` recordings open locally with `uv run rerun <file>.rrd` and the `viz` extra.
 

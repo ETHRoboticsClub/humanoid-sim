@@ -31,7 +31,8 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `RobotPlant` | `src/humanoid_sim/train/plant.py` | The batched plant for every env of a scene: `submit`, `pre_physics`, `measured`, `truth`, `params`, `reset`, `set_level`, `attach_log`, `log` |
 | `Measured`, `Truth` | `src/humanoid_sim/train/plant.py` | What `measured()` and `truth()` return |
 | `PlantAction`, `PlantActionCfg` | `src/humanoid_sim/train/isaaclab.py` | An Isaac Lab action term that owns a `RobotPlant`; you subclass it and implement `demands()` |
-| `robot_scene_cfg`, `robot_sim_cfg` | `src/humanoid_sim/train/scene.py` | The `InteractiveSceneCfg` (robot, IMU, contact sensor, ground or terrain) and the `SimulationCfg` (one 4 ms step on MJWarp) |
+| `robot_scene_cfg`, `robot_sim_cfg` | `src/humanoid_sim/train/scene.py` | The `InteractiveSceneCfg` (robot, IMU, contact sensor, ground or terrain, static boxes) and the `SimulationCfg` (one 4 ms step on MJWarp) |
+| `StaticBoxes` | `src/humanoid_sim/world/boxes.py` | A room's walls and furniture as static boxes, read from a file, described in [world.md](world.md#static-boxes) |
 | `initial_pose`, `POSES` | `src/humanoid_sim/model/poses.py`, re-exported by `humanoid_sim.train.scene` | The joint positions and base height of a named initial pose |
 | `heightfield_terrain_cfg` | `src/humanoid_sim/world/terrain.py` | The terrain-importer config for a heightfield terrain the caller lays out, described in [world.md](world.md#heightfield-terrain) |
 | `ForcePush`, `Gantry` | `src/humanoid_sim/world/` | Pushes and gantry ropes a task applies, described in [world.md](world.md) |
@@ -98,14 +99,14 @@ Train on the plain asset. The `--base-joints` variant is for replays ([replay-an
 
 | `pose` | Joint positions | Held rigidly on flat ground |
 |---|---|---|
-| `"home"` (default) | The description's [home pose](glossary.md#home-pose) (`Description.home_pose`): the CAD's export pose, legs straight and both soles level at one height | At the baseline gains it stands still on flat ground (60 s measured, the base within 0.6° of upright); pushes and rough terrain make it fall unless a policy balances it (`tests/test_world.py::test_a_robot_holding_the_home_pose_stands`). |
+| `"home"` (default) | The description's [home pose](glossary.md#home-pose) (`Description.home_pose`): the V1's CAD export pose, legs straight; the G1's deploy standing pose, knees bent 0.3 rad; both soles level at one height | At the baseline gains the V1 stands still on flat ground (60 s measured, the base within 0.6° of upright); pushes and rough terrain make it fall unless a policy balances it. The G1 tips over within about 1.3 s: an inverted pendulum on its ankles, it stands only on ankles stiffer in pitch than its weight times its centre of mass's height above them (about 210 Nm/rad), and Unitree's deploy gains give 80 Nm/rad for both. A G1 task needs its policy to balance from the first step (`tests/test_world.py::test_holding_the_home_pose_stands_only_on_ankles_stiffer_than_toppling`). |
 | `"standing"` | The description's [standing pose](glossary.md#standing-pose), captured on the robot: every joint at its `standing_offset_rad` | Under an upright base the soles are pitched about 10° (left) and 17° (right). The robot lands on its sole edges, hops and tips over within about a second. |
 
 In both poses the base is upright and the lowest sole corner is 1 mm above the ground (`STANDING_CLEARANCE_M` in `src/humanoid_sim/model/poses.py`); on the current description the base starts 0.924 m up in the home pose and 0.945 m up in the standing pose. Where the home pose comes from, and why the standing pose does not stand, is in [robot-model.md](robot-model.md#standing-on-the-ground).
 
 The articulation's `data.default_joint_pos` holds the chosen pose (articulation joint order), so `mdp.reset_scene_to_default` puts the robot back into it. Take action offsets from `default_joint_pos`, as `examples/train_scene.py` does, instead of from `standing_offset_rad`; then the task follows whichever pose the scene was built with.
 
-`initial_pose(usd, robot="ethrc_v1", pose="home")` returns the pose's joint positions `[22]` (description order, float64) and the base height at which its lowest sole corner touches the ground, without the clearance. To build your own scene config, `articulation_cfg(usd, props, ..., joint_pos=...)` in `src/humanoid_sim/physics/isaaclab.py` takes the initial joint positions in `props.names` order; without `joint_pos` it uses the standing pose.
+`initial_pose(usd, robot="ethrc_v1", pose="home")` returns the pose's joint positions `[J]` (description order, float64) and the base height at which its lowest sole corner touches the ground, without the clearance. To build your own scene config, `articulation_cfg(usd, props, ..., joint_pos=...)` in `src/humanoid_sim/physics/isaaclab.py` takes the initial joint positions in `props.names` order; without `joint_pos` it uses the standing pose.
 
 ## A minimal environment
 
@@ -300,7 +301,7 @@ The velocity steps are coarse; this is what the real drives report.
 | `seq` | `[E, 16]` | Sequence number, from 1 after a reset; 0 for an empty slot |
 | `count` | `[E]` | Samples delivered since the last reset |
 
-The sensor frame is the chip frame at the description's IMU mount (`imu_joint` on `base_link`); nothing rotates it into the base frame. Sampling and delivery are the rig's: on the V1 the sensor samples every 2.5 ms (400 Hz) and the host receives each sample over CAN as it is taken; on the G1 every 2 ms sample is delivered as it is taken (modeled). Each sample carries the errors of the rig's IMU model (for the MTi-610: white noise, a turn-on bias drawn at every reset and a slow bias drift), plus any bias and misalignment the randomization drew. Details are in [sensors.md](sensors.md).
+The sensor frame is the chip frame at the description's IMU mount (`imu_joint` on `base_link`); nothing rotates it into the base frame. Sampling and delivery are the rig's: on the V1 the sensor samples every 2.74 ms (about 365 samples/s) and the host receives them in [bursts](glossary.md#imu-burst) every 13.9 to 17.6 ms, so the newest sample can be one burst period old; on the G1 every 2 ms sample is delivered as it is taken (modeled). Each sample carries the errors of the rig's IMU model (for the MTi-610: white noise, a turn-on bias drawn at every reset and a slow bias drift), plus any bias and misalignment the randomization drew. Details are in [sensors.md](sensors.md).
 
 Actor observations come from `measured()` only. That is the information a deployed policy has on the robot; `truth()` and `params()` are for critics, rewards, terminations and diagnostics. The plant hands out raw drive feedback and raw IMU samples. What Controls computes from them before a policy sees them (an orientation estimate, the standing-frame joint offsets, the observation layout of its policy contract) is Controls behaviour and is not modeled here; a task that trains for Controls reproduces it from measured signals ([controls-integration.md](controls-integration.md)).
 

@@ -24,6 +24,7 @@ import torch
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.urdf import BASE_JOINTS
 from humanoid_sim.physics.joint_properties import JointProperties
+from humanoid_sim.world.boxes import StaticBoxes
 
 # Base-joint PD. Each joint carries the whole robot (a few kg m² about yaw, ~10 about pitch and roll at the
 # pelvis), so 1e5 Nm/rad holds a 30 Nm waist reaction to 0.3 mrad and stays below the explicit-stiffness
@@ -54,8 +55,15 @@ class IsaacLabCfg:
     ground_friction: float = 1.0
     imu: bool = False  # the IMU sensor at the description's mount
     contacts: bool = False  # a contact sensor on every body
+    scene: StaticBoxes | None = None  # static boxes around the robot (every env's robot then starts at the origin)
     rerun: bool = False
     rerun_rrd: str | None = None
+    # More scene entities by name (Isaac Lab entity configs: cameras, assets), added before the scene is built, as
+    # the RTX sensors and a room's splat need (sensors/rtx.py).
+    entities: dict | None = None
+    # Render (update the visualizers, run Kit's app) after every physics step. The RTX sensors turn it off and render
+    # at their own rates (sensors/rtx.py KitRender): with Kit up a render per step costs far more than the step.
+    render_each_step: bool = True
 
 
 def solver_settings(physics: dict, solver: str | None = None) -> tuple[str, dict]:
@@ -104,6 +112,42 @@ def apply_joint_limits(physics: dict) -> None:
     model.joint_limit_ke.fill_(0.0)
     model.joint_limit_kd.fill_(0.0)
     NewtonManager.add_model_change(ModelFlags.JOINT_DOF_PROPERTIES)
+
+
+def apply_heightfield_base(physics: dict) -> None:
+    """Give every heightfield of the running MJWarp model a solid base ``heightfield_base_m`` deep below its lowest
+    point (the block's setting). Newton exports a heightfield to MuJoCo with a 0.1 mm base, and MuJoCo pushes a
+    shape that sinks deeper into a cell's prism than the prism is thick out through its bottom: a G1 foot sphere
+    (5 mm) landing on the lowest cells of a rough tile falls through the terrain. The base, the heightfield's
+    bounding box and its bounding radius are rewritten together. Kamino collides heightfields in Newton's own
+    pipeline and takes no setting."""
+    if running_solver() != "mjwarp":
+        return
+    import mujoco_warp
+    import numpy as np
+    from isaaclab_newton.physics import NewtonManager
+
+    solver = NewtonManager._solver
+    if solver is None or getattr(solver, "mjw_model", None) is None:
+        raise RuntimeError("no MJWarp model yet: apply the heightfield base after the simulation is reset")
+    m = solver.mjw_model
+    if m.hfield_size.shape[0] == 0:
+        return
+    base = float(physics["mjwarp"]["heightfield_base_m"])
+    size = m.hfield_size.numpy()
+    size[:, 3] = np.maximum(size[:, 3], base)
+    m.hfield_size.assign(size)
+    geoms = np.nonzero(m.geom_type.numpy() == int(mujoco_warp.GeomType.HFIELD))[0]
+    dataid, aabb, rbound = m.geom_dataid.numpy(), m.geom_aabb.numpy(), m.geom_rbound.numpy()
+    for g in geoms:
+        hx, hy, top, bottom = size[dataid[0, g]]
+        # MuJoCo's box around a heightfield in its frame: centre (0, 0, (top - bottom) / 2), half sizes
+        # (hx, hy, (top + bottom) / 2); its bounding sphere encloses the box's corners.
+        aabb[:, g, 0] = (0.0, 0.0, (top - bottom) / 2)
+        aabb[:, g, 1] = (hx, hy, (top + bottom) / 2)
+        rbound[:, g] = float(np.sqrt(hx**2 + hy**2 + max(top, bottom) ** 2))
+    m.geom_aabb.assign(aabb)
+    m.geom_rbound.assign(rbound)
 
 
 def _per_joint(names, values):
@@ -220,7 +264,8 @@ def simulation_cfg(physics: dict, *, device: str, period_s: float, solver: str |
 
 
 class IsaacLabRobot:
-    """Scene with ground and robot; exposes joint state, target writes and stepping as torch tensors."""
+    """Scene with ground, robot and any static boxes; exposes joint state, target writes and stepping as torch
+    tensors."""
 
     def __init__(self, desc: Description, usd_path: Path, cfg: IsaacLabCfg, *, props: JointProperties):
         import isaaclab.sim as sim_utils
@@ -234,8 +279,14 @@ class IsaacLabRobot:
         class SceneCfg(InteractiveSceneCfg):
             pass
 
-        scene_cfg = SceneCfg(num_envs=cfg.num_envs, env_spacing=cfg.env_spacing_m, replicate_physics=True)
+        # The boxes are one set of shapes every env's world collides with, at the same coordinates.
+        spacing = 0.0 if cfg.scene is not None else cfg.env_spacing_m
+        scene_cfg = SceneCfg(num_envs=cfg.num_envs, env_spacing=spacing, replicate_physics=True)
         scene_cfg.ground = ground_cfg(cfg.ground_friction)
+        if cfg.scene is not None:
+            from humanoid_sim.world.boxes import static_boxes_cfg
+
+            scene_cfg.static_boxes = static_boxes_cfg(cfg.scene.file, cfg.scene.spawn_m, friction=cfg.ground_friction)
         scene_cfg.robot = articulation_cfg(usd_path, props, fixed_base=cfg.fixed_base, base_joints=cfg.base_joints,
                                            self_collision=cfg.self_collision, base_height_m=cfg.base_height_m,
                                            contact_sensors=cfg.contacts)
@@ -243,6 +294,8 @@ class IsaacLabRobot:
             scene_cfg.imu = imu_sensor_cfg(desc.robot)
         if cfg.contacts:
             scene_cfg.contacts = contact_sensor_cfg(history=1, air_time=False)  # net forces now: the truth
+        for name, entity in (cfg.entities or {}).items():
+            setattr(scene_cfg, name, entity)
         visualizers = []
         if cfg.rerun:
             from isaaclab_visualizers.rerun import RerunVisualizerCfg
@@ -285,7 +338,7 @@ class IsaacLabRobot:
 
     def step(self) -> None:
         self.scene.write_data_to_sim()
-        self.sim.step()
+        self.sim.step(render=self.cfg.render_each_step)
         self.scene.update(self.cfg.period_s)
 
     def close(self) -> None:

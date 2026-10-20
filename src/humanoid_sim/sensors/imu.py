@@ -41,6 +41,31 @@ class ImuDeliveryCfg:
     history: int = 16  # delivered samples kept per env
     pending: int = 16  # samples a burst can carry
 
+    @classmethod
+    def from_sensor(cls, sensor) -> ImuDeliveryCfg:
+        """The whole IMU of a rig entry (:class:`~humanoid_sim.sensors.models.Sensor`): its model's errors, the
+        robot's sample period and delivery."""
+        m, c = sensor.model, sensor.config
+        return cls(sample_period_ns=int(c.sample_period_ns),
+                   burst_period_ns=tuple(int(v) for v in c.burst_period_ns),
+                   in_burst_spacing_ns=int(c.in_burst_spacing_ns),
+                   gyro_noise_density=float(m.gyro_noise_density_rad_s_sqrt_hz),
+                   accel_noise_density=float(m.accel_noise_density_m_s2_sqrt_hz),
+                   gyro_turn_on_bias=float(m.gyro_turn_on_bias_rad_s),
+                   accel_turn_on_bias=float(m.accel_turn_on_bias_m_s2),
+                   gyro_bias_instability=float(m.gyro_bias_instability_rad_s),
+                   accel_bias_instability=float(m.accel_bias_instability_m_s2),
+                   bias_correlation_time_ns=int(m.bias_correlation_time_ns))
+
+    @classmethod
+    def for_robot(cls, desc, profile: dict) -> ImuDeliveryCfg:
+        """The IMU of the robot's rig, checked against its description."""
+        from humanoid_sim.sensors.models import SensorRig
+
+        rig = SensorRig.load(profile)
+        rig.check_frames(desc)
+        return cls.from_sensor(rig.imu)
+
 
 @dataclass
 class ImuSamples:

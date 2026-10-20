@@ -1,0 +1,98 @@
+# Sensor models a robot's profile names in its rig (`sensors:`; see src/humanoid_sim/sensors/models.py). One entry per
+# product: its kind and the behaviour the product has wherever it is mounted, in SI units and integer nanoseconds.
+# What a robot sets around a sensor (its mount, configured rate, delivery to the host, per-unit calibration) is in that
+# robot's rig, not here. Every figure names its source; `modeled` marks one not yet checked against a robot capture,
+# `unmeasured` one nobody has a figure for (it is then 0: an ideal sensor in that respect).
+schema: humanoid-sim-sensors/v1
+
+models:
+  mti-610:
+    kind: imu
+    product: Xsens (Movella) MTi-610
+    # Movella MTi-610 leaflet, May 2023, as Controls carries it (ethrc_ssot/imu_sensors.py MTI_610 @ 6b86de8e).
+    source: Movella MTi-610 leaflet (May 2023); turn-on bias modeled from one power-on (Controls ethrc_ssot/imu_sensors.py)
+    gyro_noise_density_rad_s_sqrt_hz: 1.2217e-4   # 0.007 deg/s/sqrt(Hz)
+    accel_noise_density_m_s2_sqrt_hz: 5.884e-4    # 60 ug/sqrt(Hz)
+    # Per axis, 1 sigma, drawn at every reset. Gyro: modeled from the size of one power-on's bias on the V1 (chip-axis
+    # means, 2026-10-06, hanging, drives off, 60 s, their RMS); the spread across power-ons is unmeasured.
+    # Accelerometer: unmeasured.
+    gyro_turn_on_bias_rad_s: 1.5e-3
+    accel_turn_on_bias_m_s2: 0.0
+    # In-run bias stability (Allan minimum) as the stationary sigma of a first-order Gauss-Markov drift. The leaflet
+    # gives no correlation time: 100 s is modeled.
+    gyro_bias_instability_rad_s: 3.878e-5         # 8 deg/h
+    accel_bias_instability_m_s2: 1.471e-4         # 15 ug, the worse (z) axis
+    bias_correlation_time_ns: 100000000000
+
+  unitree-g1-imu:
+    kind: imu
+    product: Unitree G1 body IMU (pelvis, LowState imu_state)
+    # Unitree publishes no noise or bias figures for it: an ideal sensor until a capture gives them.
+    source: unmeasured
+    gyro_noise_density_rad_s_sqrt_hz: 0.0
+    accel_noise_density_m_s2_sqrt_hz: 0.0
+    gyro_turn_on_bias_rad_s: 0.0
+    accel_turn_on_bias_m_s2: 0.0
+    gyro_bias_instability_rad_s: 0.0
+    accel_bias_instability_m_s2: 0.0
+    bias_correlation_time_ns: 100000000000
+
+  oak-d-w:
+    kind: camera
+    product: Luxonis OAK-D-W
+    # Streams as Controls' depthai backend opens them (ethrc_cameras/depthai_backend.py); its BNO086 IMU is part of
+    # the device and not a body IMU. Baseline: the device calibration's mono_left -> mono_right, read on the V1
+    # (2026-10-20, tf camera0_mono_left_optical_frame -> camera0_mono_right_optical_frame).
+    source: Controls ethrc_cameras depthai backend; device calibration read on the V1
+    streams: [rgb, mono_left, mono_right, depth]
+    stereo_baseline_m: 0.075
+
+  realsense-d435i:
+    kind: camera
+    product: Intel RealSense D435i
+    # Streams as Controls' realsense adapter opens them (ethrc_cameras/realsense_backend.py: colour, the infrared
+    # pair, and depth registered to the left infrared imager, which is the camera frame's origin). Intel RealSense
+    # D400 Series datasheet: 50 mm stereo baseline; depth from 0.28 m (min-Z at 1280 x 720) to about 10 m (how far
+    # depends on the scene). The colour imager's place is modeled: about 15 mm from the left imager towards the right
+    # one, as D435 units' factory extrinsics report it; a unit's calibration replaces it.
+    source: Intel RealSense D400 Series datasheet; Controls ethrc_cameras realsense backend; colour offset modeled
+    streams: [rgb, mono_left, mono_right, depth]
+    stereo_baseline_m: 0.050
+    stream_kinds: {rgb: color, mono_left: mono, mono_right: mono, depth: depth}
+    stream_offsets_m:
+      rgb: [0.0, -0.015, 0.0]
+      mono_left: [0.0, 0.0, 0.0]
+      mono_right: [0.0, -0.050, 0.0]
+      depth: [0.0, 0.0, 0.0]
+    depth_range_m: [0.28, 10.0]
+
+  zed-mini:
+    kind: camera
+    product: Stereolabs ZED Mini
+    # Streams as Controls' zed backend opens them (ethrc_cameras/zed_backend.py: each eye grey, the luma of the
+    # side-by-side YUYV frame); the left eye is the camera frame's origin. Stereolabs ZED Mini datasheet: 63 mm
+    # baseline, the right eye nominally one baseline to the right; a unit's factory calibration replaces it.
+    source: Stereolabs ZED Mini datasheet; Controls ethrc_cameras zed backend
+    streams: [left, right]
+    stereo_baseline_m: 0.063
+    stream_kinds: {left: mono, right: mono}
+    stream_offsets_m:
+      left: [0.0, 0.0, 0.0]
+      right: [0.0, -0.063, 0.0]
+
+  livox-mid360:
+    kind: lidar
+    product: Livox Mid-360
+    # Livox Mid-360 user manual (as Controls' ethrc_cameras/lidar.py MID360): 0.1 m blind zone, 70 m at 80 %
+    # reflectivity, 360 deg x (-7, +52) deg, 10 Hz frames, 200 000 points/s; range precision 2 cm (1 sigma, 10 m),
+    # angular precision 0.15 deg (1 sigma).
+    source: Livox Mid-360 user manual
+    frame_period_ns: 100000000
+    point_rate_hz: 200000
+    range_min_m: 0.1
+    range_max_m: 70.0
+    horizontal_fov_rad: 6.283185307
+    elevation_min_rad: -0.122173048                # -7 deg
+    elevation_max_rad: 0.907571211                 # 52 deg
+    range_sigma_m: 0.02
+    angular_sigma_rad: 0.002617994                 # 0.15 deg

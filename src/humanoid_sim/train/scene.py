@@ -5,7 +5,10 @@
 * ``robot``: the built asset as an articulation (constant solver PD, the description's passive properties);
 * ``imu``: Isaac Lab's IMU sensor at the description's mount (``imu_joint``), raw sensor-frame values;
 * ``contacts``: a contact sensor on every body (net forces with history, air time);
-* ``ground``: the flat ground at the profile's friction, unless a ``terrain`` config is given.
+* ``ground``: the flat ground at the profile's friction, unless a ``terrain`` config is given;
+* ``static_boxes``: with ``scene`` (:class:`~humanoid_sim.world.boxes.StaticBoxes`), a room's walls and furniture
+  as static boxes that every env collides with. Every env's robot then starts at the world origin, the scene's
+  spawn point (each env is its own solver world, so robots at one spot never touch).
 
 The robot's default state is upright, its lowest sole corner on the ground
 (:func:`~humanoid_sim.model.kinematics.standing_base_height`), so ``reset_scene_to_default`` puts it on its feet,
@@ -27,11 +30,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from humanoid_sim.model.asset import load_profile
+from humanoid_sim.model.asset import check_asset_robot, load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.poses import POSES, STANDING_CLEARANCE_M, initial_pose
 from humanoid_sim.physics.isaaclab import contact_sensor_cfg, imu_sensor_cfg
 from humanoid_sim.physics.joint_properties import JointProperties
+from humanoid_sim.world.boxes import StaticBoxes
 
 __all__ = ["POSES", "STANDING_CLEARANCE_M", "initial_pose", "plant_joint_properties", "robot_scene_cfg",
            "robot_sim_cfg"]
@@ -47,17 +51,25 @@ def plant_joint_properties(robot: str = "ethrc_v1") -> JointProperties:
     return joint_properties(PlantCore(desc, joints, 1, PlantCfg(robot=robot)), joints)
 
 
-def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_spacing: float = 2.5,
+def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_spacing: float | None = None,
                     terrain=None, ground_friction: float | None = None, imu: bool = True, contacts: bool = True,
-                    self_collision: bool | None = None, pose: str = "home"):
+                    self_collision: bool | None = None, pose: str = "home", scene: StaticBoxes | None = None):
     """Scene config with the robot, its sensors and the ground (or ``terrain``, an Isaac Lab
-    ``TerrainImporterCfg``), the robot on its feet in ``pose`` (see :data:`POSES`). With robot friction
-    randomized, pass ``ground_friction=0``: the solver takes the larger friction of the two shapes in contact."""
+    ``TerrainImporterCfg``), the robot on its feet in ``pose`` (see :data:`POSES`), and ``scene``'s static boxes.
+    With robot friction randomized, pass ``ground_friction=0``: the solver takes the larger friction of the two
+    shapes in contact; the boxes take the ground's friction. ``env_spacing`` defaults to 2.5 m, and to 0 with a
+    ``scene``, which allows no other and no ``terrain``."""
     from isaaclab.scene import InteractiveSceneCfg
     from isaaclab.utils import configclass
 
     from humanoid_sim.physics.isaaclab import articulation_cfg, ground_cfg
 
+    check_asset_robot(usd, robot)
+    if scene is not None and terrain is not None:
+        raise ValueError("a scene's boxes stand on the flat ground: no terrain with them")
+    if scene is not None and env_spacing not in (None, 0.0):
+        raise ValueError("a scene's robots start at its spawn point, the world origin: env_spacing 0")
+    env_spacing = (0.0 if scene is not None else 2.5) if env_spacing is None else env_spacing
     profile = load_profile(robot)
     q, height = initial_pose(usd, robot, pose)
     props = plant_joint_properties(robot)
@@ -72,10 +84,15 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
         usd, props, base_height_m=height + STANDING_CLEARANCE_M, contact_sensors=contacts,
         self_collision=profile["physics"]["self_collision"] if self_collision is None else self_collision,
         joint_pos=[float(q[names.index(n)]) for n in props.names])
+    friction = profile["model"]["ground_friction"] if ground_friction is None else ground_friction
     if terrain is not None:
         cfg.terrain = terrain
     else:
-        cfg.ground = ground_cfg(profile["model"]["ground_friction"] if ground_friction is None else ground_friction)
+        cfg.ground = ground_cfg(friction)
+    if scene is not None:
+        from humanoid_sim.world.boxes import static_boxes_cfg
+
+        cfg.static_boxes = static_boxes_cfg(scene.file, scene.spawn_m, friction=friction)
     if imu:
         cfg.imu = imu_sensor_cfg(robot)
     if contacts:

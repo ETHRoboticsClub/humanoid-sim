@@ -97,7 +97,8 @@ def cmd_view_runtime(args) -> int:
     from humanoid_sim.runtime.view import view_runtime
 
     frames = view_runtime(args.segment, _usd(args), rrd=args.save, connect=args.connect, fps=args.fps,
-                          seconds=args.seconds, wait_s=args.wait, robot=args.robot)
+                          seconds=args.seconds, wait_s=args.wait, robot=args.robot, draw=args.draw,
+                          detail=args.detail)
     print(f"{frames} frames" + (f" -> {args.save}" if args.save else ""))
     return 0
 
@@ -115,16 +116,16 @@ def cmd_bench(args) -> int:
     if args.runtime:
         from humanoid_sim.bench.runner import run_runtime_bench
 
-        print(json.dumps(run_runtime_bench(args, _usd(args)), indent=1))
+        print(json.dumps(run_runtime_bench(args, _usd(args), scene=_scene(args)), indent=1))
         return 0
     if args.train:
         from humanoid_sim.bench.train import run_train_bench
 
-        print(json.dumps(run_train_bench(args, _usd(args)), indent=1))
+        print(json.dumps(run_train_bench(args, _usd(args), scene=_scene(args)), indent=1))
         return 0
     from humanoid_sim.bench.runner import run_bench
 
-    print(json.dumps(run_bench(args, _usd(args)), indent=1))
+    print(json.dumps(run_bench(args, _usd(args), scene=_scene(args)), indent=1))
     return 0
 
 
@@ -203,11 +204,36 @@ def _revision() -> str:
         return "unknown"
 
 
+def _scene(args):
+    """The static boxes of ``--scene`` with ``--spawn`` at the world origin, or None."""
+    if args.scene is None:
+        if args.spawn is not None or getattr(args, "scan_mesh", None) is not None:
+            raise SystemExit("--spawn and --scan-* go with a --scene")
+        return None
+    from humanoid_sim.world.boxes import StaticBoxes
+    from humanoid_sim.world.scan import ScanFiles
+
+    scan = getattr(args, "scan_mesh", None)
+    if (scan is None) != (getattr(args, "scan_texture", None) is None):
+        raise SystemExit("--scan-mesh and --scan-texture go together")
+    if scan is None and getattr(args, "scan_floor_texture", None) is not None:
+        raise SystemExit("--scan-floor-texture comes with --scan-mesh and --scan-texture")
+    files = None if scan is None else ScanFiles.of(scan, args.scan_texture, args.scan_floor_texture)
+    return StaticBoxes.load(args.scene, args.spawn or (0.0, 0.0), scan=files)
+
+
+def _add_scene_args(parser) -> None:
+    parser.add_argument("--scene", default=None, help="static boxes (walls, furniture) around the robot: an .npz as "
+                        "world/boxes.py describes, such as Controls' hangar_proxy.npz")
+    parser.add_argument("--spawn", nargs=2, type=float, default=None, metavar=("X", "Y"),
+                        help="the scene point (m) the robot starts at, placed at the world origin (default 0 0)")
+
+
 def cmd_serve(args) -> int:
     from humanoid_sim.runtime.host import EXIT_CLIENT_LOST, EXIT_DETACHED, RuntimeHost
 
     host = RuntimeHost(args.segment, _usd(args), device=args.device, robot=args.robot, solver=args.solver,
-                       support=args.support, pose=args.pose,
+                       support=args.support, pose=args.pose, scene=_scene(args),
                        bus_period_ns=int(args.bus_period_us * 1000),
                        client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
                        sim_revision=_revision(), truth_every=args.truth_every)
@@ -223,6 +249,14 @@ def cmd_serve(args) -> int:
     finally:
         host.close()
     return 0 if code == EXIT_DETACHED else code
+
+
+def cmd_splat_usd(args) -> int:
+    from humanoid_sim.world.splat import convert
+
+    spawn = (0.0, 0.0) if args.spawn is None else tuple(args.spawn)
+    print(json.dumps(convert(args.ply, args.out, spawn_m=spawn, sh_degree=args.sh_degree, half=args.half), indent=1))
+    return 0
 
 
 def cmd_fit_delay(args) -> int:
@@ -294,6 +328,10 @@ def main(argv: list[str] | None = None) -> int:
     vr.add_argument("--wait", type=float, default=60.0,
                     help="seconds to wait for the segment to appear (the next session of a --persist host is "
                          "followed if it starts within 10 s)")
+    vr.add_argument("--draw", choices=("scan", "boxes"), default=None,
+                    help="the host's scene as its textured scan or its boxes (default: the scan when it has one)")
+    vr.add_argument("--detail", choices=("full", "live"), default=None,
+                    help="the scan's detail (default: full with --save, live otherwise)")
     vr.set_defaults(func=cmd_view_runtime)
 
     be = sub.add_parser("bench")
@@ -304,6 +342,7 @@ def main(argv: list[str] | None = None) -> int:
     be.add_argument("--no-self-collision", action="store_true")
     be.add_argument("--train", action="store_true", help="Train-Time API scene: RobotPlant, IMU, contacts")
     be.add_argument("--runtime", action="store_true", help="the real-time host's whole step, unpaced")
+    _add_scene_args(be)
     be.set_defaults(func=cmd_bench)
 
     fp = sub.add_parser("fit-passive", help="fit upper-body passive joint parameters to captures")
@@ -354,7 +393,24 @@ def main(argv: list[str] | None = None) -> int:
                     "and serve the next client on a new session, until stopped")
     sv.add_argument("--max-steps", type=int, default=None, help="periods per session")
     sv.add_argument("--seed", type=int, default=0)
+    _add_scene_args(sv)
+    sv.add_argument("--scan-mesh", default=None, help="with --scene: the room's textured scan (an OBJ), for viewers "
+                    "only; the descriptor names it and its digest")
+    sv.add_argument("--scan-texture", default=None, help="the scan's texture (PNG)")
+    sv.add_argument("--scan-floor-texture", default=None, help="the scan's floor seen from above (PNG), drawn over "
+                    "the scene file's floor_corners")
     sv.set_defaults(func=cmd_serve)
+
+    sp = sub.add_parser("splat-usd", help="convert a 3D Gaussian Splatting PLY (a scanned room) to a USD splat for "
+                        "cameras to render, placed like the room's boxes")
+    sp.add_argument("ply")
+    sp.add_argument("out", help="the USD file to write (.usdc for a large splat)")
+    sp.add_argument("--spawn", nargs=2, type=float, default=None, metavar=("X", "Y"),
+                    help="the scene point (m) placed at the world origin, as for --scene (default 0 0)")
+    sp.add_argument("--sh-degree", type=int, default=None, help="keep spherical harmonics up to this degree "
+                    "(default: all the PLY has; 0 keeps each Gaussian's base colour only)")
+    sp.add_argument("--half", action="store_true", help="store the coefficients as half floats")
+    sp.set_defaults(func=cmd_splat_usd)
 
     args = p.parse_args(argv)
     if args.command is None:
