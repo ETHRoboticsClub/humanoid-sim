@@ -15,6 +15,13 @@
                                                    fit upper-body passive joint parameters by batched replay
     humanoid-sim fit-delay <exc-dir>... [--delays-ms FROM TO STEP]
                                                    replay with a range of demand delays, best delay per drive
+    humanoid-sim fit-pace <capture>... --holdout <capture>... --num-envs N --generations G
+                                                   fit PACE 0.2.0's actuator model (armature, damping, static and
+                                                   dynamic friction, encoder bias, command delay) to excitation
+                                                   captures or rosbags, replayed from their command frames
+    humanoid-sim pace-selftest --num-envs N --generations G
+                                                   plant known PACE parameters, record a chirp on a fixed base and
+                                                   fit it back: checks the model is identifiable and the fit wired
     humanoid-sim serve --segment PATH [--support suspended|free]
                                                    one robot in real time behind the runtime segment, for
                                                    Controls' plant host
@@ -191,6 +198,133 @@ def cmd_fit_passive(args) -> int:
     print(json.dumps({k: result[k] for k in ("objective_description", "objective", "multipliers", "names")}))
     if args.holdout:
         print(json.dumps(result["holdout"]["objective_description"]), json.dumps(result["holdout"]["objective_fit"]))
+    return 0
+
+
+def open_capture(path: str):
+    """An ``exc-*`` capture directory or a rosbag2 directory."""
+    p = Path(path)
+    if (p / "metadata.yaml").is_file():
+        from humanoid_sim.replay.bag import BagCapture
+
+        return BagCapture(p)
+    from humanoid_sim.replay.exc import ExcitationCapture
+
+    return ExcitationCapture(p)
+
+
+def cmd_fit_pace(args) -> int:
+    import math
+
+    import numpy as np
+
+    from humanoid_sim.replay.replay import command_demand_rms
+    from humanoid_sim.sim import SimCore
+    from humanoid_sim.sysid.pace import PaceSpace, evaluate, fit, save, start_values
+
+    moving = args.base != "fixed"
+    sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, num_envs=args.num_envs,
+                  fixed_base=not moving, base_joints=moving, solver=args.solver)
+    plant = sim.plant
+    joints, drives = list(plant.map.joint_names), list(plant.map.drive_names)
+    kw = dict(log_bound=math.log(args.bound), bias_bound_rad=args.bias_bound_mrad / 1e3,
+              delay_bounds_ns=tuple(int(round(v * 1e6)) for v in args.delay_ms),
+              separate_dynamic_friction=not args.no_dynamic_friction)
+    sizes = PaceSpace(joints, drives, start_values(sim.desc, joints), **kw).sizes
+    fixed = {}
+    for item in args.fix:
+        param, _, name = item.partition(".")
+        names = drives if param == "bias" else joints
+        if param not in sizes or param == "delay" or name not in names:
+            raise SystemExit(f"--fix {item}: PARAM.NAME, PARAM one of {sorted(set(sizes) - {'delay'})}")
+        fixed.setdefault(param, np.zeros(sizes[param], dtype=bool))[names.index(name)] = True
+    space = PaceSpace(joints, drives, start_values(sim.desc, joints), fixed=fixed, **kw)
+    skip = set(args.skip_drives)
+    unknown = skip - set(drives)
+    if unknown:
+        raise SystemExit(f"--skip-drives: unknown drives {sorted(unknown)}")
+    scored = [i for i, d in enumerate(drives) if d not in skip]
+    captures = [open_capture(c) for c in args.captures]
+    held = [open_capture(c) for c in args.holdout]
+    shifts = np.arange(0, 40_000_001, 1_000_000)
+    rebuild = {c.dataset_id: command_demand_rms(c, plant, shifts) for c in captures + held}
+    for cid, r in rebuild.items():
+        worst = max(r["rms_at_best_rad"], key=lambda d: r["rms_at_best_rad"][d])
+        print(f"{cid}: rebuilt targets vs 0x6062 best at {r['best_shift_ns'] / 1e6:g} ms, worst "
+              f"{worst} {r['rms_at_best_rad'][worst] * 1e3:.3f} mrad", flush=True)
+    base = args.base if moving else None
+    t = time.time()
+    result = fit(sim, captures, space, scored, generations=args.generations, base_motion=base,
+                 duration_s=args.duration, seed=args.seed, search=args.search)
+    best = {k: v[0] for k, v in space.decode(np.asarray(result["x"])[None]).items()}
+    meta = result | {"captures": [c.dataset_id for c in captures], "base": args.base, "num_envs": args.num_envs,
+                     "generations": args.generations, "duration_s": args.duration, "seed": args.seed,
+                     "scored": [drives[i] for i in scored], "fixed": sorted(args.fix), "wall_s": time.time() - t,
+                     "command_rebuild": rebuild, **sim.desc.identity()}
+    if held:
+        x = np.zeros((args.num_envs, space.dim))
+        x[1:] = result["x"]
+        f, per = evaluate(sim, held, space, x, scored, base_motion=base, duration_s=None)
+        meta["holdout"] = {"captures": [c.dataset_id for c in held], "objective_start": float(f[0]),
+                           "objective_fit": float(f[1]), "rms_start": per[:, 0].tolist(), "rms_fit": per[:, 1].tolist()}
+    save(Path(args.out), space, best, plant, sim.period_ns, captures, meta)
+    print(json.dumps({k: meta[k] for k in ("objective_start", "objective")} | {"delay_ns": int(best["delay"])}))
+    if held:
+        print(json.dumps({k: meta["holdout"][k] for k in ("objective_start", "objective_fit")}))
+    return 0
+
+
+def cmd_pace_selftest(args) -> int:
+    import math
+
+    import numpy as np
+
+    from humanoid_sim.sim import SimCore
+    from humanoid_sim.sysid.pace import (
+        JOINT_PARAMS,
+        PaceSpace,
+        chirp_commands,
+        evaluate,
+        fit,
+        save,
+        start_values,
+        synthetic_capture,
+    )
+
+    sim = SimCore(_usd(args), device=args.device, robot=args.robot, num_envs=args.num_envs, fixed_base=True,
+                  solver=args.solver)
+    plant = sim.plant
+    joints, drives = list(plant.map.joint_names), list(plant.map.drive_names)
+    space = PaceSpace(joints, drives, start_values(sim.desc, joints), log_bound=math.log(args.bound),
+                      separate_dynamic_friction=not args.no_dynamic_friction)
+    rng = np.random.default_rng(args.seed)
+    x_true = rng.uniform(-args.spread, args.spread, space.dim)
+    planted = space.decode(np.tile(x_true, (args.num_envs, 1)))
+    amp = {j: args.amplitude_rad / (2 if sim.desc.joints[j].device is None else 1) for j in joints}
+    commands = chirp_commands(joints, duration_s=args.duration, f0_hz=args.f0, f1_hz=args.f1, amplitude_rad=amp,
+                              seed=args.seed)
+    t = time.time()
+    capture = synthetic_capture(sim, space, planted, commands)
+    x = np.zeros((args.num_envs, space.dim))
+    x[0] = x_true
+    f, _ = evaluate(sim, [capture], space, x, list(range(len(drives))), base_motion=None, duration_s=None)
+    print(f"objective at the planted values {f[0] * 1e3:.4f} mrad, at the start values {f[1] * 1e3:.3f} mrad",
+          flush=True)
+    result = fit(sim, [capture], space, list(range(len(drives))), generations=args.generations, base_motion=None,
+                 seed=args.seed, search=args.search)
+    best = {k: v[0] for k, v in space.decode(np.asarray(result["x"])[None]).items()}
+    truth = {k: v[0] for k, v in planted.items()}
+    recovery = {p: float(np.median(np.abs(np.log(best[p] / truth[p])))) for p in JOINT_PARAMS}
+    recovery |= {"bias_rad": float(np.median(np.abs(best["bias"] - truth["bias"]))),
+                 "delay_ns": int(best["delay"] - truth["delay"]),
+                 "friction_ratio": float(np.median(np.abs(best["friction_ratio"] - truth["friction_ratio"])))}
+    meta = result | {"selftest": True, "objective_planted": float(f[0]), "x_true": x_true.tolist(),
+                     "planted": {k: np.asarray(v).tolist() for k, v in truth.items()},
+                     "recovery_median_error": recovery, "num_envs": args.num_envs, "generations": args.generations,
+                     "seed": args.seed, "wall_s": time.time() - t, **sim.desc.identity()}
+    save(Path(args.out), space, best, plant, sim.period_ns, [capture], meta)
+    print(json.dumps({"objective_planted": float(f[0]), "objective": result["objective"],
+                      "objective_start": result["objective_start"], "recovery_median_error": recovery}))
     return 0
 
 
@@ -376,6 +510,48 @@ def main(argv: list[str] | None = None) -> int:
     fd.add_argument("--device", default="cuda:0")
     fd.add_argument("--out", default="outputs/sysid")
     fd.set_defaults(func=cmd_fit_delay)
+
+    fpc = sub.add_parser("fit-pace", help="fit PACE 0.2.0's actuator model to captures or rosbags, from their "
+                                          "command frames")
+    fpc.add_argument("captures", nargs="+", help="exc-* capture directories or rosbag2 directories")
+    fpc.add_argument("--holdout", nargs="*", default=[],
+                     help="captures to score the fit on; use a different excitation profile than the fitted ones")
+    fpc.add_argument("--num-envs", type=int, default=512, help="CMA-ES population + 1 (env 0 keeps the best)")
+    fpc.add_argument("--generations", type=int, default=40)
+    fpc.add_argument("--duration", type=float, default=None, help="replay only the first seconds of each capture")
+    fpc.add_argument("--base", choices=("yaw", "orientation", "fixed"), default="yaw")
+    fpc.add_argument("--device", default="cuda:0")
+    fpc.add_argument("--seed", type=int, default=0)
+    fpc.add_argument("--bound", type=float, default=10.0,
+                     help="armature, damping and friction stay within [1/bound, bound] of the description's")
+    fpc.add_argument("--bias-bound-mrad", type=float, default=20.0, help="encoder bias within ± this")
+    fpc.add_argument("--delay-ms", nargs=2, type=float, default=[0.0, 20.0], metavar=("FROM", "TO"),
+                     help="command delay range")
+    fpc.add_argument("--no-dynamic-friction", action="store_true",
+                     help="one Coulomb friction per joint (PACE without separate_dynamic_friction)")
+    fpc.add_argument("--fix", nargs="*", default=[], metavar="PARAM.NAME",
+                     help="hold entries at their start, e.g. bias.maxonHEJ50L_ANK1 friction_ratio.knee_l")
+    fpc.add_argument("--skip-drives", nargs="*", default=[], help="drives left out of the objective")
+    fpc.add_argument("--search", choices=("blocks", "joint"), default="blocks",
+                     help="a CMA-ES per drive (ankle) on its own error, or one over every parameter as PACE does")
+    fpc.add_argument("--out", default="outputs/sysid/pace")
+    fpc.set_defaults(func=cmd_fit_pace)
+
+    st = sub.add_parser("pace-selftest", help="fit PACE parameters planted in the sim back from a synthetic chirp")
+    st.add_argument("--num-envs", type=int, default=512)
+    st.add_argument("--generations", type=int, default=40)
+    st.add_argument("--duration", type=float, default=20.0, help="seconds of chirp (the first one at rest)")
+    st.add_argument("--f0", type=float, default=0.2)
+    st.add_argument("--f1", type=float, default=5.0)
+    st.add_argument("--amplitude-rad", type=float, default=0.1, help="per joint (ankle hinges: half)")
+    st.add_argument("--spread", type=float, default=0.5, help="planted values: x uniform in ± this of the box")
+    st.add_argument("--bound", type=float, default=10.0)
+    st.add_argument("--no-dynamic-friction", action="store_true")
+    st.add_argument("--search", choices=("blocks", "joint"), default="blocks")
+    st.add_argument("--device", default="cuda:0")
+    st.add_argument("--seed", type=int, default=0)
+    st.add_argument("--out", default="outputs/sysid/pace-selftest")
+    st.set_defaults(func=cmd_pace_selftest)
 
     sv = sub.add_parser("serve", help="one robot in real time behind the runtime segment")
     sv.add_argument("--segment", required=True, help="segment file (on a volume shared with the plant host)")
