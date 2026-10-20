@@ -251,6 +251,14 @@ def cmd_serve(args) -> int:
     return 0 if code == EXIT_DETACHED else code
 
 
+def cmd_splat_usd(args) -> int:
+    from humanoid_sim.world.splat import convert
+
+    spawn = (0.0, 0.0) if args.spawn is None else tuple(args.spawn)
+    print(json.dumps(convert(args.ply, args.out, spawn_m=spawn, sh_degree=args.sh_degree, half=args.half), indent=1))
+    return 0
+
+
 def cmd_fit_delay(args) -> int:
     import numpy as np
 
@@ -392,6 +400,17 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--scan-floor-texture", default=None, help="the scan's floor seen from above (PNG), drawn over "
                     "the scene file's floor_corners")
     sv.set_defaults(func=cmd_serve)
+
+    sp = sub.add_parser("splat-usd", help="convert a 3D Gaussian Splatting PLY (a scanned room) to a USD splat for "
+                        "cameras to render, placed like the room's boxes")
+    sp.add_argument("ply")
+    sp.add_argument("out", help="the USD file to write (.usdc for a large splat)")
+    sp.add_argument("--spawn", nargs=2, type=float, default=None, metavar=("X", "Y"),
+                    help="the scene point (m) placed at the world origin, as for --scene (default 0 0)")
+    sp.add_argument("--sh-degree", type=int, default=None, help="keep spherical harmonics up to this degree "
+                    "(default: all the PLY has; 0 keeps each Gaussian's base colour only)")
+    sp.add_argument("--half", action="store_true", help="store the coefficients as half floats")
+    sp.set_defaults(func=cmd_splat_usd)
 
     args = p.parse_args(argv)
     if args.command is None:
