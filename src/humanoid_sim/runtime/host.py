@@ -26,6 +26,11 @@ friction is the family's ``backdrive_torque`` (the joint's own friction when the
 enabled-drive friction, as in Controls' MuJoCo plant (the ankle joints keep theirs: the cranks have no joint-space
 figure). The friction is written when a drive turns on or off, not every step.
 
+With ``scene`` (:class:`~humanoid_sim.world.boxes.StaticBoxes`) the robot stands among static boxes, a room's walls
+and furniture, starting at the scene's spawn point (the world origin); the descriptor's ``scene`` names the file,
+its digest and the spawn point, so the client can map the truth's world frame to the scene's. A spawn point inside
+a box is refused.
+
 IMU sample times (``sample_ns``, ``stamp_ns``) are plant time; the feedback region's ``sim_time_ns`` and
 ``written_mono_ns`` map them to the host clock.
 """
@@ -44,6 +49,7 @@ import torch
 from humanoid_sim.devices.demand import LAW_FREEZE, DriveDemand
 from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.timing.clock import NS_PER_S
+from humanoid_sim.world.boxes import StaticBoxes
 from humanoid_sim.world.supports import _quat_rotate
 
 EXIT_DONE = 0  # max steps or a stop request
@@ -130,13 +136,17 @@ class RuntimeHost:
                  solver: str | None = None, support: str = "suspended", pose: str | None = None,
                  bus_period_ns: int = 1_500_000,
                  client_timeout_ns: int = 500_000_000,
-                 seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True):
+                 seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True,
+                 scene: StaticBoxes | None = None):
         from humanoid_sim.model.asset import asset_meta, load_profile
         from humanoid_sim.model.poses import POSES, STANDING_CLEARANCE_M, initial_pose, start_pose
         from humanoid_sim.sim import SimCore
 
         if support not in ("suspended", "free"):
             raise ValueError(f"support {support!r}: start suspended or free (hang a gantry by command)")
+        if scene is not None and scene.clearance_m() == 0.0:
+            raise ValueError(f"spawn point {scene.spawn_m} is inside a box of {scene.file}: the robot starts there")
+        self.scene = scene
         self.support = support
         meta = asset_meta(usd)
         if pose is not None and pose not in POSES:
@@ -149,7 +159,7 @@ class RuntimeHost:
         cuda = str(device).startswith("cuda")
         self.sim = SimCore(usd, device=device, robot=robot, solver=solver, fixed_base=support == "suspended",
                            base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
-                           compile=compile and cuda, imu_history=abi.IMU_SAMPLES)
+                           compile=compile and cuda, imu_history=abi.IMU_SAMPLES, scene=scene)
         self.device = torch.device(device)
         self._intake = _DemandIntake(self.sim.plant, len(self.sim.plant.map.drive_names), self.device,
                                      cuda_graph=cuda, compile=compile and cuda)
@@ -261,6 +271,7 @@ class RuntimeHost:
             "soles": [s["body"] for s in self._soles],
             "commands": {str(k): v for k, v in abi.COMMANDS.items()}, "faults": list(abi.FAULTS),
             "fidelity_gaps": FIDELITY_GAPS,
+            "scene": None if self.scene is None else self.scene.describe(),
         }
 
     def _sole_geometry(self, boxes: list[dict]) -> list[dict]:

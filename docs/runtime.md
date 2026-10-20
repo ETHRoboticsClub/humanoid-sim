@@ -32,6 +32,9 @@ humanoid-sim serve --segment /run/hsim/plant --support suspended
 | `--persist` | off | When a client detaches or is lost, reset the robot and serve the next client on a new session, until stopped. |
 | `--max-steps N` | none | Physics periods per session, paused periods included. Reaching it ends the process, with or without `--persist`. |
 | `--seed` | `0` | Seed of the IMU's random generator (white noise, sample phase, burst timing). |
+| `--scene PATH` | none | Static boxes around the robot, such as the walls and furniture of Controls' hangar (see [world.md](world.md#static-boxes)). |
+| `--spawn X Y` | `0 0` | With `--scene`: the scene point (m) the robot starts at, placed at the world origin. A spawn point inside a box is refused. |
+| `--scan-mesh OBJ`, `--scan-texture PNG`, `--scan-floor-texture PNG` | none | With `--scene`: the room's photo-textured scan and its floor, for viewers only (the physics collides with the boxes). The descriptor names them with their digests, and `view-runtime` draws them (see [world.md](world.md#the-scan-for-viewers)). |
 
 Four options of the top-level parser go before `serve`: `--solver` (`mjwarp` or `kamino`, default the profile's), `--robot` (default `ethrc_v1`, also written to the header's `robot_id`), `--assets` (default `outputs/assets`, relative to the working directory) and `--usd` (a robot USD to use instead of the built asset). Without `--usd`, `serve` exits with a message if the asset for the current description and profile is not built.
 
@@ -210,6 +213,7 @@ The descriptor region holds one JSON object (sorted keys, at most 16,384 bytes) 
 | `commands` | Command codes to names, `{"1": "reset", ..., "9": "set_fidelity"}` |
 | `faults` | `encoder_freeze`, `imu_spike`, `imu_bias`, `power_sag` |
 | `fidelity_gaps` | What the runtime does not model (`FIDELITY_GAPS` in `host.py`) |
+| `scene` | Null, or with `--scene`: `file`, its `sha256`, the number of `boxes`, `spawn_m`, `spawn_clearance_m` (the horizontal distance from the spawn point to the nearest box) and `scan` (null, or the `mesh`, `texture` and `floor_texture` files, each as `file` and `sha256`). The truth is in the world frame, whose origin is the scene point `spawn_m`. |
 
 The fidelity gaps the runtime publishes:
 
@@ -578,6 +582,8 @@ humanoid-sim view-runtime /run/hsim/plant --save runtime.rrd   # writes a record
 | `--fps N` | `30` | Reads of the segment per second |
 | `--seconds S` | until the host goes | Stop after this long |
 | `--wait S` | `60` | How long to wait for the segment to appear and become ready |
+| `--draw scan\|boxes` | the scan, when the host has one | How to draw the host's scene. Its files must be readable where the viewer runs, with the digests the descriptor gives; otherwise the scene is not drawn. |
+| `--detail full\|live` | `full` with `--save`, `live` otherwise | The scan's detail (see [world.md](world.md#the-scan-for-viewers)) |
 
 Each read logs the truth and feedback records that are new since the last read, at their `sim_time_ns` on Rerun's `time` timeline (plant time in seconds). The recording therefore samples the host about `--fps` times per second, not every 4 ms step, and the robot's pose moves only as often as the host publishes the truth (every `--truth-every` steps, 20 ms by default).
 
