@@ -320,7 +320,7 @@ def test_a_joint_pushed_into_its_stop_stays_at_it(robot, solver):
 
 
 @pytest.mark.physics
-def test_pace_objective_is_zero_at_planted_parameters(usd, request):
+def test_pace_objective_is_zero_at_planted_parameters(request):
     """A chirp recorded with planted PACE parameters replays exactly at them, and measurably worse at the start
     values: the fit's plumbing (bias, delay, friction relief, solver writes) round-trips."""
     pytest.importorskip("isaaclab_newton")
@@ -329,7 +329,7 @@ def test_pace_objective_is_zero_at_planted_parameters(usd, request):
     from humanoid_sim.sim import SimCore
     from humanoid_sim.sysid.pace import PaceSpace, chirp_commands, evaluate, start_values, synthetic_capture
 
-    sim = SimCore(usd, device="cpu", num_envs=2, fixed_base=True)
+    sim = SimCore(built_usd("ethrc_v1"), device="cpu", robot="ethrc_v1", num_envs=2, fixed_base=True)
     request.addfinalizer(sim.close)
     joints, drives = list(sim.plant.map.joint_names), list(sim.plant.map.drive_names)
     space = PaceSpace(joints, drives, start_values(sim.desc, joints))
