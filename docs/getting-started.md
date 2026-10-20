@@ -220,6 +220,8 @@ docker run --rm -v "$PWD":/workspace/humanoid-sim -v hsim-run:/run/hsim -w /work
 
 When the host is ready it prints a JSON line with `"ready": true` and the session id. `--support suspended` welds the base to the world; `--support free` stands the robot on the ground. On the CPU device the host runs below real time, which is enough to check the protocol against a client: in the arm64 image on an Apple silicon Mac it was ready 25 to 40 s after start, with Warp's kernel cache kept on a volume. On a GPU, drop `--device cpu` and add `--gpus all`: the host then captures and compiles its step at startup (about a minute) and runs faster than real time. Ctrl-C stops the host.
 
+The `justfile` wraps these commands: `just image` builds the image, `just asset [robot]` the robot asset, and `just serve [robot] [support]` serves on the `hsim-run` volume with `--persist`, on `cuda:0` when `nvidia-smi` is present and on the CPU otherwise (`HSIM_DEVICE` overrides it). Controls' simulation stack attaches to that volume. `just view` records the running host to `outputs/runtime.rrd`.
+
 The smallest client is `examples/runtime_client.py`. It holds the robot where it starts at the baseline gains, waves the arms, pushes the left forearm after 8 s and detaches. In a second terminal, run it in another container on the same volume:
 
 ```bash
