@@ -67,6 +67,16 @@ cfg.scene = robot_scene_cfg(4096, usd, terrain=terrain)
 
 `cfg` and `usd` are the env config and robot USD from [training.md](training.md#a-minimal-environment). When a terrain is given, the scene has no flat ground and `ground_friction` is ignored.
 
+### Which pipeline collides the robot
+
+MJWarp steps the robot either with contacts from Newton's collision pipeline or with its own (`physics.mjwarp.contacts` in the profile: `newton`, the default, or `mujoco`). On a plane the two agree: a V1 holding its stance on a plane lasted 137.5 and 137.8 policy steps on average over 4,096 robots with the two.
+
+On a heightfield MJWarp's own pipeline is wrong now and then. A rollout of 4,096 V1s under a half-trained walking policy, on the flat tiles of the training terrain, flagged about 5,400 spins or energy jumps per million policy steps: a sole box against a prism came back between 2 and 7.6 m deep, and the solver pushed that contact out in one step, so the robot spun at up to 54 rad/s and gained up to 20 kJ. A thicker sole box (20 mm), more GJK/EPA iterations (100) and multi-contact detection changed nothing. With Newton's pipeline the same rollouts on flat and rough tiles, and with the training's start states and pushes, flagged none in 3 million policy steps, and the episodes were as long as on a plane.
+
+`tests/test_world.py::test_a_robot_falling_on_a_heightfield_gains_no_energy` tips each robot onto a bumpy tile with its drives off, a passive system, and checks that its centre-of-mass kinetic plus potential energy never exceeds its start and that no contact is deeper than 3 cm. With `contacts: mujoco` it fails on every robot, with terrain contacts 4 to 28 cm deep in different runs.
+
+The two sections below apply to `contacts: mujoco` only.
+
 ### The heightfield's base
 
 MuJoCo collides a shape with a heightfield cell by cell, each cell a prism from the surface down to the heightfield's base, and pushes a shape that has sunk into a prism out the nearest way. Newton exports a heightfield to MuJoCo with a base 0.1 mm below its lowest point, so over the lowest cells a prism is thinner than a landing foot sinks into it (soft contact), and the foot is pushed out downwards, through the terrain. The G1's feet, four 5 mm spheres each, fell 1 to 2 cm into a bumpy tile on landing and kept falling; the V1's sole plates sank about 3 cm.

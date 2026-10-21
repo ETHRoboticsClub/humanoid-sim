@@ -1,10 +1,11 @@
 """Heightfield terrain for the training scene, as an Isaac Lab terrain-importer config.
 
 This is the mechanism only: which tiles, how many, how hard and any curriculum over them are the task's choice
-(humanoid-learning's terrain generators). What is fixed here is what the physics can collide with. On MJWarp the
-robot's contacts run in its own collision pipeline, which collides the robot's hulls and boxes with heightfields
-but not with triangle-mesh terrain, and Isaac Lab turns a generated terrain into a heightfield only when every
-sub-terrain is a heightfield one (``Hf*``), so :func:`heightfield_terrain_cfg` accepts only those. Imports Isaac
+(humanoid-learning's terrain generators). What is fixed here is what the physics can collide with. Isaac Lab turns a
+generated terrain into a heightfield only when every sub-terrain is a heightfield one (``Hf*``), and MJWarp's own
+collision pipeline (``contacts: mujoco``) collides the robot with heightfields but not with triangle-mesh terrain,
+so :func:`heightfield_terrain_cfg` accepts only those. Collide them through Newton's pipeline (``contacts: newton``,
+the default): MJWarp's own returns some sole-box contacts metres deep (docs/world.md). Imports Isaac
 Lab lazily.
 """
 
