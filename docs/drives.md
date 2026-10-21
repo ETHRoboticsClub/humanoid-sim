@@ -112,11 +112,11 @@ q_drive, _, _ = plant.map.drive_state(standing, torch.zeros_like(standing))
 
 # 0.05 rad past standing on every drive, at the baseline gains (humanoid-urdf baseline_position_gains).
 demand = DriveDemand.pd(q_drive + 0.05, plant.drive_stiffness, plant.drive_damping)
-print(demand.stiffness_nm_per_rad[0, :3])  # tensor([320., 320., 320.]) Nm/rad
+print(demand.stiffness_nm_per_rad[0, :3])  # tensor([197.4, 197.4, 197.4]) Nm/rad
 
 plant.submit(demand, torch.tensor([1_000_000]))  # in force 1 ms into the first step
 plant.pre_physics(0, standing, torch.zeros_like(standing))
-print(plant.last.demanded[0, :3])  # 12 Nm each: 320 Nm/rad · 0.05 rad over 3/4 of the step
+print(plant.last.demanded[0, :3])  # 7.40 Nm each: 197.4 Nm/rad · 0.05 rad over 3/4 of the step
 ```
 
 ## Arrival and latency
@@ -210,10 +210,10 @@ Isaac Lab's articulation has a joint PD inside the solver. MJWarp's `implicitfas
 
 | Joints | `k0` (Nm/rad) | `d0` (Nm·s/rad) |
 |---|---|---|
-| HEJ90 joints | 320 (knees 600) | 10 to 26 |
+| HEJ90 joints | 197.4 | 12.6 |
 | HEJ70 shoulders | 100 | 5 |
-| HEJ50 arm joints | 50 | 2.5 |
-| Ankle hinges (from 480 Nm/rad and 8 Nm·s/rad per crank) | 1021 to 1094 | 17.0 to 18.2 |
+| HEJ50 arm joints | 22.1 | 1.41 |
+| Ankle hinges (from 22.1 Nm/rad and 1.41 Nm·s/rad per crank) | 47 to 50 | 3.0 to 3.2 |
 
 Every other force law (the drive's own gains, the envelope and cap, arrival blending, external torque) is realized by moving the solver's position target, with its velocity target at 0 (`shaped_position_target` in `src/humanoid_sim/devices/shaping.py`, called from `PlantCore.pre_physics`):
 

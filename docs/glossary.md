@@ -24,7 +24,7 @@ Turning a drive's output by an external force while the drive is disabled. The r
 
 ### Baseline gains
 
-The position gains in `actuators.yaml` (`baseline_position_gains`), per drive: for example 320 Nm/rad on the hip drives and 600 Nm/rad on the knees. The solver's constant PD uses them (see [solver gains](#solver-gains)), and the examples hold poses with them.
+The position gains in `actuators.yaml` (`baseline_position_gains`), per drive: for example 197.4 Nm/rad on the hip and knee drives (HEJ90, from their armature at 10 Hz) and 100 Nm/rad on the shoulders. The solver's constant PD uses them (see [solver gains](#solver-gains)), and the examples hold poses with them.
 
 ### Bus period
 

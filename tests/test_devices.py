@@ -108,9 +108,10 @@ def test_plant_core_on_description(desc):
     assert torch.allclose(target, standing, atol=1e-9)
     fb = plant.feedback(standing, torch.zeros_like(standing))
     assert torch.allclose(fb.applied_torque_nm, torch.zeros(2, 22, dtype=D64), atol=1e-9)
-    # Ankle solver gains are the crank gains through J at standing (pitch ~ 480/0.96^2 per crank pair).
+    # Ankle solver gains are the crank gains through J at standing: pitch ~ 2 kp / 0.96^2 for the crank pair.
     i = joints.index("foot_pitch_l")
-    assert 700 < plant.k0[0, i].item() < 1100
+    kp = desc.drives["maxonHEJ50L_ANK1"].baseline_stiffness
+    assert 1.45 * kp < plant.k0[0, i].item() < 2.3 * kp
 
 
 def test_drive_deviations_and_per_drive_arrival():
