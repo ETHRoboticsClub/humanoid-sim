@@ -34,6 +34,8 @@ BASE_JOINT_DAMPING = 2e3
 ROBOT_PRIM = "{ENV_REGEX_NS}/Robot"
 
 SOLVERS = ("mjwarp", "kamino")
+# Where MJWarp's contacts come from: Newton's collision pipeline or MJWarp's own (the profile's ``contacts``).
+CONTACTS = ("newton", "mujoco")
 # Isaac Lab's ``solver_type`` of each solver config.
 _SOLVER_TYPES = {"mujoco_warp": "mjwarp", "kamino": "kamino"}
 
@@ -113,8 +115,8 @@ def apply_heightfield_base(physics: dict) -> None:
     (5 mm) landing on the lowest cells of a rough tile falls through the terrain. The base, the heightfield's
     bounding box and its bounding radius are rewritten together. Kamino collides heightfields in Newton's own
     pipeline and takes no setting."""
-    if running_solver() != "mjwarp":
-        return
+    if running_solver() != "mjwarp" or physics["mjwarp"]["contacts"] != "mujoco":
+        return  # Newton's collision pipeline collides heightfields itself
     import mujoco_warp
     import numpy as np
     from isaaclab_newton.physics import NewtonManager
@@ -225,9 +227,13 @@ def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None):
     if solver == "mjwarp":
         from isaaclab_newton.physics import MJWarpSolverCfg
 
+        contacts = settings["contacts"]
+        if contacts not in CONTACTS:
+            raise ValueError(f"MJWarp contacts {contacts!r}: one of {', '.join(CONTACTS)}")
         return MJWarpSolverCfg(integrator=integrator, use_mujoco_cpu=False, iterations=settings["iterations"],
                                ls_iterations=settings["ls_iterations"], cone=settings["cone"],
-                               njmax=settings["njmax"], nconmax=settings["nconmax"])
+                               njmax=settings["njmax"], nconmax=settings["nconmax"],
+                               use_mujoco_contacts=contacts == "mujoco")
     if solver == "kamino":
         from isaaclab_newton.physics import KaminoMaterialsCfg, KaminoPADMMCfg, KaminoPADMMSolverCfg
 
