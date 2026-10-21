@@ -47,7 +47,7 @@ def test_every_rig_sits_on_its_description(robot):
 def test_the_v1_carries_the_mti_610_on_can_and_an_oak_d_w():
     rig = rigs.rig("ethrc_v1")
     assert {n: type(s) for n, s in rig.sensors.items()} == {"imu": Mti610, "camera0": OakDW}
-    assert rig.unsimulated() == ["camera0"] and rig.unsimulated(rtx=True) == ["camera0"]
+    assert rig.unsimulated() == ["camera0"] and rig.unsimulated(rtx=True) == []  # the RTX sensors render it
     cfg = rig.imu.delivery_cfg()
     assert cfg.gyro_turn_on_bias == Mti610.gyro_turn_on_bias_rad_s
     assert (cfg.sample_period_ns, cfg.burst_period_ns) == (2_500_000, (2_500_000, 2_500_000))  # 400 Hz, no bursts

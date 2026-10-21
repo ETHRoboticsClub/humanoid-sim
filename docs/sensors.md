@@ -44,6 +44,8 @@ rig.unsimulated()                               # ['mid360', 'zed', 'd435']
 rig.unsimulated(rtx=True)                       # []: the RTX sensors simulate them all
 ```
 
+The V1's OAK-D-W places its streams as Controls' depthai backend does (the left mono at the camera frame's origin, depth aligned to it, the right mono a baseline away); the colour imager's place midway between the monos, and the right mono's and depth's pinholes (the left mono's), are modeled until the unit's calibration is read.
+
 Frames and units are as in [drives.md](drives.md#frames): drive quantities in rad, rad/s and Nm at the drive output (crank angle for the ankle cranks), joint quantities in URDF joint coordinates, all times in integer nanoseconds on the plant clock.
 
 ## Drive feedback

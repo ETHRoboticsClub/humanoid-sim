@@ -6,7 +6,7 @@ A robot's cameras and lidars are rendered by Isaac Sim's RTX renderer (Kit) whil
 
 ## What is simulated
 
-The sensors are the robot's rig ([sensors.md](sensors.md#sensor-models-and-the-rig)): every lidar, and every camera whose class places and names the kind of each stream and whose instance calibrates each stream (`Camera.rtx_ready`). The G1's rig has the Mid-360. The `g1-cameras` extra rig (`sensors/rigs.py`) adds the cameras the lab G1 is reported to carry, which its rig does not declare yet: a ZED Mini on the helmet mount (`camera0_camera`) with the lab unit's factory calibration, and a RealSense D435i at Unitree's `d435_link` with the datasheet's fields of view.
+The sensors are the robot's rig ([sensors.md](sensors.md#sensor-models-and-the-rig)): every lidar, and every camera whose class places and names the kind of each stream and whose instance calibrates each stream (`Camera.rtx_ready`). The V1's rig has its OAK-D-W (`camera0`, partly modeled: [sensors.md](sensors.md)), the G1's the Mid-360. The `g1-cameras` extra rig (`sensors/rigs.py`) adds the cameras the lab G1 is reported to carry, which its rig does not declare yet: a ZED Mini on the helmet mount (`camera0_camera`) with the lab unit's factory calibration, and a RealSense D435i at Unitree's `d435_link` with the datasheet's fields of view.
 
 | Instance | Model | Streams, as Controls' backend publishes them | Lens or pattern |
 |---|---|---|---|
@@ -64,6 +64,19 @@ rsync -avz hsim-rtx:sky_workdir/outputs/rtx/ outputs/rtx/
 ```
 
 The robot is welded at the spawn point in its home pose, feet just above the floor (a G1 cannot stand on a fixed-gain hold). In a scanned room, the room's boxes collide and the lidar sees them and the scan's mesh (`--scan-mesh`); with its splat (`--splat`, made by `humanoid-sim splat-usd`, [world.md](world.md)) the cameras see the splat, the boxes, the mesh and the ground being hidden from camera rays. RTX shows the splat's baked colours darker than the scan's photographs; `--splat-intensity` scales its emission.
+
+## On a running runtime: `render-runtime`
+
+`humanoid-sim render-runtime <segment>` renders a running `serve`'s robot with the same sensors and outputs (`src/humanoid_sim/runtime/render.py`). It never steps physics and never writes to the segment: each render it takes the latest truth (base pose and joint positions), poses the robot there by forward kinematics (`SensorSession.pose`) and renders at that plant time (`SensorSession.render_at`). It renders as fast as Kit allows, at most once per camera period (the lidar's sweep period without cameras), and a render that falls behind skips to the latest truth; the host keeps real time on its own. Stamps map plant time onto the realtime clock through the host's own mapping (the feedback region's `written_mono_ns` at `sim_time_ns`). The scene is the host's: its boxes and scan from the descriptor when the files are readable here with the same digests, plus `--splat` for the cameras. It follows a `--persist` host's next session.
+
+```bash
+humanoid-sim serve --segment /run/hsim/plant --truth-every 1 --scene $H/hangar_proxy.npz --spawn -4.42 3.48 \
+  --scan-mesh $H/hangar_visual.obj --scan-texture $H/hangar_visual.png --scan-floor-texture $H/hangar_floor.png &
+humanoid-sim render-runtime /run/hsim/plant --splat outputs/rtx/hangar_splat.usdc --splat-intensity 3 \
+  --feeds /run/ethrc-camera-feed --lidar-domain 7 --summary outputs/rtx/render.json
+```
+
+The summary adds `render_rate_hz`, `lag_ms` (the host's plant time when a render's frames are out, minus the render's plant time) and `host_keeping_up` (the share of renders during which the host kept real time). Controls runs it as `just sim-isaac-rtx`.
 
 ## Checks
 

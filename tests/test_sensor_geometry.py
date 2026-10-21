@@ -118,11 +118,14 @@ def test_a_point_ahead_of_each_camera_lands_on_its_principal_point(desc, rig):
 
 
 def test_a_camera_without_every_stream_placed_is_refused(rig):
-    assert OakDW.nominal_offsets_m == {} and OakDW.stream_kinds == {}  # the V1's: its model places no stream
+    # The V1's OAK-D-W: every stream relative to the left mono, depth aligned to it, the right mono a baseline away.
     v1 = rigs.rig("ethrc_v1")
-    assert not v1.sensors["camera0"].rtx_ready and v1.unsimulated(rtx=True) == ["camera0"]
-    with pytest.raises(ValueError, match="not every stream"):
-        geometry.camera_spec(v1.sensors["camera0"])
+    spec = geometry.camera_spec(v1.sensors["camera0"])
+    places = {st.name: st.translation_m for st in spec.streams}
+    assert places["mono_left"] == places["depth"] == (0.0, 0.0, 0.0)
+    assert places["mono_right"] == (0.0, -OakDW.stereo_baseline_m, 0.0)
+    assert {st.name: st.kind for st in spec.streams} == dict(OakDW.stream_kinds)
+    assert v1.unsimulated(rtx=True) == []
     # The G1's Mid-360 is simulated with the RTX sensors; with the example cameras so are they.
     assert rig.unsimulated() == ["mid360", "zed", "d435"] and rig.unsimulated(rtx=True) == []
 
