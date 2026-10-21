@@ -105,7 +105,7 @@ A session is tied to the segment file and outlives the client process that drove
 The runtime runs in real time only. `RuntimeHost.run` paces each physics period, 4 ms (`physics.period_ns` in `profiles/ethrc_v1.yaml`), to `CLOCK_MONOTONIC`: it sleeps until 100 µs before the step's deadline and spins for the rest (`SPIN_NS`). Each period does, in order (`RuntimeHost.step`):
 
 1. Handle a new mailbox command, if there is one, and write its ack.
-2. Take every demand record the client appended since the last step into the drive bank, oldest first. Each is sent at its `sent_mono_ns` mapped to plant time (the latest feedback's mapping, below), so the 2 to 3 records a 1.5 ms bus writes during one 4 ms step each act from their own time within the step. If no new record arrives the last one stays in force. See [drives.md](drives.md#arrival-and-latency) for the arrival queue and the drive law.
+2. Take every demand record the client appended since the last step into the drive bank, oldest first. Each is sent at its `sent_mono_ns` mapped to plant time (the latest feedback's mapping, below), and each drive applies it its [drive model](drives.md#drive-models)'s delay later (5 ms on the V1), so the 2 to 3 records a 1.5 ms bus writes during one 4 ms step each act from their own time within a step. If no new record arrives the last one stays in force. See [drives.md](drives.md#arrival-and-latency) for the arrival queue and the drive law.
 3. Step the physics with the active gantry, disturbances and prescribed pose, unless paused.
 4. Publish the feedback, the truth when due, and the heartbeat.
 
@@ -212,7 +212,8 @@ The descriptor region holds one JSON object (sorted keys, at most 16,384 bytes) 
 | `soles` | The two sole bodies, left then right |
 | `commands` | Command codes to names, `{"1": "reset", ..., "9": "set_fidelity"}` |
 | `faults` | `encoder_freeze`, `imu_spike`, `imu_bias`, `power_sag` |
-| `fidelity_gaps` | What the runtime does not model (`FIDELITY_GAPS` in `host.py`) |
+| `drive_models` | One entry per drive model the robot has: `model` (its class), `family`, `product`, `interface`, `drive_delay_ns`, `delay_measured` and the `drives` it is ([drives.md](drives.md#drive-models)) |
+| `fidelity_gaps` | What the runtime does not model (`fidelity_gaps` in `host.py`) |
 | `scene` | Null, or with `--scene`: `file`, its `sha256`, the number of `boxes`, `spawn_m`, `spawn_clearance_m` (the horizontal distance from the spawn point to the nearest box) and `scan` (null, or the `mesh`, `texture` and `floor_texture` files, each as `file` and `sha256`). The truth is in the world frame, whose origin is the scene point `spawn_m`. |
 
 The fidelity gaps the runtime publishes:
@@ -221,6 +222,8 @@ The fidelity gaps the runtime publishes:
 - upper-body passive joint parameters (waist, shoulders, elbows) are description values, not identified
 - ankle as pitch and roll hinges driven through the crank transmission (no closed chain)
 - IMU errors from the rig's model: white noise, turn-on bias, Gauss-Markov drift (SET_FIDELITY ideal turns them off); the turn-on bias is redrawn at every IMU reset, not only at power-on
+- drive delay is each family's fixed figure (actuators.yaml drive_delay_s), without per-cycle jitter
+- for a robot whose description records no delay for some families (the G1's): drive delay unmeasured for those families, whose demands act when the bus delivers them
 
 ### Demands
 

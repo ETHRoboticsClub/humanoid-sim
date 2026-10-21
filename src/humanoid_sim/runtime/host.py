@@ -68,7 +68,18 @@ FIDELITY_GAPS = [
     "ankle as pitch and roll hinges driven through the crank transmission (no closed chain)",
     "IMU errors from the rig's model: white noise, turn-on bias, Gauss-Markov drift (SET_FIDELITY ideal turns them "
     "off); the turn-on bias is redrawn at every IMU reset, not only at power-on",
+    "drive delay is each family's fixed figure (actuators.yaml drive_delay_s), without per-cycle jitter",
 ]
+
+
+def fidelity_gaps(models: dict) -> list[str]:
+    """The runtime's gaps for drives with these models: :data:`FIDELITY_GAPS` and the families whose delay the
+    description does not record."""
+    unmeasured = sorted({m.family for m in models.values() if not m.delay_measured})
+    if not unmeasured:
+        return list(FIDELITY_GAPS)
+    return FIDELITY_GAPS + [f"drive delay unmeasured for {', '.join(unmeasured)}: their demands act when the bus "
+                            "delivers them"]
 
 
 class _DemandIntake:
@@ -151,7 +162,9 @@ class RuntimeHost:
                  client_timeout_ns: int = 500_000_000,
                  seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True,
                  scene: StaticBoxes | None = None):
+        from humanoid_sim.devices.models import drive_models
         from humanoid_sim.model.asset import asset_meta, load_profile
+        from humanoid_sim.model.description import Description
         from humanoid_sim.model.poses import POSES, STANDING_CLEARANCE_M, initial_pose, start_pose
         from humanoid_sim.sim import SimCore
 
@@ -170,10 +183,12 @@ class RuntimeHost:
         self._poses = {name: initial_pose(usd, robot, name) for name in POSES}
         height = self._poses[self.start_pose][1] + STANDING_CLEARANCE_M + (0.3 if support == "suspended" else 0.0)
         cuda = str(device).startswith("cuda")
+        models = drive_models(Description.load(robot))
         self.sim = SimCore(usd, device=device, robot=robot, solver=solver, fixed_base=support == "suspended",
                            base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
                            compile=compile and cuda, imu_history=abi.IMU_SAMPLES, scene=scene,
-                           queue_capacity=_queue_capacity(0, bus_period_ns,
+                           queue_capacity=_queue_capacity(max(m.drive_delay_ns for m in models.values()),
+                                                          bus_period_ns,
                                                           int(load_profile(robot)["physics"]["period_ns"])))
         self.device = torch.device(device)
         self._intake = _DemandIntake(self.sim.plant, len(self.sim.plant.map.drive_names), self.device,
@@ -182,6 +197,9 @@ class RuntimeHost:
         self.robot = self.sim.backend.robot
         self.period_ns = self.sim.period_ns
         self.drives = self.sim.plant.map.drive_names
+        self.drive_models = {name: models[name] for name in self.drives}
+        # Each drive applies a bus cycle's demand its model's delay after the bus delivered it.
+        self._drive_delays_ns = np.array([m.drive_delay_ns for m in self.drive_models.values()], dtype=np.int64)
         self.joints = list(self.desc.joints)
         self.client_timeout_ns = client_timeout_ns
         self.truth_every = truth_every
@@ -287,9 +305,17 @@ class RuntimeHost:
             "imu": {"parent": self.desc.imu_mount()[0]},
             "soles": [s["body"] for s in self._soles],
             "commands": {str(k): v for k, v in abi.COMMANDS.items()}, "faults": list(abi.FAULTS),
-            "fidelity_gaps": FIDELITY_GAPS,
+            "drive_models": self._drive_model_table(),
+            "fidelity_gaps": fidelity_gaps(self.drive_models),
             "scene": None if self.scene is None else self.scene.describe(),
         }
+
+    def _drive_model_table(self) -> list[dict]:
+        """Each drive model with the drives it is, for the descriptor."""
+        table: dict[str, dict] = {}
+        for name, model in self.drive_models.items():
+            table.setdefault(model.family, model.describe() | {"drives": []})["drives"].append(name)
+        return list(table.values())
 
     def _sole_geometry(self, boxes: list[dict]) -> list[dict]:
         """Each sole plate in its body's frame: corners, bottom-face corners, axes and half extents."""
@@ -581,7 +607,7 @@ class RuntimeHost:
         for k in range(first, count):
             record = rec["ring"][k % abi.DEMAND_RING]
             sent_ns = int(record["sent_mono_ns"]) - self._mono_minus_plant_ns
-            self._intake(record["drive"][:n], np.full(n, sent_ns, dtype=np.int64))
+            self._intake(record["drive"][:n], sent_ns + self._drive_delays_ns)
         self._demands_taken = count
         running = rec["ring"][(count - 1) % abi.DEMAND_RING]["drive"][:n]["law"] != abi.LAW_DISABLED
         self._set_drives_off(~running)

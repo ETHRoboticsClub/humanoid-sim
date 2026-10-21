@@ -116,7 +116,7 @@ The EPOS4 drive mode Controls uses for control on the ETHRC V1 (mode -64): the d
 
 ### Latency
 
-The time from a demand leaving the master to its [arrival](#arrival) at the drive. Randomized in training; in the runtime a demand takes effect at the next physics step.
+The time from a demand leaving the master to its [arrival](#arrival) at the drive. Its last part is the drive's own delay (`drive_delay_s` per family in actuators.yaml, the [drive model](drives.md#drive-models)'s `drive_delay_ns`), which both the runtime and training apply; training adds the randomized `latency` before it.
 
 ### Mailbox
 
