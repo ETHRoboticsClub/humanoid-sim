@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import os
 import subprocess
 from dataclasses import dataclass
@@ -254,6 +255,19 @@ class Description:
         one, never above the drive's ``effort`` (Controls' ``ethrc_ssot.torque_envelope.braking_limit``)."""
         d = self.drives[drive]
         return min(float(self.family_value(d.family, "braking_peak", d.effort_peak)), d.effort_peak)
+
+    def drive_delay_ns(self, family: str) -> int | None:
+        """A motor family's ``drive_delay_s`` in integer ns: the controller's APPLIED acknowledgement to the drive's
+        position demand starting to move. None when the description records none for the family."""
+        if family not in self.table.get("families", {}):
+            raise ValueError(f"{self.robot}: no drive family {family!r}")
+        value = self.family_value(family, "drive_delay_s")
+        if value is None:
+            return None
+        value = float(value)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{self.robot}: {family} drive_delay_s {value!r} must be finite and non-negative")
+        return round(value * 1e9)
 
     def family_value(self, family: str, key: str, default=None):
         """A motor family's ``key``, or ``default`` when the family does not record it."""

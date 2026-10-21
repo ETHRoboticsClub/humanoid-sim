@@ -122,6 +122,19 @@ plant.pre_physics(0, standing, torch.zeros_like(standing))
 print(plant.last.demanded[0, :3])  # 7.40 Nm each: 197.4 Nm/rad · 0.05 rad over 3/4 of the step
 ```
 
+## Drive models
+
+Each drive is a product, and `src/humanoid_sim/devices/models.py` has one class per product, as the sensors do: `Hej90`, `Hej70` and `Hej50` (maxon HEJ joints on EPOS4 controllers, `Epos4Drive`) for the ETHRC V1, and `UnitreeN7520_14`, `UnitreeN7520_22`, `UnitreeN5020` and `UnitreeW4010` (`UnitreeMotor`) for the G1. A class names its `actuators.yaml` family; its figures are robot facts, so the description holds them and an instance reads them: `Hej90(desc)` is a HEJ 90 on that robot. `drive_models(desc)` gives every drive its model and refuses a family without a class.
+
+| Attribute | Meaning |
+|---|---|
+| `family`, `product`, `interface` | The family key, the product, how the robot's controller drives it |
+| `drive_delay_ns` | The family's `drive_delay_s` in integer ns: from the controller staging a demand (its APPLIED acknowledgement) to the drive acting on it, which is the bus master's staging, the bus and the drive's interpolation. 0 when the description records none |
+| `delay_measured` | Whether the description records the delay; the runtime lists the families that do not in its fidelity gaps |
+| `delay_source` | The description's `drive_delay_source` |
+
+On the current V1 description every family has 5.0 ms, one whole-robot figure Controls identified over the 1:1 joints (`ethrc_ssot.command_latency`), until a per-family fit replaces it ([replay-and-sysid.md](replay-and-sysid.md#fitting-paces-actuator-model)). The G1's families record no delay.
+
 ## Arrival and latency
 
 A demand leaves the master at `sent_ns` and takes effect at the drive at `arrival_ns`. `ArrivalQueue` in `src/humanoid_sim/timing/arrival.py` holds the demands in flight, per env, with one lane per drive so that each drive can have its own arrival time.
