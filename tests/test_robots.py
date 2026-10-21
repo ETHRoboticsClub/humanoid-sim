@@ -90,7 +90,12 @@ def test_the_mirror_map_pairs_left_with_right(robot):
             assert partner != name
 
 
-@pytest.mark.parametrize("robot", ROBOTS)
+# humanoid-urdf c0ec54e set every standing offset to 0 without converting the standing-relative position limits
+# (its ethrc_v1/AGENTS.md: unvalidated in the calibration frame until re-authored), so the V1's CAD export pose has
+# its knees about 33 mrad past their limit until the URDF is re-exported at standing.
+@pytest.mark.parametrize("robot", [pytest.param(r, marks=pytest.mark.xfail(
+    strict=True, reason="humanoid-urdf limits not yet re-authored for zero standing offsets")) if r == "ethrc_v1"
+    else r for r in ROBOTS])
 def test_the_home_pose_lies_inside_the_travel(robot):
     desc = Description.load(robot)
     home = home_pose(desc, load_profile(robot))

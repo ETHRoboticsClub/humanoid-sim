@@ -78,7 +78,6 @@ class AnkleTransmission:
             if not np.allclose(geometry[name], axis):
                 raise ValueError(f"ankle transmission requires {name}={axis}")
         self.cranks_geom = (crank_geometry(geometry["upper"]), crank_geometry(geometry["lower"]))
-        self.max_tilt = float(geometry["max_tilt"])
         sign = np.asarray(kinematic_sign, dtype=np.float64)
         if sign.shape != (2,) or not np.isin(sign, (-1, 1)).all():
             raise ValueError("invalid semantic_to_kinematic_sign")

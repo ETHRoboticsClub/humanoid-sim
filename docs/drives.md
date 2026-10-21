@@ -40,27 +40,30 @@ The physical [drive-output frame](glossary.md#drive-frame) is what a drive measu
 | 1:1 | `q_drive = sign · q_URDF` | `sign · q̇` | `τ_joint = sign · τ_drive` |
 | Ankle crank | crank angle relative to the linkage neutral | `J q̇` | `τ_hinges = Jᵀ τ_cranks` |
 
-`sign` is the joint's `sign` (±1) in actuators.yaml. Positions are in rad, velocities in rad/s, torques in Nm at the drive output. The crank's zero (linkage neutral) is the drive's calibration zero and corresponds to both ankle hinges at URDF zero. Some readings at the standing pose:
+`sign` is the joint's `sign` (±1) in actuators.yaml. Positions are in rad, velocities in rad/s, torques in Nm at the drive output. The crank's zero (linkage neutral) is the drive's calibration zero and corresponds to both ankle hinges at URDF zero. Some readings at the [home pose](glossary.md#home-pose):
 
-| Drive | Joint(s) | sign | URDF angle at standing (rad) | Drive reading (rad) |
+| Drive | Joint(s) | sign | URDF angle at home (rad) | Drive reading (rad) |
 |---|---|---|---|---|
-| `maxonHEJ90L4` | knee_l | -1 | -2.3074 | 2.3074 |
-| `maxonHEJ90R4` | knee_r | +1 | -2.3168 | -2.3168 |
-| `maxonHEJ50L_ANK1` | foot_pitch_l, foot_roll_l | crank | 0.3912, 0.0038 | -0.3932 |
-| `maxonHEJ50L_ANK2` | foot_pitch_l, foot_roll_l | crank | 0.3912, 0.0038 | 0.4002 |
+| `maxonHEJ90L4` | knee_l | -1 | -1.9002 | 1.9002 |
+| `maxonHEJ90R4` | knee_r | +1 | -1.9002 | -1.9002 |
+| `maxonHEJ50L_ANK1` | foot_pitch_l, foot_roll_l | crank | 0.3294, 0.0 | -0.3317 |
+| `maxonHEJ50L_ANK2` | foot_pitch_l, foot_roll_l | crank | 0.3294, 0.0 | 0.3310 |
 
 To compute them (CPU, no physics backend needed):
 
 ```python
 import torch
 from humanoid_sim.core import PlantCore
+from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
+from humanoid_sim.model.poses import home_pose
 
 desc = Description.load("ethrc_v1")
 joints = list(desc.joints)
 plant = PlantCore(desc, joints, num_envs=1)
-standing = torch.tensor([[desc.joints[n].standing_offset_rad for n in joints]])  # [1, 22] rad, URDF
-q_drive, v_drive, jacobians = plant.map.drive_state(standing, torch.zeros_like(standing))
+home = home_pose(desc, load_profile("ethrc_v1"))
+q = torch.tensor([[home[n] for n in joints]])  # [1, 22] rad, URDF
+q_drive, v_drive, jacobians = plant.map.drive_state(q, torch.zeros_like(q))
 print(dict(zip(plant.map.drive_names, q_drive[0].tolist())))
 ```
 

@@ -33,7 +33,8 @@ def test_unlisted_joints_welded_and_actuated_joints_limited(built):
     for name, j in movable.items():
         lim = j.find("limit")
         assert (float(lim.get("lower")), float(lim.get("upper"))) == pytest.approx(desc.calibration_travel(name))
-    assert desc.calibration_travel("knee_l")[1] == 0.0  # recorded mechanical stop
+    # An ankle hinge's travel is the hull of its cranks' stops (ankle_model.bounds), with no limit of its own.
+    assert desc.calibration_travel("foot_pitch_l") == pytest.approx(desc.ankle_model.bounds("l")[0])
 
 
 def test_sole_boxes_match_controls_fit(built):

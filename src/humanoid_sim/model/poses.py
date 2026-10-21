@@ -2,8 +2,8 @@
 
 * ``"home"``: the pose the profile names (:func:`home_pose`). For the ETHRC V1 the pose its CAD is exported in, legs
   straight and both soles level at one height; for the G1 Unitree's deploy standing pose.
-* ``"standing"``: every joint at the description's standing offset. For the ETHRC V1 the pose captured on the
-  robot, whose soles are pitched by 10° and 17° under an upright base; for the G1 the URDF's zero.
+* ``"standing"``: every joint at the description's standing offset. For the ETHRC V1 the calibration pose while
+  humanoid-urdf's offsets are 0 (until its URDF is re-exported at standing); for the G1 the URDF's zero.
 
 Training scenes (``humanoid_sim.train.scene``) and the runtime host both start robots from these. A runtime session
 starts in the profile's ``poses.start`` (:func:`start_pose`).

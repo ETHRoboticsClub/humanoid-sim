@@ -261,8 +261,12 @@ class Description:
 
     def calibration_travel(self, name: str) -> tuple[float, float]:
         """Simulated travel in URDF (calibration) radians: the recorded mechanical stop where there is one,
-        else the position limit. Same rule as Controls ``ethrc_ssot/joint_travel.py``."""
+        else the position limit. Same rule as Controls ``ethrc_ssot/joint_travel.py``. An ankle hinge has no limit
+        of its own: its travel is the axis hull of what its cranks' stops allow (``ankle_model.bounds``)."""
         entry = self.table["joints"][name]
+        linkage = next((lk for lk in self.linkages if name in lk.joints), None)
+        if linkage is not None:
+            return self._ankle_bounds(linkage.side)[linkage.joints.index(name)]
         offset = float(entry["standing_offset_rad"])
         lo, hi = (float(b) + offset for b in entry["position_limit"])
         stop = entry.get("mechanical_stop_calibration_rad")
@@ -330,6 +334,17 @@ class Description:
         if linkage is None:
             raise ValueError(f"{self.robot} has no ankle linkage on side {side!r}")
         return linkage.upper, linkage.lower
+
+    def _ankle_bounds(self, side: str):
+        cache = self.__dict__.setdefault("_ankle_bounds_cache", {})
+        if side not in cache:
+            cache[side] = self.ankle_model.bounds(side)
+        return cache[side]
+
+    @cached_property
+    def ankle_model(self):
+        """humanoid-urdf's ``AnkleModel`` for this description: the cranks' stops and what they allow."""
+        return self.ankle_model_module().load(self.actuators_path)
 
     def ankle_model_module(self):
         """humanoid-urdf's own ``ankle_model`` module (numpy reference), loaded from the submodule."""
