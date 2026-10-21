@@ -8,6 +8,7 @@ from conftest import (
     GRAVITY,
     PARTS,
     PHYSICS_ROBOTS,
+    V1_LIMITS_UNCONVERTED,
     built_usd,
     gravity_torque,
     imu_samples_per_s,
@@ -133,6 +134,7 @@ def test_holds_its_pose_on_a_fixed_base_against_gravity(request, robot, solver):
 
 
 @pytest.mark.physics
+@V1_LIMITS_UNCONVERTED
 def test_base_joints_follow_prescribed_yaw(request):
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.devices.demand import DriveDemand

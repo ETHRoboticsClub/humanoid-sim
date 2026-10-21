@@ -51,8 +51,8 @@ def pose_joint_positions(desc, profile: dict, pose: str) -> dict[str, float]:
 
 
 def initial_pose(usd: Path, robot: str = "ethrc_v1", pose: str = "home"):
-    """Joint positions ``[J]`` (description order) of ``pose`` (see :data:`POSES`) and the upright base height at
-    which its lowest collision point touches the ground."""
+    """Joint positions ``[J]`` (description order) of ``pose`` (see :data:`POSES`), each within its joint's travel,
+    and the upright base height at which its lowest collision point touches the ground."""
     import torch
 
     from humanoid_sim.model.asset import load_profile
@@ -60,5 +60,9 @@ def initial_pose(usd: Path, robot: str = "ethrc_v1", pose: str = "home"):
 
     desc = Description.load(robot)
     joints = pose_joint_positions(desc, load_profile(robot), pose)
-    q = torch.tensor([joints[n] for n in desc.joints], dtype=torch.float64)
+    # Inside each joint's travel, as the solver would put it, and as Isaac Lab requires of a default pose. Only a
+    # description whose limits exclude the pose moves it: humanoid-urdf c0ec54e's unconverted standing-relative
+    # limits put the V1's home knees 33 mrad, and its shoulder abduction 1.19 rad, past their travel.
+    q = torch.tensor([min(max(joints[n], desc.calibration_travel(n)[0]), desc.calibration_travel(n)[1])
+                      for n in desc.joints], dtype=torch.float64)
     return q, standing_base_height(usd, desc, q)

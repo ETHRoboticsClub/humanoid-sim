@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import PARTS, PHYSICS_ROBOTS, built_usd, gravity_torque, urdf_mass_kg
+from conftest import PARTS, PHYSICS_ROBOTS, built_usd, gravity_torque, urdf_mass_kg, v1_unconverted
 
 from humanoid_sim.model.asset import asset_dir, load_profile
 from humanoid_sim.model.description import Description
@@ -138,7 +138,7 @@ def test_serve_round_trip(tmp_path, robot):
             proc.kill()
 
 
-@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+@pytest.mark.parametrize("robot", v1_unconverted(PHYSICS_ROBOTS))
 def test_prescribed_pose_with_floor_clearance_and_sole_truth(tmp_path, robot):
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.runtime.host import RuntimeHost
@@ -416,6 +416,9 @@ def test_the_host_serves_the_g1(tmp_path):
         assert soles["position_m"][0][1] > soles["position_m"][1][1]  # left at +y: the G1 faces +x
         demand["law"][:] = abi.LAW_DISABLED
         client.write_demands(demand, cycle=51)
+        # Sent after the last step ended, so in force from just after the next one starts: off for all of the one
+        # after.
+        host.step()
         host.step()
         assert np.abs(_feedback(client)["drive"]["demanded_torque_nm"][:29]).max() == 0.0
         client.close()

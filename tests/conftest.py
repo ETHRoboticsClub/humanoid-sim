@@ -18,6 +18,19 @@ GRAVITY = 9.81
 # hands is the G1 Controls launches).
 PHYSICS_ROBOTS = ("ethrc_v1", "g1_29dof_rev_1_0", "g1_29dof_with_hand_rev_1_0")
 
+# humanoid-urdf c0ec54e zeroed the V1's standing offsets without converting its standing-relative limits (its
+# ethrc_v1/AGENTS.md: unvalidated until the URDF is re-exported at standing). Its standing pose is the folded
+# calibration pose and its home pose no longer lies within the travel (initial_pose clamps it in), so checks of how
+# the V1 holds or stands in those poses fail until then. Strict: they report when the re-export fixes them.
+V1_LIMITS_UNCONVERTED = pytest.mark.xfail(strict=True, reason="humanoid-urdf c0ec54e: V1 limits not re-authored for "
+                                          "zero standing offsets")
+
+
+def v1_unconverted(robots):
+    """``robots`` as parameters, the V1 expected to fail while its limits are unconverted."""
+    return [pytest.param(r, marks=V1_LIMITS_UNCONVERTED) if r == "ethrc_v1" else r for r in robots]
+
+
 # Parts of each robot a test acts on by name. Test inputs, not expectations: what a test expects of them comes from
 # the description.
 #   torso: the upper-body link (a push's point of application)
