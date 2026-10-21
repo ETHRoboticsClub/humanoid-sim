@@ -47,6 +47,12 @@ physics:
     # 0.1 mm base, through which a shape sinking into the lowest cells is pushed out downwards (a G1 foot sphere
     # landing on a rough tile falls through). Deeper than any shape sinks; nothing lies under the terrain.
     heightfield_base_m: 1.0
+    # Collision detection: newton (Newton's collision pipeline, its contacts handed to MJWarp) or mujoco (MJWarp's
+    # own). MJWarp's own pipeline now and then returns a sole box against a heightfield prism metres deep (the V1's
+    # sole boxes at -2 to -7.6 m, about 5,400 times per million policy steps of a training rollout), and the
+    # solver pushes that contact out in one step: the robot spins at up to 54 rad/s. It also keeps at most 50 prisms
+    # per shape pair. Newton's pipeline gave no such contact or spin in the same rollouts (docs/world.md).
+    contacts: newton
   # Kamino (beta in Newton 1.6): maximal coordinates, hard joint-limit and contact constraints, P-ADMM forward
   # dynamics, contacts from Newton's collision pipeline. Contact friction mixes by the larger coefficient, as
   # MJWarp does. Not yet checked against MJWarp or the captures (modeled).

@@ -80,6 +80,77 @@ def test_heightfield_terrain_carries_the_feet(robot):
         sim_utils.SimulationContext.clear_instance()
 
 
+def _deepest_terrain_contact_m():
+    """The deepest contact with a heightfield in the last step of the running MJWarp data (signed distance, negative
+    inside), over all worlds; 0 when there is none. Self-contacts are left out: convex hulls of neighbouring links
+    overlap by construction."""
+    import mujoco_warp
+    import numpy as np
+    from isaaclab_newton.physics import NewtonManager
+
+    solver = NewtonManager._solver
+    d = solver.mjw_data
+    n = int(d.nacon.numpy()[0])
+    if not n:
+        return 0.0
+    hfield = solver.mjw_model.geom_type.numpy() == int(mujoco_warp.GeomType.HFIELD)
+    geom = d.contact.geom.numpy()[:n]
+    on = hfield[geom[:, 0]] | hfield[geom[:, 1]]
+    return min(0.0, float(d.contact.dist.numpy()[:n][on].min())) if on.any() else 0.0
+
+
+def test_a_robot_falling_on_a_heightfield_gains_no_energy(robot):
+    """Drives off, a robot tipped over onto a bumpy heightfield is a passive system: its mechanical energy can only
+    fall, so its centre-of-mass kinetic energy plus potential energy (a lower bound of the total) never exceeds what
+    it started with. And no contact with the terrain is deeper than a few centimetres. MJWarp's own collision pipeline broke both now
+    and then: a sole box against a prism came back metres deep and the solver flung the robot (``contacts:
+    mujoco`` in the profile's ``physics.mjwarp``)."""
+    import isaaclab.sim as sim_utils
+    from isaaclab.terrains.height_field import HfRandomUniformTerrainCfg
+
+    from humanoid_sim.train.plant import RobotPlant
+    from humanoid_sim.world.terrain import heightfield_terrain_cfg
+
+    n = 8
+    bumpy = {"bumps": HfRandomUniformTerrainCfg(proportion=1.0, noise_range=(0.0, 0.025), noise_step=0.005)}
+    terrain = heightfield_terrain_cfg(bumpy, rows=2, cols=4, size_m=4.0, border_m=2.0, curriculum=False, seed=0)
+    sim, scene = _scene(robot, n, terrain=terrain)
+    try:
+        art = scene["robot"]
+        plant = RobotPlant(art, TrainPlantCfg(robot=robot), imu=None, contacts=None)
+        stand = art.data.default_root_pose.torch[0, 2].item()
+        gen = torch.Generator().manual_seed(0)
+        tilt = (torch.rand(n, 2, generator=gen) - 0.5) * 0.6  # up to 0.3 rad about x and y: every robot falls
+        half = 0.5 * tilt
+        quat = torch.stack([torch.sin(half[:, 0]), torch.sin(half[:, 1]), torch.zeros(n),
+                            torch.cos(half[:, 0]) * torch.cos(half[:, 1])], 1)
+        quat = quat / quat.norm(dim=1, keepdim=True)
+        root = torch.cat([scene.env_origins + torch.tensor([0.0, 0.0, stand + 0.05]), quat], 1)
+        plant.reset(torch.arange(n), root_pose=root, root_vel=torch.zeros(n, 6))
+        mass = art.data.body_mass.torch  # [n, bodies]
+        ground = scene.env_origins[:, 2:3]
+
+        def energy():
+            z = art.data.body_com_pos_w.torch[..., 2] - ground
+            v = art.data.body_com_lin_vel_w.torch
+            return (mass * (GRAVITY * z + 0.5 * (v**2).sum(-1))).sum(1)
+
+        _step(sim, scene, plant, 1)
+        start, peak, deepest = energy(), energy(), 0.0
+        for _ in range(int(1.5e9 / plant.period_ns)):  # 1.5 s: it tips over and lands
+            _step(sim, scene, plant, 1)
+            peak = torch.maximum(peak, energy())
+            deepest = min(deepest, _deepest_terrain_contact_m())
+        weight = mass.sum(1) * GRAVITY
+        # Allowance: the energy a contact stores at a few millimetres of soft penetration under the robot's weight.
+        assert (peak <= start + weight * 0.01).all(), (peak - start) / weight
+        assert deepest > -0.03, deepest
+        z = art.data.root_link_pose_w.torch[:, 2] - ground[:, 0]
+        assert (z > 0.0).all() and (z < stand).all()  # on the terrain, fallen
+    finally:
+        sim_utils.SimulationContext.clear_instance()
+
+
 def test_force_push_accelerates_the_robot_horizontally(robot):
     import isaaclab.sim as sim_utils
 
