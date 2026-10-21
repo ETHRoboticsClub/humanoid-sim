@@ -119,9 +119,13 @@ class RuntimeRender:
             self.seg.close()
 
 
-def render_runtime(segment: str | Path, cfg, *, seconds: float | None = None, wait_s: float = 60.0) -> dict:
+def render_runtime(segment: str | Path, cfg, *, seconds: float | None = None, wait_s: float = 60.0,
+                   summary: str | None = None) -> dict:
     """Render ``segment``'s robot (waiting up to ``wait_s`` for it) until its host is gone or for ``seconds``,
-    following a ``serve --persist`` host's next session; returns the summary."""
+    following a ``serve --persist`` host's next session. The summary is printed (and written to ``summary``) before
+    Kit closes, which may end the process."""
+    import json
+
     from humanoid_sim.sensors.rtx import start_kit
 
     kit = start_kit(cfg.device)
@@ -139,10 +143,14 @@ def render_runtime(segment: str | Path, cfg, *, seconds: float | None = None, wa
     except KeyboardInterrupt:
         pass
     finally:
-        summary = render.summary(time.monotonic() - start)
+        out = render.summary(time.monotonic() - start)
+        text = json.dumps(out, indent=1)
+        if summary:
+            Path(summary).write_text(text)
+        print(text, flush=True)
         render.close()
         kit.close()
-    return summary
+    return out
 
 
 __all__ = ["RuntimeRender", "host_scene", "plant_now_ns", "render_runtime"]

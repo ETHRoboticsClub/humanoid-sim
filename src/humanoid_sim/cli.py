@@ -420,11 +420,7 @@ def cmd_render_runtime(args) -> int:
                      scan_mesh=args.scan_mesh, cameras=not args.no_cameras, lidar=not args.no_lidar,
                      feeds=args.feeds, lidar_domain=args.lidar_domain, rrd=args.rrd, images=args.images,
                      device=args.device, assets=args.assets)
-    summary = render_runtime(args.segment, cfg, seconds=args.seconds, wait_s=args.wait)
-    text = json.dumps(summary, indent=1)
-    if args.summary:
-        Path(args.summary).write_text(text)
-    print(text)
+    render_runtime(args.segment, cfg, seconds=args.seconds, wait_s=args.wait, summary=args.summary)
     return 0
 
 
