@@ -15,15 +15,16 @@
 extern "C" {
 #endif
 
-#define HSIM_PLANT_ABI_MAJOR 2
+#define HSIM_PLANT_ABI_MAJOR 3
 #define HSIM_PLANT_ABI_MINOR 0
 #define HSIM_PLANT_MAGIC "HSIMPLNT"
-#define HSIM_PLANT_LAYOUT_HASH 0xfb475e58737ea4a4ULL
-#define HSIM_PLANT_SEGMENT_BYTES 30912
+#define HSIM_PLANT_LAYOUT_HASH 0x8e1d3042ca178a4dULL
+#define HSIM_PLANT_SEGMENT_BYTES 56128
 
 #define HSIM_PLANT_MAX_DRIVES 64
 #define HSIM_PLANT_MAX_JOINTS 64
 #define HSIM_PLANT_IMU_SAMPLES 32
+#define HSIM_PLANT_DEMAND_RING 8
 #define HSIM_PLANT_DESCRIPTOR_BYTES 16384
 #define HSIM_PLANT_MAILBOX_BYTES 4096
 #define HSIM_PLANT_ACK_MESSAGE_BYTES 256
@@ -109,11 +110,21 @@ typedef struct {
   uint8_t json[HSIM_PLANT_DESCRIPTOR_BYTES];
 } HsimDescriptor;
 
+// One bus cycle's demands. sent_mono_ns: the client's CLOCK_MONOTONIC when the bus delivered
+// them to the drives; each drive applies them its own delay later (plant_abi.py).
+typedef struct {
+  uint64_t cycle, sent_mono_ns;
+  HsimDriveDemand drive[HSIM_PLANT_MAX_DRIVES];
+} HsimDemandRecord;
+
+// The client appends record k at ring[k % HSIM_PLANT_DEMAND_RING], sets count = k + 1 and
+// publishes the whole region.
 typedef struct {
   HSIM_REGION_HEAD
-  uint64_t cycle, written_mono_ns, session_id;
+  uint64_t written_mono_ns, session_id;
+  uint64_t count; // records written in total
   uint32_t num_drives, _pad1;
-  HsimDriveDemand drive[HSIM_PLANT_MAX_DRIVES];
+  HsimDemandRecord ring[HSIM_PLANT_DEMAND_RING];
 } HsimDemands;
 
 typedef struct {
@@ -123,6 +134,8 @@ typedef struct {
   uint64_t written_mono_ns, late_steps;
   uint32_t keeping_up, paused, num_drives, imu_count;
   uint64_t imu_total;
+  uint64_t demand_records;  // demand records taken from the ring in this session
+  uint64_t demand_overruns; // records the ring overwrote before the sim took them
   HsimDriveFeedback drive[HSIM_PLANT_MAX_DRIVES];
   HsimImuSample imu[HSIM_PLANT_IMU_SAMPLES]; // newest first; imu_count valid
 } HsimFeedback;
@@ -157,20 +170,22 @@ typedef struct {
 
 #define HSIM_OFFSET_DESCRIPTOR 320
 #define HSIM_OFFSET_DEMANDS 16768
-#define HSIM_OFFSET_FEEDBACK 20416
-#define HSIM_OFFSET_MAILBOX 24896
-#define HSIM_OFFSET_ACK 29056
-#define HSIM_OFFSET_TRUTH 29376
+#define HSIM_OFFSET_FEEDBACK 45632
+#define HSIM_OFFSET_MAILBOX 50112
+#define HSIM_OFFSET_ACK 54272
+#define HSIM_OFFSET_TRUTH 54592
 
 #ifdef __cplusplus
 static_assert(sizeof(HsimHeader) == 272, "header layout");
-static_assert(sizeof(HsimDemands) == 3632, "demands layout");
-static_assert(sizeof(HsimFeedback) == 4424, "feedback layout");
+static_assert(sizeof(HsimDemandRecord) == 3600, "demand record layout");
+static_assert(sizeof(HsimDemands) == 28848, "demands layout");
+static_assert(sizeof(HsimFeedback) == 4440, "feedback layout");
 static_assert(sizeof(HsimTruth) == 1536, "truth layout");
 #else
 _Static_assert(sizeof(HsimHeader) == 272, "header layout");
-_Static_assert(sizeof(HsimDemands) == 3632, "demands layout");
-_Static_assert(sizeof(HsimFeedback) == 4424, "feedback layout");
+_Static_assert(sizeof(HsimDemandRecord) == 3600, "demand record layout");
+_Static_assert(sizeof(HsimDemands) == 28848, "demands layout");
+_Static_assert(sizeof(HsimFeedback) == 4440, "feedback layout");
 _Static_assert(sizeof(HsimTruth) == 1536, "truth layout");
 #endif
 

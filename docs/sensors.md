@@ -268,4 +268,4 @@ The sole plates are the [sole boxes](glossary.md#sole-box), the box contact prim
 | `plate_face_height_span_m` | m | Height difference across the plate's bottom face (0 when it lies flat) |
 | `face_xy_m` | m, `[4, 2]` | The plate's bottom-face corners, world x and y |
 
-In the description's standing pose under an upright base the plates are tilted (about 10° on the left, 17° on the right); in the home pose they lie flat. See [robot-model.md](robot-model.md#standing-on-the-ground).
+In the home pose under an upright base the plates lie flat. See [robot-model.md](robot-model.md#standing-on-the-ground).

@@ -179,6 +179,10 @@ class BagCapture:
             raise ValueError(f"{self.root}: no COMMAND frames on {COMMAND_TOPIC}")
         return CommandTrace.from_frames(frames)
 
+    def applied_commands(self) -> None:
+        """A bag carries no controller acknowledgements: fits replay the frame stamps."""
+        return None
+
     def time_span_ns(self) -> tuple[int, int]:
         traces = self.pdo().values()
         return max(int(tr.t_ns[0]) for tr in traces), min(int(tr.t_ns[-1]) for tr in traces)

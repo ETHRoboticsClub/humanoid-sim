@@ -38,7 +38,9 @@ class TorqueSpeedEnvelope:
         lead = s.shape[:-1]
         sp = self.speeds.expand(*lead, *self.speeds.shape)
         tq = self.torques.expand(*lead, *self.torques.shape)
-        idx = torch.searchsorted(sp.contiguous(), s.unsqueeze(-1).contiguous()).clamp(1, sp.shape[-1] - 1)
+        # searchsorted (left) as a count over the few breakpoints: Inductor's searchsorted kernel fails to compile
+        # for some batch shapes (the runtime's arrival queue at 8 records).
+        idx = (sp < s.unsqueeze(-1)).sum(-1, keepdim=True).clamp(1, sp.shape[-1] - 1)
         s0, s1 = sp.gather(-1, idx - 1).squeeze(-1), sp.gather(-1, idx).squeeze(-1)
         t0, t1 = tq.gather(-1, idx - 1).squeeze(-1), tq.gather(-1, idx).squeeze(-1)
         lim = t0 + (t1 - t0) * ((s - s0) / (s1 - s0)).clamp(0, 1)

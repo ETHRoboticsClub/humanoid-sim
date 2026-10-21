@@ -40,27 +40,30 @@ The physical [drive-output frame](glossary.md#drive-frame) is what a drive measu
 | 1:1 | `q_drive = sign · q_URDF` | `sign · q̇` | `τ_joint = sign · τ_drive` |
 | Ankle crank | crank angle relative to the linkage neutral | `J q̇` | `τ_hinges = Jᵀ τ_cranks` |
 
-`sign` is the joint's `sign` (±1) in actuators.yaml. Positions are in rad, velocities in rad/s, torques in Nm at the drive output. The crank's zero (linkage neutral) is the drive's calibration zero and corresponds to both ankle hinges at URDF zero. Some readings at the standing pose:
+`sign` is the joint's `sign` (±1) in actuators.yaml. Positions are in rad, velocities in rad/s, torques in Nm at the drive output. The crank's zero (linkage neutral) is the drive's calibration zero; the ankle hinges are then at `ankle_model.semantic_neutral_rad` (pitch -0.329 rad, roll 0), not at URDF zero. Some readings at the [home pose](glossary.md#home-pose), which is URDF zero:
 
-| Drive | Joint(s) | sign | URDF angle at standing (rad) | Drive reading (rad) |
+| Drive | Joint(s) | sign | URDF angle at home (rad) | Drive reading (rad) |
 |---|---|---|---|---|
-| `maxonHEJ90L4` | knee_l | -1 | -2.3074 | 2.3074 |
-| `maxonHEJ90R4` | knee_r | +1 | -2.3168 | -2.3168 |
-| `maxonHEJ50L_ANK1` | foot_pitch_l, foot_roll_l | crank | 0.3912, 0.0038 | -0.3932 |
-| `maxonHEJ50L_ANK2` | foot_pitch_l, foot_roll_l | crank | 0.3912, 0.0038 | 0.4002 |
+| `maxonHEJ90L4` | knee_l | -1 | 0.0 | 0.0 |
+| `maxonHEJ90R4` | knee_r | +1 | 0.0 | 0.0 |
+| `maxonHEJ50L_ANK1` | foot_pitch_l, foot_roll_l | crank | 0.0, 0.0 | -0.3317 |
+| `maxonHEJ50L_ANK2` | foot_pitch_l, foot_roll_l | crank | 0.0, 0.0 | 0.3310 |
 
 To compute them (CPU, no physics backend needed):
 
 ```python
 import torch
 from humanoid_sim.core import PlantCore
+from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
+from humanoid_sim.model.poses import home_pose
 
 desc = Description.load("ethrc_v1")
 joints = list(desc.joints)
 plant = PlantCore(desc, joints, num_envs=1)
-standing = torch.tensor([[desc.joints[n].standing_offset_rad for n in joints]])  # [1, 22] rad, URDF
-q_drive, v_drive, jacobians = plant.map.drive_state(standing, torch.zeros_like(standing))
+home = home_pose(desc, load_profile("ethrc_v1"))
+q = torch.tensor([[home[n] for n in joints]])  # [1, 22] rad, URDF
+q_drive, v_drive, jacobians = plant.map.drive_state(q, torch.zeros_like(q))
 print(dict(zip(plant.map.drive_names, q_drive[0].tolist())))
 ```
 
@@ -119,14 +122,27 @@ plant.pre_physics(0, standing, torch.zeros_like(standing))
 print(plant.last.demanded[0, :3])  # 7.40 Nm each: 197.4 Nm/rad · 0.05 rad over 3/4 of the step
 ```
 
+## Drive models
+
+Each drive is a product, and `src/humanoid_sim/devices/models.py` has one class per product, as the sensors do: `Hej90`, `Hej70` and `Hej50` (maxon HEJ joints on EPOS4 controllers, `Epos4Drive`) for the ETHRC V1, and `UnitreeN7520_14`, `UnitreeN7520_22`, `UnitreeN5020` and `UnitreeW4010` (`UnitreeMotor`) for the G1. A class names its `actuators.yaml` family; its figures are robot facts, so the description holds them and an instance reads them: `Hej90(desc)` is a HEJ 90 on that robot. `drive_models(desc)` gives every drive its model and refuses a family without a class.
+
+| Attribute | Meaning |
+|---|---|
+| `family`, `product`, `interface` | The family key, the product, how the robot's controller drives it |
+| `drive_delay_ns` | The family's `drive_delay_s` in integer ns: from the controller staging a demand (its APPLIED acknowledgement) to the drive acting on it, which is the bus master's staging, the bus and the drive's interpolation. 0 when the description records none |
+| `delay_measured` | Whether the description records the delay; the runtime lists the families that do not in its fidelity gaps |
+| `delay_source` | The description's `drive_delay_source` |
+
+On the current V1 description every family has 5.0 ms, one whole-robot figure Controls identified over the 1:1 joints (`ethrc_ssot.command_latency`), until a per-family fit replaces it ([replay-and-sysid.md](replay-and-sysid.md#fitting-paces-actuator-model)). The G1's families record no delay.
+
 ## Arrival and latency
 
 A demand leaves the master at `sent_ns` and takes effect at the drive at `arrival_ns`. `ArrivalQueue` in `src/humanoid_sim/timing/arrival.py` holds the demands in flight, per env, with one lane per drive so that each drive can have its own arrival time.
 
 Where the arrival time comes from depends on the front end:
 
-- Training: `RobotPlant.submit(demand, sent_ns)` (`src/humanoid_sim/train/plant.py`) sets `arrival_ns[e, d] = sent_ns[e] + latency_ns[e, d]`. `latency_ns` comes from the `latency` randomization parameter (seconds, per env and drive, redrawn for envs being reset) and is 0 when it is not randomized.
-- Runtime: the host reads the client's latest demand record once per physics step and queues it with the step's start time as its arrival, so it is in force for the whole step (`RuntimeHost._take_demands` in `src/humanoid_sim/runtime/host.py`). If the client writes several records within one 4 ms step, only the latest is used. The bus and drive timing on that path is modeled by Controls' fake bank.
+- Training: `RobotPlant.submit(demand, sent_ns)` (`src/humanoid_sim/train/plant.py`) sets `arrival_ns[e, d] = sent_ns[e] + latency_ns[e, d] + drive_delay_ns[d]`. `latency_ns` is the latency before the drive (the controller's path), from the `latency` randomization parameter (seconds, per env and drive, redrawn for envs being reset), 0 when it is not randomized; `drive_delay_ns` is the drive's own delay from its [model](#drive-models), always applied.
+- Runtime: the host takes every record the client appended to the demand ring since the last physics step, oldest first, and queues each to arrive at drive `d` at its send time (`sent_mono_ns` mapped to plant time) plus that drive's `drive_delay_ns` ([Drive models](#drive-models); `RuntimeHost._take_demands` in `src/humanoid_sim/runtime/host.py`). Controls' fake bank sends each record when its bus delivers that cycle's outputs, so the lane's timing is the real master's up to the bus, then the drive's delay here.
 - Replay: recorded demands with an optional fixed delay; see [replay-and-sysid.md](replay-and-sysid.md).
 
 In training, with `plant = env.action_manager.get_term("drives").plant`:
@@ -200,7 +216,7 @@ The bank also carries how each drive deviates from what it is told. All are `[E,
 | `d_scale` | `drive_damping` | ratio | Realized D gain over the demanded one |
 | `torque_scale` | `torque_limit` | ratio | Scales the envelope and the torque cap |
 | `position_offset` | `encoder_offset` | rad | Drive's position reading minus the truth |
-| `RobotPlant.latency_ns` | `latency` | s, stored as ns | Time from sent to in force |
+| `RobotPlant.latency_ns` | `latency` | s, stored as ns | Time from sent to the controller staging it; the drive's own delay follows |
 
 In the runtime these stay at identity, except `torque_scale`, which the `power_sag` fault sets.
 
@@ -299,11 +315,12 @@ The mailbox and its other commands are described in [runtime.md](runtime.md).
 
 ## What is not modeled
 
-The runtime publishes its known gaps in the segment descriptor (`FIDELITY_GAPS` in `src/humanoid_sim/runtime/host.py`):
+The runtime publishes its known gaps in the segment descriptor (`fidelity_gaps` in `src/humanoid_sim/runtime/host.py`):
 
 - There are no drive current, thermal or backlash models. The applied torque is the envelope-clipped control law.
 - The passive joint parameters of the upper body (waist, shoulders, elbows) are the description's values and have not been identified from captures.
 - The ankle is two hinges, pitch and roll, driven through the crank transmission. There is no closed chain.
 - IMU errors are the rig's model's: white noise, a turn-on bias and a slow drift (`SET_FIDELITY` ideal turns them off). See [sensors.md](sensors.md#sampling-and-errors).
+- Each drive's delay is its family's fixed figure, with no per-cycle jitter. A family whose description records no delay (the G1's) has none, and the gap names it.
 
 For the drive model this means the applied torque follows the law within the step, with no current-loop dynamics, and a drive can hold its peak torque indefinitely. Gearbox losses are only the joints' Coulomb friction and viscous damping from actuators.yaml, plus the back-drive friction of an off drive in the runtime. There is no integral term. The crank position windows in actuators.yaml are not enforced by the plant; the ankle hinges have joint stops at their ±30° position limits.

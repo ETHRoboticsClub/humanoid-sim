@@ -7,9 +7,8 @@ robot: ethrc_v1
 # Named poses (model/poses.py). home: the pose the CAD is exported in, from humanoid-urdf's zero-rebase table.
 poses:
   home: {export: tools/urdf6_zero_rebase.json}
-  # Controls arms a drive only inside its position_limit, and home's straight knees lie past the knees' upper bound.
   # The standing pose is where Controls' MuJoCo plant starts the robot (ethrc_sim/plant.py with
-  # ethrc_ssot/neutral_pose.py, whose shoulder clearance is zero for this description @ e332eef6).
+  # ethrc_ssot/neutral_pose.py). The standing offsets are 0, so it is the home pose: zero, arms down, legs straight.
   start: standing
 
 model:

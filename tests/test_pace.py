@@ -27,7 +27,7 @@ def test_decode_starts_at_the_start_values_and_spans_the_bounds():
     assert np.allclose(x0[s.slices()["friction_ratio"]], 1.0)  # the description's ratio: no dynamic friction
     v = s.decode(np.stack([x0, np.ones(s.dim), -np.ones(s.dim), 3 * np.ones(s.dim)]))
     assert np.allclose(v["armature"][0], START["armature"]) and np.allclose(v["bias"][0], 0.0)
-    assert v["delay"].tolist() == [5_000_000, 10_000_000, 0, 10_000_000]  # outside the box: at its edge
+    assert v["delay"][:, 0].tolist() == [5_000_000, 10_000_000, 0, 10_000_000]  # outside the box: at its edge
     assert np.allclose(v["damping"][1], 10 * START["damping"]) and np.allclose(v["friction"][2], START["friction"] / 10)
     assert np.allclose(v["friction_ratio"][0], 1.0) and np.allclose(v["friction_ratio"][2], 0.0)
     assert np.allclose(v["bias"][2], -0.01)
@@ -125,6 +125,9 @@ def test_command_demand_rms_finds_the_shift(plant):
         def commands(self):
             return cmds
 
+        def applied_commands(self):
+            return None
+
         def pdo(self):
             return {d: DriveTrace(d, t, {"position_demand_rad": sample_hold(t_cmd, targets[:, i], t - 6_000_000)})
                     for i, d in enumerate(plant.map.drive_names)}
@@ -144,6 +147,61 @@ def test_excitation_capture_reads_its_commands(tmp_path):
         "1,100,0.0,knee_l,0.1,0.1\n1,100,0.0,knee_r,0.2,0.2\n2,120,0.02,knee_l,0.3,0.3\n")
     c = ExcitationCapture(tmp_path).commands()
     assert c.t_ns.tolist() == [100, 120] and c.positions_rad.tolist() == [[0.1, 0.2], [0.3, 0.2]]
+
+
+def test_a_fit_replays_frames_from_the_controllers_applied_acknowledgements(tmp_path):
+    import json
+
+    from humanoid_sim.replay.exc import FORMAT, ExcitationCapture
+    from humanoid_sim.replay.replay import fit_commands
+
+    (tmp_path / "manifest.json").write_text(json.dumps({"format": FORMAT, "complete": True, "dataset_id": "exc-x"}))
+    (tmp_path / "commands.csv").write_text(
+        "seq,t_frame_ros_ns,t_signal_s,joint_id,q_nominal_rad,q_mirror_rad\n"
+        "1,100,0.0,knee_l,0.1,0.1\n2,120,0.02,knee_l,0.3,0.3\n3,140,0.04,knee_l,0.5,0.5\n")
+    cap = ExcitationCapture(tmp_path)
+    frames, reference = fit_commands(cap)
+    assert reference == "frame" and frames.t_ns.tolist() == [100, 120, 140]
+    (tmp_path / "acks.csv").write_text(
+        "seq,receiver_id,state,t_ack_ros_ns\n"
+        "1,router,routed,103\n1,controller,applied,113\n2,controller,applied,134\n3,controller,rejected,150\n")
+    frames, reference = fit_commands(cap)
+    # Frame 3 never applied: left out. The others at their APPLIED times.
+    assert reference == "applied" and frames.t_ns.tolist() == [113, 134]
+    assert frames.positions_rad[:, 0].tolist() == [0.1, 0.3]
+
+
+def test_one_delay_per_family():
+    s = PaceSpace(J + ["c"], D + ["dc"], {k: np.append(v, v[0]) for k, v in START.items()},
+                  delay_groups=["HEJ90", "HEJ50", "HEJ90"], delay_bounds_ns=(0, 10_000_000))
+    assert s.groups == ["HEJ90", "HEJ50"] and s.sizes["delay"] == 2
+    assert s.names[s.slices()["delay"]] == ["delay.HEJ90", "delay.HEJ50"]
+    x = s.x0()
+    x[s.slices()["delay"]] = [0.0, 1.0]
+    v = s.decode(x[None])
+    assert v["delay"].tolist() == [[5_000_000, 10_000_000]]
+    assert s.drive_delays(v).tolist() == [[5_000_000, 10_000_000, 5_000_000]]
+    best = {k: a[0] for k, a in v.items()}
+    p = s.pace_params(best, 2_500_000)  # PACE's one delay: the drives' mean, 6.67 ms, in whole 2.5 ms steps
+    assert p.shape == (len(s.pace_names),) and p[s.slices()["delay"].start] == 3
+    assert len(s.pace_names) == s.dim - 1 and "delay.all" in s.pace_names
+    with pytest.raises(ValueError, match="one per drive"):
+        PaceSpace(J, D, START, delay_groups=["HEJ90"])
+
+
+def test_each_family_delay_is_its_own_block_scored_on_its_drives(plant):
+    from humanoid_sim.sysid.pace import blocks, start_values
+
+    joints, drives = list(plant.map.joint_names), list(plant.map.drive_names)
+    families = [plant.desc.drives[d].family for d in drives]
+    space = PaceSpace(joints, drives, start_values(plant.desc, joints), delay_groups=families)
+    parts = blocks(space, plant, list(range(len(drives))))
+    delay = space.slices()["delay"]
+    delay_parts = [(idx, ds) for idx, ds in parts if idx[0] >= delay.start and idx[0] < delay.stop]
+    assert len(delay_parts) == len(space.groups) == len(set(families))
+    for idx, ds in delay_parts:
+        family = space.groups[idx[0] - delay.start]
+        assert sorted(ds) == [i for i, f in enumerate(families) if f == family]
 
 
 def test_write_follows_paces_bias_sign_and_sets_the_relief(plant):
@@ -254,6 +312,9 @@ def test_command_demand_rms_falls_back_to_position_and_reports_offsets(plant):
     class Cap:
         def commands(self):
             return cmds
+
+        def applied_commands(self):
+            return None
 
         def pdo(self):
             return {d: DriveTrace(d, t, {"position_demand_rad": nan,

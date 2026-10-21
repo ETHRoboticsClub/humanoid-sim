@@ -12,8 +12,10 @@ region      writer  contents
 header      sim     magic, ABI version, layout hash, sizes, session id, robot id, digests, periods, state,
                     heartbeat
 descriptor  sim     JSON: drive and joint names, units, profile, revisions, fidelity notes
-demands     client  bus cycle, client clock, session echo, one SI ``DriveDemand`` per drive (law, targets, gains)
-feedback    sim     sim time, physical drive feedback per drive, lateness, the latest raw IMU samples
+demands     client  the last DEMAND_RING bus cycles, each with its send time and one SI ``DriveDemand`` per drive
+                    (law, targets, gains); client clock, session echo, records written
+feedback    sim     sim time, physical drive feedback per drive, lateness, demand records taken and overrun, the
+                    latest raw IMU samples
 mailbox     client  one command at a time: sequence number, command code, JSON arguments
 ack         sim     the last command handled: its sequence number, a result code and a message
 truth       sim     the oracle tests need: base pose and twist, centre of mass, joint state, gantry tension,
@@ -37,7 +39,14 @@ Time: ``*_mono_ns`` fields are ``CLOCK_MONOTONIC`` of the writing process; ``sim
 ``written_mono_ns - (sim_time_ns - t)``. Identity: the description digest is :func:`description_digest`.
 Physical quantities are SI in the physical drive-output frame (crank angle for the ankle cranks). Demands are
 vendor-neutral: a client converts its device's command (an EPOS4's CiA-402 mode and raw JVPT gains, a Unitree
-motor's LowCmd entry) into a law with SI targets and gains at its own boundary (ABI 2.0).
+motor's LowCmd entry) into a law with SI targets and gains at its own boundary.
+
+Demands (ABI 3.0): the client appends one record per bus cycle to a ring of :data:`DEMAND_RING` records (record
+``k`` at ``ring[k % DEMAND_RING]``, ``count`` records written in total) and rewrites the region, so the sim sees every
+cycle's demand, not only the latest. Each record carries ``sent_mono_ns``, the client's ``CLOCK_MONOTONIC`` when the
+bus delivered that cycle's outputs to the drives; the sim maps it to plant time with its latest feedback mapping and
+each drive applies the record its own delay after that (the drive's model). Records the sim did not take before
+the ring wrapped are counted in the feedback's ``demand_overruns``. :meth:`Segment.write_demands` appends.
 """
 
 from __future__ import annotations
@@ -53,7 +62,7 @@ from pathlib import Path
 
 import numpy as np
 
-ABI_MAJOR = 2
+ABI_MAJOR = 3
 ABI_MINOR = 0
 MAGIC = b"HSIMPLNT"
 ALIGN = 64
@@ -62,6 +71,7 @@ ALIGN = 64
 MAX_DRIVES = 64
 MAX_JOINTS = 64
 IMU_SAMPLES = 32  # latest delivered samples kept in the feedback region, newest first
+DEMAND_RING = 8  # bus-cycle demand records kept in the demands region: 12 ms at a 1.5 ms bus cycle
 DESCRIPTOR_BYTES = 16384
 MAILBOX_BYTES = 4096
 ACK_MESSAGE_BYTES = 256
@@ -200,14 +210,23 @@ SOLE = np.dtype(
     align=True,
 )
 
+DEMAND_RECORD = np.dtype(
+    [
+        ("cycle", "<u8"),  # the client's bus cycle
+        ("sent_mono_ns", "<u8"),  # client clock: the bus delivered this cycle's outputs to the drives
+        ("drive", DRIVE_DEMAND, (MAX_DRIVES,)),
+    ],
+    align=True,
+)
+
 DESCRIPTOR = _region(("length", "<u4"), ("_pad1", "<u4"), ("json", "u1", (DESCRIPTOR_BYTES,)))
 DEMANDS = _region(
-    ("cycle", "<u8"),
     ("written_mono_ns", "<u8"),
     ("session_id", "<u8"),
+    ("count", "<u8"),  # records written in total; record k is ring[k % DEMAND_RING]
     ("num_drives", "<u4"),
     ("_pad1", "<u4"),
-    ("drive", DRIVE_DEMAND, (MAX_DRIVES,)),
+    ("ring", DEMAND_RECORD, (DEMAND_RING,)),
 )
 FEEDBACK = _region(
     ("step", "<u8"),
@@ -219,6 +238,8 @@ FEEDBACK = _region(
     ("num_drives", "<u4"),
     ("imu_count", "<u4"),
     ("imu_total", "<u8"),
+    ("demand_records", "<u8"),  # demand records taken from the ring in this session
+    ("demand_overruns", "<u8"),  # records the ring overwrote before the sim took them
     ("drive", DRIVE_FEEDBACK, (MAX_DRIVES,)),
     ("imu", IMU_SAMPLE, (IMU_SAMPLES,)),
 )
@@ -383,6 +404,7 @@ class Segment:
             name: Region(name, dtype, self.buf[OFFSETS[name] : OFFSETS[name] + dtype.itemsize])
             for name, dtype in REGIONS
         }
+        self._demands: np.ndarray | None = None  # the client's copy of the demand ring
 
     # -- lifecycle --------------------------------------------------------------------------------
 
@@ -563,6 +585,23 @@ class Segment:
         rec["args"][: len(data)] = np.frombuffer(data, np.uint8)
         return self.regions["mailbox"].write(rec)
 
+    def write_demands(self, demand: dict[str, np.ndarray], *, cycle: int, sent_mono_ns: int | None = None) -> int:
+        """Client: append one bus cycle's demands (per-drive arrays named as :data:`DRIVE_DEMAND`'s fields) to the
+        ring and publish it. ``sent_mono_ns``: when the bus delivered them to the drives (default now). The ring
+        continues from what the region holds, so a client that reopens a session's segment does not restart it.
+        Returns the region's sequence number."""
+        now = mono_ns()
+        if self._demands is None:
+            got = self.regions["demands"].read()
+            self._demands = got[1].copy() if got is not None else np.zeros((), DEMANDS)
+        rec = self._demands
+        count = int(rec["count"])
+        rec["ring"][count % DEMAND_RING] = demand_record(
+            demand, cycle=cycle, sent_mono_ns=now if sent_mono_ns is None else sent_mono_ns)
+        rec["count"], rec["written_mono_ns"], rec["session_id"] = count + 1, now, self.session_id
+        rec["num_drives"] = len(demand["law"])
+        return self.regions["demands"].write(rec)
+
     def poll_command(self, last_seq: int) -> tuple[int, int, dict] | None:
         """Sim: ``(seq, command, args)`` of a command newer than ``last_seq``, or None (also while the client is
         writing one). Malformed JSON gives ``args = None``."""
@@ -605,7 +644,7 @@ class Segment:
 def pd_demand(
     target_position_rad, stiffness_nm_per_rad, damping_nm_s_per_rad, *, law: int = LAW_PD, **fields
 ) -> dict[str, np.ndarray]:
-    """Per-drive arrays for :func:`demands_record`: every drive on ``law`` about its target at the given gains, no
+    """Per-drive arrays for :meth:`Segment.write_demands`: every drive on ``law`` about its target at the given gains, no
     velocity target, feed-forward or torque limit unless ``fields`` names them."""
     target = np.asarray(target_position_rad, dtype=np.float64)
     n = len(target)
@@ -620,16 +659,13 @@ def pd_demand(
     return demand | {k: np.broadcast_to(v, n).copy() for k, v in fields.items()}
 
 
-def demands_record(demand: dict[str, np.ndarray], *, cycle: int, session_id: int) -> np.ndarray:
-    """Build a demands record from per-drive arrays named as :data:`DRIVE_DEMAND`'s fields."""
+def demand_record(demand: dict[str, np.ndarray], *, cycle: int, sent_mono_ns: int) -> np.ndarray:
+    """One ring record from per-drive arrays named as :data:`DRIVE_DEMAND`'s fields."""
     n = len(demand["law"])
-    rec = np.zeros((), DEMANDS)
-    rec["cycle"], rec["written_mono_ns"], rec["session_id"], rec["num_drives"] = (
-        cycle,
-        mono_ns(),
-        session_id,
-        n,
-    )
+    if n > MAX_DRIVES:
+        raise AbiError(f"{n} drives, at most {MAX_DRIVES}")
+    rec = np.zeros((), DEMAND_RECORD)
+    rec["cycle"], rec["sent_mono_ns"] = cycle, sent_mono_ns
     for name in DRIVE_DEMAND.names:
         if not name.startswith("_"):
             rec["drive"][name][:n] = demand[name]

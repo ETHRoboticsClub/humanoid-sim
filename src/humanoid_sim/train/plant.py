@@ -4,7 +4,8 @@ The environment owns the scene (:func:`~humanoid_sim.train.scene.robot_scene_cfg
 sits between demands and the solver:
 
 * :meth:`RobotPlant.submit` queues one SI ``DriveDemand`` per env and drive, sent at ``sent_ns``; it
-  takes effect one bus and drive latency later (per env and drive, randomized);
+  takes effect after the randomized ``latency`` before the drive (per env and drive) and then the drive's own
+  delay (its model's ``drive_delay_ns``, :mod:`humanoid_sim.devices.models`);
 * :meth:`RobotPlant.pre_physics`, once before every physics step (an action term's ``apply_actions``): samples
   the sensors at the step start, runs the drive bank over the step and writes the solver PD targets;
 * :meth:`RobotPlant.measured` is what the robot's host would read: drive feedback as the drive reports it (its
@@ -31,6 +32,7 @@ import torch
 from humanoid_sim.core import PlantCfg, PlantCore
 from humanoid_sim.devices.demand import DriveDemand
 from humanoid_sim.devices.feedback import DriveFeedback
+from humanoid_sim.devices.models import drive_models
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.randomization import PARAMS, ParamSpec, Randomizer, parse_specs
@@ -47,7 +49,7 @@ class TrainPlantCfg:
     seed: int = 0
     feedback_history: int = 16  # physics steps of drive feedback kept for :meth:`RobotPlant.measured`
     reporting: bool = True  # measured drive feedback quantized as the drive reports it
-    queue_capacity: int = 8  # demands in flight per env: ≥ max latency / demand period + 1
+    queue_capacity: int = 8  # demands in flight per env: ≥ (max latency + drive delay) / demand period + 1
 
 
 @dataclass
@@ -88,7 +90,11 @@ class RobotPlant:
         self.drives = self.core.map.drive_names
         d = len(self.drives)
         self.t_ns = 0
-        self.latency_ns = torch.zeros(e, d, dtype=torch.int64, device=self.device)
+        self.latency_ns = torch.zeros(e, d, dtype=torch.int64, device=self.device)  # before the drive, randomized
+        models = drive_models(self.desc)
+        self.drive_models = [models[n] for n in self.drives]
+        self.drive_delay_ns = torch.tensor([m.drive_delay_ns for m in self.drive_models], dtype=torch.int64,
+                                           device=self.device)
         self._targets = robot.data.default_joint_pos.torch.clone()
         self._physics_manager = physics_manager
         # Every env starts at the articulation's default joint state, the pose the scene chose (standing or flat
@@ -245,9 +251,10 @@ class RobotPlant:
     # -- demands and stepping ---------------------------------------------------------------------
 
     def submit(self, demand: DriveDemand, sent_ns: torch.Tensor, env_mask: torch.Tensor | None = None) -> None:
-        """Demands ``[E, D]`` leaving the master at ``sent_ns`` ``[E]``; each drive applies them after its
-        latency."""
-        self.core.submit(demand, sent_ns.to(torch.int64).unsqueeze(1) + self.latency_ns, env_mask)
+        """Demands ``[E, D]`` sent at ``sent_ns`` ``[E]``; each drive applies them after the latency before it and its
+        own delay."""
+        arrival = sent_ns.to(torch.int64).unsqueeze(1) + self.latency_ns + self.drive_delay_ns
+        self.core.submit(demand, arrival, env_mask)
 
     def joint_state(self) -> tuple[torch.Tensor, torch.Tensor]:
         data = self.robot.data

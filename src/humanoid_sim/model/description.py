@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import os
 import subprocess
 from dataclasses import dataclass
@@ -255,14 +256,31 @@ class Description:
         d = self.drives[drive]
         return min(float(self.family_value(d.family, "braking_peak", d.effort_peak)), d.effort_peak)
 
+    def drive_delay_ns(self, family: str) -> int | None:
+        """A motor family's ``drive_delay_s`` in integer ns: the controller's APPLIED acknowledgement to the drive's
+        position demand starting to move. None when the description records none for the family."""
+        if family not in self.table.get("families", {}):
+            raise ValueError(f"{self.robot}: no drive family {family!r}")
+        value = self.family_value(family, "drive_delay_s")
+        if value is None:
+            return None
+        value = float(value)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{self.robot}: {family} drive_delay_s {value!r} must be finite and non-negative")
+        return round(value * 1e9)
+
     def family_value(self, family: str, key: str, default=None):
         """A motor family's ``key``, or ``default`` when the family does not record it."""
         return self.table.get("families", {}).get(family, {}).get(key, default)
 
     def calibration_travel(self, name: str) -> tuple[float, float]:
         """Simulated travel in URDF (calibration) radians: the recorded mechanical stop where there is one,
-        else the position limit. Same rule as Controls ``ethrc_ssot/joint_travel.py``."""
+        else the position limit. Same rule as Controls ``ethrc_ssot/joint_travel.py``. An ankle hinge has no limit
+        of its own: its travel is the axis hull of what its cranks' stops allow (``ankle_model.bounds``)."""
         entry = self.table["joints"][name]
+        linkage = next((lk for lk in self.linkages if name in lk.joints), None)
+        if linkage is not None:
+            return self._ankle_bounds(linkage.side)[linkage.joints.index(name)]
         offset = float(entry["standing_offset_rad"])
         lo, hi = (float(b) + offset for b in entry["position_limit"])
         stop = entry.get("mechanical_stop_calibration_rad")
@@ -318,11 +336,15 @@ class Description:
     def ankle_kinematic_sign(self, side: str) -> list[int]:
         return [int(s) for s in self.table["ankle_model"]["semantic_to_kinematic_sign"][side]]
 
+    def ankle_neutral(self, side: str) -> list[float]:
+        """Joint angles (pitch, roll) of the linkage neutral, where both cranks read zero."""
+        return [float(v) for v in self.table["ankle_model"]["semantic_neutral_rad"][side]]
+
     def ankle_transmission(self, side: str, *, device="cpu", dtype=None) -> AnkleTransmission:
         import torch
 
-        return AnkleTransmission(self.ankle_geometry(side), self.ankle_kinematic_sign(side), device=device,
-                                 dtype=dtype or torch.float32)
+        return AnkleTransmission(self.ankle_geometry(side), self.ankle_kinematic_sign(side), self.ankle_neutral(side),
+                                 device=device, dtype=dtype or torch.float32)
 
     def ankle_cranks(self, side: str) -> tuple[str, str]:
         """(upper, lower) crank drive names of one side."""
@@ -330,6 +352,17 @@ class Description:
         if linkage is None:
             raise ValueError(f"{self.robot} has no ankle linkage on side {side!r}")
         return linkage.upper, linkage.lower
+
+    def _ankle_bounds(self, side: str):
+        cache = self.__dict__.setdefault("_ankle_bounds_cache", {})
+        if side not in cache:
+            cache[side] = self.ankle_model.bounds(side)
+        return cache[side]
+
+    @cached_property
+    def ankle_model(self):
+        """humanoid-urdf's ``AnkleModel`` for this description: the cranks' stops and what they allow."""
+        return self.ankle_model_module().load(self.actuators_path)
 
     def ankle_model_module(self):
         """humanoid-urdf's own ``ankle_model`` module (numpy reference), loaded from the submodule."""

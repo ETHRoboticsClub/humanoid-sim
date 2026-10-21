@@ -14,6 +14,7 @@ HEADER_H = abi.Path(abi.__file__).with_name("plant_abi.h")
 
 STRUCTS = {"HsimHeader": abi.HEADER, "HsimDriveDemand": abi.DRIVE_DEMAND, "HsimDriveFeedback": abi.DRIVE_FEEDBACK,
            "HsimImuSample": abi.IMU_SAMPLE, "HsimSole": abi.SOLE, "HsimDescriptor": abi.DESCRIPTOR,
+           "HsimDemandRecord": abi.DEMAND_RECORD,
            "HsimDemands": abi.DEMANDS, "HsimFeedback": abi.FEEDBACK, "HsimMailbox": abi.MAILBOX, "HsimAck": abi.ACK,
            "HsimTruth": abi.TRUTH}
 
@@ -106,20 +107,38 @@ def test_mailbox_round_trip(tmp_path):
     assert client.wait_ack(seq, timeout_s=1.0) == (abi.ACK_REJECTED, "no")
 
 
-def test_demands_record_round_trip(tmp_path):
+def test_demands_ring_round_trip(tmp_path):
     path = tmp_path / "plant"
     sim = _create(path)
     client = abi.Segment.open(path)
     n = 22
     demand = abi.pd_demand(np.linspace(-1, 1, n), 320.0, 12.0, torque_limit_nm=np.full(n, 40.0))
     demand["law"][0] = abi.LAW_FREEZE
-    client.regions["demands"].write(abi.demands_record(demand, cycle=5, session_id=client.session_id))
+    client.write_demands(demand, cycle=5, sent_mono_ns=123)
     _, rec = sim.regions["demands"].read()
-    assert int(rec["cycle"]) == 5 and int(rec["session_id"]) == sim.session_id and int(rec["num_drives"]) == n
-    np.testing.assert_array_equal(rec["drive"]["target_position_rad"][:n], demand["target_position_rad"])
-    assert int(rec["drive"]["law"][0]) == abi.LAW_FREEZE and int(rec["drive"]["law"][1]) == abi.LAW_PD
-    assert float(rec["drive"]["stiffness_nm_per_rad"][n - 1]) == 320.0
-    assert float(rec["drive"]["torque_limit_nm"][n - 1]) == 40.0
+    assert int(rec["count"]) == 1 and int(rec["session_id"]) == sim.session_id and int(rec["num_drives"]) == n
+    r = rec["ring"][0]
+    assert int(r["cycle"]) == 5 and int(r["sent_mono_ns"]) == 123
+    np.testing.assert_array_equal(r["drive"]["target_position_rad"][:n], demand["target_position_rad"])
+    assert int(r["drive"]["law"][0]) == abi.LAW_FREEZE and int(r["drive"]["law"][1]) == abi.LAW_PD
+    assert float(r["drive"]["stiffness_nm_per_rad"][n - 1]) == 320.0
+    assert float(r["drive"]["torque_limit_nm"][n - 1]) == 40.0
+
+
+def test_the_demand_ring_keeps_the_last_cycles_and_survives_a_reopen(tmp_path):
+    path = tmp_path / "plant"
+    sim = _create(path)
+    client = abi.Segment.open(path)
+    for cycle in range(1, abi.DEMAND_RING + 4):
+        client.write_demands(abi.pd_demand(np.full(22, float(cycle)), 1.0, 0.1), cycle=cycle, sent_mono_ns=cycle)
+    client.close()
+    again = abi.Segment.open(path)  # a client reopening the session's segment continues the ring
+    again.write_demands(abi.pd_demand(np.zeros(22), 1.0, 0.1), cycle=99)
+    _, rec = sim.regions["demands"].read()
+    count = int(rec["count"])
+    assert count == abi.DEMAND_RING + 4
+    kept = [int(rec["ring"][k % abi.DEMAND_RING]["cycle"]) for k in range(count - abi.DEMAND_RING, count)]
+    assert kept == list(range(5, abi.DEMAND_RING + 4)) + [99]
 
 
 def test_a_pd_demand_has_no_torque_limit():

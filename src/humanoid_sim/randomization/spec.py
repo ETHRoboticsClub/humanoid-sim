@@ -51,7 +51,7 @@ PARAMS: dict[str, Param] = {
     "drive_stiffness": Param("device", "drive", doc="drive's realized P gain over the demanded one"),
     "drive_damping": Param("device", "drive", doc="drive's realized D gain over the demanded one"),
     "torque_limit": Param("device", "drive", doc="scale of the torque-speed envelope and torque cap"),
-    "latency": Param("device", "drive", unit="s", doc="bus and drive latency, demand sent → in force"),
+    "latency": Param("device", "drive", unit="s", doc="latency before the drive (the controller's path), demand sent → staged; the drive's own delay follows"),
     "encoder_offset": Param("device", "drive", unit="rad", doc="drive's position reading minus the truth"),
     "imu_gyro_bias": Param("device", "axis", unit="rad/s", doc="gyro bias, sensor frame"),
     "imu_accel_bias": Param("device", "axis", unit="m/s²", doc="accelerometer bias, sensor frame"),

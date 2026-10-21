@@ -251,6 +251,7 @@ def cmd_fit_pace(args) -> int:
 
     import numpy as np
 
+    from humanoid_sim.replay.replay import fit_commands
     from humanoid_sim.sim import SimCore
     from humanoid_sim.sysid.pace import PaceSpace, evaluate, fit, save, start_values
 
@@ -261,6 +262,11 @@ def cmd_fit_pace(args) -> int:
     if refused:
         raise SystemExit(f"refused captures {refused} (see above; --skip-drives leaves a drive out)")
     rebuild = {cid: chk.rebuild for cid, chk in checks.items()}
+    references = {fit_commands(c)[1] for c in captures + held}
+    if len(references) > 1:
+        raise SystemExit("captures with and without the controller's APPLIED acknowledgements: their delays mean "
+                         "different things, fit them separately")
+    reference = references.pop()
     moving = args.base != "fixed"
     sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, num_envs=args.num_envs,
                   fixed_base=not moving, base_joints=moving, solver=args.solver)
@@ -268,7 +274,8 @@ def cmd_fit_pace(args) -> int:
     joints, drives = list(plant.map.joint_names), list(plant.map.drive_names)
     kw = dict(log_bound=math.log(args.bound), bias_bound_rad=args.bias_bound_mrad / 1e3,
               delay_bounds_ns=tuple(int(round(v * 1e6)) for v in args.delay_ms),
-              separate_dynamic_friction=not args.no_dynamic_friction)
+              separate_dynamic_friction=not args.no_dynamic_friction,
+              delay_groups=None if args.one_delay else [sim.desc.drives[d].family for d in drives])
     sizes = PaceSpace(joints, drives, start_values(sim.desc, joints), **kw).sizes
     fixed = {}
     for item in args.fix:
@@ -287,7 +294,10 @@ def cmd_fit_pace(args) -> int:
     meta = result | {"captures": [c.dataset_id for c in captures], "base": args.base, "num_envs": args.num_envs,
                      "generations": args.generations, "duration_s": args.duration, "seed": args.seed,
                      "scored": [drives[i] for i in scored], "fixed": sorted(args.fix), "wall_s": time.time() - t,
-                     "command_rebuild": rebuild, **sim.desc.identity()}
+                     "command_rebuild": rebuild, "delay_reference": reference, **sim.desc.identity()}
+    if reference == "applied" and not args.one_delay:
+        # Ready for actuators.yaml: each family's drive_delay_s, controller APPLIED to the drive acting.
+        meta["drive_delay_s"] = {g: int(v) / 1e9 for g, v in zip(space.groups, best["delay"], strict=True)}
     if held:
         x = np.zeros((args.num_envs, space.dim))
         x[1:] = result["x"]
@@ -295,7 +305,8 @@ def cmd_fit_pace(args) -> int:
         meta["holdout"] = {"captures": [c.dataset_id for c in held], "objective_start": float(f[0]),
                            "objective_fit": float(f[1]), "rms_start": per[:, 0].tolist(), "rms_fit": per[:, 1].tolist()}
     save(Path(args.out), space, best, plant, sim.period_ns, captures, meta)
-    print(json.dumps({k: meta[k] for k in ("objective_start", "objective")} | {"delay_ns": int(best["delay"])}))
+    print(json.dumps({k: meta[k] for k in ("objective_start", "objective", "delay_reference")}
+                     | {"delay_ns": dict(zip(space.groups, map(int, best["delay"]), strict=True))}))
     if held:
         print(json.dumps({k: meta["holdout"][k] for k in ("objective_start", "objective_fit")}))
     return 0
@@ -323,7 +334,8 @@ def cmd_pace_selftest(args) -> int:
     plant = sim.plant
     joints, drives = list(plant.map.joint_names), list(plant.map.drive_names)
     space = PaceSpace(joints, drives, start_values(sim.desc, joints), log_bound=math.log(args.bound),
-                      separate_dynamic_friction=not args.no_dynamic_friction)
+                      separate_dynamic_friction=not args.no_dynamic_friction,
+                      delay_groups=None if args.one_delay else [sim.desc.drives[d].family for d in drives])
     rng = np.random.default_rng(args.seed)
     x_true = rng.uniform(-args.spread, args.spread, space.dim)
     planted = space.decode(np.tile(x_true, (args.num_envs, 1)))
@@ -343,7 +355,7 @@ def cmd_pace_selftest(args) -> int:
     truth = {k: v[0] for k, v in planted.items()}
     recovery = {p: float(np.median(np.abs(np.log(best[p] / truth[p])))) for p in JOINT_PARAMS}
     recovery |= {"bias_rad": float(np.median(np.abs(best["bias"] - truth["bias"]))),
-                 "delay_ns": int(best["delay"] - truth["delay"]),
+                 "delay_ns": dict(zip(space.groups, map(int, best["delay"] - truth["delay"]), strict=True)),
                  "friction_ratio": float(np.median(np.abs(best["friction_ratio"] - truth["friction_ratio"])))}
     meta = result | {"selftest": True, "objective_planted": float(f[0]), "x_true": x_true.tolist(),
                      "planted": {k: np.asarray(v).tolist() for k, v in truth.items()},
@@ -568,6 +580,7 @@ def main(argv: list[str] | None = None) -> int:
     fpc.add_argument("--fix", nargs="*", default=[], metavar="PARAM.NAME",
                      help="hold entries at their start, e.g. bias.maxonHEJ50L_ANK1 friction_ratio.knee_l")
     fpc.add_argument("--skip-drives", nargs="*", default=[], help="drives left out of the objective")
+    fpc.add_argument("--one-delay", action="store_true", help="one delay for every drive, not one per family")
     fpc.add_argument("--search", choices=("blocks", "joint"), default="blocks",
                      help="a CMA-ES per drive (ankle) on its own error, or one over every parameter as PACE does")
     fpc.add_argument("--out", default="outputs/sysid/pace")
@@ -584,6 +597,7 @@ def main(argv: list[str] | None = None) -> int:
     st.add_argument("--bound", type=float, default=10.0)
     st.add_argument("--no-dynamic-friction", action="store_true")
     st.add_argument("--search", choices=("blocks", "joint"), default="blocks")
+    st.add_argument("--one-delay", action="store_true", help="one delay for every drive, not one per family")
     st.add_argument("--device", default="cuda:0")
     st.add_argument("--seed", type=int, default=0)
     st.add_argument("--out", default="outputs/sysid/pace-selftest")

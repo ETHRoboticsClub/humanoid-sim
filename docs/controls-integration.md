@@ -123,7 +123,7 @@ python3 /opt/ethrc/repository/scripts/sim/launch.py --prepared --headless --no-a
 
 The script waits until every drive is enabled or the plant host reports a fault, runs for `--seconds`, and then reads the segment from inside the Controls container. It prints a JSON result: the plant host's status (`physics`, `cycles`, `keeping_up`, `drives`, `drives_operational`, `drives_enabled`, `drives_faulted`, `fault`) and, from the segment, `sim_steps`, `sim_time_s`, `sim_late_steps`, `imu_samples`, `pd_drives` and `max_tracking_error_rad`. `ok` is true, and the exit code 0, when there is no fault, every drive is enabled and none faulted, at least one drive runs the PD law, and the largest PD tracking error is under 0.05 rad.
 
-The sim starts every session in the V1's standing pose (its profile's `poses.start`, see [runtime.md](runtime.md#the-start-pose)), where every drive lies inside the window Controls arms it in. A sim started with `--pose home` holds the knees outside theirs, and Controls refuses to arm them.
+The sim starts every session in the V1's standing pose (its profile's `poses.start`, see [runtime.md](runtime.md#the-start-pose)), where every drive lies inside the window Controls arms it in; with the V1's standing offsets at 0 it is the home pose.
 
 On the default CPU device the lane comes up but the sim does not keep up with real time.
 

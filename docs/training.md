@@ -10,7 +10,7 @@ This page is for someone writing a task. The drive model itself is in [drives.md
 
 - The robot starts in the home pose (the default of `robot_scene_cfg`, see [The initial pose](#the-initial-pose)), and the demands are taken from the articulation's `data.default_joint_pos`.
 - The ground is a heightfield of random bumps up to 25 mm (`heightfield_terrain_cfg` with one `HfRandomUniformTerrainCfg` tile type) laid out as one row of 2.5 m tiles, one tile per robot, without a curriculum. The tile mix is the example's own; a task takes its terrain from its generator in humanoid-learning. Isaac Lab puts every env assigned to a tile at that tile's origin, so envs that share a tile spawn on the same spot. `--flat` uses the flat ground instead.
-- Robot friction (0.4 to 1.0), a payload of 0 to 4.5 kg on `base_link` and one drive latency per env (10 to 20 ms) are randomized. The terrain and the flat ground have friction 0 so the robot's value decides.
+- Robot friction (0.4 to 1.0), a payload of 0 to 4.5 kg on `base_link` and one latency before the drives per env (10 to 20 ms, which the drives' own delay follows) are randomized. The terrain and the flat ground have friction 0 so the robot's value decides.
 - A `ForcePush` pushes `base_link` with 40 to 120 N for 0.1 to 0.2 s, with 1.5 to 3 s between pushes. The loop steps it once per policy step.
 - With `--rrd`, a `SceneRecorder` records every robot to a Rerun file, and `plant.log` adds robot 0's left knee and base height to the same recording, every `--record-every` policy steps (default 2). See [Recording a scene](#recording-a-scene).
 
@@ -49,7 +49,7 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `seed` | `0` | Seed of the randomizer; the IMU model uses `seed + 1` and the encoder jitter `seed + 2` |
 | `feedback_history` | `16` | Physics steps of drive feedback kept in `Measured.history` |
 | `reporting` | `True` | Quantize the measured drive feedback the way the drives report it |
-| `queue_capacity` | `8` | Demands in flight per env; needs at least max latency / demand period + 1 |
+| `queue_capacity` | `8` | Demands in flight per env; needs at least (max latency + drive delay) / demand period + 1 |
 
 `PlantActionCfg` extends Isaac Lab's `ActionTermCfg`:
 
@@ -66,7 +66,7 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 
 Isaac Lab's `ManagerBasedRLEnv.step` calls each action term's `process_actions` once per env step and `apply_actions` before every physics step. `PlantAction` uses them like this:
 
-1. `process_actions(actions)` calls your `demands(actions)` and hands the result to `RobotPlant.submit`. Each drive queues the demand to take effect at `sent_ns` plus that drive's [latency](glossary.md#latency).
+1. `process_actions(actions)` calls your `demands(actions)` and hands the result to `RobotPlant.submit`. Each drive queues the demand to take effect at `sent_ns` plus its randomized `latency` plus its own delay ([latency](glossary.md#latency)).
 2. `apply_actions()` calls `RobotPlant.pre_physics()`. With the state at the start of the physics step it appends drive feedback to the history and steps the IMU delivery model; then it runs the drive bank over the step (every demand in force during the step, weighted by the time it covers), maps drive torque to joint torque through the ankle transmission, and writes the position target that makes the solver's constant PD produce that torque. `plant.t_ns` then advances by one physics period.
 3. When envs finish an episode, Isaac Lab runs the reset events, which write the new state, and then the action manager's reset, which calls `RobotPlant.reset(env_ids)`.
 
@@ -100,9 +100,9 @@ Train on the plain asset. The `--base-joints` variant is for replays ([replay-an
 | `pose` | Joint positions | Held rigidly on flat ground |
 |---|---|---|
 | `"home"` (default) | The description's [home pose](glossary.md#home-pose) (`Description.home_pose`): the V1's CAD export pose, legs straight; the G1's deploy standing pose, knees bent 0.3 rad; both soles level at one height | At the baseline gains the V1 stands still on flat ground (60 s measured, the base within 0.6° of upright); pushes and rough terrain make it fall unless a policy balances it. The G1 tips over within about 1.3 s: an inverted pendulum on its ankles, it stands only on ankles stiffer in pitch than its weight times its centre of mass's height above them (about 210 Nm/rad), and Unitree's deploy gains give 80 Nm/rad for both. A G1 task needs its policy to balance from the first step (`tests/test_world.py::test_holding_the_home_pose_stands_only_on_ankles_stiffer_than_toppling`). |
-| `"standing"` | The description's [standing pose](glossary.md#standing-pose), captured on the robot: every joint at its `standing_offset_rad` | Under an upright base the soles are pitched about 10° (left) and 17° (right). The robot lands on its sole edges, hops and tips over within about a second. |
+| `"standing"` | The description's [standing pose](glossary.md#standing-pose): every joint at its `standing_offset_rad`, all 0 on the V1, which makes it the home pose there | As the home pose on the V1 |
 
-In both poses the base is upright and the lowest sole corner is 1 mm above the ground (`STANDING_CLEARANCE_M` in `src/humanoid_sim/model/poses.py`); on the current description the base starts 0.924 m up in the home pose and 0.945 m up in the standing pose. Where the home pose comes from, and why the standing pose does not stand, is in [robot-model.md](robot-model.md#standing-on-the-ground).
+In both poses the base is upright and the lowest sole corner is 1 mm above the ground (`STANDING_CLEARANCE_M` in `src/humanoid_sim/model/poses.py`); on the current description the base starts 0.924 m up in the home pose. Where the home pose comes from is in [robot-model.md](robot-model.md#standing-on-the-ground).
 
 The articulation's `data.default_joint_pos` holds the chosen pose (articulation joint order), so `mdp.reset_scene_to_default` puts the robot back into it. Take action offsets from `default_joint_pos`, as `examples/train_scene.py` does, instead of from `standing_offset_rad`; then the task follows whichever pose the scene was built with.
 
@@ -394,7 +394,7 @@ The full table is `PARAMS` in `src/humanoid_sim/randomization/spec.py`. E is the
 | `drive_stiffness` | device | `[E, 22]` | ratio | 1 | Realized P gain over the demanded one |
 | `drive_damping` | device | `[E, 22]` | ratio | 1 | Realized D gain over the demanded one |
 | `torque_limit` | device | `[E, 22]` | ratio | 1 | Scale on the torque-speed envelope and the torque cap |
-| `latency` | device | `[E, 22]` | s | 0 | Bus and drive latency from demand sent to demand in force |
+| `latency` | device | `[E, 22]` | s | 0 | Latency before the drive, from the demand sent to the controller staging it. The drive's own delay ([drive model](drives.md#drive-models) `drive_delay_ns`, 5 ms on the V1) always follows it |
 | `encoder_offset` | device | `[E, 22]` | rad | 0 | The drive's position reading minus the true position |
 | `imu_gyro_bias` | device | `[E, 3]` | rad/s | 0 | Gyro bias, sensor frame |
 | `imu_accel_bias` | device | `[E, 3]` | m/s² | 0 | Accelerometer bias, sensor frame |
@@ -505,7 +505,7 @@ The plant's steady-state work (`submit`, `pre_physics`, `measured`, `truth`, `re
 ## Pitfalls
 
 - The solver uses the larger friction of the two shapes in contact (MJWarp always, Kamino as the profile configures it). When `friction` is randomized on the robot, give the ground zero friction (`robot_scene_cfg(..., ground_friction=0.0)` or `heightfield_terrain_cfg(..., friction=0.0)`); with the profile's ground friction of 1.0 every robot value below 1 has no effect.
-- Take targets and action offsets from `data.default_joint_pos`, not from `standing_offset_rad`: the scene spawns in the home pose, and the standing pose, which a rigid robot cannot hold on flat ground, is only used when a scene asks for it. See [The initial pose](#the-initial-pose).
+- Take targets and action offsets from `data.default_joint_pos`, not from `standing_offset_rad`: the scene spawns in the home pose, and the standing pose is only used when a scene asks for it. See [The initial pose](#the-initial-pose).
 - The encoder jitter is drawn on every `measured()` call, for `drive` and for `history`. Two observation terms that each call `measured()` see different jitter in the same step; read it once in one term, as `actor_obs` does.
 - `history[:, 0]` is one physics step older than `drive`. The history and the IMU are sampled at the start of each physics step, so after an env step their newest entries are from `plant.t_ns - 4 ms`, while `drive` is the state now. Use `history_ns` for the times.
 - After a reset, the history and IMU buffers keep the previous episode's values until they are overwritten; only `history_ns`, `sample_ns`, `stamp_ns`, `seq` and `count` mark them empty. The observation computed right after a reset, in the same env step, always has `count == 0`, and the first burst can take more than one policy period to arrive. Mask on `history_ns >= 0` and `stamp_ns >= 0` where it matters.
