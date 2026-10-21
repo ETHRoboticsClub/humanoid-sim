@@ -412,6 +412,22 @@ def cmd_serve(args) -> int:
     return 0 if code == EXIT_DETACHED else code
 
 
+def cmd_render_runtime(args) -> int:
+    from humanoid_sim.runtime.render import render_runtime
+    from humanoid_sim.sensors.session import SessionCfg
+
+    cfg = SessionCfg(robot=args.robot, sensors=args.sensors, splat=args.splat, splat_intensity=args.splat_intensity,
+                     scan_mesh=args.scan_mesh, cameras=not args.no_cameras, lidar=not args.no_lidar,
+                     feeds=args.feeds, lidar_domain=args.lidar_domain, rrd=args.rrd, images=args.images,
+                     device=args.device, assets=args.assets)
+    summary = render_runtime(args.segment, cfg, seconds=args.seconds, wait_s=args.wait)
+    text = json.dumps(summary, indent=1)
+    if args.summary:
+        Path(args.summary).write_text(text)
+    print(text)
+    return 0
+
+
 def cmd_splat_usd(args) -> int:
     from humanoid_sim.world.splat import convert
 
@@ -494,6 +510,26 @@ def main(argv: list[str] | None = None) -> int:
     vr.add_argument("--detail", choices=("full", "live"), default=None,
                     help="the scan's detail (default: full with --save, live otherwise)")
     vr.set_defaults(func=cmd_view_runtime)
+
+    rr_ = sub.add_parser("render-runtime", help="the rig's RTX cameras and lidars on a running `serve`, published as "
+                         "Controls reads them (Isaac Sim image, RTX GPU; read-only)")
+    rr_.add_argument("segment", help="the segment file `serve --segment` publishes")
+    rr_.add_argument("--sensors", default=None, help="an extra rig whose sensors join the robot's (e.g. g1-cameras)")
+    rr_.add_argument("--splat", default=None, help="the room's Gaussian splat as USD (`splat-usd`), for the cameras")
+    rr_.add_argument("--splat-intensity", type=float, default=1.0, help="scale the splat's emission")
+    rr_.add_argument("--scan-mesh", default=None,
+                     help="the room's scan (OBJ) for the lidar (default: the host's, when readable here)")
+    rr_.add_argument("--no-cameras", action="store_true")
+    rr_.add_argument("--no-lidar", action="store_true")
+    rr_.add_argument("--feeds", default=None, help="camera feed root (ethrc-camera-sim-feed/v1)")
+    rr_.add_argument("--lidar-domain", type=int, default=None, help="publish the Mid-360 on Unitree's DDS domain")
+    rr_.add_argument("--rrd", default=None)
+    rr_.add_argument("--images", default=None, help="save every stream's first and last frame here (PNG)")
+    rr_.add_argument("--summary", default=None, help="write the summary here (JSON)")
+    rr_.add_argument("--device", default="cuda:0")
+    rr_.add_argument("--seconds", type=float, default=None, help="stop after this long (default: until the server goes)")
+    rr_.add_argument("--wait", type=float, default=60.0, help="seconds to wait for the segment to appear")
+    rr_.set_defaults(func=cmd_render_runtime)
 
     be = sub.add_parser("bench")
     be.add_argument("--num-envs", type=int, default=1)

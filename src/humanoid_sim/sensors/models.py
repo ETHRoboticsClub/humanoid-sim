@@ -210,11 +210,16 @@ class OakDW(Camera):
     # Streams as Controls' depthai backend opens them; its BNO086 is part of the device, not a body IMU. The mono pair
     # is the OV9282 (global shutter, 127 x 79.5 deg unrectified); the RGB camera is an IMX378 (rolling shutter) or an
     # OV9782 (global) by variant, which one the V1 has is unread. Baseline also read from the V1's calibration.
-    # The streams have no kinds or places here yet, so the RTX sensors do not simulate it.
+    # The backend places every stream relative to the left mono (the camera frame's origin) and aligns depth to the
+    # rectified left image (depthai_backend.py). The colour imager's place is modeled: midway between the monos, as
+    # on Luxonis' OAK-D-W drawing; a unit's calibration replaces it.
     source = ("Luxonis OAK-D W product page; streams as Controls' ethrc_cameras depthai backend opens them; "
-              "baseline also read from the V1's device calibration")
+              "baseline also read from the V1's device calibration; colour offset modeled")
     streams = ("rgb", "mono_left", "mono_right", "depth")
     stereo_baseline_m = 0.075
+    stream_kinds = {"rgb": "color", "mono_left": "mono", "mono_right": "mono", "depth": "depth"}
+    nominal_offsets_m = {"rgb": (0.0, -0.0375, 0.0), "mono_left": (0.0, 0.0, 0.0), "mono_right": (0.0, -0.075, 0.0),
+                         "depth": (0.0, 0.0, 0.0)}
     depth_range_m = (0.7, 12.0)  # the vendor's ideal range
 
 

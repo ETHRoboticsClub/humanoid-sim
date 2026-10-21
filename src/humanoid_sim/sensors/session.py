@@ -13,6 +13,10 @@ a frame; a lidar fires its pattern over the time since the previous render and h
 completes. Stamps are the realtime clock's reading at the frame's or sweep's plant time (``feeds.ros_time_s``). The
 robot is welded at its spawn point in its home pose (a G1 topples on a fixed-gain hold), feet just above the floor,
 unless ``fixed_base`` is off.
+
+With ``physics`` off the session never steps: the caller poses the robot (:meth:`SensorSession.pose`, the
+runtime's truth) and renders at plant times it chooses (:meth:`SensorSession.render_at`), telling the session where
+the plant is now (``clock_ns``) so stamps map onto the realtime clock (``runtime/render.py``).
 """
 
 from __future__ import annotations
@@ -51,6 +55,7 @@ class SessionCfg:
     device: str = "cuda:0"
     assets: str = "outputs/assets"
     fixed_base: bool = True
+    physics: bool = True  # False: posed from outside (pose, render_at), never stepped
 
 
 class SensorSession:
@@ -85,7 +90,7 @@ class SensorSession:
             entities["splat"] = rtx.splat_entity(cfg.splat)
         self.boxes = StaticBoxes.load(cfg.scene, cfg.spawn_m) if cfg.scene else None
         pose, height = initial_pose(self.usd, cfg.robot, "home")
-        self.sim = SimCore(self.usd, device=cfg.device, robot=cfg.robot, fixed_base=cfg.fixed_base,
+        self.sim = SimCore(self.usd, device=cfg.device, robot=cfg.robot, fixed_base=cfg.fixed_base and cfg.physics,
                            base_height_m=height + STANDING_CLEARANCE_M, scene=self.boxes, entities=entities,
                            render_each_step=False)
         if cfg.scan_mesh and lidars:
@@ -143,15 +148,34 @@ class SensorSession:
         self.ms = {"physics": [], "render": [], "camera_read": [], "lidar_read": [], "publish": []}
         self._saved: dict[str, bool] = {}  # every image stream seen: whether it is depth
         self._last_sweep: dict[str, tuple] = {}
+        self.clock_ns: int | None = None  # where the plant is now, when something else steps it
+        self.render_ns = min([int(round(1e9 / s.rate_hz)) for c in self.camera_specs for s in c.streams]
+                             or [lidar.period_ns for lidar in self.lidars] or [0])
+
+    @property
+    def now_ns(self) -> int:
+        return self.sim.t_ns if self.clock_ns is None else self.clock_ns
+
+    def pose(self, t_ns: int, q: torch.Tensor, base_pose: torch.Tensor) -> None:
+        """Put the robot at joint positions ``q`` ``[1, J]`` (the description's joint order) and base pose
+        ``base_pose`` ``[1, 7]`` (position, quaternion xyzw, world) at plant time ``t_ns``, without stepping: the
+        bodies follow by forward kinematics."""
+        from isaaclab_newton.physics import NewtonManager
+
+        robot = self.sim.backend.robot
+        self.sim.write_joint_state(q, torch.zeros_like(q))
+        robot.write_root_pose_to_sim_index(root_pose=base_pose.to(robot.data.root_link_pose_w.torch.dtype))
+        robot.write_root_velocity_to_sim_index(root_velocity=torch.zeros(1, 6, device=base_pose.device))
+        self.sim.backend.scene.write_data_to_sim()
+        NewtonManager.forward()
+        self.sim.t_ns = t_ns
 
     # -- loop -------------------------------------------------------------------------------------------------
 
     def run(self, seconds: float) -> None:
         """Step ``seconds`` of plant time, rendering every camera period (or every lidar sweep without cameras)."""
         period_ns = self.sim.period_ns
-        render_ns = min([int(round(1e9 / s.rate_hz)) for c in self.camera_specs for s in c.streams]
-                        or [lidar.period_ns for lidar in self.lidars])
-        next_render = self.sim.t_ns + render_ns
+        next_render = self.sim.t_ns + self.render_ns
         for _ in range(int(seconds * 1e9) // period_ns):
             t = time.perf_counter()
             self.sim.step()
@@ -160,28 +184,33 @@ class SensorSession:
             now = self.sim.t_ns
             if now < next_render:
                 continue
-            next_render += render_ns
+            next_render += self.render_ns
+            self.render_at(now, self.render_ns)
+
+    def render_at(self, now_ns: int, dt_ns: int) -> None:
+        """Render the stage at plant time ``now_ns``, ``dt_ns`` after the previous render, and hand every camera's
+        frames and every completed lidar sweep to the outputs."""
+        t = time.perf_counter()
+        self.render(now_ns)
+        if self.cameras:
+            self.cameras.update(dt_ns / 1e9)
+        self.ms["render"].append(1e3 * (time.perf_counter() - t))
+        self.counts["renders"] += 1
+        if self.recorder:
+            self.recorder.frame(now_ns)
+        if self.cameras:
+            self._cameras(now_ns)
+        for lidar in self.lidars:
             t = time.perf_counter()
-            self.render(now)
-            if self.cameras:
-                self.cameras.update(render_ns / 1e9)
-            self.ms["render"].append(1e3 * (time.perf_counter() - t))
-            self.counts["renders"] += 1
-            if self.recorder:
-                self.recorder.frame(now)
-            if self.cameras:
-                self._cameras(now)
-            for lidar in self.lidars:
-                t = time.perf_counter()
-                sweeps = lidar.read(now)
-                self.ms["lidar_read"].append(1e3 * (time.perf_counter() - t))
-                for sweep in sweeps:
-                    self._lidar(now, lidar, sweep)
+            sweeps = lidar.read(now_ns)
+            self.ms["lidar_read"].append(1e3 * (time.perf_counter() - t))
+            for sweep in sweeps:
+                self._lidar(now_ns, lidar, sweep)
 
     def _cameras(self, now_ns: int) -> None:
         from humanoid_sim.sensors.feeds import depth_mm, ros_time_s
 
-        stamp = ros_time_s(now_ns, self.sim.t_ns)
+        stamp = ros_time_s(now_ns, self.now_ns)
         for cam in self.camera_specs:
             for s in cam.streams:
                 t = time.perf_counter()
@@ -228,7 +257,7 @@ class SensorSession:
             self.sweeps.append(sweep)
         if self.publisher and lidar.sensor.model == UNITREE_MODEL:
             t = time.perf_counter()
-            stamp_ns = int(ros_time_s(sweep.start_ns, self.sim.t_ns) * 1e9)
+            stamp_ns = int(ros_time_s(sweep.start_ns, self.now_ns) * 1e9)
             self.publisher.publish(pack_sweep(sweep.points_m, sweep.hit, sweep.time_s, stamp_ns))
             self.ms["publish"].append(1e3 * (time.perf_counter() - t))
         if self.recorder:
