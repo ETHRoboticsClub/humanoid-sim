@@ -48,7 +48,8 @@ class SimCore:
                  self_collision: bool | None = None, base_joints: bool = False, imu: bool = False,
                  contacts: bool = False, seed: int = 0, cuda_graph: bool = False, compile: bool = False,
                  imu_history: int | None = None, scene: StaticBoxes | None = None,
-                 entities: dict | None = None, render_each_step: bool = True):
+                 entities: dict | None = None, render_each_step: bool = True,
+                 queue_capacity: int | None = None):
         check_asset_robot(usd_path, robot)
         self.desc = Description.load(robot)
         self.profile = load_profile(robot)
@@ -61,7 +62,8 @@ class SimCore:
         joints = list(self.desc.joints)
         # Description joint order for the plant; the articulation's order is mapped through names.
         self.plant = PlantCore(self.desc, joints, num_envs,
-                               PlantCfg(robot=robot, physics_period_ns=self.period_ns, device=device))
+                               PlantCfg(robot=robot, physics_period_ns=self.period_ns, device=device,
+                                        **({} if queue_capacity is None else {"queue_capacity": queue_capacity})))
         props = joint_properties(self.plant, joints)
         period_s = self.period_ns / NS_PER_S
         self.backend = IsaacLabRobot(self.desc, usd_path, IsaacLabCfg(

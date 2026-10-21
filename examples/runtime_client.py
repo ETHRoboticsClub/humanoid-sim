@@ -64,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         ramp = min(1.0, t / 2.0)  # ease in over 2 s
         demand["target_position_rad"] = hold + wave * ramp * 0.5 * (1 - math.cos(2 * math.pi * args.wave_hz * t))
         cycle += 1
-        seg.regions["demands"].write(abi.demands_record(demand, cycle=cycle, session_id=seg.session_id))
+        seg.write_demands(demand, cycle=cycle)
         if not pushed and 0 <= args.push_at <= t:
             seg.send(abi.CMD_APPLY_DISTURBANCE, {"body": pushed_body, "force_n": [0.0, 40.0, 0.0],
                                                  "torque_nm": [0.0, 0.0, 0.0], "duration_s": 0.3})
@@ -84,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     seq = seg.send(abi.CMD_DETACH, {})
     for _ in range(100):  # keep writing demands until the host acknowledges
         cycle += 1
-        seg.regions["demands"].write(abi.demands_record(demand, cycle=cycle, session_id=seg.session_id))
+        seg.write_demands(demand, cycle=cycle)
         try:
             result, message = seg.wait_ack(seq, timeout_s=0.02)
             print("detach:", result, message)

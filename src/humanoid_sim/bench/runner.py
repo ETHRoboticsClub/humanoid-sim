@@ -119,7 +119,7 @@ def run_runtime_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict
             def step():
                 nonlocal cycle
                 cycle += 1
-                client.regions["demands"].write(abi.demands_record(demand, cycle=cycle, session_id=host.session_id))
+                client.write_demands(demand, cycle=cycle)
                 host.step()
 
             for _ in range(50):

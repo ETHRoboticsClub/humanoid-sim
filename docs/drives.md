@@ -126,7 +126,7 @@ A demand leaves the master at `sent_ns` and takes effect at the drive at `arriva
 Where the arrival time comes from depends on the front end:
 
 - Training: `RobotPlant.submit(demand, sent_ns)` (`src/humanoid_sim/train/plant.py`) sets `arrival_ns[e, d] = sent_ns[e] + latency_ns[e, d]`. `latency_ns` comes from the `latency` randomization parameter (seconds, per env and drive, redrawn for envs being reset) and is 0 when it is not randomized.
-- Runtime: the host reads the client's latest demand record once per physics step and queues it with the step's start time as its arrival, so it is in force for the whole step (`RuntimeHost._take_demands` in `src/humanoid_sim/runtime/host.py`). If the client writes several records within one 4 ms step, only the latest is used. The bus and drive timing on that path is modeled by Controls' fake bank.
+- Runtime: the host takes every record the client appended to the demand ring since the last physics step, oldest first, and queues each with its send time (`sent_mono_ns` mapped to plant time) as its arrival (`RuntimeHost._take_demands` in `src/humanoid_sim/runtime/host.py`). The bus and drive timing on that path is modeled by Controls' fake bank.
 - Replay: recorded demands with an optional fixed delay; see [replay-and-sysid.md](replay-and-sysid.md).
 
 In training, with `plant = env.action_manager.get_term("drives").plant`:

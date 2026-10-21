@@ -71,7 +71,7 @@ def test_serve_round_trip(tmp_path, robot):
         def send_demands():
             nonlocal cycle
             cycle += 1
-            seg.regions["demands"].write(abi.demands_record(demand, cycle=cycle, session_id=seg.session_id))
+            seg.write_demands(demand, cycle=cycle)
 
         def serve_for(seconds):
             end = time.monotonic() + seconds
@@ -183,7 +183,7 @@ def test_detach_and_next_session(tmp_path, robot):
         first = abi.Segment.open(path, wait_s=1)
         n = first.num_drives
         demand = abi.pd_demand(np.zeros(n), 0.0, 0.0, law=abi.LAW_DISABLED)
-        first.regions["demands"].write(abi.demands_record(demand, cycle=1, session_id=first.session_id))
+        first.write_demands(demand, cycle=1)
         host.step()
         assert host.attached
         assert host._set_support({"support": "gantry", "tension_breakpoints_s_n": [[0, 300]],
@@ -217,10 +217,10 @@ def test_detach_and_next_session(tmp_path, robot):
         assert np.allclose(truth["joint_pos_rad"][: len(start)], start, atol=1e-4)
         assert float(truth["base_position_m"][2]) == pytest.approx(host._poses[host.start_pose][1] + 0.001, abs=1e-3)
 
-        first.regions["demands"].write(abi.demands_record(demand, cycle=2, session_id=first.session_id))
+        first.write_demands(demand, cycle=2)
         host.step()
         assert not host.attached  # a client of the ended session does not attach
-        second.regions["demands"].write(abi.demands_record(demand, cycle=1, session_id=second.session_id))
+        second.write_demands(demand, cycle=1)
         host.step()
         assert host.attached
         first.close()
@@ -301,7 +301,7 @@ def test_joint_disturbance_deflects_a_held_joint_and_clears(tmp_path, robot):
         hold = client.regions["feedback"].read()[1]["drive"]["position_rad"][:n].copy()
         demand = abi.pd_demand(hold, [d.drives[x].baseline_stiffness for x in drives],
                                [d.drives[x].baseline_damping for x in drives])
-        client.regions["demands"].write(abi.demands_record(demand, cycle=1, session_id=client.session_id))
+        client.write_demands(demand, cycle=1)
         elbow = PARTS[robot]["elbow"]
         drive = next(x for x, dr in d.drives.items() if dr.joints == (elbow,))
         j = host.joints.index(elbow)
@@ -368,7 +368,7 @@ def test_a_disabled_drive_is_back_driven_through_its_gearbox(tmp_path, robot):
         demand = abi.pd_demand(client.regions["feedback"].read()[1]["drive"]["position_rad"][:n].copy(), 100.0, 5.0)
         for cycle, enabled in enumerate((1, 0), start=1):
             demand["law"][:] = abi.LAW_PD if enabled else abi.LAW_DISABLED
-            client.regions["demands"].write(abi.demands_record(demand, cycle=cycle, session_id=client.session_id))
+            client.write_demands(demand, cycle=cycle)
             host.step()
             expected = desc.joints[knee_joint].friction if enabled else backdrive
             assert friction(knee) == pytest.approx(expected)
@@ -404,7 +404,7 @@ def test_the_host_serves_the_g1(tmp_path):
         demand = abi.pd_demand(hold, [desc.drives[d].baseline_stiffness for d in drives],
                                [desc.drives[d].baseline_damping for d in drives])
         for cycle in range(1, 51):
-            client.regions["demands"].write(abi.demands_record(demand, cycle=cycle, session_id=client.session_id))
+            client.write_demands(demand, cycle=cycle)
             host.step()
         assert host.attached
         fb = _feedback(client)["drive"]
@@ -415,7 +415,7 @@ def test_the_host_serves_the_g1(tmp_path):
         assert (soles["lowest_z_m"] > 0.2).all() and (soles["normal_force_n"] == 0).all()  # hung 0.3 m up
         assert soles["position_m"][0][1] > soles["position_m"][1][1]  # left at +y: the G1 faces +x
         demand["law"][:] = abi.LAW_DISABLED
-        client.regions["demands"].write(abi.demands_record(demand, cycle=51, session_id=client.session_id))
+        client.write_demands(demand, cycle=51)
         host.step()
         assert np.abs(_feedback(client)["drive"]["demanded_torque_nm"][:29]).max() == 0.0
         client.close()

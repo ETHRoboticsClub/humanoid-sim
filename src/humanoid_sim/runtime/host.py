@@ -3,7 +3,8 @@
 Every physics period (4 ms), in order:
 
 1. handle a new mailbox command, if any, and acknowledge it;
-2. take the client's latest demands (if they changed) into the drive bank, in force from this step on;
+2. take every demand record the client appended since the last step into the drive bank, each sent at its own
+   time (its ``sent_mono_ns`` in plant time);
 3. step the physics (unless paused), with the active gantry, disturbances and prescribed pose;
 4. publish feedback (physical drive feedback, the latest raw IMU samples, lateness); every ``truth_every`` steps
    (and after a command) the truth; heartbeat.
@@ -71,9 +72,10 @@ FIDELITY_GAPS = [
 
 
 class _DemandIntake:
-    """The client's demands into the drive bank. The record's fields are packed into one pinned host buffer and
+    """The client's demands into the drive bank. A record's fields are packed into one pinned host buffer and
     copied to the device in one transfer; unpacking and queueing run there, as a CUDA graph on CUDA (otherwise a
-    new demand every bus cycle costs more than the physics). The arrival time travels in the same buffer."""
+    new demand every bus cycle costs more than the physics). Each drive's arrival time travels in the same
+    buffer."""
 
     FIELDS = ("law", "target_position_rad", "target_velocity_rad_s", "feedforward_torque_nm", "stiffness_nm_per_rad",
               "damping_nm_s_per_rad", "torque_limit_nm")
@@ -82,9 +84,13 @@ class _DemandIntake:
                  warmup: int = 3):
         self.plant, self.n = plant, num_drives
         cuda = device.type == "cuda"
-        self.host = torch.zeros(len(self.FIELDS) * num_drives + 1, dtype=torch.float64, pin_memory=cuda)
-        self.host_np = self.host.numpy()
-        self.dev = torch.zeros_like(self.host, device=device)
+        # One host buffer per record a step can take: a buffer is written again only after the step's feedback
+        # came back, and by then its copy, queued before, is done.
+        self.hosts = torch.zeros(abi.DEMAND_RING, (len(self.FIELDS) + 1) * num_drives, dtype=torch.float64,
+                                 pin_memory=cuda)
+        self.hosts_np = self.hosts.numpy()
+        self._next = 0
+        self.dev = torch.zeros_like(self.hosts[0], device=device)
         self._submit = torch.compile(self._unpack_and_submit, dynamic=False) if compile else self._unpack_and_submit
         self.graph = None
         if cuda_graph:  # the warm-up queues disabled demands: reset the plant afterwards
@@ -99,28 +105,35 @@ class _DemandIntake:
                 self._submit()
 
     def _unpack_and_submit(self) -> None:
-        f = self.dev[:-1].view(len(self.FIELDS), 1, self.n)
+        f = self.dev[:-self.n].view(len(self.FIELDS), 1, self.n)
         dt = self.plant.cfg.dtype
         law = f[0].to(torch.int16)  # u1 on the wire: 0 to 255
         law = torch.where(law <= LAW_FREEZE, law, torch.zeros_like(law)).to(torch.int8)  # unknown: DISABLED
         demand = DriveDemand(law=law, target_position_rad=f[1].to(dt), target_velocity_rad_s=f[2].to(dt),
                              feedforward_torque_nm=f[3].to(dt), stiffness_nm_per_rad=f[4].to(dt),
                              damping_nm_s_per_rad=f[5].to(dt), torque_limit_nm=f[6].to(dt))
-        self.plant.submit(demand, self.dev[-1:].view(torch.int64))
+        self.plant.submit(demand, self.dev[-self.n:].view(torch.int64).view(1, self.n))
 
-    def __call__(self, drive: np.ndarray, arrival_ns: int) -> None:
-        """Queue the record's per-drive demands (``drive``: the first ``num_drives`` entries) from ``arrival_ns``."""
-        n = self.n
+    def __call__(self, drive: np.ndarray, arrival_ns: np.ndarray) -> None:
+        """Queue the record's per-drive demands (``drive``: the first ``num_drives`` entries), drive ``d``'s from
+        ``arrival_ns[d]``."""
+        n, slot = self.n, self._next
+        self._next = (slot + 1) % abi.DEMAND_RING
+        host = self.hosts_np[slot]
         for k, name in enumerate(self.FIELDS):
-            self.host_np[k * n:(k + 1) * n] = drive[name]
-        self.host_np[-1:].view(np.int64)[0] = arrival_ns
-        # The host buffer is written again next cycle, after the step's feedback came back: by then this copy,
-        # queued before it, is done.
-        self.dev.copy_(self.host, non_blocking=True)
+            host[k * n:(k + 1) * n] = drive[name]
+        host[-n:].view(np.int64)[:] = arrival_ns
+        self.dev.copy_(self.hosts[slot], non_blocking=True)
         if self.graph is not None:
             self.graph.replay()
         else:
             self._submit()
+
+
+def _queue_capacity(max_delay_ns: int, bus_period_ns: int, period_ns: int) -> int:
+    """Pending demand records per drive bank: every bus cycle's record stays queued until it has arrived on every
+    drive, up to the longest delay after a send that can fall a step late."""
+    return math.ceil((max_delay_ns + 2 * period_ns) / bus_period_ns) + 1
 
 
 @dataclass
@@ -159,7 +172,9 @@ class RuntimeHost:
         cuda = str(device).startswith("cuda")
         self.sim = SimCore(usd, device=device, robot=robot, solver=solver, fixed_base=support == "suspended",
                            base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
-                           compile=compile and cuda, imu_history=abi.IMU_SAMPLES, scene=scene)
+                           compile=compile and cuda, imu_history=abi.IMU_SAMPLES, scene=scene,
+                           queue_capacity=_queue_capacity(0, bus_period_ns,
+                                                          int(load_profile(robot)["physics"]["period_ns"])))
         self.device = torch.device(device)
         self._intake = _DemandIntake(self.sim.plant, len(self.sim.plant.map.drive_names), self.device,
                                      cuda_graph=cuda, compile=compile and cuda)
@@ -216,6 +231,8 @@ class RuntimeHost:
         self.detached = False
         self._client_mono_ns = 0
         self._demand_seq = 0
+        self._demands_taken = 0
+        self._demand_overruns = 0
         self._command_seq = 0
         # Held until the client attaches.
         self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = self._named_pose(self.start_pose)
@@ -539,6 +556,8 @@ class RuntimeHost:
     # -- demands ----------------------------------------------------------------------------------
 
     def _take_demands(self) -> None:
+        """Every ring record not taken yet, oldest first, each sent at its plant time (the client's send time through
+        the last feedback's clock mapping)."""
         try:
             got = self.seg.regions["demands"].read()
         except abi.StaleRead:  # the client is mid-write: take it next step
@@ -549,13 +568,22 @@ class RuntimeHost:
         if int(rec["session_id"]) != self.session_id:
             return  # a client of an earlier session
         self._demand_seq = seq
+        count = int(rec["count"])
+        if count <= self._demands_taken:
+            return
         if not self.attached:
             self.attached = True
             self._prescribed = None  # the start pose is released when the client arrives
         self._client_mono_ns = int(rec["written_mono_ns"])
-        drive = rec["drive"][:len(self.drives)]
-        self._intake(drive, self.sim.t_ns)
-        running = drive["law"] != abi.LAW_DISABLED
+        first = max(self._demands_taken, count - abi.DEMAND_RING)
+        self._demand_overruns += first - self._demands_taken
+        n = len(self.drives)
+        for k in range(first, count):
+            record = rec["ring"][k % abi.DEMAND_RING]
+            sent_ns = int(record["sent_mono_ns"]) - self._mono_minus_plant_ns
+            self._intake(record["drive"][:n], np.full(n, sent_ns, dtype=np.int64))
+        self._demands_taken = count
+        running = rec["ring"][(count - 1) % abi.DEMAND_RING]["drive"][:n]["law"] != abi.LAW_DISABLED
         self._set_drives_off(~running)
 
     def _set_drives_off(self, off: np.ndarray) -> None:
@@ -657,6 +685,8 @@ class RuntimeHost:
         rec["late_steps"], rec["paused"], rec["num_drives"] = self.late_steps, self.paused, n
         rec["keeping_up"] = self._keeping_up(now)
         rec["imu_total"] = total
+        rec["demand_records"], rec["demand_overruns"] = self._demands_taken, self._demand_overruns
+        self._mono_minus_plant_ns = now - sim.t_ns
         valid = min(total, h, abi.IMU_SAMPLES)
         rec["imu_count"] = valid
         for k, name in enumerate(abi.DRIVE_FEEDBACK.names):

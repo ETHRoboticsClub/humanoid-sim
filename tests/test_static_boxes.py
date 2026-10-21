@@ -230,7 +230,7 @@ def test_the_runtime_host_stands_the_robot_among_the_boxes(tmp_path, usd):
                                [desc.drives[d].baseline_damping for d in drives])
         z0 = float(host.robot.data.root_link_pose_w.torch[0, 2])
         for cycle in range(1, 126):  # 0.5 s
-            client.regions["demands"].write(abi.demands_record(demand, cycle=cycle, session_id=client.session_id))
+            client.write_demands(demand, cycle=cycle)
             host.step()
         pose = host.robot.data.root_link_pose_w.torch[0]
         assert abs(float(pose[2]) - z0) < 0.02 and pose[:2].norm().item() < 0.02  # standing where it started

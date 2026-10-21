@@ -84,7 +84,7 @@ The standing pose leaves the V1's soles tilted under an upright base, which does
 
 The header's `session_id` (a random non-zero 64-bit number chosen when the segment file is created) names one client session.
 
-A client attaches by writing a demands record whose `session_id` echoes the header's. Records carrying another session id are ignored, so a client of an earlier session cannot attach to a new one. Until the first demand arrives, the session holds the robot in its [start pose](#the-start-pose): the joints in that pose and, in a free session, the base at its height. The pose is written before every physics step and every drive is treated as off. The client's first demands release the pose, so the robot starts moving when the client does. Physics and plant time run before attachment, and no client timeout applies until then.
+A client attaches by writing demands whose `session_id` echoes the header's. Demands carrying another session id are ignored, so a client of an earlier session cannot attach to a new one. Until the first demand arrives, the session holds the robot in its [start pose](#the-start-pose): the joints in that pose and, in a free session, the base at its height. The pose is written before every physics step and every drive is treated as off. The client's first demands release the pose, so the robot starts moving when the client does. Physics and plant time run before attachment, and no client timeout applies until then.
 
 A session ends in one of three ways. The segment's `state` becomes ended in every case (`RuntimeHost.run` sets it when it returns):
 
@@ -105,7 +105,7 @@ A session is tied to the segment file and outlives the client process that drove
 The runtime runs in real time only. `RuntimeHost.run` paces each physics period, 4 ms (`physics.period_ns` in `profiles/ethrc_v1.yaml`), to `CLOCK_MONOTONIC`: it sleeps until 100 µs before the step's deadline and spins for the rest (`SPIN_NS`). Each period does, in order (`RuntimeHost.step`):
 
 1. Handle a new mailbox command, if there is one, and write its ack.
-2. Take the client's latest demands record, if it changed, into the drive bank. Its arrival time is the step's start, so it is in force for the whole step. The host reads demands once per step: of the records a 1.5 ms bus writes during one 4 ms step only the latest acts, and if no new record arrives the last one stays in force. See [drives.md](drives.md) for the arrival queue and the drive law.
+2. Take every demand record the client appended since the last step into the drive bank, oldest first. Each is sent at its `sent_mono_ns` mapped to plant time (the latest feedback's mapping, below), so the 2 to 3 records a 1.5 ms bus writes during one 4 ms step each act from their own time within the step. If no new record arrives the last one stays in force. See [drives.md](drives.md#arrival-and-latency) for the arrival queue and the drive law.
 3. Step the physics with the active gantry, disturbances and prescribed pose, unless paused.
 4. Publish the feedback, the truth when due, and the heartbeat.
 
@@ -117,17 +117,17 @@ While paused, physics, plant time and the step counter stop. Commands and demand
 
 ## The segment
 
-The segment is one file of 30,912 bytes: a 272-byte header and six regions. Values are little-endian at natural alignment, and every region starts on a 64-byte boundary. Each region has one writer.
+The segment is one file of 56,128 bytes: a 272-byte header and six regions. Values are little-endian at natural alignment, and every region starts on a 64-byte boundary. Each region has one writer.
 
 | Region | Offset | Bytes | Writer | Contents |
 |---|---|---|---|---|
 | header | 0 | 272 | sim | Identity, sizes, session, state, periods, heartbeat |
 | descriptor | 320 | 16,408 | sim | JSON: names, units, identity, commands, faults, fidelity gaps |
-| demands | 16,768 | 3,632 | client | Bus cycle, client clock, session echo, one SI drive demand per drive |
-| feedback | 20,416 | 4,424 | sim | Plant time, lateness, physical drive feedback, the latest raw IMU samples |
-| mailbox | 24,896 | 4,128 | client | One command: code and JSON arguments |
-| ack | 29,056 | 288 | sim | The last command handled: its number, a result code, a message |
-| truth | 29,376 | 1,536 | sim | Base pose and twist, centre of mass, joint state, gantry tension, sole plates |
+| demands | 16,768 | 28,848 | client | The last 8 bus cycles' demands, each with its send time; client clock, session echo |
+| feedback | 45,632 | 4,440 | sim | Plant time, lateness, demand records taken, physical drive feedback, the latest raw IMU samples |
+| mailbox | 50,112 | 4,128 | client | One command: code and JSON arguments |
+| ack | 54,272 | 288 | sim | The last command handled: its number, a result code, a message |
+| truth | 54,592 | 1,536 | sim | Base pose and twist, centre of mass, joint state, gantry tension, sole plates |
 
 `MAX_DRIVES` (64) and `MAX_JOINTS` (64) size the arrays. A robot with more drives or joints needs a new major ABI version. Only one client may write the demands and mailbox regions: a second writer would break the protocol below.
 
@@ -138,10 +138,10 @@ The header is written when the file is created; afterwards only `state` and `hea
 | Field | Type | Meaning |
 |---|---|---|
 | `magic` | char[8] | `HSIMPLNT`, written last when the file is filled |
-| `abi_major`, `abi_minor` | u16 | 2, 0 |
+| `abi_major`, `abi_minor` | u16 | 3, 0 |
 | `header_bytes` | u32 | 272 |
 | `layout_hash` | u64 | Hash of the layout (see [Validating a segment](#validating-a-segment)) |
-| `segment_bytes` | u64 | 30,912 |
+| `segment_bytes` | u64 | 56,128 |
 | `session_id` | u64 | This session |
 | `state` | u32 | 0 creating, 1 ready, 2 ended |
 | `num_drives`, `num_joints` | u32 | 22 and 22 for `ethrc_v1` |
@@ -182,15 +182,15 @@ A reader repeats three steps, up to 1000 times (`attempts`):
 
 | Check | Expected |
 |---|---|
-| File size | `SEGMENT_BYTES` (30,912) |
+| File size | `SEGMENT_BYTES` (56,128) |
 | `magic` | `HSIMPLNT` |
-| `abi_major` | This side's `ABI_MAJOR` (1) |
+| `abi_major` | This side's `ABI_MAJOR` (3) |
 | `layout_hash` | This side's `LAYOUT_HASH` |
 | `state` | Ready |
 
 While the file is missing or one of these fails it retries every 10 ms until `wait_s` has passed, then raises `FileNotFoundError` or `AbiError`. Once the segment is ready it compares `robot_id` and `description_digest` with the values given and raises `AbiError` on a mismatch. A different `abi_minor` is accepted.
 
-The layout hash (`layout_hash()`) is the first 8 bytes, little-endian, of a SHA-256 over every field's name, offset, type and shape and the region offsets. Any change to the layout changes it. `plant_abi.h` carries the same value as `HSIM_PLANT_LAYOUT_HASH` (`0xfb475e58737ea4a4`), and `tests/test_runtime_abi.py` compiles the header and checks every struct size, field offset, region offset and the hash against the Python layout.
+The layout hash (`layout_hash()`) is the first 8 bytes, little-endian, of a SHA-256 over every field's name, offset, type and shape and the region offsets. Any change to the layout changes it. `plant_abi.h` carries the same value as `HSIM_PLANT_LAYOUT_HASH` (`0x8e1d3042ca178a4d`), and `tests/test_runtime_abi.py` compiles the header and checks every struct size, field offset, region offset and the hash against the Python layout.
 
 The description digest (`description_digest(urdf, actuators)`) is the SHA-256 over the URDF and `actuators.yaml` of the robot description in `third_party/humanoid-urdf`, each as its file name followed by its bytes. The sim writes `Description.digest`. A client computes the digest from its own checkout of humanoid-urdf and passes it to `Segment.open`: equal digests mean both sides run the same description.
 
@@ -224,15 +224,25 @@ The fidelity gaps the runtime publishes:
 
 ### Demands
 
-The client writes the demands region every bus cycle.
+Every bus cycle the client appends one record to a ring of `DEMAND_RING` (8) records and rewrites the region (`Segment.write_demands`), so the host takes every cycle's demands, not only the latest. Record `k` is at `ring[k % 8]`. Eight records are 12 ms of a 1.5 ms bus, three physics steps: a host that misses steps loses records only when it falls further behind, and counts them in the feedback's `demand_overruns`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `cycle` | u64 | The client's cycle counter (not used by the host) |
-| `written_mono_ns` | u64 | The client's `CLOCK_MONOTONIC` when it wrote the record; the client timeout runs from it |
+| `written_mono_ns` | u64 | The client's `CLOCK_MONOTONIC` when it wrote the region; the client timeout runs from it |
 | `session_id` | u64 | Must equal the header's |
+| `count` | u64 | Records written in this session; the newest is `ring[(count - 1) % 8]` |
 | `num_drives` | u32 | Drives filled in (the host reads as many entries as the header's `num_drives`) |
+| `ring` | `HsimDemandRecord[8]` | The last 8 records |
+
+Each record:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `cycle` | u64 | The client's bus cycle (not used by the host) |
+| `sent_mono_ns` | u64 | The client's `CLOCK_MONOTONIC` when the bus delivered this cycle's outputs to the drives. The host maps it to plant time and each drive applies the record its delay after that ([drives.md](drives.md#arrival-and-latency)) |
 | `drive` | `HsimDriveDemand[64]` | One demand per drive, in descriptor order |
+
+`Segment.write_demands` continues the ring from what the region holds, so a client that reopens a session's segment does not restart it.
 
 Each drive's demand is vendor-neutral and in SI units, the `DriveDemand` of Controls' `docs/sim-learning-api-plan.md` (§1.2). The client converts its device's command at its own boundary (an EPOS4's CiA-402 mode and raw JVPT gains, a Unitree motor's `LowCmd` entry; [drives.md](drives.md#the-demand) lists both mappings):
 
@@ -246,7 +256,7 @@ Each drive's demand is vendor-neutral and in SI units, the `DriveDemand` of Cont
 | `damping_nm_s_per_rad` | f64 | D gain |
 | `torque_limit_nm` | f64 | Cap on the applied torque; `inf` for none |
 
-PD tracks the position and velocity targets with the demand's gains and adds the feed-forward torque; freeze holds the position the drive read when it entered the law. A disabled drive applies no torque and its joint, for a 1:1 drive, takes the drive family's back-drive friction. [drives.md](drives.md) gives the drive law, the envelope and the frames. `pd_demand(target, stiffness, damping, *, law=LAW_PD, **fields)` gives every drive's fields as arrays, with no torque limit unless one is passed, and `demands_record(demand, cycle=..., session_id=...)` builds a record from them.
+PD tracks the position and velocity targets with the demand's gains and adds the feed-forward torque; freeze holds the position the drive read when it entered the law. A disabled drive applies no torque and its joint, for a 1:1 drive, takes the drive family's back-drive friction. [drives.md](drives.md) gives the drive law, the envelope and the frames. `pd_demand(target, stiffness, damping, *, law=LAW_PD, **fields)` gives every drive's fields as arrays, with no torque limit unless one is passed, and `Segment.write_demands(demand, cycle=..., sent_mono_ns=None)` appends them as one record (sent now by default).
 
 ### Feedback
 
@@ -263,6 +273,8 @@ The host writes the feedback region every period, paused or not.
 | `num_drives` | u32 | Drives filled in |
 | `imu_count` | u32 | Valid entries of `imu`, up to 32 |
 | `imu_total` | u64 | IMU samples delivered since the IMU was last reset (session start or `RESET`) |
+| `demand_records` | u64 | Demand records taken from the ring in this session |
+| `demand_overruns` | u64 | Records the ring overwrote before the host took them |
 | `drive` | `HsimDriveFeedback[32]` | Per drive: `position_rad`, `velocity_rad_s`, `applied_torque_nm`, `demanded_torque_nm` |
 | `imu` | `HsimImuSample[32]` | The latest delivered IMU samples, newest first |
 
@@ -472,7 +484,7 @@ class Client:
         if seg.state != abi.STATE_READY or seg.heartbeat_age_ns() > SIM_STALE_NS:
             raise RuntimeError("the sim ended the session or stopped")
         self.cycle += 1
-        seg.regions["demands"].write(abi.demands_record(self.demand, cycle=self.cycle, session_id=seg.session_id))
+        seg.write_demands(self.demand, cycle=self.cycle)
         try:
             _, self.fb = seg.regions["feedback"].read()
         except abi.StaleRead:
