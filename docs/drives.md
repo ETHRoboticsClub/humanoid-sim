@@ -256,6 +256,12 @@ Golden tests in `tests/test_ankle_transmission.py` check the torch transmission 
 
 They run without Isaac Lab: `uv run pytest tests/test_ankle_transmission.py` (needs the submodules).
 
+## Dynamic friction
+
+The solver's Coulomb friction (MJWarp frictionloss) holds a joint at rest up to the joint's static `friction`, and resists a sliding joint with the same torque. A joint whose `dynamic_friction` is lower gets the difference back while it moves: `PlantCore` adds the joint torque `friction_relief · tanh(q̇ / v_s)` before target shaping, with `friction_relief = friction − dynamic_friction` (`[E, J]`, Nm) and `v_s = SLIDING_VELOCITY_RAD_S` = 0.02 rad/s (`src/humanoid_sim/core.py`). At rest the tanh vanishes and the static friction holds; above a few `v_s` the net friction is the dynamic one. `v_s` is modeled: the drives' breakaway speed has not been measured.
+
+The description states no dynamic friction yet, so the relief is zero by default. Training draws it through `joint_friction_ratio` (dynamic over static) and recomputes it from the solver's static friction, randomized or not, at every reset; `fit-pace` writes it per candidate. A 1:1 joint whose drive is off gets no relief, since its friction is then the back-drive torque below.
+
 ## Disabled drives: back-drive friction
 
 A disabled drive is back-driven through its gearbox. Only the runtime host models this (`RuntimeHost._set_drives_off` in `src/humanoid_sim/runtime/host.py`). When a 1:1 drive's law is disabled in the latest demand record, the host sets its joint's Coulomb friction to the family's `backdrive_torque` in place of the enabled-drive friction from actuators.yaml (a family without one keeps the joint's friction). It writes the friction only when the on/off pattern changes. Before a client attaches every drive is disabled.

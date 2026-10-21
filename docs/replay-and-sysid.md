@@ -1,14 +1,16 @@
 # Replay and system identification
 
-humanoid-sim can replay an excitation capture recorded on the robot at the drive level and fit model parameters to it. During a replay each of the 22 simulated drives receives the position demand the real drive acted on, and the simulated drive feedback is compared with what the real drive measured. Three commands are built on this:
+humanoid-sim can replay an excitation capture recorded on the robot at the drive level and fit model parameters to it. During a replay each of the 22 simulated drives receives the position demand the real drive acted on, and the simulated drive feedback is compared with what the real drive measured. These commands are built on this:
 
 | Command | What it does | Code |
 |---|---|---|
 | `humanoid-sim replay` | Replays one capture and scores the sim against it | `src/humanoid_sim/replay/replay.py` |
 | `humanoid-sim fit-delay` | Finds the timing offset between the recorded demands and the drives' response | `src/humanoid_sim/sysid/delay.py` |
 | `humanoid-sim fit-passive` | Fits upper-body joint damping, friction and armature | `src/humanoid_sim/sysid/passive.py` |
+| `humanoid-sim fit-pace` | Fits PACE 0.2.0's actuator model to captures or rosbags, from their command frames | `src/humanoid_sim/sysid/pace.py` |
+| `humanoid-sim pace-selftest` | Plants PACE parameters in the sim and fits them back from a synthetic chirp | `src/humanoid_sim/sysid/pace.py` |
 
-All three step physics on Isaac Lab / MJWarp, so they run in the Isaac Lab image or on a GPU node (see [getting-started.md](getting-started.md) and [testing-and-gpu.md](testing-and-gpu.md)). The capture reader, `src/humanoid_sim/replay/exc.py`, needs only NumPy and can be used anywhere.
+All of them step physics on Isaac Lab / MJWarp, so they run in the Isaac Lab image or on a GPU node (see [getting-started.md](getting-started.md) and [testing-and-gpu.md](testing-and-gpu.md)). The capture reader, `src/humanoid_sim/replay/exc.py`, needs only NumPy and can be used anywhere.
 
 ## Excitation captures
 
@@ -279,6 +281,95 @@ A fit is worth keeping when `holdout.objective_fit` is clearly below `holdout.ob
 
 `--start` values are inputs to a single run. They are not a place to keep robot constants, which this repository never holds.
 
+## Rosbags
+
+`fit-pace` also reads rosbag2 recordings from Controls' robot API recorder (`ros2 bag record --all`; sqlite3 on ROS Humble, MCAP too), through `BagCapture` in `src/humanoid_sim/replay/bag.py`. It needs the `bag` extra (`rosbags`), which reads bags without ROS. It serves the same interface as `ExcitationCapture`:
+
+| Topic | Type | Used as |
+|---|---|---|
+| `/ethrc/drive_feedback` | `msg_ethrc/DriveFeedback` | Per drive: `source_stamp_ns`, measured position, velocity and torque, and the 0x6062 position demand (the `pdo_feedback.csv` columns) |
+| `/drive_gains/state` | `msg_ethrc/DriveGains` | The gains in force: the latest state at or before the feedback starts and every state during it, all applied, none ramping or failed, all equal |
+| `/rt/body_control/device` | `msg_ethrc/BodyControlFrame` | The router's COMMAND frames to the EtherCAT master, stamped when the loop host sent them (the `commands.csv` rows) |
+| `/rt/imu` | `sensor_msgs/Imu` | The base motion for the moving-base modes |
+
+Every time comes from the messages' own stamps, never from the bag's receipt times. Humble's sqlite3 bags carry no message definitions, so the reader uses the copies in `src/humanoid_sim/replay/msgs/`, taken from Controls' `msg_ethrc`, unless the bag holds its own. A bag has no `complete` flag and no record of the gantry: that the robot hung on the gantry and ran an excitation is for whoever passes the bag to know. `sensor_msgs/Imu` has no sample counter, so a dropped IMU sample goes unnoticed. The capture id is `bag-` and 16 hex digits of the sha256 over the bag's files.
+
+## Fitting PACE's actuator model
+
+```bash
+humanoid-sim fit-pace <capture-or-bag>... --holdout <capture-or-bag>... [--num-envs 512] [--generations 40]
+humanoid-sim pace-selftest [--num-envs 512] [--generations 40]
+```
+
+`fit-pace` fits the actuator model of [PACE](https://github.com/leggedrobotics/pace-sim2real) 0.2.0 (Bjelonic et al., IJRR 2025) on this plant, by batched replay with CMA-ES as `fit-passive` does, and writes the result in PACE's own layout.
+
+### The parameters
+
+In PACE's order, with `separate_dynamic_friction` (`PaceSpace` in `src/humanoid_sim/sysid/pace.py`):
+
+| Parameter | Per | Unit | Range | Written to |
+|---|---|---|---|---|
+| `armature` | joint | kg m² | description × [1/`--bound`, `--bound`] | `write_joint_armature_to_sim_index` |
+| `damping` | joint | Nm s/rad | description × [1/`--bound`, `--bound`] | `write_joint_viscous_friction_coefficient_to_sim_index` |
+| `friction` | joint | Nm | description × [1/`--bound`, `--bound`] | `write_joint_friction_coefficient_to_sim_index` (static) |
+| `bias` | drive | rad | ± `--bias-bound-mrad` | `DriveBank.position_offset = −bias` |
+| `delay` | all drives | ns | `--delay-ms FROM TO` | the latency of each command frame |
+| `friction_ratio` | joint | ratio | [0, 1] | `PlantCore.friction_relief = friction · (1 − ratio)` ([drives.md](drives.md#dynamic-friction)) |
+
+The bias has PACE's sign: the drive's controller sees the true position minus the bias. The bias is per drive, so an ankle's two entries are its cranks'; the other parameters are per joint, an ankle's on its pitch and roll hinges. The delay applies to the commands, PACE's `delay_mode="command"`. With `--no-dynamic-friction` the ratio is 1 and not a parameter, PACE's default layout.
+
+A candidate is a point of [-1, 1]^dim: the description's value times `bound^x` for armature, damping and friction, linear over its range for the others. The search starts at the description's values (its friction ratio: 1 while it states no dynamic friction), zero bias and the middle of the delay range, with a step size of 0.3. `--fix PARAM.NAME` holds one entry at its start, for example `bias.maxonHEJ50L_ANK1` for a crank that barely moves; `--skip-drives` leaves drives out of the objective. The objective is the position RMS of the drive readings after the first second, averaged over the fitted captures and the scored drives. Candidates outside the box are evaluated at its edge and penalized, as in `fit-passive`.
+
+`--search` picks how the search is split (`fit` in `src/humanoid_sim/sysid/pace.py`):
+
+- `blocks` (the default): one CMA-ES per block, each ranked by its own drives' error. A 1:1 drive's block is its joint's armature, damping, friction and ratio and its own bias; an ankle's block is both hinges' and both cranks' entries, ranked on the two cranks; the delay is a block of its own, ranked on every scored drive. All blocks share every generation's envs: env `e` runs candidate `e` of every block, and env 0 the blocks' current means. On a fixed base a drive's error depends mostly on its own joint, so the 5- to 10-dimensional searches converge in tens of generations, where one search over all 111 parameters needs hundreds.
+- `joint`: one CMA-ES over every parameter on the overall objective, as PACE searches; env 0 re-evaluates the best so far.
+
+### Replaying from the commands
+
+The delay is the time from a command leaving the loop host to the drive acting on it, which is the plant's `latency` in training. Fitting it needs the targets the EtherCAT master sent, not the drives' 0x6062 demand, which already includes the delay. No topic carries the per-drive targets the master writes, so `drive_targets` in `src/humanoid_sim/replay/replay.py` rebuilds them from the joint-space command frames as the master does (Controls `standalone.cpp` `bodyDriveTargets`): `sign · (q + standing_offset)` for a 1:1 drive, and the crank inverse kinematics of the hinges for an ankle. The replay (`source="command"`) submits each frame at its stamp; it takes effect one latency later through the drive queue, as demands do in training. The master's velocity slew is not modeled: it passes a target through unchanged when one bus step reaches it, and the rebuild check ([the capture contract](#the-capture-contract)) shows where it did not.
+
+### The capture contract
+
+A capture or bag is fit only if it meets the contract below. `check-bag` checks it without physics, on any machine with the `bag` extra, and `fit-pace` runs the same checks (`check_capture` in `src/humanoid_sim/sysid/contract.py`) and refuses before replaying anything:
+
+```bash
+humanoid-sim check-bag <capture-or-bag>... [--base yaw|orientation|fixed] [--delay-ms 0 20] [--bias-bound-mrad 20] [--skip-drives ...]
+```
+
+It prints each capture's feedback, commands and rebuild numbers, then its errors and warnings, and exits 1 if any capture has an error. The options mean what they mean to `fit-pace`; give it the ones the fit will get.
+
+| The capture must | Checked as |
+|---|---|
+| Hold feedback from every drive of the description, with finite positions | Error otherwise |
+| Report 0x6062 on every scored drive. Controls' EtherCAT master does; its fake bus does not | Error otherwise |
+| Hold gains that are applied on every drive and do not change, ramp or fail while it runs | Error otherwise |
+| Hold the IMU, unless the fit runs with `--base fixed` | Error otherwise |
+| Hold COMMAND frames that name every joint, overlapping the feedback for at least 5 s. Stamps on different clocks fail this | Error otherwise |
+| Be recorded with the zeros and signs of the description humanoid-sim pins | Error when a scored drive's 0x6062 differs from the rebuilt targets on average by more than the bias bound |
+| Show a delay inside the fit's range | Error when the rebuilt targets best explain 0x6062 at a shift outside `--delay-ms` |
+| Stream without gaps | Warning for a gap over 50 ms |
+
+The rebuild check scans shifts from 10 ms below to 10 ms above the delay range. At each shift it compares every drive's 0x6062 with the target sent that much earlier (`command_demand_rms`). At the best shift the RMS should be near zero, up to the drive's interpolation; a large value means the rebuild does not match the master (for example an ankle convention). A drive without 0x6062 is compared with its measured position instead, which adds its tracking error; the zero check still applies, the delay check does not. The numbers are in `command_rebuild` in the output.
+
+Two things are not in the data, and the contract cannot check them: that the robot hung on the gantry, and which excitation band a capture holds. Pass the captures of one band to fit and another's as `--holdout`.
+
+### Output
+
+`<out>/` (default `outputs/sysid/pace`):
+
+| File | Contents |
+|---|---|
+| `fit-pace.json` | `values` per joint (armature, damping, friction, friction ratio and the resulting dynamic friction) and per drive (bias), and `delay_ns`. Also `pace_params`, `pace_names` and `bounds`; the objective at the start and the fit, the per-generation `history`, `rms_start` and `rms_best` per capture and drive, `holdout`, `command_rebuild`; the run settings and the description identity |
+| `config.pt` | PACE's: `bounds`, `joint_order`, `dof_pos` and `des_dof_pos` (the first capture's readings and the rebuilt targets in force, one row per physics step as PACE's `fit.py` steps them, drive order), `time`, `separate_dynamic_friction`, plus `drive_order`, `delay_mode`, `sim_dt` and `pace_version` |
+| `mean_final.pt` | PACE's parameter vector, the delay rounded to whole physics steps of `sim_dt` (PACE's delay buffer takes whole steps) |
+
+Judge a fit as for `fit-passive`: `holdout.objective_fit` clearly below `holdout.objective_start`, and no value at the edge of its range. As with `fit-passive`, nothing is written back: the values belong in humanoid-urdf's `actuators.yaml`, the dynamic friction as `dynamic_friction`, which the description reads when present.
+
+### Self-test
+
+`pace-selftest` checks the model and the fit without the robot. It draws parameters uniformly within ± `--spread` of the box, plants them in every env, and runs a chirp of command frames on a fixed base: every joint sweeps `--f0` to `--f1` Hz about the standing pose with amplitude `--amplitude-rad` (half on the ankle hinges), after one second at rest. It records the drives' readings as a capture, prints the objective at the planted values (near zero) and at the start values, then fits from the start values. `fit-pace.json` adds `planted`, `objective_planted` and `recovery_median_error`: the median absolute log error of armature, damping and friction, the median absolute error of bias and ratio, and the delay error in ns. `tests/test_physics.py::test_pace_objective_is_zero_at_planted_parameters` runs the same round trip briefly on the CPU.
+
 ## Running on a GPU with SkyPilot
 
 `sky/replay.sky.yaml` and `sky/sysid.sky.yaml` run the replays and the passive fit on one L40S on AWS (8 or more CPUs, 32 GB or more of memory, 200 GB of disk). `sky/setup.sh` installs Isaac Lab release 3.0.0 at `ISAACLAB_COMMIT` and humanoid-sim in editable mode. The repository is synced to `~/sky_workdir` on the node, and the three captures are mounted from `../datasets/humanoid-v1/` (beside the repository) at `/data/exc-<id>`. To use another capture, add it to `file_mounts`.
@@ -301,6 +392,13 @@ The two high-band captures run the same profile, so one would not validate a fit
 
 ```bash
 sky launch -y -c hsim-bench -i 10 sky/sysid.sky.yaml
+rsync -avz hsim-bench:sky_workdir/outputs/sysid/ outputs/sysid/
+```
+
+`pace.sky.yaml` builds both assets, runs the PACE physics test and `pace-selftest` (`NUM_ENVS` 512, `GENERATIONS` 40, `DURATION` 20 s), and, with `BAGS` set to mounted capture or bag directories, fits the first and holds out the others. `SEARCH` (`blocks` or `joint`) picks the search. Results go to `outputs/sysid/pace-selftest-<search>/` (with `outputs/sysid/pace-selftest-<search>.log`) and `outputs/sysid/pace/`.
+
+```bash
+sky launch -y -c hsim-bench -i 10 sky/pace.sky.yaml
 rsync -avz hsim-bench:sky_workdir/outputs/sysid/ outputs/sysid/
 ```
 

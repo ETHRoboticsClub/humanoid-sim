@@ -138,3 +138,55 @@ def test_zero_torque_scale_applies_no_torque():
     bank.submit(_pd(0.1), torch.tensor([STEP]))
     out = bank.compute(STEP, 2 * STEP, torch.zeros(1, 1, dtype=D64), torch.zeros(1, 1, dtype=D64))
     assert out.applied.item() == 0.0 and out.demanded.item() == pytest.approx(32.0)
+
+
+def test_sliding_friction_relief(desc):
+    """A sliding joint gets static minus dynamic friction back along its motion; at rest, or with its drive off,
+    none."""
+    from humanoid_sim.core import SLIDING_VELOCITY_RAD_S
+
+    joints = list(desc.joints)
+    plant = PlantCore(desc, joints, 2, PlantCfg(dtype=D64))
+    expect = [desc.joints[n].friction - desc.joints[n].dynamic_friction for n in joints]
+    assert plant.friction_relief[0].tolist() == pytest.approx(expect)
+    standing = torch.tensor([desc.joints[n].standing_offset_rad for n in joints], dtype=D64).expand(2, -1)
+    i = joints.index("elbow_flexion_l")
+    qd = torch.zeros_like(standing)
+    qd[:, i] = torch.tensor([10 * SLIDING_VELOCITY_RAD_S, -10 * SLIDING_VELOCITY_RAD_S], dtype=D64)
+
+    def target(relief, enabled=True):
+        plant.reset(torch.arange(2))
+        plant.friction_relief[:] = relief
+        if enabled:
+            qdrv, _, _ = plant.map.drive_state(standing, qd)
+            demand = DriveDemand.pd(qdrv.clone(), plant.drive_stiffness.expand(2, -1), plant.drive_damping.expand(2, -1))
+            plant.submit(demand, torch.zeros(2, dtype=torch.long))
+        return plant.pre_physics(0, standing, qd)
+
+    shift = (target(0.3) - target(0.0))[:, i] * plant.k0[:, i]
+    assert shift.tolist() == pytest.approx([0.3 * torch.tanh(torch.tensor(10.0)).item(), -0.3 * torch.tanh(
+        torch.tensor(10.0)).item()])
+    assert torch.allclose(target(0.3, enabled=False), target(0.0, enabled=False))
+
+
+def test_dynamic_friction_from_the_description(tmp_path):
+    import shutil
+
+    import yaml
+
+    root = Description.default_root()
+    shutil.copytree(root / "ethrc_v1", tmp_path / "ethrc_v1", symlinks=True)
+    path = tmp_path / "ethrc_v1" / "actuators.yaml"
+    table = yaml.safe_load(path.read_text())
+    table["joints"]["elbow_flexion_l"]["dynamic_friction"] = 0.004
+    path.write_text(yaml.safe_dump(table))
+    desc = Description.load("ethrc_v1", tmp_path)
+    assert desc.joints["elbow_flexion_l"].dynamic_friction == 0.004
+    assert desc.joints["elbow_flexion_r"].dynamic_friction == desc.joints["elbow_flexion_r"].friction
+    plant = PlantCore(desc, list(desc.joints), 1, PlantCfg(dtype=D64))
+    i = list(desc.joints).index("elbow_flexion_l")
+    assert plant.friction_relief[0, i].item() == pytest.approx(desc.joints["elbow_flexion_l"].friction - 0.004)
+    table["joints"]["elbow_flexion_l"]["dynamic_friction"] = 1.0  # above the static friction
+    path.write_text(yaml.safe_dump(table))
+    with pytest.raises(ValueError, match="dynamic_friction"):
+        _ = Description.load("ethrc_v1", tmp_path).joints

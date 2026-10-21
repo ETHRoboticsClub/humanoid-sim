@@ -48,6 +48,32 @@ class DriveGains:
 
 
 @dataclass
+class CommandTrace:
+    """Joint-space command frames as they left the loop host: semantic radians (relative to the standing pose),
+    one row per frame, each joint held at its last commanded value (NaN until first commanded)."""
+
+    t_ns: np.ndarray  # int64, the frame stamps, strictly increasing
+    joints: list[str]
+    positions_rad: np.ndarray  # [F, J]
+
+    @classmethod
+    def from_frames(cls, frames: list[tuple[int, dict[str, float]]]) -> CommandTrace:
+        """From ``(stamp, {joint: rad})`` frames in any order; a repeated stamp keeps the later frame."""
+        frames = sorted(frames, key=lambda f: f[0])
+        joints = sorted({j for _, f in frames for j in f})
+        held = dict.fromkeys(joints, np.nan)
+        t, rows = [], []
+        for stamp, f in frames:
+            held |= f
+            if t and stamp == t[-1]:
+                rows[-1] = [held[j] for j in joints]
+                continue
+            t.append(stamp)
+            rows.append([held[j] for j in joints])
+        return cls(np.asarray(t, dtype=np.int64), joints, np.asarray(rows, dtype=np.float64).reshape(len(t), -1))
+
+
+@dataclass
 class ImuTrace:
     t_ns: np.ndarray  # int64, t_source_ros_ns (host receipt), sorted
     seq: np.ndarray  # int64, the relay's sample sequence
@@ -125,6 +151,16 @@ class ExcitationCapture:
             num("orientation_x", "orientation_y", "orientation_z", "orientation_w")[order],
             num("angular_velocity_x_rad_s", "angular_velocity_y_rad_s", "angular_velocity_z_rad_s")[order],
             num("specific_force_x_m_s2", "specific_force_y_m_s2", "specific_force_z_m_s2")[order])
+
+    def commands(self) -> CommandTrace:
+        """``commands.csv``: the frames the robot API published, ``q_nominal_rad`` at ``t_frame_ros_ns``."""
+        frames: dict[int, dict[str, float]] = {}
+        with (self.root / "commands.csv").open(newline="") as f:
+            reader = csv.reader(f)
+            col = {name: i for i, name in enumerate(next(reader))}
+            for r in reader:
+                frames.setdefault(int(r[col["t_frame_ros_ns"]]), {})[r[col["joint_id"]]] = float(r[col["q_nominal_rad"]])
+        return CommandTrace.from_frames(list(frames.items()))
 
     def time_span_ns(self) -> tuple[int, int]:
         """Interval covered by every drive's PDO trace."""

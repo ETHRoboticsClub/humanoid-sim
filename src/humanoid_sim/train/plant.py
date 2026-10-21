@@ -115,6 +115,7 @@ class RobotPlant:
         specs = parse_specs(cfg.randomization)
         self._nominal_physics = self._read_physics()
         nominal = {name: v for name, v in self._nominal_physics.items()} | self._device_nominal()
+        self._ratio = nominal["joint_friction_ratio"]
         used = {s.param for s in specs}
         self.randomizer = Randomizer(specs, {k: v for k, v in nominal.items() if k in used},
                                      {"body": list(robot.body_names), "joint": self.joints, "drive": self.drives},
@@ -152,8 +153,12 @@ class RobotPlant:
         e, d = self.num_envs, len(self.drives)
         ones = torch.ones(e, d, device=self.device)
         zeros3 = torch.zeros(e, 3, device=self.device)
+        static = torch.tensor([self.desc.joints[n].friction for n in self.joints], device=self.device)
+        dynamic = torch.tensor([self.desc.joints[n].dynamic_friction for n in self.joints], device=self.device)
+        ratio = torch.where(static > 0, dynamic / static.clamp(min=1e-12), torch.ones_like(static))
         return {"drive_stiffness": ones, "drive_damping": ones.clone(), "torque_limit": ones.clone(),
                 "latency": torch.zeros_like(ones), "encoder_offset": torch.zeros_like(ones),
+                "joint_friction_ratio": ratio.expand(e, -1).clone(),
                 "imu_gyro_bias": zeros3, "imu_accel_bias": zeros3.clone(), "imu_misalignment": zeros3.clone()}
 
     def _shape_friction(self) -> torch.Tensor:
@@ -204,6 +209,12 @@ class RobotPlant:
                 target[env_ids] = v[name][env_ids].to(target.dtype)
         if "latency" in v:
             self.latency_ns[env_ids] = (v["latency"][env_ids] * NS_PER_S).round().to(torch.int64)
+        if "joint_friction_ratio" in v or "joint_friction" in v:
+            # The relief follows the static friction in the solver, randomized or not.
+            static = v.get("joint_friction", self._nominal_physics["joint_friction"])[env_ids]
+            ratio = v["joint_friction_ratio"][env_ids] if "joint_friction_ratio" in v else self._ratio[env_ids]
+            relief = self.core.friction_relief
+            relief[env_ids] = (static * (1 - ratio.clamp(0, 1))).to(relief.dtype)
         if self.imu is not None:
             for name, target in (("imu_gyro_bias", self.imu.gyro_bias), ("imu_accel_bias", self.imu.accel_bias),
                                  ("imu_misalignment", self.imu.misalignment)):
