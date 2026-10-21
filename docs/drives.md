@@ -141,7 +141,7 @@ A demand leaves the master at `sent_ns` and takes effect at the drive at `arriva
 
 Where the arrival time comes from depends on the front end:
 
-- Training: `RobotPlant.submit(demand, sent_ns)` (`src/humanoid_sim/train/plant.py`) sets `arrival_ns[e, d] = sent_ns[e] + latency_ns[e, d]`. `latency_ns` comes from the `latency` randomization parameter (seconds, per env and drive, redrawn for envs being reset) and is 0 when it is not randomized.
+- Training: `RobotPlant.submit(demand, sent_ns)` (`src/humanoid_sim/train/plant.py`) sets `arrival_ns[e, d] = sent_ns[e] + latency_ns[e, d] + drive_delay_ns[d]`. `latency_ns` is the latency before the drive (the controller's path), from the `latency` randomization parameter (seconds, per env and drive, redrawn for envs being reset), 0 when it is not randomized; `drive_delay_ns` is the drive's own delay from its [model](#drive-models), always applied.
 - Runtime: the host takes every record the client appended to the demand ring since the last physics step, oldest first, and queues each to arrive at drive `d` at its send time (`sent_mono_ns` mapped to plant time) plus that drive's `drive_delay_ns` ([Drive models](#drive-models); `RuntimeHost._take_demands` in `src/humanoid_sim/runtime/host.py`). Controls' fake bank sends each record when its bus delivers that cycle's outputs, so the lane's timing is the real master's up to the bus, then the drive's delay here.
 - Replay: recorded demands with an optional fixed delay; see [replay-and-sysid.md](replay-and-sysid.md).
 
@@ -216,7 +216,7 @@ The bank also carries how each drive deviates from what it is told. All are `[E,
 | `d_scale` | `drive_damping` | ratio | Realized D gain over the demanded one |
 | `torque_scale` | `torque_limit` | ratio | Scales the envelope and the torque cap |
 | `position_offset` | `encoder_offset` | rad | Drive's position reading minus the truth |
-| `RobotPlant.latency_ns` | `latency` | s, stored as ns | Time from sent to in force |
+| `RobotPlant.latency_ns` | `latency` | s, stored as ns | Time from sent to the controller staging it; the drive's own delay follows |
 
 In the runtime these stay at identity, except `torque_scale`, which the `power_sag` fault sets.
 

@@ -74,7 +74,7 @@ The training workload builds the scene a training environment uses ([training.md
 | Friction coefficient of every robot shape | Set between 0.3 and 1.0 |
 | Drive stiffness and damping | Scaled by 0.9 to 1.1 |
 | Torque limits | Scaled by 0.85 to 1.0 |
-| Latency from demand sent to demand in force | 10 to 20 ms, plus another 10 to 20 ms on a robot's ankle crank drives (the V1's four) |
+| Latency before the drives, from demand sent to the controller staging it | 10 to 20 ms, plus another 10 to 20 ms on a robot's ankle crank drives (the V1's four); each drive's own delay (5 ms on the V1) follows |
 | Encoder offsets | Between -0.026 and 0.026 rad on every drive, plus between -0.14 and 0.14 rad on the left ankle's crank drives (the V1's) |
 | IMU gyro bias | Standard deviation 0.0015 rad/s |
 

@@ -10,7 +10,7 @@ This page is for someone writing a task. The drive model itself is in [drives.md
 
 - The robot starts in the home pose (the default of `robot_scene_cfg`, see [The initial pose](#the-initial-pose)), and the demands are taken from the articulation's `data.default_joint_pos`.
 - The ground is a heightfield of random bumps up to 25 mm (`heightfield_terrain_cfg` with one `HfRandomUniformTerrainCfg` tile type) laid out as one row of 2.5 m tiles, one tile per robot, without a curriculum. The tile mix is the example's own; a task takes its terrain from its generator in humanoid-learning. Isaac Lab puts every env assigned to a tile at that tile's origin, so envs that share a tile spawn on the same spot. `--flat` uses the flat ground instead.
-- Robot friction (0.4 to 1.0), a payload of 0 to 4.5 kg on `base_link` and one drive latency per env (10 to 20 ms) are randomized. The terrain and the flat ground have friction 0 so the robot's value decides.
+- Robot friction (0.4 to 1.0), a payload of 0 to 4.5 kg on `base_link` and one latency before the drives per env (10 to 20 ms, which the drives' own delay follows) are randomized. The terrain and the flat ground have friction 0 so the robot's value decides.
 - A `ForcePush` pushes `base_link` with 40 to 120 N for 0.1 to 0.2 s, with 1.5 to 3 s between pushes. The loop steps it once per policy step.
 - With `--rrd`, a `SceneRecorder` records every robot to a Rerun file, and `plant.log` adds robot 0's left knee and base height to the same recording, every `--record-every` policy steps (default 2). See [Recording a scene](#recording-a-scene).
 
@@ -49,7 +49,7 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `seed` | `0` | Seed of the randomizer; the IMU model uses `seed + 1` and the encoder jitter `seed + 2` |
 | `feedback_history` | `16` | Physics steps of drive feedback kept in `Measured.history` |
 | `reporting` | `True` | Quantize the measured drive feedback the way the drives report it |
-| `queue_capacity` | `8` | Demands in flight per env; needs at least max latency / demand period + 1 |
+| `queue_capacity` | `8` | Demands in flight per env; needs at least (max latency + drive delay) / demand period + 1 |
 
 `PlantActionCfg` extends Isaac Lab's `ActionTermCfg`:
 
@@ -66,7 +66,7 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 
 Isaac Lab's `ManagerBasedRLEnv.step` calls each action term's `process_actions` once per env step and `apply_actions` before every physics step. `PlantAction` uses them like this:
 
-1. `process_actions(actions)` calls your `demands(actions)` and hands the result to `RobotPlant.submit`. Each drive queues the demand to take effect at `sent_ns` plus that drive's [latency](glossary.md#latency).
+1. `process_actions(actions)` calls your `demands(actions)` and hands the result to `RobotPlant.submit`. Each drive queues the demand to take effect at `sent_ns` plus its randomized `latency` plus its own delay ([latency](glossary.md#latency)).
 2. `apply_actions()` calls `RobotPlant.pre_physics()`. With the state at the start of the physics step it appends drive feedback to the history and steps the IMU delivery model; then it runs the drive bank over the step (every demand in force during the step, weighted by the time it covers), maps drive torque to joint torque through the ankle transmission, and writes the position target that makes the solver's constant PD produce that torque. `plant.t_ns` then advances by one physics period.
 3. When envs finish an episode, Isaac Lab runs the reset events, which write the new state, and then the action manager's reset, which calls `RobotPlant.reset(env_ids)`.
 
@@ -394,7 +394,7 @@ The full table is `PARAMS` in `src/humanoid_sim/randomization/spec.py`. E is the
 | `drive_stiffness` | device | `[E, 22]` | ratio | 1 | Realized P gain over the demanded one |
 | `drive_damping` | device | `[E, 22]` | ratio | 1 | Realized D gain over the demanded one |
 | `torque_limit` | device | `[E, 22]` | ratio | 1 | Scale on the torque-speed envelope and the torque cap |
-| `latency` | device | `[E, 22]` | s | 0 | Bus and drive latency from demand sent to demand in force |
+| `latency` | device | `[E, 22]` | s | 0 | Latency before the drive, from the demand sent to the controller staging it. The drive's own delay ([drive model](drives.md#drive-models) `drive_delay_ns`, 5 ms on the V1) always follows it |
 | `encoder_offset` | device | `[E, 22]` | rad | 0 | The drive's position reading minus the true position |
 | `imu_gyro_bias` | device | `[E, 3]` | rad/s | 0 | Gyro bias, sensor frame |
 | `imu_accel_bias` | device | `[E, 3]` | m/s² | 0 | Accelerometer bias, sensor frame |
