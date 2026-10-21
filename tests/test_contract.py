@@ -50,6 +50,9 @@ class Cap:
     def commands(self):
         return self.cmds
 
+    def applied_commands(self):
+        return None  # a bag: frame stamps only
+
     def gains(self):
         return {d: DriveGains(100.0, 5.0, 0, 0) for d in self._pdo}
 

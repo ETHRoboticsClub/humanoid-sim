@@ -106,13 +106,22 @@ def drive_targets(plant: PlantCore, commands: CommandTrace) -> tuple[np.ndarray,
     return qdrv.numpy(), commands.t_ns[first:]
 
 
+def fit_commands(capture):
+    """The command frames a command replay applies and what their stamps are: ``(frames, "applied")``, stamped when
+    the controller applied each, when the capture has those acknowledgements, so a delay after them is the drives'
+    own (``drive_delay_s``); else ``(frames, "frame")``, stamped when they left the loop host, so the delay also
+    holds the software path."""
+    applied = capture.applied_commands()
+    return (applied, "applied") if applied is not None else (capture.commands(), "frame")
+
+
 def command_demand_rms(capture, plant: PlantCore, shifts_ns: np.ndarray) -> dict:
     """How well the rebuilt targets explain the drives' own demands: per shift ``s`` and drive, the RMS of 0x6062
     minus the target sent ``s`` earlier (zero-order hold), and the mean at the best shift. Near zero at some shift
     when the rebuild matches the master, up to the drive's interpolation and any slew. A drive without 0x6062 is
     compared with its measured position instead, which adds its tracking error (``against``); a large mean there
     still shows a zero or sign that differs from the description's."""
-    targets, t_cmd = drive_targets(plant, capture.commands())
+    targets, t_cmd = drive_targets(plant, fit_commands(capture)[0])
     pdo = capture.pdo()
     drives = plant.map.drive_names
     rms = np.full((len(shifts_ns), len(drives)), np.nan)
@@ -149,7 +158,8 @@ class _Run:
 def _prepare(capture: ExcitationCapture, sim: SimCore, duration_s: float | None, base_motion: str | None,
              delays_ns: np.ndarray | None = None, source: str = "drive", latency_ns=None) -> _Run:
     """``delays_ns`` ``[E]``: env ``e`` applies the demand recorded at ``t`` at ``t + delay`` (negative: earlier).
-    ``source="command"``: the targets the master sent, taking effect ``latency_ns`` ``[E]`` after their stamp."""
+    ``source="command"``: the targets the master sent (:func:`fit_commands`), taking effect ``latency_ns`` ``[E]`` or
+    ``[E, D]`` (per drive) after their stamp."""
     if source not in ("drive", "command"):
         raise ValueError(f"replay source {source!r}: drive or command")
     plant = sim.plant
@@ -157,7 +167,7 @@ def _prepare(capture: ExcitationCapture, sim: SimCore, duration_s: float | None,
     pdo = capture.pdo()
     t_start, t_end = capture.time_span_ns()
     if source == "command":
-        targets, t_cmd = drive_targets(plant, capture.commands())
+        targets, t_cmd = drive_targets(plant, fit_commands(capture)[0])
         t_start = max(t_start, int(t_cmd[0]))  # from the first frame naming every joint
     if duration_s is not None:
         t_end = min(t_end, t_start + int(duration_s * NS_PER_S))
@@ -177,8 +187,8 @@ def _prepare(capture: ExcitationCapture, sim: SimCore, duration_s: float | None,
             raise ValueError("source='command' takes latency_ns, not delays_ns")
         lat = torch.zeros(plant.num_envs, dtype=torch.int64, device=plant.cfg.device) if latency_ns is None else \
             torch.as_tensor(np.asarray(latency_ns), dtype=torch.int64, device=plant.cfg.device)
-        if lat.shape != (plant.num_envs,) or bool((lat < 0).any()):
-            raise ValueError(f"latency_ns: {plant.num_envs} delays >= 0 expected")
+        if lat.shape not in ((plant.num_envs,), (plant.num_envs, len(drives))) or bool((lat < 0).any()):
+            raise ValueError(f"latency_ns: [{plant.num_envs}] or [{plant.num_envs}, {len(drives)}] delays >= 0 expected")
         return _Run(t_grid, t_meas, targets, real, base, t_cmd - t_grid[0], lat)
     if delays_ns is None:
         demand = series("position_demand_rad", t_grid)

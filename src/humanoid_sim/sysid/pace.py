@@ -7,8 +7,12 @@ The parameters, in PACE's order with ``separate_dynamic_friction``:
 * ``friction`` [J], N m: static Coulomb friction (the solver's);
 * ``bias`` [D], rad: encoder bias, PACE's sign: the drive reads its truth minus the bias (``position_offset =
   -bias``). Per drive, so the ankles' entries are their cranks';
-* ``delay``, one for every drive: from a command leaving the master to the drive acting on it (the plant's
-  ``latency``), in ns here and in physics steps in PACE's files (``delay_mode="command"``);
+* ``delay`` [G], ns: one per delay group, a drive family (:attr:`PaceSpace.delay_groups`; one group for every
+  drive by default): from a command's stamp to the drive acting on it. A capture with the controller's APPLIED
+  acknowledgements is replayed from those (:func:`humanoid_sim.replay.replay.fit_commands`), so the delay is the
+  family's ``drive_delay_s``; otherwise from the frame stamps, so it includes the software path. Applied through the
+  drive queue at its exact time, never in whole steps; PACE's files take one delay in physics steps
+  (``delay_mode="command"``), the drive-weighted mean;
 * ``friction_ratio`` [J]: dynamic over static friction, in [0, 1] (:attr:`~humanoid_sim.core.PlantCore.friction_relief`).
 
 A candidate is a point of ``[-1, 1]^dim``: ``start · bound^x`` for armature, damping and friction (start values
@@ -44,6 +48,7 @@ class PaceSpace:
     ratio_bounds: tuple[float, float] = (0.0, 1.0)
     separate_dynamic_friction: bool = True  # PACE's flag: without it the ratio is 1 and not a parameter
     fixed: dict[str, np.ndarray] = field(default_factory=dict)  # parameter -> [n] bool: held at its start
+    delay_groups: list[str] | None = None  # per drive, the group sharing its delay (a family); None: one group
 
     def __post_init__(self):
         j = len(self.joints)
@@ -59,14 +64,28 @@ class PaceSpace:
             raise ValueError(f"friction ratio bounds {self.ratio_bounds}: need 0 <= low <= high <= 1")
         if self.delay_bounds_ns[0] > self.delay_bounds_ns[1]:
             raise ValueError(f"delay bounds {self.delay_bounds_ns}")
+        if self.delay_groups is not None and len(self.delay_groups) != len(self.drives):
+            raise ValueError(f"delay_groups: one per drive ({len(self.drives)}) expected")
         for name, mask in self.fixed.items():
             if name not in self.sizes or np.asarray(mask).shape != (self.sizes[name],):
                 raise ValueError(f"fixed {name!r}: a mask over one of {sorted(self.sizes)}")
 
     @property
+    def groups(self) -> list[str]:
+        """The delay groups, in order of their first drive."""
+        return list(dict.fromkeys(self.delay_groups)) if self.delay_groups is not None else ["all"]
+
+    @property
+    def group_of_drive(self) -> np.ndarray:
+        """Each drive's delay group index ``[D]``."""
+        if self.delay_groups is None:
+            return np.zeros(len(self.drives), dtype=np.int64)
+        return np.array([self.groups.index(g) for g in self.delay_groups], dtype=np.int64)
+
+    @property
     def sizes(self) -> dict[str, int]:
         j, d = len(self.joints), len(self.drives)
-        out = {"armature": j, "damping": j, "friction": j, "bias": d, "delay": 1}
+        out = {"armature": j, "damping": j, "friction": j, "bias": d, "delay": len(self.groups)}
         return out | ({"friction_ratio": j} if self.separate_dynamic_friction else {})
 
     @property
@@ -82,7 +101,7 @@ class PaceSpace:
 
     @property
     def names(self) -> list[str]:
-        labels = {"bias": self.drives, "delay": ["all"]}
+        labels = {"bias": self.drives, "delay": self.groups}
         return [f"{p}.{n}" for p in self.sizes for n in labels.get(p, self.joints)]
 
     def x0(self) -> np.ndarray:
@@ -97,7 +116,8 @@ class PaceSpace:
         return ((x - np.clip(x, -1.0, 1.0)) ** 2).sum(axis=-1)
 
     def decode(self, x: np.ndarray) -> dict[str, np.ndarray]:
-        """Values of candidates ``x`` ``[E, dim]``: ``[E, n]`` per parameter, ``delay`` ``[E]`` (int ns)."""
+        """Values of candidates ``x`` ``[E, dim]``: ``[E, n]`` per parameter, ``delay`` ``[E, G]`` (int ns per group);
+        :meth:`drive_delays` spreads it over the drives."""
         x = np.clip(np.array(x, dtype=np.float64, ndmin=2), -1.0, 1.0)
         s, x0 = self.slices(), self.x0()
         for name, mask in self.fixed.items():
@@ -106,7 +126,7 @@ class PaceSpace:
         out = {p: np.asarray(self.start[p])[None] * np.exp(x[:, s[p]] * self.log_bound) for p in LOG_PARAMS}
         out["bias"] = x[:, s["bias"]] * self.bias_bound_rad
         lo, hi = self.delay_bounds_ns
-        out["delay"] = np.round(lo + (x[:, s["delay"]][:, 0] + 1) / 2 * (hi - lo)).astype(np.int64)
+        out["delay"] = np.round(lo + (x[:, s["delay"]] + 1) / 2 * (hi - lo)).astype(np.int64)
         if self.separate_dynamic_friction:
             lo, hi = self.ratio_bounds
             out["friction_ratio"] = lo + (x[:, s["friction_ratio"]] + 1) / 2 * (hi - lo)
@@ -114,8 +134,19 @@ class PaceSpace:
             out["friction_ratio"] = np.ones((len(x), len(self.joints)))
         return out
 
+    def drive_delays(self, values: dict[str, np.ndarray]) -> np.ndarray:
+        """Each drive's delay ``[E, D]`` (int ns) from decoded ``values``."""
+        return np.asarray(values["delay"]).reshape(-1, len(self.groups))[:, self.group_of_drive]
+
+    @property
+    def pace_names(self) -> list[str]:
+        """PACE's parameter names: ours with one delay."""
+        s = self.slices()["delay"]
+        names = self.names
+        return names[:s.start] + ["delay.all"] + names[s.stop:]
+
     def bounds(self, period_ns: int) -> np.ndarray:
-        """PACE's ``bounds_params`` ``[dim, 2]``: absolute values, the delay in physics steps of ``period_ns``."""
+        """PACE's ``bounds_params``: absolute values, its one delay in physics steps of ``period_ns``."""
         rows = []
         for p in LOG_PARAMS:
             start = np.asarray(self.start[p])
@@ -127,11 +158,12 @@ class PaceSpace:
         return np.asarray(rows, dtype=np.float64)
 
     def pace_params(self, values: dict[str, np.ndarray], period_ns: int) -> np.ndarray:
-        """One candidate's values (``decode(x)`` row) as PACE's parameter vector, the delay in whole physics steps
-        (PACE's delay buffer takes whole steps; the exact delay is in ``fit-pace.json``)."""
+        """One candidate's values (``decode(x)`` row) as PACE's parameter vector, its one delay the drives' mean in
+        whole physics steps (PACE's delay buffer takes whole steps; the exact delays are in ``fit-pace.json``)."""
         ratio = [values["friction_ratio"]] if self.separate_dynamic_friction else []
+        delay = float(self.drive_delays(values).mean())
         return np.concatenate([values["armature"], values["damping"], values["friction"], values["bias"],
-                               [round(int(values["delay"]) / period_ns)], *ratio])
+                               [round(delay / period_ns)], *ratio])
 
 
 def write(sim, space: PaceSpace, values: dict[str, np.ndarray]) -> None:
@@ -172,7 +204,7 @@ def evaluate(sim, captures, space: PaceSpace, x: np.ndarray, scored: list[int], 
     values = space.decode(x)
     write(sim, space, values)
     per = np.stack([replay_position_rms(c, sim, base_motion=base_motion, duration_s=duration_s, source="command",
-                                        latency_ns=values["delay"]).cpu().numpy() for c in captures])
+                                        latency_ns=space.drive_delays(values)).cpu().numpy() for c in captures])
     return per[:, :, scored].mean(axis=(0, 2)), per
 
 
@@ -182,8 +214,8 @@ SEARCHES = ("blocks", "joint")
 def blocks(space: PaceSpace, plant, scored: list[int]) -> list[tuple[np.ndarray, list[int]]]:
     """The search's blocks: ``(entries of x, drives scoring them)``. A 1:1 drive's block is its joint's armature,
     damping, friction and ratio and its own bias, scored on that drive; an ankle's, both hinges' and both cranks',
-    scored on the two cranks; the delay's, scored on every scored drive. Fixed entries and blocks without a scored
-    drive are left out."""
+    scored on the two cranks; each delay group's, scored on the group's scored drives. Fixed entries and blocks
+    without a scored drive are left out."""
     s = space.slices()
     per_joint = [p for p in (*JOINT_PARAMS, "friction_ratio") if p in s]
     fixed = np.zeros(space.dim, dtype=bool)
@@ -202,7 +234,11 @@ def blocks(space: PaceSpace, plant, scored: list[int]) -> list[tuple[np.ndarray,
         idx = entries(js, ds)
         if ds and idx.size:
             out.append((idx, ds))
-    out.append((np.array([s["delay"].start], dtype=np.int64), list(scored)))
+    group = space.group_of_drive
+    for g in range(len(space.groups)):
+        ds = [d for d in scored if group[d] == g]
+        if ds:
+            out.append((np.array([s["delay"].start + g], dtype=np.int64), ds))
     return out
 
 
@@ -317,8 +353,9 @@ def save(out, space: PaceSpace, best: dict[str, np.ndarray], plant, period_ns: i
                                  | {"dynamic_friction": float(best["friction"][i] * best["friction_ratio"][i])}
                                  for i, j in enumerate(space.joints)},
                       "drives": {d: {"bias_rad": float(best["bias"][i])} for i, d in enumerate(space.drives)},
-                      "delay_ns": int(best["delay"])},
-           "pace_params": params.tolist(), "pace_names": space.names, "bounds": space.bounds(period_ns).tolist(),
+                      "delay_ns": {g: int(v) for g, v in zip(space.groups, np.ravel(best["delay"]), strict=True)}},
+           "pace_params": params.tolist(), "pace_names": space.pace_names, "names": space.names,
+           "bounds": space.bounds(period_ns).tolist(),
            **meta}
     import json
 
@@ -330,9 +367,9 @@ def _pace_data(capture, plant, period_ns: int):
     the first command frame (s), the targets in force (zero-order hold of the frames) and the drives' readings
     ``[T, D]``, drive order."""
     from humanoid_sim.replay.exc import sample_hold, sample_linear
-    from humanoid_sim.replay.replay import drive_targets
+    from humanoid_sim.replay.replay import drive_targets, fit_commands
 
-    targets, t_cmd = drive_targets(plant, capture.commands())
+    targets, t_cmd = drive_targets(plant, fit_commands(capture)[0])
     pdo = capture.pdo()
     t_end = min(int(t_cmd[-1]), capture.time_span_ns()[1])
     t = np.arange(int(t_cmd[0]), t_end + 1, period_ns, dtype=np.int64)
@@ -353,6 +390,10 @@ class SyntheticCapture:
     _gains: dict
 
     def commands(self):
+        return self._commands
+
+    def applied_commands(self):
+        """The run applied every frame at its stamp: no software path before the drives."""
         return self._commands
 
     def pdo(self):
@@ -405,7 +446,8 @@ def synthetic_capture(sim, space: PaceSpace, values: dict[str, np.ndarray], comm
     sim.write_joint_state(q0, torch.zeros_like(q0))
     plant.reset(torch.arange(e, device=dev), DriveDemand.pd(tg[0].expand(e, -1), kp, kd))
     sim.t_ns = 0
-    latency = torch.as_tensor(values["delay"], dtype=torch.int64, device=dev)
+    delays = space.drive_delays(values)  # [E, D]
+    latency = torch.as_tensor(delays, dtype=torch.int64, device=dev)
     period, nxt = sim.period_ns, 1
     offset = plant.bank.position_offset[0]
     # The first sample is the start state at rest, so a replay starts exactly where this run did.
@@ -421,8 +463,9 @@ def synthetic_capture(sim, space: PaceSpace, values: dict[str, np.ndarray], comm
         rows["native_position_rad"].append(fb.position_rad[0] + offset)
         rows["velocity_rad_s"].append(fb.velocity_rad_s[0].clone())
         rows["torque_nm"].append(fb.applied_torque_nm[0].clone())
-        arrived = int(np.searchsorted(rel + int(values["delay"][0]), sim.t_ns, side="right")) - 1
-        demand.append(targets[max(arrived, 0)])
+        arrived = [max(int(np.searchsorted(rel + int(delays[0, i]), sim.t_ns, side="right")) - 1, 0)
+                   for i in range(targets.shape[1])]
+        demand.append(targets[arrived, np.arange(targets.shape[1])])
     t = np.asarray(stamps, dtype=np.int64)
     arrays = {k: torch.stack(v).double().cpu().numpy() for k, v in rows.items()}
     arrays["position_demand_rad"] = np.asarray(demand, dtype=np.float64)

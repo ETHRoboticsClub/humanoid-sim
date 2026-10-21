@@ -41,7 +41,7 @@ def check_capture(capture, plant, *, bias_bound_rad: float, delay_bounds_ns: tup
                   scored: list[str] | None = None, need_imu: bool = True) -> CaptureCheck:
     """``capture``: an ``ExcitationCapture`` or ``BagCapture``; ``plant``: anything with ``desc`` and ``map``
     (a ``PlantCore``). ``scored``: the drives the fit scores (default all); the others need only stream."""
-    from humanoid_sim.replay.replay import command_demand_rms, drive_targets
+    from humanoid_sim.replay.replay import command_demand_rms, drive_targets, fit_commands
 
     c = CaptureCheck(getattr(capture, "name", str(capture)))
     drives = list(plant.map.drive_names)
@@ -81,12 +81,13 @@ def check_capture(capture, plant, *, bias_bound_rad: float, delay_bounds_ns: tup
             c.errors.append(f"{what}: {e}")
 
     try:
-        _, t_cmd = drive_targets(plant, capture.commands())
+        frames, reference = fit_commands(capture)
+        _, t_cmd = drive_targets(plant, frames)
     except ValueError as e:
         c.errors.append(f"commands: {e}")
         return c
     overlap = min(t1, int(t_cmd[-1])) - max(t0, int(t_cmd[0]))
-    c.info["commands"] = (f"{len(t_cmd)} frames over {(t_cmd[-1] - t_cmd[0]) / 1e9:.1f} s, "
+    c.info["commands"] = (f"{len(t_cmd)} frames ({'stamped when the controller applied them' if reference == 'applied' else 'at their frame stamps: no controller acknowledgements'}) over {(t_cmd[-1] - t_cmd[0]) / 1e9:.1f} s, "
                           f"{max(overlap, 0) / 1e9:.1f} s of it with feedback")
     if overlap < MIN_OVERLAP_NS:
         c.errors.append(f"the command frames and the feedback overlap for {max(overlap, 0) / 1e9:.1f} s (at least "

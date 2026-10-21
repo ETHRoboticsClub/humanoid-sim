@@ -162,6 +162,32 @@ class ExcitationCapture:
                 frames.setdefault(int(r[col["t_frame_ros_ns"]]), {})[r[col["joint_id"]]] = float(r[col["q_nominal_rad"]])
         return CommandTrace.from_frames(list(frames.items()))
 
+    def applied_commands(self) -> CommandTrace | None:
+        """The command frames stamped when the controller applied them (``acks.csv``: receiver ``controller``,
+        state ``applied``, ``t_ack_ros_ns``), so a replay of them leaves out the software path before the
+        controller. Frames the controller never applied are left out. None without such acknowledgements."""
+        path = self.root / "acks.csv"
+        if not path.is_file():
+            return None
+        applied: dict[int, int] = {}
+        with path.open(newline="") as f:
+            reader = csv.reader(f)
+            col = {name: i for i, name in enumerate(next(reader))}
+            for r in reader:
+                if r[col["receiver_id"]] == "controller" and r[col["state"]] == "applied":
+                    applied[int(r[col["seq"]])] = int(r[col["t_ack_ros_ns"]])
+        if not applied:
+            return None
+        frames: dict[int, dict[str, float]] = {}
+        with (self.root / "commands.csv").open(newline="") as f:
+            reader = csv.reader(f)
+            col = {name: i for i, name in enumerate(next(reader))}
+            for r in reader:
+                seq = int(r[col["seq"]])
+                if seq in applied:
+                    frames.setdefault(applied[seq], {})[r[col["joint_id"]]] = float(r[col["q_nominal_rad"]])
+        return CommandTrace.from_frames(list(frames.items()))
+
     def time_span_ns(self) -> tuple[int, int]:
         """Interval covered by every drive's PDO trace."""
         traces = self.pdo().values()
