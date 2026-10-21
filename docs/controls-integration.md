@@ -219,6 +219,39 @@ ETHRC_TEST_HUMANOID_SIM_SEGMENT=/tmp/plant python -m pytest /controls/ros2_ws/sr
 
 It steps the left knee 0.2 rad with every motor at its deploy gains and checks that the knee gets there, that every motor applies `kp (target - q)` at rest, that the IMU reads a still, upright pelvis, and that limp motors apply no torque. It passes on Warp's CPU device.
 
+### Running the G1 scenarios
+
+`scripts/sim/humanoid_sim_scenarios.py` in Controls runs Controls' G1 scenarios on humanoid-sim. Each scenario's session asks for a support and a world; the script starts one `serve --persist --truth-every 1` per support and world, with the world from `humanoid_sim_world.py`, runs each scenario in Controls' simulation-tests image (`scripts/ci/test-ros.sh --e2e --only`) with `ETHRC_TEST_PLANT=humanoid-sim`, samples the plant host's status while it runs, and prints one JSON line per scenario: pass or fail, the plant's real-time factor over the session, the sim's late steps, the board's command-loss timeouts and the host's longest command gap. `--plant mujoco` runs the same scenarios on MuJoCo for a side-by-side, and `sim_plant_live` runs `test_sim_plant_live.py` against the same sim. On a GPU node with humanoid-sim installed:
+
+```bash
+scripts/sim/humanoid_sim_scenarios.py --controls-image ethrc-controls:simulation-tests \
+  --sim-command humanoid-sim --sim-repo ../humanoid-sim --sim-cpus 0,4 --controls-cpus 1-3,5-7 \
+  --env G1_WALK_BUNDLE=/bundle --volume "$PWD/../g1_walk_bundle:/bundle" \
+  --volume "$PWD/ros2_ws/policy_checkpoints:/opt/ethrc/repository/ros2_ws/policy_checkpoints" \
+  sim_plant_live g1_policy g1_walk g1_sonic_teleop g1_sonic_navigation
+```
+
+`g1_walk` needs a walking bundle in `G1_WALK_BUNDLE`, and the SONIC scenarios need `gear-sonic-v1.1` in the policy library (Controls' `scripts/policy/install_sonic.py`). `g1_explore` runs in the room, which has no boxes file, so it cannot run here yet.
+
+### Real time
+
+The G1 lane is wall-clocked: the board's command loss, the body host and the policies run on the wall clock, and the scenarios fail a phase in which the plant falls behind it by more than 5 % (`keeping_up` in Controls' `g1_walk_scenario.py`). Three things decide whether the sim keeps up beside Controls' stack on one machine:
+
+- **The step's own cost.** On an L40S node one step of the free G1 takes 1.6 ms with the truth published every step (1.15 ms every fifth): the physics 0.9 ms, the feedback 0.19 ms, the truth 0.61 ms. A rope adds its own per-step work; the runtime publishes feedback and truth in one transfer and batches the soles, and the rope pushes only the points it uses.
+- **The CPU.** The step is a chain of kernel launches and two waits on the GPU, so a CPU thread that the stack preempts starts it late. Controls' stack (SONIC, Nav2, the API) loads 6 to 8 CPUs during a scenario. The scenario script runs the stack 10 nice levels below the sim, and the compose simulation runs the sim 10 levels up (`CAP_SYS_NICE`). On a node with 8 vCPUs, give the sim one physical core of its own (`--sim-cpus 0,4 --controls-cpus 1-3,5-7`; `lscpu -e` shows which CPUs share a core).
+- **The GPU.** Another job on the same GPU delays each step's kernels.
+
+Measured on 2026-10-20 (the plant's real-time factor over each scenario's session):
+
+| Host | Scenarios | Real-time factor | Late steps |
+|---|---|---|---|
+| L40S node, 8 vCPUs, sim on its own core | g1_policy (suspended) | 0.998 | 2 in 33 s |
+| | g1_walk (free, gantry, walking) | 0.997 | 24 in 51 s |
+| | g1_sonic_navigation (free, hangar) | 0.992 | 86 in 53 s |
+| GB10 Spark, 20 cores, sim alone behind a 2 ms client | free, holding still | 1.000 (0.995 with 18 busy processes) | 0 in 30 s (32 with 18 busy) |
+| Apple silicon Mac, Warp's CPU device, sim alone | free, holding still | 0.91 | 563 in 30 s |
+| L4 node, 8 vCPUs, before the batched truth | free scenarios | 0.90 | about 20 per second |
+
 ## Shared volume, clock and permissions
 
 The segment is a file that both processes map. Both must run on the same machine, because the protocol compares `CLOCK_MONOTONIC` values across them: the sim's client timeout, the plant host's heartbeat check and the IMU stamp mapping. Containers on one host share that clock. The file lives on a Docker named volume mounted into both containers (as `humanoid_sim_lane.py --sim-image` does) or in a host directory bind-mounted into the Controls container (`--sim-dir`).
