@@ -16,8 +16,8 @@ in one of two poses (``pose``):
 
 * ``"home"`` (default): the description's home pose (:attr:`~humanoid_sim.model.description.Description.home_pose`),
   the pose the CAD is exported in: legs straight, both soles level and at the same height.
-* ``"standing"``: the description's standing pose, the one captured on the robot. Under an upright base its soles
-  are not level (pitched by 10° and 17°), so a robot holding it rigidly tips over within about a second.
+* ``"standing"``: the description's standing pose, every joint at its standing offset (the V1's are 0, which makes
+  it the home pose).
 
 The articulation's ``data.default_joint_pos`` holds the chosen pose, for a task's action offsets.
 

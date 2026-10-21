@@ -2,7 +2,6 @@
 
 import pytest
 import torch
-from conftest import v1_unconverted
 
 from humanoid_sim.core import PlantCfg, PlantCore
 from humanoid_sim.devices.demand import DriveDemand
@@ -91,7 +90,7 @@ def test_the_mirror_map_pairs_left_with_right(robot):
             assert partner != name
 
 
-@pytest.mark.parametrize("robot", v1_unconverted(ROBOTS))
+@pytest.mark.parametrize("robot", ROBOTS)
 def test_the_home_pose_lies_inside_the_travel(robot):
     desc = Description.load(robot)
     home = home_pose(desc, load_profile(robot))

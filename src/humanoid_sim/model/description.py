@@ -336,11 +336,15 @@ class Description:
     def ankle_kinematic_sign(self, side: str) -> list[int]:
         return [int(s) for s in self.table["ankle_model"]["semantic_to_kinematic_sign"][side]]
 
+    def ankle_neutral(self, side: str) -> list[float]:
+        """Joint angles (pitch, roll) of the linkage neutral, where both cranks read zero."""
+        return [float(v) for v in self.table["ankle_model"]["semantic_neutral_rad"][side]]
+
     def ankle_transmission(self, side: str, *, device="cpu", dtype=None) -> AnkleTransmission:
         import torch
 
-        return AnkleTransmission(self.ankle_geometry(side), self.ankle_kinematic_sign(side), device=device,
-                                 dtype=dtype or torch.float32)
+        return AnkleTransmission(self.ankle_geometry(side), self.ankle_kinematic_sign(side), self.ankle_neutral(side),
+                                 device=device, dtype=dtype or torch.float32)
 
     def ankle_cranks(self, side: str) -> tuple[str, str]:
         """(upper, lower) crank drive names of one side."""

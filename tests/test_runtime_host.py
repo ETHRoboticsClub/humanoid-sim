@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import PARTS, PHYSICS_ROBOTS, built_usd, gravity_torque, urdf_mass_kg, v1_unconverted
+from conftest import PARTS, PHYSICS_ROBOTS, built_usd, gravity_torque, urdf_mass_kg
 
 from humanoid_sim.model.asset import asset_dir, load_profile
 from humanoid_sim.model.description import Description
@@ -138,7 +138,7 @@ def test_serve_round_trip(tmp_path, robot):
             proc.kill()
 
 
-@pytest.mark.parametrize("robot", v1_unconverted(PHYSICS_ROBOTS))
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
 def test_prescribed_pose_with_floor_clearance_and_sole_truth(tmp_path, robot):
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.runtime.host import RuntimeHost

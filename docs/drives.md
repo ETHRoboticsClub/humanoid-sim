@@ -40,14 +40,14 @@ The physical [drive-output frame](glossary.md#drive-frame) is what a drive measu
 | 1:1 | `q_drive = sign · q_URDF` | `sign · q̇` | `τ_joint = sign · τ_drive` |
 | Ankle crank | crank angle relative to the linkage neutral | `J q̇` | `τ_hinges = Jᵀ τ_cranks` |
 
-`sign` is the joint's `sign` (±1) in actuators.yaml. Positions are in rad, velocities in rad/s, torques in Nm at the drive output. The crank's zero (linkage neutral) is the drive's calibration zero and corresponds to both ankle hinges at URDF zero. Some readings at the [home pose](glossary.md#home-pose):
+`sign` is the joint's `sign` (±1) in actuators.yaml. Positions are in rad, velocities in rad/s, torques in Nm at the drive output. The crank's zero (linkage neutral) is the drive's calibration zero; the ankle hinges are then at `ankle_model.semantic_neutral_rad` (pitch -0.329 rad, roll 0), not at URDF zero. Some readings at the [home pose](glossary.md#home-pose), which is URDF zero:
 
 | Drive | Joint(s) | sign | URDF angle at home (rad) | Drive reading (rad) |
 |---|---|---|---|---|
-| `maxonHEJ90L4` | knee_l | -1 | -1.9002 | 1.9002 |
-| `maxonHEJ90R4` | knee_r | +1 | -1.9002 | -1.9002 |
-| `maxonHEJ50L_ANK1` | foot_pitch_l, foot_roll_l | crank | 0.3294, 0.0 | -0.3317 |
-| `maxonHEJ50L_ANK2` | foot_pitch_l, foot_roll_l | crank | 0.3294, 0.0 | 0.3310 |
+| `maxonHEJ90L4` | knee_l | -1 | 0.0 | 0.0 |
+| `maxonHEJ90R4` | knee_r | +1 | 0.0 | 0.0 |
+| `maxonHEJ50L_ANK1` | foot_pitch_l, foot_roll_l | crank | 0.0, 0.0 | -0.3317 |
+| `maxonHEJ50L_ANK2` | foot_pitch_l, foot_roll_l | crank | 0.0, 0.0 | 0.3310 |
 
 To compute them (CPU, no physics backend needed):
 

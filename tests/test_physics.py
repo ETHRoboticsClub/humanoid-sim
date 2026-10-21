@@ -8,7 +8,6 @@ from conftest import (
     GRAVITY,
     PARTS,
     PHYSICS_ROBOTS,
-    V1_LIMITS_UNCONVERTED,
     built_usd,
     gravity_torque,
     imu_samples_per_s,
@@ -74,23 +73,6 @@ def test_home_pose_levels_both_soles_at_one_height(robot):
         assert lo <= float(q[c]) <= hi, name
 
 
-def test_the_v1_standing_pose_pitches_its_soles():
-    """The V1's standing pose, captured on the robot, does not stand its soles level under an upright base."""
-    pytest.importorskip("newton")
-    pytest.importorskip("pxr")
-    from humanoid_sim.model.asset import asset_meta
-    from humanoid_sim.model.kinematics import RobotKinematics
-
-    usd = built_usd("ethrc_v1")
-    desc = Description.load("ethrc_v1")
-    joints = list(desc.joints)
-    kin = RobotKinematics(usd, joints, base_height_m=0.0)
-    labels = [lbl.rsplit("/", 1)[-1] for lbl in kin.model.body_label]
-    standing = torch.tensor([desc.joints[n].standing_offset_rad for n in joints], dtype=torch.float64)
-    soles = _soles_at(kin, asset_meta(usd)["sole_boxes"], labels, standing)
-    assert max(n for n, _ in soles) < np.cos(np.radians(5))  # pitched toes-down
-
-
 @pytest.mark.physics
 @pytest.mark.parametrize("solver", ["mjwarp", "kamino"])
 @pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
@@ -134,7 +116,6 @@ def test_holds_its_pose_on_a_fixed_base_against_gravity(request, robot, solver):
 
 
 @pytest.mark.physics
-@V1_LIMITS_UNCONVERTED
 def test_base_joints_follow_prescribed_yaw(request):
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.devices.demand import DriveDemand

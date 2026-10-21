@@ -184,7 +184,7 @@ The joint angle of each joint in the robot's standing pose, measured from the [c
 
 ### Standing pose
 
-All joints at their standing offsets: the pose the real robot was captured standing in. Since humanoid-urdf c0ec54e every offset is 0, so it is the calibration pose until the URDF is re-exported at standing. It is the reference for Controls' standing-relative angles, the ankle gains and the left/right mirror map. Under an upright base its soles are pitched by about 10° and 17°, so the sim spawns in the [home pose](#home-pose) unless asked for this one.
+All joints at their standing offsets. The V1's offsets are 0, so its standing pose is the calibration pose, which is also its [home pose](#home-pose); the pose captured standing on the robot is recorded under `standing_reference` in actuators.yaml. It is the reference for Controls' standing-relative angles, the ankle gains and the left/right mirror map.
 
 ### Support
 

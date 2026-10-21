@@ -8,10 +8,11 @@ drives move the foot through rods. This module maps between the hinge state and 
 * ``jacobian(q)``: ``dθ/dq`` from the rod constraints (as in ``ankle_kinematics.joint_to_motor_jacobian``);
 * crank torque → hinge torque is ``Jᵀ τ``; hinge velocity → crank velocity is ``J q̇``.
 
-Geometry, axes and frame signs come from the description (``actuators.yaml`` ``ankle_model``); nothing
-is typed in here. ``q`` is in URDF (calibration) joint coordinates; the description's
-``semantic_to_kinematic_sign`` maps it to the linkage frame. Crank angles are relative to the
-linkage neutral, which is the drive's calibration zero.
+Geometry, axes, frame signs and the linkage neutral come from the description (``actuators.yaml``
+``ankle_model``); nothing is typed in here. ``q`` is in URDF (calibration) joint coordinates. The linkage
+neutral, where both cranks read zero (the drives' calibration zero), sits at ``semantic_neutral_rad``; the
+linkage is solved on the offset from it, which ``semantic_to_kinematic_sign`` maps to the linkage frame.
+Crank angles are relative to the linkage neutral.
 
 It is golden-tested against ``ankle_kinematics`` (numpy reference) and humanoid-urdf ``ankle_model``.
 """
@@ -73,7 +74,7 @@ def mirror_right(right: dict) -> dict:
 class AnkleTransmission:
     """One ankle side, batched over leading dims. ``q``: ``[..., 2]`` (pitch, roll), URDF coordinates."""
 
-    def __init__(self, geometry: dict, kinematic_sign, *, device="cpu", dtype=torch.float32):
+    def __init__(self, geometry: dict, kinematic_sign, neutral=(0.0, 0.0), *, device="cpu", dtype=torch.float32):
         for name, axis in (("pitch_axis", [0, 1, 0]), ("roll_axis", [1, 0, 0])):
             if not np.allclose(geometry[name], axis):
                 raise ValueError(f"ankle transmission requires {name}={axis}")
@@ -81,6 +82,10 @@ class AnkleTransmission:
         sign = np.asarray(kinematic_sign, dtype=np.float64)
         if sign.shape != (2,) or not np.isin(sign, (-1, 1)).all():
             raise ValueError("invalid semantic_to_kinematic_sign")
+        neutral = np.asarray(neutral, dtype=np.float64)
+        if neutral.shape != (2,) or not np.isfinite(neutral).all():
+            raise ValueError("invalid semantic_neutral_rad")
+        self._neutral_np = neutral
         self.to(device, dtype, sign=sign)
 
     def to(self, device, dtype, *, sign=None):
@@ -92,6 +97,7 @@ class AnkleTransmission:
 
         self.device, self.dtype = torch.device(device), dtype
         self.sign = t(sign)
+        self.neutral = t(self._neutral_np)  # [2] joint angles of the linkage neutral
         g = self.cranks_geom
         self._p0 = t(np.stack([c.p_anchor0 for c in g]))  # [2, 3]
         self._c = t(np.stack([c.center for c in g]))
@@ -123,14 +129,14 @@ class AnkleTransmission:
 
     def cranks(self, q: torch.Tensor, *, return_reach: bool = False):
         """Crank angles relative to neutral, ``[..., 2]`` (upper, lower). ``reach`` = |K/R| (≥1: unreachable)."""
-        p_f, _, _, _ = self._foot(q * self.sign)
+        p_f, _, _, _ = self._foot((q - self.neutral) * self.sign)
         theta, reach = self._theta_abs(p_f)
         rel = torch.remainder(theta - self._theta0 + torch.pi, 2 * torch.pi) - torch.pi
         return (rel, reach) if return_reach else rel
 
     def jacobian(self, q: torch.Tensor) -> torch.Tensor:
         """``dθ/dq`` ``[..., 2 (crank), 2 (pitch, roll)]`` in URDF joint coordinates."""
-        p_f, p_r, cp, sp = self._foot(q * self.sign)
+        p_f, p_r, cp, sp = self._foot((q - self.neutral) * self.sign)
         theta, _ = self._theta_abs(p_f)
         c, s = torch.cos(theta).unsqueeze(-1), torch.sin(theta).unsqueeze(-1)
         tip = self._c + self._r.unsqueeze(-1) * (c * self._u + s * self._v)
@@ -153,7 +159,7 @@ class AnkleTransmission:
         """Hinge angles whose cranks are ``theta`` (Newton on ``cranks(q) = θ`` from ``q0``; fixed iterations).
 
         Used for initial states and replay, never in the step loop. Starts must be on the same assembly
-        branch (near the standing pose); the residual is the caller's to check.
+        branch (near the linkage neutral or the standing pose); the residual is the caller's to check.
         """
         q = q0.expand_as(theta).clone()
         for _ in range(iterations):

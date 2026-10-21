@@ -73,12 +73,12 @@ Every session starts in the same named pose: the one `--pose` names, else the pr
 
 | Robot | `poses.start` | Why |
 |---|---|---|
-| ETHRC V1 | `standing` | Controls arms a drive only while its position lies inside its window (the joint's `position_limit`, the crank's device-frame limit), and the [home pose](glossary.md#home-pose)'s straight knees lie 0.13 rad past the knees' upper bound, so Controls would refuse to arm a V1 that starts at home. The [standing pose](glossary.md#standing-pose) lies inside every window, and it is where Controls' MuJoCo plant starts the robot. |
+| ETHRC V1 | `standing` | Controls arms a drive only while its position lies inside its window (the joint's `position_limit`, the crank's device-frame limit). The [standing pose](glossary.md#standing-pose) is where Controls' MuJoCo plant starts the robot; with the V1's standing offsets at 0 it is the [home pose](glossary.md#home-pose), arms down and legs straight, inside every window. |
 | G1 | `home` | Unitree's standing pose, which Controls' G1 lane also resets to |
 
 `test_the_runtime_start_pose_lies_inside_every_drive_window` (in `tests/test_robots.py`) checks every robot's start pose against its windows.
 
-The standing pose leaves the V1's soles tilted under an upright base, which does not matter while the robot hangs (`suspended`, the default). A free robot that holds it falls over within a second or two: in a free session on the CPU device, the base had tilted 99° and dropped to 0.16 m after 2.5 s of plant time. A free V1 that should stand by itself at the baseline gains needs `--pose home`, with both soles flat on the floor: in a 60 s free session on CUDA the base stayed at 0.923 m and within 0.6° of upright. To hold the start pose, take the drive positions the first feedback reports as targets, as `examples/runtime_client.py` does. See [RESET](#reset-1) and [robot-model.md](robot-model.md#standing-on-the-ground).
+The V1's start pose puts both soles flat on the floor: a free V1 held in it at the baseline gains stands by itself (in a 60 s free session on CUDA the base stayed at 0.923 m and within 0.6° of upright). To hold the start pose, take the drive positions the first feedback reports as targets, as `examples/runtime_client.py` does. See [RESET](#reset-1) and [robot-model.md](robot-model.md#standing-on-the-ground).
 
 ### Sessions
 

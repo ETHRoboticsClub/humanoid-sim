@@ -10,7 +10,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import V1_LIMITS_UNCONVERTED
 
 from humanoid_sim.model.asset import asset_dir, load_profile
 from humanoid_sim.model.description import Description
@@ -166,7 +165,6 @@ def test_the_solver_collides_with_the_boxes_where_controls_places_them(tmp_path,
 
 
 @pytest.mark.physics
-@V1_LIMITS_UNCONVERTED
 def test_robots_in_every_env_stand_on_a_box(tmp_path, usd):
     """Dropped onto the platform under the spawn point, both envs' robots stand on its top, a platform's height above
     where they stand on the floor."""
