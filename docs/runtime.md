@@ -576,7 +576,7 @@ static int hsim_read(const void *region, void *out, size_t size) {
 
 ## Device and performance
 
-Run the host on CUDA. With its step captured as CUDA graphs and compiled, one unpaced step took 1.5 ms on average on an L4 (2.7 times faster than real time) with a new demand every step; [benchmarks.md](benchmarks.md) has the full figures. Device-to-host copies go into pinned buffers and the host thread sleeps on a blocking CUDA event while it waits, and it spins only for the last 100 µs before each deadline: the host shares its machine with Controls. Each truth publish waits for one more device-to-host copy, so `--truth-every 1` costs more per step than the default.
+Run the host on CUDA. With its step captured as CUDA graphs and compiled, one unpaced step took 1.5 ms on average on an L4 (2.7 times faster than real time) with a new demand every step; [benchmarks.md](benchmarks.md) has the full figures. Device-to-host copies go into pinned buffers and the host thread sleeps on a blocking CUDA event while it waits, and it spins only for the last 100 µs before each deadline: the host shares its machine with Controls. A step that publishes the truth brings feedback and truth to the host in one copy, but gathering the truth still costs time: on an L40S the free G1's step takes 1.6 ms with `--truth-every 1` and 1.15 ms with the default.
 
 `humanoid-sim bench --runtime --device cuda:0` measures the host's whole step, unpaced, with a client writing a demand before every step. It reports `ms_per_step`, `ms_p99`, `ms_max`, `steps_over_period`, `real_time_factor` and whether CUDA graphs were used. [benchmarks.md](benchmarks.md) has the figures.
 
