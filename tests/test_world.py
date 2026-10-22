@@ -14,12 +14,13 @@ def _scene(robot, n, **kw):
     import isaaclab.sim as sim_utils
     from isaaclab.utils import instantiate
 
-    from humanoid_sim.train.scene import robot_scene_cfg, robot_sim_cfg
+    from humanoid_sim.train.scene import robot_build, robot_scene_cfg, robot_sim_cfg
 
     usd = built_usd(robot)
     sim = sim_utils.SimulationContext(robot_sim_cfg(robot, device="cpu"))
-    scene = instantiate(robot_scene_cfg(n, usd, robot=robot, **kw))
-    sim.reset()
+    with robot_build(robot):
+        scene = instantiate(robot_scene_cfg(n, usd, robot=robot, **kw))
+        sim.reset()
     return sim, scene
 
 

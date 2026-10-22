@@ -24,7 +24,7 @@ def _env(robot, num_envs=2):
 
     from humanoid_sim.devices.demand import DriveDemand
     from humanoid_sim.train.isaaclab import PlantAction, PlantActionCfg
-    from humanoid_sim.train.scene import robot_scene_cfg, robot_sim_cfg
+    from humanoid_sim.train.scene import robot_build, robot_scene_cfg, robot_sim_cfg
 
     class HoldStanding(PlantAction):
         """Demand the standing pose at the baseline gains, offset by the action (rad, drive frame)."""
@@ -90,7 +90,8 @@ def _env(robot, num_envs=2):
         {"param": "latency", "dist": "uniform", "range": [0.010, 0.020], "op": "set", "per_target": False},
         {"param": "body_inertia", "dist": "uniform", "range": [0.8, 1.2], "op": "scale"},
     ])
-    return ManagerBasedRLEnv(cfg)
+    with robot_build(robot):
+        return ManagerBasedRLEnv(cfg)
 
 
 def _rotation(q_xyzw):

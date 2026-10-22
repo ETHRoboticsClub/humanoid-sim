@@ -32,6 +32,7 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `Measured`, `Truth` | `src/humanoid_sim/train/plant.py` | What `measured()` and `truth()` return |
 | `PlantAction`, `PlantActionCfg` | `src/humanoid_sim/train/isaaclab.py` | An Isaac Lab action term that owns a `RobotPlant`; you subclass it and implement `demands()` |
 | `robot_scene_cfg`, `robot_sim_cfg` | `src/humanoid_sim/train/scene.py` | The `InteractiveSceneCfg` (robot, IMU, contact sensor, ground or terrain, static boxes) and the `SimulationCfg` (one 4 ms step on MJWarp) |
+| `robot_build` | `src/humanoid_sim/train/scene.py` | The context to build the environment in: it adds the ankle cranks' stops to the solver model (profile `physics.mjwarp.ankle_stops`), which Newton cannot import from the USD. `RobotPlant` refuses a model built outside it |
 | `StaticBoxes` | `src/humanoid_sim/world/boxes.py` | A room's walls and furniture as static boxes, read from a file, described in [world.md](world.md#static-boxes) |
 | `initial_pose`, `POSES` | `src/humanoid_sim/model/poses.py`, re-exported by `humanoid_sim.train.scene` | The joint positions and base height of a named initial pose |
 | `heightfield_terrain_cfg` | `src/humanoid_sim/world/terrain.py` | The terrain-importer config for a heightfield terrain the caller lays out, described in [world.md](world.md#heightfield-terrain) |
@@ -133,7 +134,7 @@ from humanoid_sim.model.asset import build_asset, load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.train import TrainPlantCfg
 from humanoid_sim.train.isaaclab import PlantAction, PlantActionCfg
-from humanoid_sim.train.scene import robot_scene_cfg, robot_sim_cfg
+from humanoid_sim.train.scene import robot_build, robot_scene_cfg, robot_sim_cfg
 
 
 class PoseOffsets(PlantAction):
@@ -233,7 +234,8 @@ usd = build_asset(Description.load("ethrc_v1"), load_profile("ethrc_v1"), Path("
 cfg = StandCfg()
 cfg.scene = robot_scene_cfg(4096, usd, ground_friction=0.0)  # home pose; friction is randomized on the robot
 cfg.sim = robot_sim_cfg(device="cuda:0")
-env = ManagerBasedRLEnv(cfg)
+with robot_build():  # the ankle cranks' stops (docs/drives.md, The crank stops)
+    env = ManagerBasedRLEnv(cfg)
 ```
 
 The observation groups come out as `policy` `[E, 50]` and `critic` `[E, 77]`.

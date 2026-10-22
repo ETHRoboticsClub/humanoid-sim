@@ -23,6 +23,7 @@ import torch
 
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.urdf import BASE_JOINTS
+from humanoid_sim.physics.crank_stops import check_crank_stops, crank_stop_hook
 from humanoid_sim.physics.joint_properties import JointProperties
 from humanoid_sim.world.boxes import StaticBoxes
 
@@ -312,8 +313,10 @@ class IsaacLabRobot:
         physics = {"solver": cfg.solver, cfg.solver: cfg.settings}
         self.sim = sim_utils.SimulationContext(simulation_cfg(physics, device=cfg.device, period_s=cfg.period_s,
                                                               integrator=cfg.integrator, visualizers=visualizers))
-        self.scene = instantiate(scene_cfg)
-        self.sim.reset()
+        with crank_stop_hook(desc.robot, physics):
+            self.scene = instantiate(scene_cfg)
+            self.sim.reset()
+        check_crank_stops(desc.robot, physics)
         apply_joint_limits(physics)
         self.robot = self.scene["robot"]
         self.imu = self.scene["imu"] if cfg.imu else None
