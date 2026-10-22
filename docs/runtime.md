@@ -23,7 +23,7 @@ humanoid-sim serve --segment /run/hsim/plant --support suspended
 | Option | Default | Meaning |
 |---|---|---|
 | `--segment PATH` | required | The segment file. The host writes `PATH.<pid>.tmp` and renames it over `PATH`, so it needs write access to the directory. Put it on a volume the client also mounts. |
-| `--support suspended\|free` | `suspended` | How the robot is held for the whole process (see [Supports](#supports)). |
+| `--support suspended\|free` | `suspended` | How each session starts holding the robot (see [Supports](#supports)). |
 | `--pose home\|standing` | the profile's `poses.start` | The pose every session starts in (see [The start pose](#the-start-pose)). |
 | `--device` | `cuda:0` | `cuda:N`, or `cpu` for Warp's CPU device (below real time; see [Device and performance](#device-and-performance)). |
 | `--bus-period-us` | `1500` | The client's bus cycle, written to the header's `bus_period_ns`. Informational: the host does not use it. |
@@ -58,12 +58,12 @@ On CUDA, compilation takes about a minute. On the CPU nothing is compiled ahead,
 
 ### Supports
 
-The support is chosen at startup and reported in the descriptor's `support` field. Changing it needs a restart.
+A session starts in the support chosen at startup, reported in the descriptor's `support` field; `SET_SUPPORT` changes the rope.
 
 | Support | Base | What `SET_SUPPORT` can do |
 |---|---|---|
-| `suspended` | Welded to the world (a fixed-base articulation), 0.3 m above the start pose's height so the feet hang clear | Nothing: `{"support": "suspended"}` is accepted as a no-op, `free` and `gantry` are rejected. Any `base_pose` argument is rejected. |
-| `free` | Standing on the floor in the start pose, upright, at the origin | Hang a gantry rope (tension program or slack cable) and release it with `{"support": "free"}` |
+| `suspended` | Hanging from the lab gantry: one cable from the harness hook on the torso (the midpoint of the shoulders, the profile's `support.harness`) to an anchor overhead, carrying the robot's weight, the feet 0.3 m above the floor in the start pose. A reset to a named pose puts the robot back there; every reset rehangs the cable where the robot then is. | Release the rope (`free`), rehang the harness where the robot is (`suspended`) or hang another rope (`gantry`). Any `base_pose` argument is rejected. |
+| `free` | Standing on the floor in the start pose, upright, at the origin | Hang a gantry rope (tension program or slack cable) or the harness (`suspended`), and release it with `{"support": "free"}` |
 
 The gantry and the floor are described in [world.md](world.md).
 
@@ -203,7 +203,7 @@ The descriptor region holds one JSON object (sorted keys, at most 16,384 bytes) 
 | `robot` | `ethrc_v1` |
 | `drives` | The drive names, in the order of the demand and feedback arrays |
 | `joints` | The joint names, in the order of the truth's joint arrays |
-| `support` | `suspended` or `free` |
+| `support` | `suspended` or `free`: the support the session started in |
 | `bodies` | The articulation's body names, for `APPLY_DISTURBANCE` and gantry `attachment_bodies` |
 | `description` | `robot`, `description_digest` and `description_revision` (the humanoid-urdf checkout's git `HEAD`, or null) |
 | `physics` | `engine` (`isaaclab/mjwarp` or `isaaclab/kamino`), `period_ns`, `integrator` |
@@ -344,7 +344,7 @@ The ack is written at the start of the period, before that period's physics step
 | Result | Code | When |
 |---|---|---|
 | `ACK_OK` | 0 | Applied; the message says what was done |
-| `ACK_REJECTED` | 1 | The arguments are not a JSON object, or the handler raised a `KeyError`, `TypeError` or `ValueError`: a key is missing, a value has the wrong type or range, or the command is not allowed in this session. The message is the exception type and text, for example `ValueError: the base is welded to the world in a suspended session`. |
+| `ACK_REJECTED` | 1 | The arguments are not a JSON object, or the handler raised a `KeyError`, `TypeError` or `ValueError`: a key is missing, a value has the wrong type or range, or the command is not allowed in this session. The message is the exception type and text, for example `ValueError: a suspended session hangs at its gantry; reset it to a named pose`. |
 | `ACK_UNKNOWN` | 2 | Unknown command code |
 | `ACK_FAILED` | 3 | The handler raised any other exception. The message is its type and text. The host keeps serving the session. |
 
@@ -373,13 +373,13 @@ The home pose is the one to use when a free robot should stand. Both poses are c
 
 | Arguments | Session | Effect and ack |
 |---|---|---|
-| `{"support": "free"}` | free | Release the gantry rope: `free` |
-| `{"support": "suspended"}` | suspended | No change: `suspended` |
-| `{"support": "gantry", "tension_breakpoints_s_n": [[t, N], ...], "attachment_local_m": [x, y, z]}` | free | A vertical tension program on one base-frame point, or on two with `[[x, y, z], [x, y, z]]`: `gantry` |
-| `{"support": "gantry", "tension_breakpoints_s_n": [[t, N], ...], "attachment_bodies": [name, ...]}` | free | The same, on one or two points fixed in the base frame where the named bodies are now: `gantry` |
-| `{"support": "gantry", "cable": {"overhead_distance_m": m, "length_breakpoints_s_m": [[t, m], ...], "stiffness_n_m": k, "damping_n_s_m": c}, "attachment_local_m": [x, y, z]}` | free | A slack cable: `gantry` |
+| `{"support": "free"}` | any | Release the gantry rope: `free` |
+| `{"support": "suspended"}` | any | The harness cable, hung where the robot is now: `suspended` |
+| `{"support": "gantry", "tension_breakpoints_s_n": [[t, N], ...], "attachment_local_m": [x, y, z]}` | any | A vertical tension program on one base-frame point, or on two with `[[x, y, z], [x, y, z]]`: `gantry` |
+| `{"support": "gantry", "tension_breakpoints_s_n": [[t, N], ...], "attachment_bodies": [name, ...]}` | any | The same, on one or two points of the harness body (the profile's `support.harness.body`) where the named bodies are now: `gantry` |
+| `{"support": "gantry", "cable": {"overhead_distance_m": m, "length_breakpoints_s_m": [[t, m], ...], "stiffness_n_m": k, "damping_n_s_m": c}, "attachment_local_m": [x, y, z]}` | any | A slack cable: `gantry` |
 
-A tension program has 1 to 8 breakpoints, at non-negative increasing times counted from the command, linear between them and held beyond both ends, with non-negative tensions. The force is vertical and split evenly over the one or two points. Either `attachment_local_m` or `attachment_bodies` is required; when both are given, the bodies are used. A cable runs from one base-frame point to an anchor `overhead_distance_m` above where that point is when the cable is hung. Its unstretched length follows the program (positive lengths), and it pulls along the rope only when stretched: `T = max(0, k · extension + c · extension rate)`, with `k` positive and `c` non-negative. Hanging a rope replaces the previous one; a rejected rope leaves the previous one hanging. [world.md](world.md) describes both.
+A tension program has 1 to 8 breakpoints, at non-negative increasing times counted from the command, linear between them and held beyond both ends, with non-negative tensions. The force is vertical and split evenly over the one or two points. Either `attachment_local_m` or `attachment_bodies` is required; when both are given, the bodies are used. A cable runs from one base-frame point to an anchor `overhead_distance_m` above where that point is when the cable is hung. Its unstretched length follows the program (positive lengths), and it pulls along the rope only when stretched: `T = max(0, k · extension + c · extension rate)`, with `k` positive and `c` non-negative. Hanging a rope replaces the previous one; a rejected rope leaves the previous one hanging. A rope requested after a pose write (a reset, the session's start) is checked at once and hangs after the next step. A reset that moves the base releases a client's rope, whose anchor stays where it was hung, and rehangs the harness cable. [world.md](world.md) describes both.
 
 ### APPLY_DISTURBANCE (5)
 

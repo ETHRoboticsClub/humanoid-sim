@@ -19,3 +19,7 @@ physics:
   # Self-collision off, as Isaac Lab's own G1 articulations have it (isaaclab_assets robots/unitree.py,
   # G1_29DOF_CFG: enabled_self_collisions=False). The URDF's convex hulls of neighbouring links overlap at rest.
   self_collision: false
+
+support:
+  # The lab's straps hold the torso at the shoulders (Controls g1_walk_scenario.py HARNESS_BODY, SHOULDER_LINKS).
+  harness: {body: torso_link, shoulders: [left_shoulder_pitch_link, right_shoulder_pitch_link]}

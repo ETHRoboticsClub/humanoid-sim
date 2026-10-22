@@ -24,14 +24,11 @@ PHYSICS_ROBOTS = ("ethrc_v1", "g1_29dof_rev_1_0", "g1_29dof_with_hand_rev_1_0")
 #   vertical_joint: a joint turning about the vertical axis at home (gravity adds no torque of its own)
 #   elbow: a 1:1 elbow drive's joint
 #   ankle_pitch: the two ankle pitch hinges
-#   shoulders: the two links a gantry harness hooks onto
 _G1 = {"torso": "torso_link", "vertical_joint": "waist_yaw_joint", "elbow": "right_elbow_joint",
-       "ankle_pitch": ("left_ankle_pitch_joint", "right_ankle_pitch_joint"),
-       "shoulders": ("left_shoulder_pitch_link", "right_shoulder_pitch_link")}
+       "ankle_pitch": ("left_ankle_pitch_joint", "right_ankle_pitch_joint")}
 PARTS = {
     "ethrc_v1": {"torso": "Component171_1", "vertical_joint": "waist_upperbody_yaw", "elbow": "elbow_flexion_r",
-                 "ankle_pitch": ("foot_pitch_l", "foot_pitch_r"),
-                 "shoulders": ("shoulder_connector_l_1", "shoulder_connector_r_1")},
+                 "ankle_pitch": ("foot_pitch_l", "foot_pitch_r")},
     "g1_29dof_rev_1_0": _G1,
     "g1_29dof_with_hand_rev_1_0": _G1,
 }
@@ -51,6 +48,22 @@ def urdf_mass_kg(robot: str) -> float:
     """Total link mass read straight from the description's URDF (welded links included)."""
     root = ET.parse(Description.load(robot).urdf_path).getroot()
     return sum(float(m.get("value")) for m in root.findall("link/inertial/mass"))
+
+
+def joints_below(robot: str, link: str) -> set[str]:
+    """The URDF joints whose chain to the root passes through ``link``: the ones it carries."""
+    root = ET.parse(Description.load(robot).urdf_path).getroot()
+    joints = [j for j in root.iter("joint") if j.find("child") is not None]
+    parent = {j.find("child").get("link"): j.find("parent").get("link") for j in joints}
+
+    def carried(name):
+        while name in parent:
+            if name == link:
+                return True
+            name = parent[name]
+        return name == link
+
+    return {j.get("name") for j in joints if carried(j.find("parent").get("link"))}
 
 
 def imu_samples_per_s(robot: str) -> float:
