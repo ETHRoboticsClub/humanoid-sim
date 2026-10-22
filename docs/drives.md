@@ -131,7 +131,6 @@ Each drive is a product, and `src/humanoid_sim/devices/models.py` has one class 
 | `family`, `product`, `interface` | The family key, the product, how the robot's controller drives it |
 | `drive_delay_ns` | The family's `drive_delay_s` in integer ns: from the controller staging a demand (its APPLIED acknowledgement) to the drive acting on it, which is the bus master's staging, the bus and the drive's interpolation. 0 when the description records none |
 | `delay_measured` | Whether the description records the delay; the runtime lists the families that do not in its fidelity gaps |
-| `delay_source` | The description's `drive_delay_source` |
 
 On the current V1 description every family has 5.0 ms, one whole-robot figure Controls identified over the 1:1 joints (`ethrc_ssot.command_latency`), until a per-family fit replaces it ([replay-and-sysid.md](replay-and-sysid.md#fitting-paces-actuator-model)). The G1's families record no delay.
 
