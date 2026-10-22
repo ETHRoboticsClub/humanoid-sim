@@ -18,8 +18,9 @@ hinges alone (the tendon's length depends on nothing else), so where the sites s
 the dynamics. Nothing writes the joint state between steps, so contacts keep carrying the robot.
 
 Profile: ``physics.mjwarp.ankle_stops``: ``cranks`` (these tendons and the hinges' box) or ``hinges`` (the box
-only). Newton imports spatial tendons from MJCF only, so the sites and tendons are added to every world as Newton
-replicates the scene (Isaac Lab's ``newton_builder_world_hook``): build the scene inside :func:`crank_stop_hook`.
+only). Newton imports spatial tendons from MJCF only, so the sites are added to every world as Newton replicates the
+scene (Isaac Lab's ``newton_builder_world_hook``) and the tendons before the model is finalized: build the scene and
+reset the simulation inside :func:`crank_stop_hook`.
 Kamino has no tendons; it bounds the hinges by their box.
 
 The stops' stiffness is not measured (modeled); their positions are the description's.
@@ -190,12 +191,17 @@ def ankle_stops_setting(physics: dict, solver: str) -> str:
 
 
 class _WorldHook:
-    """Adds the sites and tendons of every crank stop to each world Newton replicates."""
+    """Adds the sites of every crank stop to each world as Newton replicates the scene, and their tendons to the
+    whole model at once before it is finalized (``MODEL_INIT``). Tendons added world by world would make Newton
+    resolve the articulation owner of every new row against every shape so far on each following world: quadratic
+    in the number of worlds."""
 
     def __init__(self, stops: list[CrankStop], solref: tuple[float, float]):
         self.stops = stops
         self.solref = solref
-        self.worlds = 0
+        self.builder = None
+        self.sites: list[tuple[int, list[tuple[int, int]]]] = []  # per world: (world, [(tip, ball) per stop])
+        self.tendons = 0
 
     def __call__(self, builder, world: int, position, quaternion) -> None:
         import warp as wp
@@ -205,27 +211,41 @@ class _WorldHook:
             if int(builder.body_world[b]) != world:
                 break
             bodies.setdefault(str(builder.body_label[b]).rsplit("/", 1)[-1], []).append(b)
+        ends = []
         for stop in self.stops:
-            ends = []
+            pair = []
             for body, point, end in ((stop.shank, stop.tip, "tip"), (stop.foot, stop.ball, "ball")):
                 found = bodies.get(body, [])
                 if len(found) != 1:
                     raise RuntimeError(f"world {world}: {len(found)} bodies named {body!r} for {stop.label}")
-                ends.append(builder.add_site(found[0], xform=wp.transform(tuple(map(float, point)), wp.quat_identity()),
+                pair.append(builder.add_site(found[0], xform=wp.transform(tuple(map(float, point)), wp.quat_identity()),
                                              scale=(SITE_RADIUS_M,) * 3, label=f"{stop.label}_{end}"))
-            rows = [builder.add_custom_values(**{"mujoco:tendon_wrap_type": 0, "mujoco:tendon_wrap_shape": shape,
-                                                 "mujoco:tendon_wrap_sidesite": -1, "mujoco:tendon_wrap_prm": 0.0})
-                    for shape in ends]  # site wraps
-            start = rows[0]["mujoco:tendon_wrap_type"]
-            builder.add_custom_values(**{
-                "mujoco:tendon_world": world, "mujoco:tendon_type": 1,  # spatial
-                "mujoco:tendon_joint_adr": 0, "mujoco:tendon_joint_num": 0,
-                "mujoco:tendon_wrap_adr": start, "mujoco:tendon_wrap_num": len(ends),
-                "mujoco:tendon_limited": 1, "mujoco:tendon_range": wp.vec2(*stop.length_range_m()),
-                "mujoco:tendon_solref_limit": wp.vec2(*self.solref),
-                "mujoco:tendon_label": stop.label,
-            })
-        self.worlds += 1
+            ends.append(tuple(pair))
+        self.builder = builder
+        self.sites.append((world, ends))
+
+    def add_tendons(self) -> None:
+        """Every world's tendons, in world order (Newton maps a world's tendons by their index modulo the count per
+        world). Once."""
+        import warp as wp
+
+        if self.builder is None or self.tendons:
+            return
+        builder = self.builder
+        for world, ends in self.sites:
+            for stop, (tip, ball) in zip(self.stops, ends, strict=True):
+                rows = [builder.add_custom_values(**{"mujoco:tendon_wrap_type": 0, "mujoco:tendon_wrap_shape": shape,
+                                                     "mujoco:tendon_wrap_sidesite": -1, "mujoco:tendon_wrap_prm": 0.0})
+                        for shape in (tip, ball)]  # site wraps
+                builder.add_custom_values(**{
+                    "mujoco:tendon_world": world, "mujoco:tendon_type": 1,  # spatial
+                    "mujoco:tendon_joint_adr": 0, "mujoco:tendon_joint_num": 0,
+                    "mujoco:tendon_wrap_adr": rows[0]["mujoco:tendon_wrap_type"], "mujoco:tendon_wrap_num": 2,
+                    "mujoco:tendon_limited": 1, "mujoco:tendon_range": wp.vec2(*stop.length_range_m()),
+                    "mujoco:tendon_solref_limit": wp.vec2(*self.solref),
+                    "mujoco:tendon_label": stop.label,
+                })
+                self.tendons += 1
 
 
 @contextlib.contextmanager
@@ -252,12 +272,15 @@ def crank_stop_hook(robot: str, physics: dict, solver: str | None = None):
     if len(solref) != 2:
         raise ValueError("ankle_stop_solref: [time constant s, damping ratio]")
     hook = _WorldHook(crank_stops(desc), solref)
+    init = NewtonManager.register_callback(lambda _: hook.add_tendons(), PhysicsEvent.MODEL_INIT,
+                                           name="crank_stops", wrap_weak_ref=False)
     ready = NewtonManager.register_callback(lambda _: _release_tendons(), PhysicsEvent.PHYSICS_READY,
                                             order=RELEASE_ORDER, name="crank_stops", wrap_weak_ref=False)
     try:
         with newton_builder_world_hook(hook):
             yield hook
     finally:
+        init.deregister()
         ready.deregister()
 
 
