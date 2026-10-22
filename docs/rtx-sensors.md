@@ -110,4 +110,4 @@ A render serves every sensor due; the cameras render every 33 ms of plant time, 
 - Camera exposure, noise, motion blur and rolling shutter: every frame is a global-shutter render at the frame's plant time. The D435i's infrared imagers see visible light, without the projector's pattern; its depth is the exact distance, without stereo matching.
 - With the ZED Mini's fisheye calibration, RTX leaves the corners of the image, beyond about 46 deg off axis, empty (light grey).
 - The Mid-360's real rosette, its reflectivity-dependent reach and intensities. Within one render the lidar sees the scene as it is at that render (Kit's motion BVH is off), so a moving robot's sweep is built from three renders.
-- The D435i on the G1 has no `<mount>_camera` link in the description, so Controls places it at a default mount; the ZED Mini mount's pitch is assumed level (humanoid-urdf `PROVENANCE.md`).
+- The D435i on the G1 has no `<mount>_camera` link in the description, so Controls places it at a default mount; the ZED Mini mount's pitch is assumed level (the G1 URDF's `camera0_camera`).

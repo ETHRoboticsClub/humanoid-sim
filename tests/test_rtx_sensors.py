@@ -1,6 +1,6 @@
 """The G1's RTX sensors against geometry worked out independently: a room of boxes with targets, the robot welded at
 the origin, its rig's Mid-360 and the cameras the ``g1-cameras`` extra rig adds. Each camera's image of a target is
-the set of pixels whose rays, cast through the mount (the numbers humanoid-urdf's ``PROVENANCE.md`` records) and the
+the set of pixels whose rays, cast through the mount (the G1 URDF's numbers) and the
 lens (the ZED Mini's factory calibration, the D435i's datasheet fields of view), meet it; the D435i's depth is the
 analytic distance to the room; every lidar return lies at the range where its ray meets the room, fired at its
 pattern's time.
@@ -34,7 +34,7 @@ G1 = "g1_29dof_with_hand_rev_1_0"
 CAMERAS = "g1-cameras"  # sensors/rigs.py EXTRAS
 SETTLE_S = 1.0  # the welded robot's arms and waist settle on their hold within this; images and sweeps after it
 
-# Mounts in torso_link, humanoid-urdf PROVENANCE.md: position (m) and URDF rpy (rad).
+# Mounts in torso_link, as the G1 URDF places them: position (m) and URDF rpy (rad).
 ZED_MOUNT = ((0.1068, 0.0406, 0.457), (0.0, 0.0, 0.0))
 D435_MOUNT = ((0.0576235, 0.01753, 0.42987), (0.0, 0.8307767239493009, 0.0))
 MID360_MOUNT = ((0.0002835, 0.00003, 0.428434), (math.pi, 0.0836, 0.0))

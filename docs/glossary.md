@@ -100,7 +100,7 @@ The overhead support the real robot hangs from. The sim models it as a tension p
 
 ### Home pose
 
-The pose the CAD model is exported in: legs straight, arms down, both soles level and at the same height under an upright base. humanoid-urdf records it per joint in `ethrc_v1/tools/urdf6_zero_rebase.json`, and `Description.home_pose` reads it. It is the default spawn pose in training and the runtime's start pose. See [robot-model.md](robot-model.md#standing-on-the-ground).
+The pose the CAD model is exported in: legs straight, arms down, both soles level and at the same height under an upright base. It is the URDF's zero: hardware delivers the export already at the calibration pose. It is the default spawn pose in training and the runtime's start pose. See [robot-model.md](robot-model.md#standing-on-the-ground).
 
 ### IMU burst
 

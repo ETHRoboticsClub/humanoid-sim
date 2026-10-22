@@ -13,8 +13,7 @@ model:
   # No sole boxes (model.sole), contact excludes (model.contact_excludes) or self-collision sets
   # (model.self_collision) unless the robot's profile names them.
 
-# Named poses (model/poses.py). home: a pose the description records, as {export: <zero-rebase table>} or
-# {preset: <preset_id in position-presets.yaml>}; zero: the URDF's zero.
+# Named poses (model/poses.py). home: zero (the URDF's zero) or {preset: <preset_id in position-presets.yaml>}.
 poses:
   home: zero
   # The pose every runtime session starts in (`serve --pose` overrides): home or standing.

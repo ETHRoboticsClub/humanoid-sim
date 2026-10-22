@@ -1,5 +1,5 @@
 """Where the G1's cameras and lidar sit and what they see (``sensors/geometry.py``), built from the sensor models and
-the rig: mounts against the numbers humanoid-urdf's ``PROVENANCE.md`` records for the lab unit, each lens against
+the rig: mounts against the G1 URDF's numbers for the lab unit, each lens against
 projections worked out by hand for points at known angles, and the lidar's pattern against its model's figures."""
 
 from __future__ import annotations
@@ -31,10 +31,10 @@ def test_the_mounts_are_the_lab_units(desc, rig):
     m = {s.frame: geometry.Mount.from_urdf(desc.urdf_path, s.frame) for s in rig.sensors.values() if s.kind != "imu"}
     assert {k: v.link for k, v in m.items()} == dict.fromkeys(("camera0_camera", "d435_link", "mid360_link"),
                                                               "torso_link")
-    # PROVENANCE.md, "ZED Mini mount": the left optical centre at (0.1068, 0.0406, 0.457) m in torso_link, level.
+    # camera0_camera: the left optical centre at (0.1068, 0.0406, 0.457) m in torso_link, level.
     np.testing.assert_allclose(m["camera0_camera"].translation_m, (0.1068, 0.0406, 0.457))
     np.testing.assert_allclose(m["camera0_camera"].R, np.eye(3), atol=1e-12)
-    # PROVENANCE.md, "MID-360 mount": Unitree's roll pi (upside down) with the measured pitch 0.0836 rad. The sensor's
+    # mid360_joint: Unitree's roll pi (upside down) with the measured pitch 0.0836 rad. The sensor's
     # z axis then points down and back by the pitch: Ry(0.0836) Rx(pi) applied to +z.
     z = m["mid360_link"].R @ np.array([0.0, 0.0, 1.0])
     np.testing.assert_allclose(z, (-math.sin(0.0836), 0.0, -math.cos(0.0836)), atol=1e-9)

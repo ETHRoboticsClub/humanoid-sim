@@ -45,7 +45,7 @@ def g1() -> Rig:
 def g1_cameras() -> Rig:
     """The cameras the lab G1 is reported to carry, at the description's camera links, until its rig declares them."""
     return Rig(
-        # The helmet mount: the left eye's optical centre (humanoid-urdf PROVENANCE.md). HD720 at 30 Hz as Controls'
+        # The helmet mount: the left eye's optical centre (the G1 URDF's camera0_camera). HD720 at 30 Hz as Controls'
         # zed backend opens it, with the factory calibration of the lab's unit (SN19945568, as Controls'
         # test_zed_backend.py carries it): fisheye (equidistant) lenses, the right eye's place from [STEREO]
         # (Baseline 62.8272 mm, TY -0.181381 mm, TZ 0.233734 mm, placed as zed_backend.parse_calibration places it).

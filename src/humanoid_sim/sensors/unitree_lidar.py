@@ -12,8 +12,8 @@ What it matches, and where that comes from (Controls origin/master 44353e2b unle
 * QoS: best effort, keep last 5. Controls reads with ROS's sensor-data profile (best effort, keep last 5,
   ``test_lidar_relay.py``), which accepts a best-effort or reliable writer alike; what Unitree's service writes with
   is not recorded;
-* frame: ``livox_frame``, which Controls relabels ``mid360_link`` without rotation (humanoid-urdf ``PROVENANCE.md``,
-  "MID-360 mount"; the test double in ``test_lidar_relay.py``);
+* frame: ``livox_frame``, which Controls relabels ``mid360_link`` without rotation (the G1 URDF's
+  ``mid360_joint``; the test double in ``test_lidar_relay.py``);
 * point layout: x, y, z and intensity float32 at offsets 0, 4, 8 and 12, ring uint16 at 16 and time float32 at 18,
   22 bytes a point, one row (Controls' double of Unitree's sweep, ``test_lidar_relay.unitree_sweep``); a ray without
   a return is a point at the origin, which Controls drops (``lidar.sweep_from_cloud``);

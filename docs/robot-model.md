@@ -5,8 +5,7 @@ humanoid-sim does not define the robot. Geometry, masses, joints, drives and the
 ```
 third_party/humanoid-urdf/ethrc_v1/            profiles/ethrc_v1.yaml
   actuators.yaml                                 model:    build choices (asset)
-  URDF_6_description/urdf/*.urdf, meshes/        physics:, devices:  (spawn and run time)
-  tools/urdf6_zero_rebase.json (home pose)
+  v1_description/urdf/*.urdf, meshes/            physics:, devices:  (spawn and run time)
         |                                              |
         v                                              |
   Description             model/description.py         |
@@ -30,7 +29,7 @@ Nothing in the code names a robot. What differs between them comes from the desc
 |---|---|---|
 | Drives | 22 EPOS4 drives: 18 drive a joint each, two crank drives per ankle move pitch and roll through a linkage | 29 motors, one per joint, in `LowCmd` slots `motor_index` 0 to 28 |
 | Gains | `baseline_position_gains` per drive | `baseline_stiffness` and `baseline_damping` per joint (Unitree's deploy gains) |
-| Home pose | the pose the CAD was exported in (`poses.home: {export: tools/urdf6_zero_rebase.json}`) | Unitree's standing pose, knees bent 0.3 rad (`poses.home: {preset: standing-init-v1}` from `position-presets.yaml`) |
+| Home pose | the URDF's zero, the pose the CAD is exported in (`poses.home: zero`) | Unitree's standing pose, knees bent 0.3 rad (`poses.home: {preset: standing-init-v1}` from `position-presets.yaml`) |
 | Feet | a sole plate fitted to each foot's lowest face (`model.sole`) | four 5 mm spheres per foot, bounded by a sole box for the truth (`model.sole.fit: bounds`) |
 | Self-collision | on, with Controls' contact excludes | off, as Isaac Lab's own G1 has it |
 | IMU | the URDF's `imu_joint` | the URDF's `imu_joint`, on the pelvis |
@@ -49,17 +48,16 @@ Nothing in the code names a robot. What differs between them comes from the desc
 
 ### Files
 
-`Description` (`src/humanoid_sim/model/description.py`) maps a robot id to its directory, `third_party/humanoid-urdf/<robot>/`, and to the ament package inside it, the one subdirectory holding the URDF that `actuators.yaml` names. For `ethrc_v1` that is `URDF_6_description`, and it reads these files:
+`Description` (`src/humanoid_sim/model/description.py`) maps a robot id to its directory, `third_party/humanoid-urdf/<robot>/`, and to the ament package inside it, the one subdirectory holding the URDF that `actuators.yaml` names. For `ethrc_v1` that is `v1_description`, and it reads these files:
 
 | File (under `ethrc_v1/`) | What humanoid-sim takes from it |
 |---|---|
 | `actuators.yaml` | Joint and drive inventory, signs, standing offsets, position limits, passive joint parameters, drive families, baseline drive gains, ankle linkage geometry. Its `schema` must be `ethrc-actuators/v1`; anything else raises. |
-| `URDF_6_description/urdf/URDF_6.urdf` | The URDF that `actuators.yaml` names in its `urdf:` key, and the one the profile selects (`model.urdf`) and the asset is built from: 60.15 kg, with the ORCA hands fixed at zero. Also read for the description digest, the IMU mount (`Description.imu_mount`, the URDF's `imu_joint`) and the mirror map. |
-| `URDF_6_description/urdf/URDF_6_orca_hands.urdf` | The same robot with the 34 hand joints movable. Welding them, as Controls' `--fixed-orca-hands` does, gives `URDF_6.urdf`. |
-| `URDF_6_description/meshes/` | Visual and collision meshes (STL), referenced as `package://URDF_6_description/meshes/...`. |
-| `tools/urdf6_zero_rebase.json` | The [home pose](#standing-on-the-ground): the joint angles of the CAD export (q = 0 in the export) in the URDF's coordinates, all zero since humanoid-urdf e077957 made the export's pose the calibration pose. `Description.home_pose` reads it. |
+| `v1_description/urdf/URDF_6.urdf` | The URDF that `actuators.yaml` names in its `urdf:` key, and the one the profile selects (`model.urdf`) and the asset is built from: 60.15 kg, with the ORCA hands fixed at zero. Also read for the description digest, the IMU mount (`Description.imu_mount`, the URDF's `imu_joint`) and the mirror map. |
+| `v1_description/urdf/URDF_6_orca_hands.urdf` | The same robot with the 34 hand joints movable. Welding them, as Controls' `--fixed-orca-hands` does, gives `URDF_6.urdf`. |
+| `v1_description/meshes/` | Visual and collision meshes (STL), referenced as `package://v1_description/meshes/...`. |
 
-URDF_6 is the full-body CAD export, and its zero is the calibration pose: the pose of the export itself (humanoid_description 8e0f840), arms down and legs straight. Every part sits where URDF_5 with the ORCA hands puts it at `q - q*` (humanoid-urdf `tools/urdf6_zero_rebase_urdf5_frame.json`), so captures recorded in URDF_5's frame convert by adding `q*`.
+URDF_6 is the full-body CAD export, and its zero is the calibration pose: the pose of the export itself (humanoid_description 8e0f840), arms down and legs straight. Captures recorded in URDF_5's frame do not carry over; re-record them on URDF_6.
 
 ### Joint coordinates
 
@@ -275,10 +273,10 @@ The robot can be put on flat ground in the home pose. Both named poses are it on
 
 | Pose | Joints | Soles under an upright base | Base height |
 |---|---|---|---|
-| `home` (default) | The CAD's export pose, the calibration pose (`tools/urdf6_zero_rebase.json`, all zero) | Level, both at one height | 0.924 m |
+| `home` (default) | The URDF's zero, which is the CAD's export pose and the calibration pose | Level, both at one height | 0.924 m |
 | `standing` | The description's standing offsets, all 0 on the V1: the same pose | Level | 0.924 m |
 
-The [home pose](glossary.md#home-pose) is the pose the CAD model is exported in: legs straight, arms down, feet flat. humanoid-urdf records, per joint, the export's angle at the calibration pose (`q_star_rad`); `Description.home_pose` is its negative, in URDF radians, now zero on every joint.
+The [home pose](glossary.md#home-pose) is the pose the CAD model is exported in: legs straight, arms down, feet flat. It is the URDF's zero (`poses.home: zero`), because hardware delivers the export at the calibration pose.
 
 Held rigidly (every drive in JVPT at the [baseline gains](glossary.md#baseline-gains), targets at the pose), the home pose stands. The physics test `test_a_robot_holding_the_home_pose_stands` (`tests/test_world.py`) checks that after 1.5 s the base is still upright and above 0.85 m, with the weight on the ground. A rigid pose is still not balance: a push or rough terrain that it cannot absorb makes it fall, and a controller has to prevent that.
 
@@ -351,7 +349,7 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `model.contact_excludes` | `add_contact_excludes` | Body pairs that never collide. |
 | `model.collision_hulls` | `PreparedUrdf.build` | `per_body` (the default) or `per_mesh`; anything else raises. |
 | `model.self_collision.sets`, `.rest`, `.pairs` | `PreparedUrdf.body_sets`, `self_collision_excludes` | Self-collision sets and which pairs of them collide. Unknown joints or set names raise. |
-| `poses.home` | `home_pose` | The home pose: `zero` (the default, the URDF's zero), `{export: <table>}` (the pose a CAD export was made in, from a zero-rebase table) or `{preset: <id>}` (from the robot's `position-presets.yaml`). |
+| `poses.home` | `home_pose` | The home pose: `zero` (the default, the URDF's zero) or `{preset: <id>}` (from the robot's `position-presets.yaml`). |
 | `poses.start` | `start_pose`, `RuntimeHost` | The pose every runtime session starts in: `home` (the default) or `standing`. `serve --pose` overrides it. |
 | `model.ground_friction` | `SimCore`, `robot_scene_cfg` | Friction of the flat ground (1.0) unless the caller overrides it or passes a terrain. See [world.md](world.md). |
 | `devices.encoders.<family>.counts_per_revolution` | `DriveReporting` | Output encoder resolution in counts per revolution: the integer units the drive reports position in. The training plant quantizes measured feedback with it; in the runtime, Controls' fake drive does that. |
@@ -392,11 +390,11 @@ A measured value reaches the simulation through humanoid-urdf. Find where the fa
 | Joint Coulomb friction or viscous damping | `actuators.yaml` `joints.<joint>.friction` / `damping`, with `damping_friction_source` | Solver friction and passive damping at spawn |
 | Back-driving torque of a disabled drive | `actuators.yaml` `families.<family>.backdrive_torque` | Friction of a disabled drive's joint in the runtime host |
 | Rotor inertia | `joints.<joint>.armature` (ankles: `armature_joint`) | Solver armature |
-| A joint's zero or the standing pose | `joints.<joint>.standing_offset_rad` and `standing_reference`; follow `ethrc_v1/AGENTS.md` in humanoid-urdf (never move URDF joint origins for this) | Standing pose, simulated travel, ankle gains and effort limits, mirror center |
-| The CAD (a new export) | humanoid-urdf re-exports it, rebases it to the calibration pose with `tools/match_calibration_zero.py` and records the angles in `tools/urdf6_zero_rebase.json` (see `ethrc_v1/tools/README.md` there) | Geometry, masses, the home pose and its spawn height |
+| A joint's zero or the standing pose | `joints.<joint>.standing_offset_rad` and `standing_reference`; edited by hand in `actuators.yaml` with its source (never move URDF joint origins for this) | Standing pose, simulated travel, ankle gains and effort limits, mirror center |
+| The CAD (a new export) | Hardware delivers it to humanoid-urdf as `URDF := f(CAD)`, already at the calibration pose (see humanoid-urdf's `README.md`) | Geometry, masses, the home pose and its spawn height |
 | Joint travel or a mechanical stop | `joints.<joint>.position_limit` (standing-relative) or `mechanical_stop_calibration_rad` (URDF radians) | Joint range in the USD |
 | Drive gains, peak torque, torque-speed curve | `baseline_position_gains`, `effort`, `families.<family>.torque_speed` | Solver PD, effort limits, torque envelope |
-| A link's mass, inertia or geometry | The link's `<inertial>`, `<origin>` or meshes in the URDF. humanoid-urdf edits the calibration-coordinate sources in `ethrc_v1/tools/calibration_model/` and publishes them with `tools/sync_calibration_model.py` (see `ethrc_v1/tools/README.md` there). humanoid-sim simulates `URDF_6.urdf`, so the change must reach that file. | Mass, inertia and collision shapes in the USD |
+| A link's mass, inertia or geometry | The link's `<inertial>`, `<origin>` or meshes in the URDF, changed in the CAD and delivered again by hardware; humanoid-urdf never patches a delivered URDF. humanoid-sim simulates `URDF_6.urdf`, so the change must reach that file. | Mass, inertia and collision shapes in the USD |
 | Encoder resolution, IMU timing or noise | `profiles/ethrc_v1.yaml` in this repository | Training plant feedback, IMU delivery |
 
 Then:

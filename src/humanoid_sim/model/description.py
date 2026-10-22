@@ -5,8 +5,9 @@ envelopes, linkage geometry) and the named poses the description records. The di
 ``actuators.yaml``; it and the description's git revision are recorded with every output so a result can be traced
 to the exact description.
 
-A robot is a directory of the description root that holds an ``actuators.yaml``; its id is the directory name
-(``ethrc_v1``, ``g1_29dof_rev_1_0``). The ament package is the subdirectory holding the URDF that ``actuators.yaml``
+A robot is a directory of the description root that holds an ``actuators.yaml`` commanding its joints; its id is
+the directory name (``ethrc_v1``, ``g1_29dof_rev_1_0``). A description whose joints are only observed (a
+``lowstate_index`` and no command address: the Go2, which walks under Unitree's controller) is not a robot here. The ament package is the subdirectory holding the URDF that ``actuators.yaml``
 names. Both actuator layouts in humanoid-urdf load: drives named by EtherCAT device with a gain table and crank
 linkages (ETHRC), and one motor per joint with gains on the joint and passive terms on the motor family (Unitree).
 """
@@ -14,7 +15,6 @@ linkages (ETHRC), and one motor per joint with gains on the joint and passive te
 from __future__ import annotations
 
 import importlib.util
-import json
 import math
 import os
 import subprocess
@@ -28,14 +28,22 @@ from humanoid_sim.transmissions.ankle import AnkleTransmission, mirror_right
 
 ACTUATORS_SCHEMA = "ethrc-actuators/v1"
 
-REBASE_SCHEMA = "ethrc-urdf-zero-rebase/v1"
 PRESETS_SCHEMA = "ethrc-position-presets/v1"
 
 
 def robots(root: Path | None = None) -> list[str]:
-    """Robot ids under a description root: its directories that hold an ``actuators.yaml``."""
+    """Robot ids under a description root: its directories whose ``actuators.yaml`` commands its joints."""
     root = Path(root) if root else Description.default_root()
-    return sorted(d.name for d in root.iterdir() if (d / "actuators.yaml").is_file())
+    found = (d for d in root.iterdir() if (d / "actuators.yaml").is_file())
+    return sorted(d.name for d in found if _commanded(d / "actuators.yaml"))
+
+
+def _commanded(actuators: Path) -> bool:
+    """Whether any joint has a command address: an EtherCAT device, a LowCmd slot or a coupled drive."""
+    document = yaml.safe_load(actuators.read_text())
+    if document.get("drives"):
+        return True
+    return any("device" in j or "motor_index" in j for j in document.get("joints", {}).values())
 
 
 @dataclass(frozen=True)
@@ -160,19 +168,6 @@ class Description:
                 effort_peak=float(j["effort"]), velocity=float(j["velocity"]), dynamic_friction=dynamic,
             )
         return out
-
-    def export_pose(self, table: str) -> dict[str, float]:
-        """URDF joint positions (rad) of the pose a CAD export was made in. humanoid-urdf rebases the export so the
-        URDF's zero is the calibration pose and records, in ``table`` (relative to the robot directory), each joint's
-        export angle at the calibration pose (``q_star_rad``); the export pose is its negative."""
-        path = self.robot_dir / table
-        data = json.loads(path.read_text())
-        if data.get("schema") != REBASE_SCHEMA or data.get("coordinates") != "source_urdf_joint_radians":
-            raise ValueError(f"{path}: expected a {REBASE_SCHEMA} table in source URDF joint radians")
-        missing = sorted(set(self.joints) - set(data["joints"]))
-        if missing:
-            raise ValueError(f"{path} lacks joints {missing}")
-        return {n: -float(data["joints"][n]["q_star_rad"]) for n in self.joints}
 
     def preset_pose(self, preset_id: str) -> dict[str, float]:
         """URDF joint positions (rad) of a named preset in the robot's ``position-presets.yaml``; joints the preset

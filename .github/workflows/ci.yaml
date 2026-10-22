@@ -59,6 +59,6 @@ jobs:
               fail=1
             fi
           }
-          check third_party/humanoid-urdf ros2_ws/src/description/URDF_5_description
+          check third_party/humanoid-urdf ros2_ws/src/description/humanoid-urdf
           check third_party/ankle_kinematics ros2_ws/src/drivers/ankle_kinematics
           exit $fail

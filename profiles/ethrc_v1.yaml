@@ -4,9 +4,9 @@
 schema: humanoid-sim-profile/v1
 robot: ethrc_v1
 
-# Named poses (model/poses.py). home: the pose the CAD is exported in, from humanoid-urdf's zero-rebase table.
+# Named poses (model/poses.py). home: the URDF's zero, which is the pose the CAD is exported in.
 poses:
-  home: {export: tools/urdf6_zero_rebase.json}
+  home: zero
   # The standing pose is where Controls' MuJoCo plant starts the robot (ethrc_sim/plant.py with
   # ethrc_ssot/neutral_pose.py). The standing offsets are 0, so it is the home pose: zero, arms down, legs straight.
   start: standing
@@ -14,7 +14,7 @@ poses:
 model:
   # The URDF actuators.yaml names (60.15 kg, ORCA hands fixed at zero), so the description digest covers the
   # simulated URDF. It equals URDF_6_orca_hands.urdf with the hands welded, as Controls builds its MJCF.
-  # Relative to URDF_6_description/.
+  # Relative to v1_description/.
   urdf: urdf/URDF_6.urdf
   # Movable URDF joints without an actuators.yaml entry are welded at zero (Controls --fixed-orca-hands).
   weld_unlisted_joints: true

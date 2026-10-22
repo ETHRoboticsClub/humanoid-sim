@@ -1,7 +1,7 @@
 """Named poses the robot starts in, and the height of an upright base that puts each on the ground.
 
-* ``"home"``: the pose the profile names (:func:`home_pose`). For the ETHRC V1 the pose its CAD is exported in, legs
-  straight and both soles level at one height; for the G1 Unitree's deploy standing pose.
+* ``"home"``: the pose the profile names (:func:`home_pose`). For the ETHRC V1 the URDF's zero, the pose its CAD is
+  exported in: legs straight and both soles level at one height; for the G1 Unitree's deploy standing pose.
 * ``"standing"``: every joint at the description's standing offset. The ETHRC V1's offsets are 0, so for it, as for
   the G1, the URDF's zero; on the V1 that is also the home pose.
 
@@ -21,16 +21,14 @@ POSES = ("home", "standing")
 
 
 def home_pose(desc, profile: dict) -> dict[str, float]:
-    """URDF joint positions of the profile's home pose (``poses.home``): ``zero``, ``{export: <table>}`` (the pose a
-    CAD export was made in) or ``{preset: <preset_id>}`` (from the robot's ``position-presets.yaml``)."""
+    """URDF joint positions of the profile's home pose (``poses.home``): ``zero`` or ``{preset: <preset_id>}`` (from
+    the robot's ``position-presets.yaml``)."""
     spec = profile.get("poses", {}).get("home", "zero")
     if spec == "zero":
         return {n: 0.0 for n in desc.joints}
-    if isinstance(spec, dict) and set(spec) == {"export"}:
-        return desc.export_pose(spec["export"])
     if isinstance(spec, dict) and set(spec) == {"preset"}:
         return desc.preset_pose(spec["preset"])
-    raise ValueError(f"poses.home {spec!r}: zero, {{export: <table>}} or {{preset: <preset_id>}}")
+    raise ValueError(f"poses.home {spec!r}: zero or {{preset: <preset_id>}}")
 
 
 def start_pose(profile: dict) -> str:

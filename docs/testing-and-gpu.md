@@ -108,7 +108,7 @@ humanoid-urdf and ankle_kinematics must be at the same commits as in Controls. T
 
 | Submodule here | Path in Controls |
 |---|---|
-| `third_party/humanoid-urdf` | `ros2_ws/src/description/URDF_5_description` |
+| `third_party/humanoid-urdf` | `ros2_ws/src/description/humanoid-urdf` |
 | `third_party/ankle_kinematics` | `ros2_ws/src/drivers/ankle_kinematics` |
 
 Two repository settings control the job:
@@ -127,7 +127,7 @@ To compare the pins yourself:
 
 ```bash
 git ls-tree HEAD third_party/humanoid-urdf third_party/ankle_kinematics
-gh api "repos/ETHRoboticsClub/ETHRC-Humanoid-Controls/contents/ros2_ws/src/description/URDF_5_description?ref=master" --jq .sha
+gh api "repos/ETHRoboticsClub/ETHRC-Humanoid-Controls/contents/ros2_ws/src/description/humanoid-urdf?ref=master" --jq .sha
 gh api "repos/ETHRoboticsClub/ETHRC-Humanoid-Controls/contents/ros2_ws/src/drivers/ankle_kinematics?ref=master" --jq .sha
 ```
 
