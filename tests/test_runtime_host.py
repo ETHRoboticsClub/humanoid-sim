@@ -19,6 +19,7 @@ from humanoid_sim.model.asset import asset_dir, load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.poses import pose_joint_positions, start_pose
 from humanoid_sim.runtime.abi import plant_abi as abi
+from humanoid_sim.sensors import rigs
 
 REPO = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.physics
@@ -39,6 +40,24 @@ def _wait(cond, timeout_s, what):
     raise AssertionError(f"timed out waiting for {what}")
 
 
+@pytest.mark.parametrize(
+    ("robot", "model"), [("ethrc_v1", "mti-610"), ("g1_29dof_with_hand_rev_1_0", "unitree-g1-imu")]
+)
+def test_the_descriptor_names_the_rigs_imu(robot, model):
+    """A client tells from the descriptor which device its IMU samples come from: the rig's model, where it
+    sits, and the sample period and delivery the rig gives it."""
+    from humanoid_sim.runtime.host import imu_descriptor
+
+    desc, rig_imu = Description.load(robot), rigs.rig(robot).imu
+    imu = json.loads(json.dumps(imu_descriptor(desc)))
+    assert imu["model"] == rig_imu.model == model
+    assert imu["parent"] == desc.imu_mount()[0] and imu["frame"] == rig_imu.frame
+    assert imu["product"]
+    assert imu["sample_period_ns"] == rig_imu.sample_period_ns
+    assert imu["burst_period_ns"] == list(rig_imu.burst_period_ns)
+    assert imu["in_burst_spacing_ns"] == rig_imu.in_burst_spacing_ns
+
+
 @pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
 def test_serve_round_trip(tmp_path, robot):
     pytest.importorskip("isaaclab_newton")
@@ -56,6 +75,7 @@ def test_serve_round_trip(tmp_path, robot):
         drives = desc["drives"]
         n = len(d.drives)
         assert len(drives) == seg.num_drives == n and desc["physics"]["engine"] == "isaaclab/mjwarp"
+        assert (desc["imu"]["model"], desc["imu"]["frame"]) == (rigs.rig(robot).imu.model, "imu_link")
 
         # Hold the pose it starts in at the baseline gains.
         hold = _feedback(seg)["drive"]["position_rad"][:n].copy()

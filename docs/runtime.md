@@ -138,7 +138,7 @@ The header is written when the file is created; afterwards only `state` and `hea
 | Field | Type | Meaning |
 |---|---|---|
 | `magic` | char[8] | `HSIMPLNT`, written last when the file is filled |
-| `abi_major`, `abi_minor` | u16 | 3, 0 |
+| `abi_major`, `abi_minor` | u16 | 3, 1 |
 | `header_bytes` | u32 | 272 |
 | `layout_hash` | u64 | Hash of the layout (see [Validating a segment](#validating-a-segment)) |
 | `segment_bytes` | u64 | 56,128 |
@@ -208,7 +208,7 @@ The descriptor region holds one JSON object (sorted keys, at most 16,384 bytes) 
 | `description` | `robot`, `description_digest` and `description_revision` (the humanoid-urdf checkout's git `HEAD`, or null) |
 | `physics` | `engine` (`isaaclab/mjwarp` or `isaaclab/kamino`), `period_ns`, `integrator` |
 | `units` | One sentence each for `drive`, `joint`, `imu` and `time` |
-| `imu` | `parent`: the link the URDF's `imu_joint` mounts the IMU on |
+| `imu` | `parent`: the link the URDF's `imu_joint` mounts the IMU on. The rig's IMU ([sensors.md](sensors.md#sensor-models-and-the-rig)): `model` (its model name in `src/humanoid_sim/sensors/models.py`, `mti-610` on the V1), `product`, `frame` (the link it sits at), `sample_period_ns`, `burst_period_ns` and `in_burst_spacing_ns`. ABI 3.1 added all but `parent`. |
 | `soles` | The two sole bodies, left then right |
 | `commands` | Command codes to names, `{"1": "reset", ..., "9": "set_fidelity"}` |
 | `faults` | `encoder_freeze`, `imu_spike`, `imu_bias`, `power_sag` |
