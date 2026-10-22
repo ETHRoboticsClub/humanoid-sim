@@ -175,12 +175,13 @@ def test_robots_in_every_env_stand_on_a_box(tmp_path, usd):
     from humanoid_sim.devices.demand import DriveDemand
     from humanoid_sim.model.poses import initial_pose
     from humanoid_sim.train.plant import RobotPlant
-    from humanoid_sim.train.scene import robot_scene_cfg, robot_sim_cfg
+    from humanoid_sim.train.scene import robot_build, robot_scene_cfg, robot_sim_cfg
 
     _, height = initial_pose(usd, "ethrc_v1", "home")
     sim = sim_utils.SimulationContext(robot_sim_cfg(device="cpu"))
-    scene = instantiate(robot_scene_cfg(2, usd, scene=StaticBoxes.load(_controls_file(tmp_path / "p.npz"), SPAWN)))
-    sim.reset()
+    with robot_build():
+        scene = instantiate(robot_scene_cfg(2, usd, scene=StaticBoxes.load(_controls_file(tmp_path / "p.npz"), SPAWN)))
+        sim.reset()
     try:
         robot = scene["robot"]
         assert torch.equal(scene.env_origins, torch.zeros_like(scene.env_origins))
