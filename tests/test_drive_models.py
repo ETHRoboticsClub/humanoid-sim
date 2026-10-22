@@ -22,7 +22,7 @@ def test_the_v1_drives_take_their_delay_from_the_description():
     for model in models.values():
         assert model.delay_measured
         assert model.drive_delay_ns == round(float(desc.family(model.family)["drive_delay_s"]) * 1e9)
-        assert isinstance(model.drive_delay_ns, int) and model.delay_source
+        assert isinstance(model.drive_delay_ns, int)
     # One instance per family.
     assert models["maxonHEJ90L4"] is models["maxonHEJ90R4"]
 

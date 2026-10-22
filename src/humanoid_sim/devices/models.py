@@ -25,7 +25,6 @@ class DriveModel:
         delay = desc.drive_delay_ns(self.family)
         self.delay_measured = delay is not None
         self.drive_delay_ns = delay or 0
-        self.delay_source = desc.family_value(self.family, "drive_delay_source") if delay is not None else None
 
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
