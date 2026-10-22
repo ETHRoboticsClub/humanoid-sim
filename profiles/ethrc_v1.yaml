@@ -61,3 +61,8 @@ devices:
     HEJ50-48-30: {counts_per_revolution: 16384}
 
 solver_gains: baseline        # constant per-episode PD = humanoid-urdf baseline_position_gains (ankles via J at standing)
+
+support:
+  # The torso (Component171_1, below the waist yaw, with the fixed torso frame merged in) carries the shoulders,
+  # by which Controls hangs the V1 (guided_sagittal_scenario.py SHOULDER_ROPES).
+  harness: {body: Component171_1, shoulders: [shoulder_connector_l_1, shoulder_connector_r_1]}

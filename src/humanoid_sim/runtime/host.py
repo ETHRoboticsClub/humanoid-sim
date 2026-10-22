@@ -19,8 +19,15 @@ the session (:meth:`RuntimeHost.run` returns :data:`EXIT_DETACHED`), as do deman
 bank ends its side when this host's heartbeat stops. :meth:`RuntimeHost.new_session` then serves the next client
 on a new segment at the same path, the robot back in its start state, without recompiling the step. Until its
 client attaches, a session holds the robot in its start pose (the profile's ``poses.start`` unless ``pose`` names
-another; the base too when free), so the session starts when the client does, as a plant started with its client
-would: a robot left hanging with idle drives between clients would sag to its rest pose first.
+another), so the session starts when the client does, as a plant started with its client would: a robot left
+hanging with idle drives between clients would sag to its rest pose first.
+
+A suspended session hangs the robot from the lab gantry, its soles ``SUSPENDED_LIFT_M`` above the ground: one cable
+from the harness hook on the torso (the profile's ``support``) to an anchor overhead, carrying the robot's weight at
+its full-weight stretch, so the waist carries the hanging legs as on the lab's gantry. A reset to a named pose puts
+the robot back at that height; every reset rehangs the cable where the robot then is. A rope requested after a pose
+write is checked at once and hung after the next step, since body poses update only in a step. The descriptor's
+``support`` is the support the session started in.
 
 A disabled drive is back-driven through its gearbox: while a 1:1 drive's law is DISABLED, its joint's Coulomb
 friction is the family's ``backdrive_torque`` (the joint's own friction when the family has none) instead of the
@@ -41,6 +48,7 @@ from __future__ import annotations
 import math
 import signal
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,7 +59,7 @@ from humanoid_sim.devices.demand import LAW_FREEZE, DriveDemand
 from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
-from humanoid_sim.world.supports import _quat_rotate
+from humanoid_sim.world.supports import NONE, _quat_rotate
 
 EXIT_DONE = 0  # max steps or a stop request
 EXIT_CLIENT_LOST = 3
@@ -60,6 +68,8 @@ EXIT_DETACHED = 4
 
 KEEPING_UP_WINDOW_NS = NS_PER_S
 SPIN_NS = 100_000  # sleep until this close to a deadline, then spin
+SUSPENDED_LIFT_M = 0.3  # a suspended robot's soles above the ground
+GRAVITY_M_S2 = 9.81  # Isaac Lab's SimulationCfg default; humanoid-sim never sets another
 
 # What the runtime does not model (published in the descriptor).
 FIDELITY_GAPS = [
@@ -170,6 +180,9 @@ class RuntimeHost:
 
         if support not in ("suspended", "free"):
             raise ValueError(f"support {support!r}: start suspended or free (hang a gantry by command)")
+        self._support_cfg = load_profile(robot)["support"]
+        if support == "suspended" and self._support_cfg["harness"] is None:
+            raise ValueError(f"{robot}: its profile names no support.harness to suspend it by")
         if scene is not None and scene.clearance_m() == 0.0:
             raise ValueError(f"spawn point {scene.spawn_m} is inside a box of {scene.file}: the robot starts there")
         self.scene = scene
@@ -181,10 +194,10 @@ class RuntimeHost:
         # The named poses for RESET {"pose": ...}: joint positions (description order) and the upright base height
         # at which the soles touch the ground. Every session starts in start_pose.
         self._poses = {name: initial_pose(usd, robot, name) for name in POSES}
-        height = self._poses[self.start_pose][1] + STANDING_CLEARANCE_M + (0.3 if support == "suspended" else 0.0)
+        height = self._poses[self.start_pose][1] + STANDING_CLEARANCE_M + self._lift_m()
         cuda = str(device).startswith("cuda")
         models = drive_models(Description.load(robot))
-        self.sim = SimCore(usd, device=device, robot=robot, solver=solver, fixed_base=support == "suspended",
+        self.sim = SimCore(usd, device=device, robot=robot, solver=solver,
                            base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
                            compile=compile and cuda, imu_history=abi.IMU_SAMPLES, scene=scene,
                            queue_capacity=_queue_capacity(max(m.drive_delay_ns for m in models.values()),
@@ -234,6 +247,9 @@ class RuntimeHost:
         self._joint_torques: dict[int, tuple[float, float, int | None]] = {}  # joint -> (Nm, Hz, end ns)
         self._joint_torque_active = False
         self._stop = False
+        self._poses_stale = False  # the pose was written since the last step: body poses are the old ones
+        self._rope_due: Callable[[], None] | None = None  # a checked rope, hung after the next step
+        self._harness_hung = False  # the rope hung or due is the harness cable
         self._warm_up()
         self._open_session()
 
@@ -255,6 +271,8 @@ class RuntimeHost:
         # Held until the client attaches.
         self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = self._named_pose(self.start_pose)
         self._write_pose(*self._prescribed)
+        if self.support == "suspended":
+            self._hang_harness()
         self._set_drives_off(np.ones(len(self.drives), dtype=bool))  # no client, no demands
         self._truth_due = True
         self._publish()
@@ -268,23 +286,26 @@ class RuntimeHost:
         self.seg.close()
         for key in list(self._faults):
             self._clear_fault(key)
-        self.sim.gantry.release(torch.tensor([0], device=self.device))
+        self._release_rope()
         self.sim.imu.set_noise(True)
         self._reset({"pose": self.start_pose})
         self._open_session()
 
     def _warm_up(self, steps: int = 3) -> None:
         """Step a few times and put the state back: the first steps compile kernels (seconds on a CPU), which must
-        not happen while a client watches the heartbeat."""
+        not happen while a client watches the heartbeat. The harness cable hangs for the later steps, so the rope's
+        force path compiles too."""
         r = self.robot
         q, qd = self.sim.joint_state()
         q, qd = q.clone(), qd.clone()
         root, vel = r.data.root_link_pose_w.torch.clone(), r.data.root_link_vel_w.torch.clone()
-        for _ in range(steps):
+        for i in range(steps):
             self.sim.step()
-        if self.support != "suspended":
-            r.write_root_pose_to_sim_index(root_pose=root)
-            r.write_root_velocity_to_sim_index(root_velocity=vel)
+            if i == 0 and self._support_cfg["harness"] is not None:
+                self._harness_cable(dry_run=False)
+        self.sim.gantry.release(torch.tensor([0], device=self.device))
+        r.write_root_pose_to_sim_index(root_pose=root)
+        r.write_root_velocity_to_sim_index(root_velocity=vel)
         self.sim.write_joint_state(q, qd)
         env = torch.tensor([0], device=self.device)
         self.sim.plant.reset(env)  # plant time keeps running: the IMU's sample clock depends on it
@@ -382,7 +403,7 @@ class RuntimeHost:
 
     def _base_pose(self, pose) -> torch.Tensor:
         if self.support == "suspended":
-            raise ValueError("the base is welded to the world in a suspended session")
+            raise ValueError("a suspended session hangs at its gantry; reset it to a named pose")
         p = torch.tensor([pose], dtype=torch.float32, device=self.device)
         if p.shape != (1, 7) or not torch.isfinite(p).all() or abs(float(p[0, 3:].norm()) - 1) > 1e-4:
             raise ValueError("base_pose is [x, y, z, qx, qy, qz, qw] with a unit quaternion")
@@ -394,10 +415,43 @@ class RuntimeHost:
         q_desc, height = self._poses[name]
         names = list(self.desc.joints)
         q = torch.tensor([[float(q_desc[names.index(n)]) for n in self.joints]], device=self.device)
-        base = None
-        if self.support != "suspended":
-            base = torch.tensor([[0.0, 0.0, height + STANDING_CLEARANCE_M, 0.0, 0.0, 0.0, 1.0]], device=self.device)
-        return q, base
+        z = height + STANDING_CLEARANCE_M + self._lift_m()
+        return q, torch.tensor([[0.0, 0.0, z, 0.0, 0.0, 0.0, 1.0]], device=self.device)
+
+    def _lift_m(self) -> float:
+        return SUSPENDED_LIFT_M if self.support == "suspended" else 0.0
+
+    def _harness_cable(self, *, dry_run: bool) -> None:
+        """The gantry cable at the harness hook, its unstretched length short of the overhead distance by the
+        stretch that carries the robot's weight, so it holds the robot where it hangs."""
+        cfg = self._support_cfg
+        if cfg["harness"] is None:
+            raise ValueError(f"{self.desc.robot}: its profile names no support.harness to suspend it by")
+        mass = float(self._mass.sum())
+        stiffness = mass * GRAVITY_M_S2 / cfg["full_weight_stretch_m"]
+        self.sim.gantry.hang_cable(
+            torch.tensor([0], device=self.device), self.sim.t_ns, attachment_bodies=cfg["harness"]["shoulders"],
+            overhead_m=cfg["overhead_m"], length_breakpoints_s_m=[(0.0, cfg["overhead_m"] - cfg["full_weight_stretch_m"])],
+            stiffness_n_m=stiffness, damping_n_s_m=2.0 * math.sqrt(stiffness * mass), dry_run=dry_run)
+
+    def _hang(self, hang: Callable[..., None], *, harness: bool) -> None:
+        """Hang a rope (``hang(dry_run=...)``): checked now, hung now while the body poses are current, else right
+        after the next step (a pose written since the last step moved the robot without updating them)."""
+        hang(dry_run=True)
+        self._harness_hung = harness
+        if self._poses_stale:
+            self._rope_due = lambda: hang(dry_run=False)
+        else:
+            self._rope_due = None
+            hang(dry_run=False)
+
+    def _hang_harness(self) -> None:
+        self._hang(self._harness_cable, harness=True)
+
+    def _release_rope(self) -> None:
+        self.sim.gantry.release(torch.tensor([0], device=self.device))
+        self._rope_due = None
+        self._harness_hung = False
 
     def _reset(self, args: dict) -> str:
         if "joint_pos" in args:
@@ -410,8 +464,18 @@ class RuntimeHost:
             q, base = self.sim.joint_state()[0], None
         else:
             raise ValueError(f"unknown pose {args['pose']!r}")
+        roped = self._rope_due is not None or bool(self.sim.gantry.mode[0] != NONE)
+        harness = self._harness_hung or (self.support == "suspended" and (base is not None or not roped))
         self._write_pose(q, base)
         env = torch.tensor([0], device=self.device)
+        # A rope's anchor stays where it was hung: the harness is rehung where the robot now is (a suspended
+        # session's robot goes back on it when the reset moves the base); a client's rope is released when the
+        # reset moved the base away from it.
+        if harness:
+            self._release_rope()
+            self._hang_harness()
+        elif roped and base is not None:
+            self._release_rope()
         self.sim.plant.reset(env)
         self.sim.imu.reset(env, self.sim.t_ns, keep_seq=True)
         self._prescribed = None
@@ -421,6 +485,7 @@ class RuntimeHost:
         return "reset"
 
     def _write_pose(self, q: torch.Tensor, base: torch.Tensor | None) -> None:
+        self._poses_stale = True
         if base is not None:
             self.robot.write_root_pose_to_sim_index(root_pose=base)
             self.robot.write_root_velocity_to_sim_index(root_velocity=torch.zeros(1, 6, device=self.device))
@@ -449,28 +514,32 @@ class RuntimeHost:
         kind = args["support"]
         env = torch.tensor([0], device=self.device)
         if kind == "free":
-            if self.support == "suspended":
-                raise ValueError("a suspended session cannot release its base; restart the host with free support")
-            self.sim.gantry.release(env)
+            self._release_rope()
             return "free"
         if kind == "suspended":
-            if self.support != "suspended":
-                raise ValueError("suspension welds the base at startup; restart the host with suspended support")
+            self._hang_harness()
             return "suspended"
         if kind != "gantry":
             raise ValueError(f"unknown support {kind!r}")
-        if self.support == "suspended":
-            raise ValueError("the base is welded to the world in a suspended session")
+        t_ns, gantry = self.sim.t_ns, self.sim.gantry
         if "cable" in args:
             c = args["cable"]
-            self.sim.gantry.hang_cable(env, self.sim.t_ns, attachment_b=args["attachment_local_m"],
-                                       overhead_m=float(c["overhead_distance_m"]),
-                                       length_breakpoints_s_m=c["length_breakpoints_s_m"],
-                                       stiffness_n_m=float(c["stiffness_n_m"]), damping_n_s_m=float(c["damping_n_s_m"]))
+            attachment = args["attachment_local_m"]
+            overhead, lengths = float(c["overhead_distance_m"]), c["length_breakpoints_s_m"]
+            stiffness, damping = float(c["stiffness_n_m"]), float(c["damping_n_s_m"])
+
+            def hang(*, dry_run):
+                gantry.hang_cable(env, t_ns, attachment_b=attachment, overhead_m=overhead,
+                                  length_breakpoints_s_m=lengths, stiffness_n_m=stiffness, damping_n_s_m=damping,
+                                  dry_run=dry_run)
         else:
-            self.sim.gantry.hang_tension(env, self.sim.t_ns, args["tension_breakpoints_s_n"],
-                                         attachment_b=args.get("attachment_local_m"),
-                                         attachment_bodies=args.get("attachment_bodies"))
+            tensions = args["tension_breakpoints_s_n"]
+            points, bodies = args.get("attachment_local_m"), args.get("attachment_bodies")
+
+            def hang(*, dry_run):
+                gantry.hang_tension(env, t_ns, tensions, attachment_b=points, attachment_bodies=bodies,
+                                    dry_run=dry_run)
+        self._hang(hang, harness=False)
         return "gantry"
 
     def _disturb(self, args: dict) -> str:
@@ -664,6 +733,10 @@ class RuntimeHost:
             self._before_physics()
             self.sim.step()
             self.step_count += 1
+            self._poses_stale = False
+            if self._rope_due is not None:
+                hang, self._rope_due = self._rope_due, None
+                hang()
         self._publish()
 
     def _publish(self) -> None:

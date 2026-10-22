@@ -68,7 +68,7 @@ The segment is a file in shared memory, so `view-runtime` has to run on the same
 
 ![view-runtime while examples/runtime_client.py waves the arms of a suspended robot](images/runtime-live.png)
 
-Here the client waves both arms (drive positions, top right) and pushes the left forearm 8 s after it attached, which shows as the spike at the left of the applied torques. The session ran in real time on an L4. The robot hangs from the default `suspended` support, so the IMU (bottom right) sees only noise.
+Here the client waves both arms (drive positions, top right) and pushes the left forearm 8 s after it attached, which shows as the spike at the left of the applied torques. The session ran in real time on an L4. The robot hangs from the default `suspended` support, so the IMU (bottom right) sees little beyond noise and the slight swing on the cable.
 
 | Path | Content |
 |---|---|

@@ -188,7 +188,7 @@ All joints at their standing offsets. The V1's offsets are 0, so its standing po
 
 ### Support
 
-How the runtime's robot is held: `suspended` (base welded to the world), `free` (on the ground), or `gantry` (hanging from a modeled gantry). Set at startup and changed with `SET_SUPPORT`.
+How the runtime's robot is held: `suspended` (hanging from the lab gantry's harness cable on the torso), `free` (on the ground), or `gantry` (hanging from a modeled gantry). Set at startup and changed with `SET_SUPPORT`.
 
 ### Target shaping
 

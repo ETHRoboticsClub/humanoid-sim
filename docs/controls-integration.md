@@ -82,7 +82,7 @@ python3 scripts/sim/launch.py --headless --hands none --clock wall --bus fake-co
 | `--plant mujoco\|humanoid-sim` | `mujoco` | `humanoid-sim` needs `--bus fake-coe` (or `unitree`, [The G1 lane](#the-g1-lane)) and `--sim-segment`; launch.py refuses it otherwise |
 | `--sim-segment PATH` | none | The file `humanoid-sim serve --segment` publishes |
 | `--sim-wait S` | `180` | How long the plant host waits for the segment to become ready. The launcher waits that long plus 30 s for the plant host to report ready. |
-| `--profile suspended\|free` | `free` | Must match the sim's `--support`. Nothing compares the two, and `serve` defaults to `suspended`. |
+| `--profile suspended\|free` | `free` | Must match the sim's `--support`. Nothing compares the two, and `serve` defaults to `suspended`. The two `suspended` differ: Controls' MuJoCo plant welds the pelvis, humanoid-sim hangs the robot from a harness cable on the torso (see below). |
 | `--clock plant\|wall` | `plant` with `--hands none`, otherwise `wall` | The fake-coe lane runs on the wall clock: pass `--clock wall` with `--hands none`, since launch.py refuses `plant` with `--bus fake-coe` |
 | `--fidelity minimal\|real` | `plant_relay`'s | Selects `plant_relay`'s IMU model; the sim's own IMU runs ideal |
 
@@ -146,7 +146,7 @@ Each scenario starts and stops its own Controls session, so the sim must serve c
 humanoid-sim serve --segment /srv/hsim/plant --support suspended --persist --truth-every 1
 ```
 
-The sim's support must match the scenario's profile. `simulator_command` defaults to `suspended`; a fake-coe scenario that asks for `profile="free"`, such as the opt-in `relative_balance` acceptance test, needs a sim started with `--support free`.
+The sim's support must match the scenario's profile, but the plants hold a suspended robot differently: Controls' MuJoCo plant welds the pelvis to the world, humanoid-sim hangs the robot from a cable on its torso ([world.md](world.md#suspended-the-lab-gantry)), where it can swing and turn slowly. Scenarios that assume a pelvis fixed in space, such as `g1_slam_truth_scenario.py`, hold only on MuJoCo; and gantry requests with `attachment_bodies` pull on the torso here but on the pelvis there. `simulator_command` defaults to `suspended`; a fake-coe scenario that asks for `profile="free"`, such as the opt-in `relative_balance` acceptance test, needs a sim started with `--support free`.
 
 Controls' test runner is `scripts/ci/test-ros.sh [--ros] [--e2e] [--only <ctest regex>]`, run in the `tests` service of `compose.sim.yaml`. That service neither passes the two variables nor mounts the segment's directory, so add both on the command line:
 

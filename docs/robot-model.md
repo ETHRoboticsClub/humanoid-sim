@@ -297,7 +297,7 @@ Training: `robot_scene_cfg(num_envs, usd, pose=...)` (`src/humanoid_sim/train/sc
 
 Runtime: each session starts in the profile's start pose (`poses.start`, or `serve --pose`): `standing` for the ETHRC V1, whose home pose Controls would refuse to arm, and `home` for the G1 (see [runtime.md](runtime.md#the-start-pose)). The mailbox command `RESET` with `{"pose": "home"}` or `{"pose": "standing"}` puts the joints in that pose, and in a free session the base upright at that pose's height (see [runtime.md](runtime.md#reset-1)). The host computes both poses at startup.
 
-The training scene places the base 1 mm (`STANDING_CLEARANCE_M`) above the pose's height, and so does the runtime host in a free session. A suspended session welds the base 0.3 m above the start pose's height, with the feet in the air.
+The training scene places the base 1 mm (`STANDING_CLEARANCE_M`) above the pose's height, and so does the runtime host in a free session. A suspended session hangs the robot 0.3 m above the start pose's height, with the feet in the air.
 
 ## Mirror map
 

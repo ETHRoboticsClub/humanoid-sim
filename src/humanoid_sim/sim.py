@@ -82,7 +82,8 @@ class SimCore:
         self._base_target: tuple[torch.Tensor, torch.Tensor] | None = None
         from humanoid_sim.world.supports import Gantry
 
-        self.gantry = Gantry(self.backend.robot)
+        harness = self.profile["support"]["harness"]
+        self.gantry = Gantry(self.backend.robot, harness=None if harness is None else harness["body"])
         self.t_ns = 0
         self.feedback: DriveFeedback | None = None
         self._state_written = True  # joint state changed outside a step: the plant's post-step state is stale
