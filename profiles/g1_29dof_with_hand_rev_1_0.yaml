@@ -11,14 +11,17 @@ model:
   sole:
     joints: {l: left_ankle_roll_joint, r: right_ankle_roll_joint}
     fit: bounds
+  # Arms collide with legs and with each other, legs with each other, so the hands stop at the hips as on the
+  # robot. Within a set and against the trunk nothing collides: the URDF's hulls of neighbouring links overlap at
+  # rest. A set is every body at or below its joint; pelvis, waist and torso are `rest`.
+  self_collision:
+    sets: {arm_l: left_shoulder_pitch_joint, arm_r: right_shoulder_pitch_joint,
+           leg_l: left_hip_pitch_joint, leg_r: right_hip_pitch_joint}
+    rest: trunk
+    pairs: [[arm_l, leg_l], [arm_r, leg_r], [arm_l, leg_r], [arm_r, leg_l], [arm_l, arm_r], [leg_l, leg_r]]
 
 poses:
   home: {preset: standing-init-v1}
-
-physics:
-  # Self-collision off, as Isaac Lab's own G1 articulations have it (isaaclab_assets robots/unitree.py,
-  # G1_29DOF_CFG: enabled_self_collisions=False). The URDF's convex hulls of neighbouring links overlap at rest.
-  self_collision: false
 
 support:
   # The lab's straps hold the torso at the shoulders (Controls ethrc_sim unitree_plant.py HARNESS_BODY, SHOULDER_LINKS).

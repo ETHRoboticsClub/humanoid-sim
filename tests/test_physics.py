@@ -51,6 +51,93 @@ def test_home_pose_stands_its_lowest_point_on_the_ground(robot):
     assert height == pytest.approx(-lowest_collision_z(kin, kin.body_poses(q.reshape(1, -1))))
 
 
+def _body_shapes(model) -> dict[str, list[int]]:
+    """Body name → the indices of its colliding shapes, for a Newton model holding one robot."""
+    import newton
+
+    owner, flags = model.shape_body.numpy(), model.shape_flags.numpy()
+    out = {}
+    for s in range(model.shape_count):
+        if owner[s] >= 0 and flags[s] & int(newton.ShapeFlags.COLLIDE_SHAPES):
+            out.setdefault(model.body_label[owner[s]].rsplit("/", 1)[-1], []).append(s)
+    return out
+
+
+@pytest.mark.parametrize("robot", [r for r in PHYSICS_ROBOTS if load_profile(r)["physics"]["self_collision"]])
+def test_home_and_start_poses_have_no_self_contact(robot):
+    """In the home pose and the runtime start pose no two of the robot's shapes that the asset lets collide
+    interpenetrate, so a reset into either starts without contact forces between its own bodies."""
+    pytest.importorskip("newton")
+    pytest.importorskip("pxr")
+    import newton
+    import warp as wp
+
+    from humanoid_sim.model.kinematics import RobotKinematics
+    from humanoid_sim.model.poses import pose_joint_positions, start_pose
+
+    desc, profile = Description.load(robot), load_profile(robot)
+    joints = list(desc.joints)
+    kin = RobotKinematics(built_usd(robot), joints)
+    body = {s: name for name, shapes in _body_shapes(kin.model).items() for s in shapes}
+    pipeline = newton.CollisionPipeline(kin.model)
+    contacts = pipeline.contacts()
+    distance = wp.zeros(contacts.rigid_contact_max, dtype=float, device=kin.model.device)
+    for pose in {"home", start_pose(profile)}:
+        q = pose_joint_positions(desc, profile, pose)
+        kin.body_poses(torch.tensor([[q[n] for n in joints]], dtype=torch.float64))
+        pipeline.collide(kin.state, contacts)
+        newton.eval_rigid_contact_kinematics(kin.model, kin.state, contacts, out_distance=distance)
+        n = int(contacts.rigid_contact_count.numpy()[0])
+        pairs = zip(contacts.rigid_contact_shape0.numpy()[:n], contacts.rigid_contact_shape1.numpy()[:n],
+                    distance.numpy()[:n], strict=True)
+        touching = {(body[a], body[b]) for a, b, d in pairs if d < 0}
+        assert not touching, (pose, touching)
+
+
+@pytest.mark.physics
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+def test_newton_model_filters_what_the_profile_excludes(robot):
+    """The Newton model of the scene filters, with the profile's ``physics.self_collision`` on, exactly the asset's
+    filtered pairs (``model.contact_excludes`` and the pairs the self-collision sets exclude) and each joint's parent
+    and child; with it off, every pair of the robot's bodies. Bodies of two sets the profile pairs collide."""
+    pytest.importorskip("isaaclab_newton")
+    from isaaclab_newton.physics import NewtonManager
+
+    from humanoid_sim.model.urdf import PreparedUrdf
+    from humanoid_sim.sim import SimCore
+
+    desc, profile = Description.load(robot), load_profile(robot)
+    sim = SimCore(built_usd(robot), device="cpu", robot=robot)
+    try:
+        model = NewtonManager.get_model()
+        shapes = _body_shapes(model)
+        filters = model.shape_collision_filter_pairs
+        filtered = {frozenset((a, b)): {(x, y) in filters or (y, x) in filters for x in shapes[a] for y in shapes[b]}
+                    for i, a in enumerate(shapes) for b in list(shapes)[i + 1:]}
+    finally:
+        sim.close()
+
+    prepared = PreparedUrdf(desc, profile).build()
+    contact_excludes = {frozenset(pair) for pair in profile["model"].get("contact_excludes", [])}
+    if profile["physics"]["self_collision"]:
+        excluded = contact_excludes | {frozenset(pair) for pair in prepared.self_collision_excludes()}
+        excluded |= {frozenset((b, parent)) for b, (_, parent) in prepared.body_tree().items() if parent}
+    else:
+        excluded = set(filtered)
+    for pair, flags in filtered.items():
+        assert flags == {pair in excluded}, sorted(pair)
+
+    cfg = profile["model"].get("self_collision")
+    if profile["physics"]["self_collision"] and cfg is not None:
+        sets = prepared.body_sets()
+        paired = None if cfg["pairs"] == "all" else {frozenset(p) for p in cfg["pairs"]}
+        crossing = [pair for pair in filtered if pair not in contact_excludes
+                    and len(named := {sets[b] for b in pair}) == 2 and named <= set(cfg["sets"])
+                    and (paired is None or named in paired)]
+        assert crossing
+        assert all(filtered[pair] == {False} for pair in crossing)
+
+
 @pytest.mark.physics
 @pytest.mark.parametrize("solver", ["mjwarp", "kamino"])
 @pytest.mark.parametrize("robot", PHYSICS_ROBOTS)

@@ -133,7 +133,7 @@ The latest `e2e` run, on an NVIDIA L40S on 2026-10-20 (`sky launch --gpus L40S:1
 | `sim_seconds_per_wall_second` | 1,260 | 1,691 |
 | `env_steps_per_s` | 315,005 | 422,708 |
 | `wall_s` | 6.50 s | 4.84 s |
-| `self_collision` | `true` | `false` (its profile) |
+| `self_collision` | `true` | `false` (its profile at the time) |
 | `host_syncs` | `none (torch sync debug mode)` | `none (torch sync debug mode)` |
 | `checksum_finite` | `true` | `true` |
 | `fraction_envs_up` | 0.95 | 0.63 |
@@ -145,7 +145,7 @@ What the runtime figures mean for a client:
 
 What the training figures mean for a training run:
 
-- 1,260 simulated seconds per wall second for the V1, over 4096 robots, is about 1,260 hours of robot experience per hour of wall time; each robot advances at about 0.3 times real time. The G1's 1,691 is a third more: no self-collision (its profile), fewer contacts (four small spheres per foot) and a lighter model, against 7 more joints.
+- 1,260 simulated seconds per wall second for the V1, over 4096 robots, is about 1,260 hours of robot experience per hour of wall time; each robot advances at about 0.3 times real time. The G1's 1,691 is a third more: no self-collision (its profile at the time; it now collides arms with legs), fewer contacts (four small spheres per foot) and a lighter model, against 7 more joints.
 - 315,005 physics steps of 4 ms per second across all V1 robots is about 63,000 policy steps per second at a 20 ms policy period; for the G1, about 85,000.
 - No host syncs: the timed loop never made the CPU wait for the GPU (torch's sync debug mode was set to `error`), so Python round trips do not limit the rate.
 - 5% of the V1 robots were down at the end. The randomization includes encoder offsets of up to 0.14 rad on the left ankle cranks, so some robots hold their feet at the wrong angle and tip over; a fallen robot is reset only when its turn in the 1-in-50 resets comes. 37% of the G1s were down: they tip over within about 1.3 s of a reset ([training.md](training.md#the-initial-pose)), so the G1 figure times a mix of standing and fallen robots.
