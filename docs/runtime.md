@@ -139,7 +139,7 @@ The header is written when the file is created; afterwards only `state` and `hea
 | Field | Type | Meaning |
 |---|---|---|
 | `magic` | char[8] | `HSIMPLNT`, written last when the file is filled |
-| `abi_major`, `abi_minor` | u16 | 3, 2 |
+| `abi_major`, `abi_minor` | u16 | 3, 3 |
 | `header_bytes` | u32 | 272 |
 | `layout_hash` | u64 | Hash of the layout (see [Validating a segment](#validating-a-segment)) |
 | `segment_bytes` | u64 | 56,256 |
@@ -206,6 +206,7 @@ The descriptor region holds one JSON object (sorted keys, at most 16,384 bytes) 
 | `joints` | The joint names, in the order of the truth's joint arrays |
 | `support` | `suspended` or `free`: the support the session started in |
 | `bodies` | The articulation's body names, for `APPLY_DISTURBANCE` and gantry `attachment_bodies` |
+| `harness` | The profile's `support.harness`: `{"body", "shoulders": [l, r]}`, the body a suspended robot hangs by and the two bodies whose midpoint is the hook, or null. ABI 3.3 added it. |
 | `description` | `robot`, `description_digest` and `description_revision` (the humanoid-urdf checkout's git `HEAD`, or null) |
 | `physics` | `engine` (`isaaclab/mjwarp` or `isaaclab/kamino`), `period_ns`, `integrator` |
 | `units` | One sentence each for `drive`, `joint`, `imu` and `time` |
@@ -381,10 +382,10 @@ The home pose is the one to use when a free robot should stand. Both poses are c
 | `{"support": "suspended"}` | any | The harness cable, hung where the robot is now (not turned under the hook): `suspended` |
 | `{"support": "gantry", "tension_breakpoints_s_n": [[t, N], ...], "attachment_local_m": [x, y, z]}` | any | A vertical tension program on one base-frame point, or on two with `[[x, y, z], [x, y, z]]`: `gantry` |
 | `{"support": "gantry", "tension_breakpoints_s_n": [[t, N], ...], "attachment_bodies": [name, ...]}` | any | The same, on one or two points of the harness body (the profile's `support.harness.body`) where the named bodies are now: `gantry` |
-| `{"support": "gantry", "cable": {"overhead_distance_m": m, "length_breakpoints_s_m": [[t, m], ...], "stiffness_n_m": k, "damping_n_s_m": c}, "attachment_local_m": [x, y, z]}` | any | A slack cable: `gantry` |
+| `{"support": "gantry", "cable": {"overhead_distance_m": m, "length_breakpoints_s_m": [[t, m], ...], "stiffness_n_m": k, "damping_n_s_m": c}, "attachment_local_m": [x, y, z]}` | any | A slack cable from one base-frame point, or, with `attachment_bodies`, from the midpoint of those bodies on the harness body (the harness hook): `gantry` |
 | `{"support": "gantry", "hoist": {"stiffness_n_m": k, "damping_n_s_m": c, "swing_damping_n_s_m": s}, "attachment_local_m": [x, y, z]}` | any, with `--gantry` | A slack cable from the crane's hook to one base-frame point (or, with `attachment_bodies`, the midpoint of those bodies on the harness body): its top follows the trolley and its unstretched length the hoist (`swing_damping_n_s_m` defaults to 0): `gantry` |
 
-A tension program has 1 to 8 breakpoints, at non-negative increasing times counted from the command, linear between them and held beyond both ends, with non-negative tensions. The force is vertical and split evenly over the one or two points. Either `attachment_local_m` or `attachment_bodies` is required; when both are given, the bodies are used. A cable runs from one base-frame point to an anchor `overhead_distance_m` above where that point is when the cable is hung. Its unstretched length follows the program (positive lengths), and it pulls along the rope only when stretched: `T = max(0, k · extension + c · extension rate)`, with `k` positive and `c` non-negative. Hanging a rope replaces the previous one; a rejected rope leaves the previous one hanging. A rope requested after a pose write (a reset, the session's start) is checked at once and hangs after the next step. A reset that moves the base releases a client's rope, whose anchor stays where it was hung, and rehangs the harness cable. [world.md](world.md) describes both.
+A tension program has 1 to 8 breakpoints, at non-negative increasing times counted from the command, linear between them and held beyond both ends, with non-negative tensions. The force is vertical and split evenly over the one or two points. Either `attachment_local_m` or `attachment_bodies` is required; when both are given, the bodies are used. A cable runs from one base-frame point (or the harness hook) to an anchor `overhead_distance_m` above where that point is when the cable is hung. Its unstretched length follows the program (positive lengths), and it pulls along the rope only when stretched: `T = max(0, k · extension + c · extension rate)`, with `k` positive and `c` non-negative. Hanging a rope replaces the previous one; a rejected rope leaves the previous one hanging. A rope requested after a pose write (a reset, the session's start) is checked at once and hangs after the next step. A reset that moves the base releases a client's rope, whose anchor stays where it was hung, and rehangs the harness cable. [world.md](world.md) describes both.
 
 ### APPLY_DISTURBANCE (5)
 
@@ -587,7 +588,7 @@ static int hsim_read(const void *region, void *out, size_t size) {
 
 ## Device and performance
 
-Run the host on CUDA. With its step captured as CUDA graphs and compiled, one unpaced step took 1.5 ms on average on an L4 (2.7 times faster than real time) with a new demand every step; [benchmarks.md](benchmarks.md) has the full figures. Device-to-host copies go into pinned buffers and the host thread sleeps on a blocking CUDA event while it waits, and it spins only for the last 100 µs before each deadline: the host shares its machine with Controls. Each truth publish waits for one more device-to-host copy, so `--truth-every 1` costs more per step than the default.
+Run the host on CUDA. With its step captured as CUDA graphs and compiled, one unpaced step took 1.5 ms on average on an L4 (2.7 times faster than real time) with a new demand every step; [benchmarks.md](benchmarks.md) has the full figures. Device-to-host copies go into pinned buffers and the host thread sleeps on a blocking CUDA event while it waits, and it spins only for the last 100 µs before each deadline: the host shares its machine with Controls. A step that publishes the truth brings feedback and truth to the host in one copy, but gathering the truth still costs time: on an L40S the free G1's step takes 1.6 ms with `--truth-every 1` and 1.15 ms with the default.
 
 `humanoid-sim bench --runtime --device cuda:0` measures the host's whole step, unpaced, with a client writing a demand before every step. It reports `ms_per_step`, `ms_p99`, `ms_max`, `steps_over_period`, `real_time_factor` and whether CUDA graphs were used. [benchmarks.md](benchmarks.md) has the figures.
 

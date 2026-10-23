@@ -345,7 +345,8 @@ class RuntimeHost:
     def _descriptor(self, support: str) -> dict:
         return {
             "robot": self.desc.robot, "drives": self.drives, "joints": self.joints, "support": support,
-            "bodies": list(self.robot.body_names), "description": self.desc.identity(),
+            "bodies": list(self.robot.body_names), "harness": self._support_cfg["harness"],
+            "description": self.desc.identity(),
             "physics": {"engine": f"isaaclab/{self.sim.solver}", "period_ns": self.period_ns,
                         "integrator": self.sim.integrator},
             "units": {"drive": "physical drive-output frame (crank angle for ankle cranks), SI",
@@ -616,12 +617,13 @@ class RuntimeHost:
                                   dry_run=dry_run)
         elif "cable" in args:
             c = args["cable"]
-            attachment = args["attachment_local_m"]
+            bodies = args.get("attachment_bodies")
+            attachment = None if bodies else args["attachment_local_m"]
             overhead, lengths = float(c["overhead_distance_m"]), c["length_breakpoints_s_m"]
             stiffness, damping = float(c["stiffness_n_m"]), float(c["damping_n_s_m"])
 
             def hang(*, dry_run):
-                gantry.hang_cable(env, t_ns, attachment_b=attachment, overhead_m=overhead,
+                gantry.hang_cable(env, t_ns, attachment_b=attachment, attachment_bodies=bodies, overhead_m=overhead,
                                   length_breakpoints_s_m=lengths, stiffness_n_m=stiffness, damping_n_s_m=damping,
                                   dry_run=dry_run)
         else:

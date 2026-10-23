@@ -63,7 +63,7 @@ from pathlib import Path
 import numpy as np
 
 ABI_MAJOR = 3
-ABI_MINOR = 2
+ABI_MINOR = 3
 MAGIC = b"HSIMPLNT"
 ALIGN = 64
 
@@ -85,7 +85,7 @@ STATE_CREATING, STATE_READY, STATE_ENDED = 0, 1, 2
 # PAUSE, RESUME    {}: while paused physics stops and feedback keeps being written
 # SET_SUPPORT      {"support": "free"}; {"support": "gantry", "tension_breakpoints_s_n": [[s, N], ...],
 #                  "attachment_local_m": [x,y,z] | null, "attachment_bodies": [name, ...] | null}; or a cable,
-#                  {"support": "gantry", "attachment_local_m": [x,y,z], "cable": {"overhead_distance_m": m,
+#                  {"support": "gantry", "attachment_local_m": [x,y,z] | "attachment_bodies": [name, ...], "cable": {"overhead_distance_m": m,
 #                  "length_breakpoints_s_m": [[s, m], ...], "stiffness_n_m": k, "damping_n_s_m": c}}; or a rope
 #                  from the gantry crane's hook, {"support": "gantry", "attachment_local_m": [x,y,z], "hoist":
 #                  {"stiffness_n_m": k, "damping_n_s_m": c, "swing_damping_n_s_m": s}}
