@@ -6,8 +6,10 @@ demands or commands, so it can watch a session a client such as Controls is driv
 ``sim_time_ns``. Entity paths: ``/world/robot/<body>``, ``/world/scene/{scan,floor,boxes}`` (the host's scan, or its
 static boxes, when its scene files are readable here with the same digests), ``/sim/0/drives/<drive>/{position,velocity,applied_torque,
 demanded_torque}``, ``/sim/0/imu/{gyro,specific_force}/{x,y,z}``, ``/sim/0/soles/<side>/normal_force``,
-``/sim/0/base/height``, ``/sim/0/gantry/tension``, ``/sim/0/host/{late_steps,keeping_up}``. A cable is drawn as
-``/world/gantry/rope``; with a crane, ``/world/gantry/{travel,bridge,trolley}`` and
+``/sim/0/base/height``, ``/sim/0/host/{late_steps,keeping_up}``. A cable is drawn as ``/world/gantry/{rope,anchor,
+plumb}`` with a status label at ``/world/gantry/status`` ("no gantry" when none hangs); its tension, length and share
+of the robot's weight are ``/sim/0/gantry/{tension_n,tension_share,length_m}`` (see
+:mod:`humanoid_sim.signals.gantry_view`). With a crane, ``/world/gantry/{travel,bridge,trolley}`` and
 ``/sim/0/gantry/{position,command}/{x,y,z}``.
 """
 
@@ -20,9 +22,11 @@ import numpy as np
 import torch
 
 from humanoid_sim.runtime.abi import plant_abi as abi
+from humanoid_sim.signals import gantry_view as gv
 from humanoid_sim.signals.log import SignalLog
 from humanoid_sim.signals.robot import RobotMeshes
 from humanoid_sim.signals.scene import log_scene
+from humanoid_sim.world.supports import GRAVITY_M_S2
 
 ROBOT_COLOR = (190, 190, 200, 255)
 
@@ -113,9 +117,7 @@ class RuntimeView:
             for name in ("position", "velocity", "applied_torque", "demanded_torque"):
                 rr.log(f"/sim/0/drives/{d}/{name}", rr.SeriesLines(names=[d]), static=True)
         if self.rig is not None:
-            outline = self.rig.travel_outline_w()
-            rr.log("/world/gantry/travel", rr.LineStrips3D([np.vstack([outline, outline[:1]])],
-                                                           colors=[(120, 120, 120)]), static=True)
+            gv.log_travel(rr, "/world/gantry/travel", self.rig)
         for group in ("gyro", "specific_force"):
             for axis, color in zip("xyz", ((220, 80, 80), (80, 180, 80), (80, 120, 220))):
                 rr.log(f"/sim/0/imu/{group}/{axis}", rr.SeriesLines(names=[axis], colors=[color]), static=True)
@@ -160,7 +162,6 @@ class RuntimeView:
             for b, name in enumerate(self.meshes.body_names):
                 rr.log(f"/world/robot/{name}", rr.Transform3D(translation=poses[b, :3], quaternion=poses[b, 3:]))
             rr.log("/sim/0/base/height", rr.Scalars(float(t["base_position_m"][2])))
-            rr.log("/sim/0/gantry/tension", rr.Scalars(float(t["gantry_tension_n"])))
             self._gantry(t)
             for k, side in enumerate(("left", "right")[: len(self.soles)]):
                 rr.log(f"/sim/0/soles/{side}/normal_force", rr.Scalars(float(t["sole"]["normal_force_n"][k])))
@@ -186,21 +187,21 @@ class RuntimeView:
         return True
 
     def _gantry(self, t) -> None:
-        """The rope while a cable hangs, and the crane where it is."""
+        """The rope while a cable hangs (coloured by what it carries, with its status), a "no gantry" label
+        otherwise, and the crane where it is. The truth does not carry the cable's unstretched length, so the
+        rest length is not drawn."""
         rr = self.rr
         top, harness = np.asarray(t["gantry_top_m"]), np.asarray(t["gantry_harness_m"])
-        if np.isfinite(top).all() and np.isfinite(harness).all():
-            rr.log("/world/gantry/rope", rr.LineStrips3D([[top, harness]], colors=[(230, 160, 40)], radii=0.006))
+        tension, base = float(t["gantry_tension_n"]), np.asarray(t["base_position_m"])
+        if (np.isfinite(top).all() and np.isfinite(harness).all()) or tension > 0.0:
+            gv.log_env(rr, "/world/gantry", "/sim/0/gantry", top=top, hook=harness, rest_m=float("nan"),
+                       tension_n=tension, weight_n=float(t["mass_kg"]) * GRAVITY_M_S2, base_w=base)
         else:
-            rr.log("/world/gantry/rope", rr.Clear(recursive=False))
+            gv.log_no_gantry(rr, "/world/gantry", base)
         position = np.asarray(t["gantry_position_m"])
         if self.rig is None or not np.isfinite(position).all():
             return
-        x, y = position[:2]
-        y0, y1 = self.rig.travel_y_m
-        rr.log("/world/gantry/bridge", rr.LineStrips3D([[self.rig.to_world((x, y0, 0)), self.rig.to_world((x, y1, 0))]],
-                                                       colors=[(90, 90, 200)], radii=0.03))
-        rr.log("/world/gantry/trolley", rr.Points3D([self.rig.to_world((x, y, 0))], radii=0.08, colors=[(90, 90, 200)]))
+        gv.log_crane(rr, "/world/gantry", self.rig, position)
         for name, value in (("position", position), ("command", np.asarray(t["gantry_command_m"]))):
             for axis, v in zip("xyz", value):
                 rr.log(f"/sim/0/gantry/{name}/{axis}", rr.Scalars(float(v)))

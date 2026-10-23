@@ -253,6 +253,7 @@ A slack cable (`hang_cable`) runs from one harness point (base-frame `attachment
 | `hang_cables(env_ids, t_ns, *, point_b, anchor_w, times_ns, lengths_m, stiffness_n_m, damping_n_s_m, swing_damping_n_s_m, harness=False)` | `[n, 3]` anchors, `[n, K]` programs (K ≤ 8), `[n]` gains | One slack cable per env from `t_ns`, for resets: no host-side checks, and anchors given since body poses are stale right after a reset |
 | `apply(t_ns)` | step start, plant time | Adds this step's rope forces |
 | `tension_n`, `distance_m` | `[E]` | Total rope force on the last step; cable length from harness point to anchor |
+| `rest_length_m(t_ns)` | `[E]` | The cables' unstretched length at `t_ns` (the hoist's for a hoist rope), NaN without a cable; for viewers |
 
 Program times are relative to the hang time and must be non-negative and increasing. A hang checks everything before it changes anything, so a rejected rope leaves the previous one; `dry_run=True` only checks. The forces go through the articulation's instantaneous wrench composer, which Isaac Lab clears after every write to the simulation, so `apply` has to run before every physics step; it adds to any other forces on that body. `SimCore` calls it in every step, so the runtime and any script built on `SimCore` only hang and release ropes. The `replay` command never hangs one.
 
@@ -276,6 +277,8 @@ hang = EventTermCfg(func=hang_from_gantry, mode="reset")  # after the event that
 ```
 
 Body poses are stale right after a reset writes the state, so a rope hung from a reset event should not take its geometry from them: `hang_cables` takes the anchors, computed from the reset state, for example from the hook's position at the start pose by host kinematics (`RobotKinematics`).
+
+Recordings draw the rope, its anchor and its load: see [The gantry](visualization.md#the-gantry).
 
 The tests exercise the gantry through `SimCore` (`tests/test_supports.py`): a tension equal to the robot's weight holds its centre of mass in place, and a cable settles at its unstretched length plus weight over stiffness.
 

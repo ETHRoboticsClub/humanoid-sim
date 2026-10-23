@@ -105,6 +105,17 @@ def train_signals_blueprint():
     ), time_panel="collapsed")
 
 
+def gantry_blueprint(envs: int):
+    return panels(rrb.Horizontal(
+        rrb.Spatial3DView(name="Training scene with gantry ropes", origin="/world",
+                          eye_controls=eye((4.2, -4.4, 1.9), (0.0, -3.4, 1.3)),
+                          background=rrb.Background(color=(232, 236, 240))),
+        rrb.TimeSeriesView(name="Rope tension over the robot's weight, envs 0 to 3", origin="/sim",
+                           contents=[f"/sim/{e}/gantry/tension_share" for e in range(envs)]),
+        column_shares=[3, 2],
+    ), time_panel="collapsed")
+
+
 ARM = ["maxonHEJ70AL1", "maxonHEJ70AR1", "maxonHEJ50AL4", "maxonHEJ50AR4"]  # shoulder and elbow flexion, l and r
 SHOTS = [
     Shot("scene-hero", "train_scene_6.rrd", 1.0,
@@ -113,6 +124,8 @@ SHOTS = [
     Shot("scene-row", "train_scene_24.rrd", 2.2,
          scene_blueprint((7.0, -33.0, 4.0), (0.0, -18.0, 0.4)), size="1800x800",
          note="python examples/train_scene.py --num-envs 24 --seconds 8 --rrd outputs/shots/train_scene_24.rrd"),
+    Shot("scene-gantry", "train_scene_gantry.rrd", 3.0, gantry_blueprint(4), size="1800x800",
+         note="python examples/train_scene.py --num-envs 4 --seconds 4 --gantry --rrd outputs/shots/train_scene_gantry.rrd"),
     Shot("scene-signals", "train_scene_6.rrd", 2.6, train_signals_blueprint(),
          note="as scene-hero"),
     Shot("world-hangar", "hangar_v1.rrd", 4.0,

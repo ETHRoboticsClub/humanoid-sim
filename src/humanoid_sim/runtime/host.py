@@ -64,7 +64,7 @@ from humanoid_sim.devices.demand import LAW_FREEZE, DriveDemand
 from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
-from humanoid_sim.world.supports import NONE, _quat_rotate, level_under
+from humanoid_sim.world.supports import GRAVITY_M_S2, NONE, _quat_rotate, level_under
 from humanoid_sim.world.trolley import GantryRig
 
 EXIT_DONE = 0  # max steps or a stop request
@@ -75,7 +75,6 @@ EXIT_DETACHED = 4
 KEEPING_UP_WINDOW_NS = NS_PER_S
 SPIN_NS = 100_000  # sleep until this close to a deadline, then spin
 SUSPENDED_LIFT_M = 0.3  # a suspended robot's soles above the ground
-GRAVITY_M_S2 = 9.81  # Isaac Lab's SimulationCfg default; humanoid-sim never sets another
 
 # What the runtime does not model (published in the descriptor).
 FIDELITY_GAPS = [

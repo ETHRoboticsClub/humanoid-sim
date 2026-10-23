@@ -37,6 +37,7 @@ import torch
 from humanoid_sim.timing.clock import NS_PER_S
 
 NONE, TENSION, CABLE, HOIST = 0, 1, 2, 3
+GRAVITY_M_S2 = 9.81  # Isaac Lab's SimulationCfg default; humanoid-sim never sets another
 
 
 def interp_program(t_ns: torch.Tensor, times_ns: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
@@ -290,6 +291,15 @@ class Gantry:
         self.swing_damping[env_ids] = swing_damping_n_s_m
         self.mode[env_ids] = HOIST
         self.active = True
+
+    def rest_length_m(self, t_ns: int) -> torch.Tensor:
+        """The cables' unstretched length at ``t_ns`` ``[E]`` (the hoist's for a hoist rope); NaN without a cable.
+        For viewers: it reads the program and the crane, and :meth:`apply` does not call it."""
+        length = interp_program(torch.full((self.num_envs,), t_ns, dtype=torch.int64, device=self.device),
+                                self.program_ns, self.program)
+        if self.trolley is not None:
+            length = torch.where(self.mode == HOIST, self.trolley.length_m, length)
+        return torch.where((self.mode == CABLE) | (self.mode == HOIST), length, float("nan"))
 
     def release(self, env_ids: torch.Tensor) -> None:
         self.mode.index_fill_(0, env_ids, NONE)
