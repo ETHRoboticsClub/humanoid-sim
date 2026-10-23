@@ -5,10 +5,14 @@ attachment bodies pull on the harness body (below):
 
 * **tension program**: a vertical force, linear in time between breakpoints and held beyond both ends, split
   evenly over attachment points (one harness, or a rope per shoulder);
-* **slack cable**: one rope from a harness point to a world anchor ``overhead_m`` above where that point was
-  when the cable was hung. It pulls along the rope only beyond its unstretched length (also a program in time):
-  ``T = max(0, k · extension + c · extension rate)``; while taut, ``swing_damping`` resists the harness point's
-  motion across the rope (the wire's friction at its hook), so a swing dies away;
+* **slack cable**: a rope from the harness to a world anchor (the hook) ``overhead_m`` above where the harness
+  point was when the cable was hung. It pulls along the rope only beyond its unstretched length (also a program in
+  time): ``T = max(0, k · extension + c · extension rate)``; while taut, ``swing_damping`` resists the harness
+  point's motion across the rope (the wire's friction at its hook), so a swing dies away. With two attachment
+  points (both shoulders) the hook carries a spreader bar and each point hangs on its own strap from the bar,
+  the bar's ends as far apart as the points were when hung (or ``spreader_width_m``); the bar keeps its heading,
+  so the straps resist twisting as a bifilar pendulum does. Each strap takes ``1 / P`` of the stiffness and both
+  dampings, so the rope's vertical stiffness and its swing are those of one rope;
 * **hoist**: the same cable hung from a crane's hook (:class:`~humanoid_sim.world.trolley.Trolley`, mounted with
   :meth:`Gantry.mount`): its top moves with the bridge and trolley and its unstretched length with the hoist, and
   the cable's damping acts on its stretch rate, relative to the moving top. Modeled, not in Controls' gantry.
@@ -37,6 +41,7 @@ import torch
 from humanoid_sim.timing.clock import NS_PER_S
 
 NONE, TENSION, CABLE, HOIST = 0, 1, 2, 3
+GRAVITY_M_S2 = 9.81  # Isaac Lab's SimulationCfg default; humanoid-sim never sets another
 
 
 def interp_program(t_ns: torch.Tensor, times_ns: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
@@ -93,20 +98,23 @@ class Gantry:
         self._body = torch.tensor([self.body_id], device=dev)
         self._all = torch.arange(e, device=dev)
         self.mode = torch.zeros(e, dtype=torch.int64, device=dev)
-        # Rope points in the rope body's frame [E, P, 3]; `points` of them used per env (tension), point 0 (cable).
+        # Rope points in the rope body's frame [E, P, 3], `num_points` of them used per env: one strap each on a
+        # cable, its top `top_offset_w` from the hook (the spreader bar's ends, world frame, horizontal).
         self.points_b = torch.zeros(e, max_points, 3, device=dev)
         self.num_points = torch.ones(e, dtype=torch.int64, device=dev)
-        self.anchor_w = torch.zeros(e, 3, device=dev)
-        self.stiffness = torch.zeros(e, device=dev)
+        self.top_offset_w = torch.zeros(e, max_points, 3, device=dev)
+        self.anchor_w = torch.zeros(e, 3, device=dev)  # cable: the hook, the spreader bar's middle
+        self.stiffness = torch.zeros(e, device=dev)  # cable gains, all straps together
         self.damping = torch.zeros(e, device=dev)
         self.swing_damping = torch.zeros(e, device=dev)
         # One program per env: tension (N) or unstretched cable length (m) over time.
         k = max_breakpoints
         self.program_ns = torch.arange(k, dtype=torch.int64, device=dev).expand(e, k).clone()
         self.program = torch.zeros(e, k, device=dev)
-        self.tension_n = torch.zeros(e, device=dev)  # applied on the last step, total
-        self.distance_m = torch.zeros(e, device=dev)  # cable: harness point to anchor
-        # On the last step: the rope's top and the harness point (point 0) in the world; NaN without a cable.
+        self.tension_n = torch.zeros(e, device=dev)  # applied on the last step, total over the straps
+        self.distance_m = torch.zeros(e, device=dev)  # cable: rope point to its top, mean over the straps
+        # On the last step: the hook and the harness point (the straps' points' mean) in the world; NaN without a
+        # cable.
         self.top_w = torch.full((e, 3), float("nan"), device=dev)
         self.harness_w = torch.full((e, 3), float("nan"), device=dev)
         self.trolley = None  # a crane to hang hoist ropes from (mount)
@@ -180,6 +188,50 @@ class Gantry:
             self._body = torch.tensor([body_id], device=self.device)
         self.program_ns[env_ids], self.program[env_ids] = program
 
+    @staticmethod
+    def _check_spreader(spreader_width_m: float | None, num_points: int) -> None:
+        if spreader_width_m is not None and not (num_points == 2 and math.isfinite(spreader_width_m)
+                                                 and spreader_width_m > 0):
+            raise ValueError("a spreader bar's width must be positive and finite, for two attachment points")
+
+    def _spread(self, env_ids: torch.Tensor, body_id: int, pts: torch.Tensor,
+                spreader_width_m: float | None) -> tuple[torch.Tensor, torch.Tensor]:
+        """The hook (the points' mean, world ``[n, 3]``) and each strap's top from it ``[n, P, 3]``: the points'
+        horizontal offsets from the hook, stretched to ``spreader_width_m`` apart when given."""
+        body = self.robot.data.body_link_pose_w.torch[env_ids, body_id]
+        pts_w = body[:, None, :3] + _quat_rotate(body[:, None, 3:].expand(-1, pts.shape[1], -1), pts)
+        hook = pts_w.mean(dim=1)
+        offset = pts_w - hook[:, None]
+        offset[..., 2] = 0.0
+        if spreader_width_m is not None:
+            offset = offset / offset.norm(dim=2, keepdim=True).clamp(min=1e-9) * (spreader_width_m / 2)
+        return hook, offset
+
+    def _set_cable(self, env_ids: torch.Tensor, mode: int, pts: torch.Tensor, offsets: torch.Tensor | None,
+                   anchor_w, stiffness_n_m, damping_n_s_m, swing_damping_n_s_m) -> None:
+        """A cable with one strap per rope point ``pts`` ``[n, P, 3]``, its top ``offsets`` from the hook."""
+        p = pts.shape[1]
+        self.points_b[env_ids] = 0.0
+        self.points_b[env_ids, :p] = pts
+        self.top_offset_w[env_ids] = 0.0
+        if offsets is not None:
+            self.top_offset_w[env_ids, :p] = offsets
+        self.num_points[env_ids] = p
+        self.anchor_w[env_ids] = anchor_w
+        self.stiffness[env_ids] = stiffness_n_m
+        self.damping[env_ids] = damping_n_s_m
+        self.swing_damping[env_ids] = swing_damping_n_s_m
+        self.mode[env_ids] = mode
+        self.active = True
+
+    def _rope_points(self, env_ids: torch.Tensor, point_b) -> torch.Tensor:
+        """``point_b`` ``[3]``, ``[n, 3]`` (one strap) or ``[n, P, 3]`` as ``[n, P, 3]``."""
+        pts = torch.as_tensor(point_b, dtype=torch.float32, device=self.device)
+        pts = pts.reshape(-1, 1, 3) if pts.dim() < 3 else pts
+        if not 1 <= pts.shape[1] <= self.points_b.shape[1]:
+            raise ValueError(f"a rope needs 1 to {self.points_b.shape[1]} attachment points")
+        return pts.expand(len(env_ids), -1, -1)
+
     def hang_tension(self, env_ids: torch.Tensor, t_ns: int, breakpoints_s_n: Sequence[tuple[float, float]], *,
                      attachment_b=None, attachment_bodies: Sequence[str] | None = None, dry_run: bool = False) -> None:
         """Vertical tension over time (s, N) from ``t_ns``, split over base-frame ``attachment_b`` points or over
@@ -202,38 +254,36 @@ class Gantry:
     def hang_cable(self, env_ids: torch.Tensor, t_ns: int, *, overhead_m: float,
                    length_breakpoints_s_m: Sequence[tuple[float, float]], stiffness_n_m: float,
                    damping_n_s_m: float, attachment_b=None, attachment_bodies: Sequence[str] | None = None,
-                   swing_damping_n_s_m: float = 0.0, dry_run: bool = False) -> None:
-        """One cable from a harness point (base-frame ``attachment_b``, or the midpoint of ``attachment_bodies``
-        on the harness body: the hook of both shoulder straps) to an anchor ``overhead_m`` above where that point
-        is now; unstretched length over time (s, m) from ``t_ns``."""
+                   swing_damping_n_s_m: float = 0.0, spreader_width_m: float | None = None,
+                   dry_run: bool = False) -> None:
+        """One cable from the harness (base-frame ``attachment_b``, or ``attachment_bodies`` on the harness body,
+        such as both shoulders) to an anchor ``overhead_m`` above the points' midpoint now, one strap per point
+        from a spreader bar (``spreader_width_m`` wide, else as wide as the points are apart now); unstretched
+        length over time (s, m) from ``t_ns``."""
         if overhead_m <= 0 or stiffness_n_m <= 0 or damping_n_s_m < 0 or swing_damping_n_s_m < 0:
             raise ValueError("cable overhead distance and stiffness must be positive, damping non-negative")
         if any(float(length) <= 0 for _, length in length_breakpoints_s_m):
             raise ValueError("cable lengths must be positive")
         program = self._program(t_ns, length_breakpoints_s_m)
         body_id, spec = self._target(attachment_b, attachment_bodies)
+        self._check_spreader(spreader_width_m, len(spec))
         self._check_body(env_ids, body_id)
         if dry_run:
             return
-        a = self._points(env_ids, body_id, spec).mean(dim=1)
-        body = self.robot.data.body_link_pose_w.torch[env_ids, body_id]
-        point = body[:, :3] + _quat_rotate(body[:, 3:], a)
+        pts = self._points(env_ids, body_id, spec)
+        hook, offsets = self._spread(env_ids, body_id, pts, spreader_width_m)
         self._commit(env_ids, body_id, program)
-        self.points_b[env_ids] = 0.0
-        self.points_b[env_ids, 0] = a
-        self.num_points[env_ids] = 1
-        self.anchor_w[env_ids] = point + torch.tensor([0.0, 0.0, overhead_m], device=self.device)
-        self.stiffness[env_ids] = stiffness_n_m
-        self.damping[env_ids] = damping_n_s_m
-        self.swing_damping[env_ids] = swing_damping_n_s_m
-        self.mode[env_ids] = CABLE
-        self.active = True
+        self._set_cable(env_ids, CABLE, pts, offsets, hook + torch.tensor([0.0, 0.0, overhead_m], device=self.device),
+                        stiffness_n_m, damping_n_s_m, swing_damping_n_s_m)
 
     def hang_cables(self, env_ids: torch.Tensor, t_ns: int, *, point_b: torch.Tensor, anchor_w: torch.Tensor,
                     times_ns: torch.Tensor, lengths_m: torch.Tensor, stiffness_n_m: torch.Tensor,
-                    damping_n_s_m: torch.Tensor, swing_damping_n_s_m: torch.Tensor, harness: bool = False) -> None:
-        """One cable per env in ``env_ids`` ``[n]``, for resets: from ``point_b`` (``[3]`` or ``[n, 3]``, in the
-        harness body's frame with ``harness``, else the base's) to world anchors ``[n, 3]``, with unstretched length
+                    damping_n_s_m: torch.Tensor, swing_damping_n_s_m: torch.Tensor, harness: bool = False,
+                    top_offset_w: torch.Tensor | None = None) -> None:
+        """One cable per env in ``env_ids`` ``[n]``, for resets: from ``point_b`` (``[3]`` or ``[n, 3]`` for one
+        strap, ``[n, P, 3]`` for one strap per point; in the harness body's frame with ``harness``, else the base's)
+        to world anchors (hooks) ``[n, 3]``, each strap's top ``top_offset_w`` ``[n, P, 3]`` from its hook (a
+        spreader bar's ends, world frame; default at the hook), with unstretched length
         programs ``times_ns`` (int64, from ``t_ns``, nondecreasing) and ``lengths_m`` ``[n, K]``, K up to
         ``max_breakpoints``, and per-env stiffness and dampings ``[n]``. Nothing is checked on the host, so pass
         positive lengths and stiffness; the anchors are given because body poses are stale right after a reset."""
@@ -241,29 +291,24 @@ class Gantry:
         if times_ns.shape != lengths_m.shape or not 1 <= times_ns.shape[1] <= k:
             raise ValueError(f"cable programs need matching [n, K] times and lengths, K from 1 to {k}")
         body_id = self.harness_id if harness else 0
+        pts = self._rope_points(env_ids, point_b)
         self._check_body(env_ids, body_id)
         pad = k - times_ns.shape[1]  # hold the last length, 1 ns apart
         steps = torch.arange(1, pad + 1, dtype=torch.int64, device=self.device)
         self._commit(env_ids, body_id, (t_ns + torch.cat([times_ns, times_ns[:, -1:] + steps], dim=1),
                                         torch.cat([lengths_m, lengths_m[:, -1:].expand(-1, pad)], dim=1)))
-        self.points_b[env_ids] = 0.0
-        self.points_b[env_ids, 0] = point_b
-        self.num_points[env_ids] = 1
-        self.anchor_w[env_ids] = anchor_w
-        self.stiffness[env_ids] = stiffness_n_m
-        self.damping[env_ids] = damping_n_s_m
-        self.swing_damping[env_ids] = swing_damping_n_s_m
-        self.mode[env_ids] = CABLE
-        self.active = True
+        self._set_cable(env_ids, CABLE, pts, top_offset_w, anchor_w, stiffness_n_m, damping_n_s_m,
+                        swing_damping_n_s_m)
 
     def hang_hoist(self, env_ids: torch.Tensor, *, stiffness_n_m, damping_n_s_m, swing_damping_n_s_m=0.0,
                    attachment_b=None, attachment_bodies: Sequence[str] | None = None, point_b=None,
-                   harness: bool = False, dry_run: bool = False) -> None:
-        """One cable from a harness point to the mounted crane's hook: its top at the trolley, its unstretched
-        length the hoist's. The point is as for :meth:`hang_cable` (base-frame ``attachment_b``, or the midpoint
-        of ``attachment_bodies`` on the harness body), or, for resets with stale poses, ``point_b`` (``[3]`` or
-        ``[n, 3]``) in the harness body's frame with ``harness``, else the base's. Stiffness and dampings are
-        floats or ``[n]`` tensors; floats are checked."""
+                   harness: bool = False, spreader_width_m: float | None = None,
+                   top_offset_w: torch.Tensor | None = None, dry_run: bool = False) -> None:
+        """One cable from the harness to the mounted crane's hook: its top at the trolley, its unstretched
+        length the hoist's. The points and the spreader bar are as for :meth:`hang_cable` (base-frame
+        ``attachment_b``, or ``attachment_bodies`` on the harness body), or, for resets with stale poses, as for
+        :meth:`hang_cables`: ``point_b`` in the harness body's frame with ``harness``, else the base's, and
+        ``top_offset_w``. Stiffness and dampings are floats or ``[n]`` tensors; floats are checked."""
         if self.trolley is None:
             raise ValueError("no crane to hang from: mount a gantry rig first")
         gains = (stiffness_n_m, damping_n_s_m, swing_damping_n_s_m)
@@ -272,24 +317,28 @@ class Gantry:
             raise ValueError("hoist stiffness must be positive, dampings non-negative, all finite")
         if point_b is None:
             body_id, spec = self._target(attachment_b, attachment_bodies)
+            self._check_spreader(spreader_width_m, len(spec))
         else:
-            body_id = self.harness_id if harness else 0
+            body_id, pts = self.harness_id if harness else 0, self._rope_points(env_ids, point_b)
         self._check_body(env_ids, body_id)
         if dry_run:
             return
-        a = (self._points(env_ids, body_id, spec).mean(dim=1) if point_b is None
-             else torch.as_tensor(point_b, dtype=torch.float32, device=self.device))
+        if point_b is None:
+            pts = self._points(env_ids, body_id, spec)
+            _, top_offset_w = self._spread(env_ids, body_id, pts, spreader_width_m)
         program = self.program_ns[env_ids], self.program[env_ids]  # unused: the hoist sets the length
         self._commit(env_ids, body_id, program)
-        self.points_b[env_ids] = 0.0
-        self.points_b[env_ids, 0] = a
-        self.num_points[env_ids] = 1
-        self.anchor_w[env_ids] = self.trolley.anchor_w[env_ids]
-        self.stiffness[env_ids] = stiffness_n_m
-        self.damping[env_ids] = damping_n_s_m
-        self.swing_damping[env_ids] = swing_damping_n_s_m
-        self.mode[env_ids] = HOIST
-        self.active = True
+        self._set_cable(env_ids, HOIST, pts, top_offset_w, self.trolley.anchor_w[env_ids], stiffness_n_m,
+                        damping_n_s_m, swing_damping_n_s_m)
+
+    def rest_length_m(self, t_ns: int) -> torch.Tensor:
+        """The cables' unstretched length at ``t_ns`` ``[E]`` (the hoist's for a hoist rope); NaN without a cable.
+        For viewers: it reads the program and the crane, and :meth:`apply` does not call it."""
+        length = interp_program(torch.full((self.num_envs,), t_ns, dtype=torch.int64, device=self.device),
+                                self.program_ns, self.program)
+        if self.trolley is not None:
+            length = torch.where(self.mode == HOIST, self.trolley.length_m, length)
+        return torch.where((self.mode == CABLE) | (self.mode == HOIST), length, float("nan"))
 
     def release(self, env_ids: torch.Tensor) -> None:
         self.mode.index_fill_(0, env_ids, NONE)
@@ -322,8 +371,9 @@ class Gantry:
         force = torch.zeros(e, p, 3, device=self.device)
         force[..., 2] = share[:, None] * used
 
-        # Cable: along the rope from point 0 to its top, beyond the unstretched length. A hoist rope's top and
-        # length are the crane's; its stretch rate is relative to the moving top, less the hoist's pay-out.
+        # Cable: along each strap from its point to its top on the bar, beyond the unstretched length, each strap
+        # with 1 / P of the gains. A hoist rope's hook and length are the crane's; its stretch rate is relative to
+        # the moving hook, less the hoist's pay-out.
         top, v_top, pay_out = self.anchor_w, torch.zeros_like(self.anchor_w), torch.zeros_like(value)
         if self.trolley is not None:
             hoist = self.mode == HOIST
@@ -332,24 +382,25 @@ class Gantry:
             value = torch.where(hoist, self.trolley.length_m, value)
             pay_out = torch.where(hoist, self.trolley.length_rate_m_s, pay_out)
         roped = (self.mode == CABLE) | (self.mode == HOIST)
-        line = top - pts_w[:, 0]
-        dist = line.norm(dim=1)
-        direction = line / dist.clamp(min=1e-9)[:, None]
-        v_point = vel[:, :3] + torch.cross(vel[:, 3:], pts_w[:, 0] - root[:, :3], dim=1)
-        v_rel = v_point - v_top
-        extension = dist - value
-        rate = -(direction * v_rel).sum(1) - pay_out
-        cable = (self.stiffness * extension + self.damping * rate).clamp(min=0.0)
-        taut = roped & (extension > 0)
+        n = self.num_points.to(value.dtype)[:, None]
+        line = top[:, None] + self.top_offset_w - pts_w
+        dist = line.norm(dim=2)
+        direction = line / dist.clamp(min=1e-9)[..., None]
+        v_point = vel[:, None, :3] + torch.cross(vel[:, None, 3:].expand(-1, p, -1), pts_w - root[:, None, :3], dim=2)
+        v_rel = v_point - v_top[:, None]
+        extension = dist - value[:, None]
+        rate = -(direction * v_rel).sum(2) - pay_out[:, None]
+        cable = ((self.stiffness[:, None] * extension + self.damping[:, None] * rate) / n).clamp(min=0.0)
+        taut = roped[:, None] & used & (extension > 0)
         cable = torch.where(taut, cable, 0.0)
-        across = v_rel - (direction * v_rel).sum(1, keepdim=True) * direction
-        swing = torch.where(cable > 0, self.swing_damping, 0.0)  # a rope without tension pushes nothing
-        force[:, 0] += direction * cable[:, None] - swing[:, None] * across
+        across = v_rel - (direction * v_rel).sum(2, keepdim=True) * direction
+        swing = torch.where(cable > 0, self.swing_damping[:, None] / n, 0.0)  # a strap without tension pushes nothing
+        force += direction * cable[..., None] - swing[..., None] * across
 
-        self.tension_n = torch.where(roped, cable, share * self.num_points.to(value.dtype))
-        self.distance_m = torch.where(roped, dist, 0.0)
+        self.tension_n = torch.where(roped, cable.sum(1), share * self.num_points.to(value.dtype))
+        self.distance_m = torch.where(roped, (dist * used).sum(1) / n[:, 0], 0.0)
         self.top_w = torch.where(roped[:, None], top, float("nan"))
-        self.harness_w = torch.where(roped[:, None], pts_w[:, 0], float("nan"))
+        self.harness_w = torch.where(roped[:, None], (pts_w * used[..., None]).sum(1) / n, float("nan"))
         composer = self.robot.instantaneous_wrench_composer
         for i in range(p):
             composer.add_forces_and_torques_index(forces=force[:, i:i + 1], torques=torch.zeros_like(force[:, i:i + 1]),

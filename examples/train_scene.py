@@ -124,6 +124,35 @@ def robot_usd() -> Path:
     return out / json.loads((out / "asset.json").read_text())["usd"]
 
 
+# What `--gantry` hangs, by env index modulo 4: a rope carrying 80% of the weight, a slack rope, no rope, and a rope
+# whose anchor is off to the side by `OFF_ANCHOR_M` (the mistake of building the anchor from the wrong robot position).
+LOAD_SHARE, SLACK_M, OFF_ANCHOR_M = 0.8, 0.05, 1.0
+
+
+def hang_ropes(env, plant) -> None:
+    """Hang the four kinds of rope above from the harness hook of each robot where it stands now."""
+    from humanoid_sim.world.supports import GRAVITY_M_S2
+
+    n, dev, robot = env.num_envs, env.device, env.scene["robot"]
+    support = plant.profile["support"]
+    mass = robot.data.body_mass.torch.sum(dim=1)
+    k = mass * GRAVITY_M_S2 / support["full_weight_stretch_m"]
+    point = torch.tensor([0.0, 0.0, 0.2], device=dev)  # base frame; the harness hook of a real task is on the torso
+    pose = robot.data.body_link_pose_w.torch[:, 0]
+    hook = pose[:, :3] + point
+    anchor = hook + torch.tensor([0.0, 0.0, support["overhead_m"]], device=dev)
+    kind = torch.arange(n, device=dev) % 4
+    reach = (anchor - hook).norm(dim=1)  # the rope is cut for the right anchor, then hung from a wrong one
+    anchor[kind == 3, 0] += OFF_ANCHOR_M
+    carried = torch.where(kind == 1, -SLACK_M, LOAD_SHARE * mass * GRAVITY_M_S2 / k)  # stretch under the rope, m
+    rest = (reach - carried).clamp(min=0.05)[:, None]
+    ids = torch.nonzero(kind != 2).squeeze(1)
+    plant.gantry.hang_cables(ids, plant.t_ns, point_b=point, anchor_w=anchor[ids],
+                             times_ns=torch.zeros(len(ids), 1, dtype=torch.int64, device=dev), lengths_m=rest[ids],
+                             stiffness_n_m=k[ids], damping_n_s_m=2.0 * (k[ids] * mass[ids]).sqrt(),
+                             swing_damping_n_s_m=torch.zeros(len(ids), device=dev))
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--num-envs", type=int, default=16)
@@ -132,6 +161,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--rrd", default=None, help="record the scene to this Rerun file")
     p.add_argument("--record-every", type=int, default=2, help="record every this many policy steps")
     p.add_argument("--flat", action="store_true", help="a flat ground plane instead of the bumpy terrain")
+    p.add_argument("--gantry", action="store_true", help="hang the robots from gantry ropes, one of four kinds per env "
+                                                         "(see hang_ropes), to show how a recording draws them")
     args = p.parse_args(argv)
 
     from humanoid_sim.world.disturbances import ForcePush
@@ -154,6 +185,9 @@ def main(argv: list[str] | None = None) -> int:
         env.reset()
         push.reset(torch.arange(args.num_envs, device=env.device), plant.t_ns)
         actions = torch.zeros(args.num_envs, 22, device=env.device)
+        if args.gantry:
+            env.step(actions)  # body poses are stale right after a reset
+            hang_ropes(env, plant)
         steps = int(args.seconds / env.step_dt)
         for k in range(steps):
             push.step(plant.t_ns)

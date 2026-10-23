@@ -132,6 +132,17 @@ def ground_meshes(env) -> list[tuple[np.ndarray, np.ndarray]]:
     return out
 
 
+def find_gantry(env):
+    """The :class:`~humanoid_sim.world.supports.Gantry` of the plant an action term of ``env`` owns
+    (``plant.gantry``), or None."""
+    manager = getattr(env, "action_manager", None)
+    for term in getattr(manager, "_terms", {}).values():
+        gantry = getattr(getattr(term, "plant", None), "gantry", None)
+        if gantry is not None:
+            return gantry
+    return None
+
+
 class SceneRecorder:
     """Records ``envs`` of ``env``'s robot (an Isaac Lab articulation named ``robot``) to ``rrd`` or a viewer at
     ``connect``. Call :meth:`frame` with the plant time whenever a frame should be recorded.
@@ -139,11 +150,18 @@ class SceneRecorder:
     The static boxes on the stage are drawn. With ``scene`` (the :class:`~humanoid_sim.world.boxes.StaticBoxes` the
     scene was built from) its scan is drawn instead, with its floor in place of the ground and a default layout
     against the scan's sky (``draw="boxes"`` keeps the boxes), at ``detail``: ``full`` when recording to a file,
-    ``live`` when streaming, unless given."""
+    ``live`` when streaming, unless given.
+
+    Each recorded env also shows its gantry (``/world/gantry/<env>``, ``/sim/<env>/gantry``, see
+    :mod:`humanoid_sim.signals.gantry_view`): the rope coloured by what it carries, its anchor, a status label and
+    the tension as signals, the crane's travel, bridge and trolley when one is mounted, or a "no gantry" label.
+    ``gantry`` is the plant's :class:`~humanoid_sim.world.supports.Gantry`, found through the env's action terms
+    (``plant.gantry``) unless given. ``notes`` maps an env to a string that follows its status label (an operator's
+    phase or outcome, set by the caller)."""
 
     def __init__(self, env, usd: Path, *, rrd: str | None = None, connect: str | None = None,
                  envs: list[int] | None = None, app_id: str = "humanoid-sim scene", scene=None,
-                 draw: str | None = None, detail: str | None = None):
+                 draw: str | None = None, detail: str | None = None, gantry=None):
         import rerun as rr
 
         from humanoid_sim.model.kinematics import RobotKinematics
@@ -152,6 +170,8 @@ class SceneRecorder:
         self.rr = rr
         self.robot = env.scene["robot"]
         self.envs = list(range(self.robot.num_instances)) if envs is None else list(envs)
+        self.gantry = gantry if gantry is not None else find_gantry(env)
+        self.notes: dict[int, str] = {}
         rr.init(app_id)
         draw = draw or ("scan" if scene is not None and scene.scan is not None else "boxes")
         # Given to the sink, not sent after it: Rerun 0.39 opened a file with the layout sent later as empty.
@@ -189,6 +209,16 @@ class SceneRecorder:
                                                        vertex_normals=vertex_normals(verts, tris),
                                                        vertex_colors=ground_colors(verts)), static=True)
         self._ids = None
+        self._crane_offsets: dict[int, np.ndarray] = {}
+        if self.gantry is not None and self.gantry.trolley is not None:
+            from humanoid_sim.signals.gantry_view import log_travel
+
+            trolley = self.gantry.trolley
+            # Where each env's crane stands from where its rig was given: the trolley's origin, less the rig's own.
+            home = np.array([*trolley.rig.center_m, trolley.rig.anchor_z_m])
+            self._crane_offsets = {e: trolley.origin_w[e].cpu().numpy() - home for e in self.envs}
+            for e in self.envs:
+                log_travel(rr, f"/world/gantry/{e}/travel", trolley.rig, self._crane_offsets[e])
 
     def frame(self, t_ns: int) -> None:
         import torch
@@ -200,6 +230,39 @@ class SceneRecorder:
         rr.set_time(TIMELINE, duration=t_ns / 1e9)
         for b, path in self.visuals:
             rr.log(path, rr.InstancePoses3D(translations=poses[:, b, :3], quaternions=poses[:, b, 3:7]))
+        self._gantry(t_ns, poses[:, 0, :3])
+
+    def _gantry(self, t_ns: int, base_w: np.ndarray) -> None:
+        """The recorded envs' ropes as the last physics step left them (``base_w`` ``[N, 3]``: their bases)."""
+        from humanoid_sim.signals import gantry_view as gv
+        from humanoid_sim.world.supports import GRAVITY_M_S2, NONE
+
+        rr, g = self.rr, self.gantry
+        if g is None:
+            for n, e in enumerate(self.envs):
+                gv.log_no_gantry(rr, f"/world/gantry/{e}", base_w[n])
+            return
+        import torch
+
+        weight = self.robot.data.body_mass.torch.sum(dim=1) * GRAVITY_M_S2
+        columns = [g.mode.double(), g.tension_n.double(), g.rest_length_m(t_ns).double(), g.stiffness.double(),
+                   weight.double()]
+        columns = [torch.stack(columns, dim=1), g.top_w.double(), g.harness_w.double()]
+        if g.trolley is not None:
+            columns.append(g.trolley.position.double())
+        state = torch.cat(columns, dim=1)[self._ids].cpu().numpy()  # one copy: [N, 5 + 3 + 3 (+ 3 with a crane)]
+        for n, e in enumerate(self.envs):
+            mode, tension, rest, stiffness, weight_n = state[n, :5]
+            world = f"/world/gantry/{e}"
+            if int(mode) == NONE:
+                gv.log_no_gantry(rr, world, base_w[n])
+                continue
+            stretch = float(gv.full_weight_stretch_m(weight_n, stiffness)) if stiffness > 0 else None
+            gv.log_env(rr, world, f"/sim/{e}/gantry", top=state[n, 5:8], hook=state[n, 8:11], rest_m=float(rest),
+                       tension_n=float(tension), weight_n=float(weight_n), stretch_m=stretch,
+                       note=self.notes.get(e, ""), base_w=base_w[n])
+            if g.trolley is not None:
+                gv.log_crane(rr, world, g.trolley.rig, state[n, 11:14], self._crane_offsets[e])
 
     def close(self) -> None:
         self.rr.disconnect()

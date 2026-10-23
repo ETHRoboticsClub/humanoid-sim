@@ -31,7 +31,7 @@ Nothing in the code names a robot. What differs between them comes from the desc
 | Gains | `baseline_position_gains` per drive | `baseline_stiffness` and `baseline_damping` per joint (Unitree's deploy gains) |
 | Home pose | the URDF's zero, the pose the CAD is exported in (`poses.home: zero`) | Unitree's standing pose, knees bent 0.3 rad (`poses.home: {preset: standing-init-v1}` from `position-presets.yaml`) |
 | Feet | a sole plate fitted to each foot's lowest face (`model.sole`) | four 5 mm spheres per foot, bounded by a sole box for the truth (`model.sole.fit: bounds`) |
-| Self-collision | on, with Controls' contact excludes | off, as Isaac Lab's own G1 has it |
+| Self-collision | on, with Controls' contact excludes | with hands: arms against legs and each other, legs against each other (`model.self_collision`), so the hands stop at the hips; without hands: off, as Isaac Lab's own G1 has it |
 | IMU | the URDF's `imu_joint` | the URDF's `imu_joint`, on the pelvis |
 | Holding the home pose at the baseline gains | stands: its crank-driven ankles are about 4.6 times as stiff in pitch as the stiffness at which its body topples | tips over within about 1.3 s: its ankles (40 Nm/rad each) are about 0.4 times as stiff as that (about 210 Nm/rad), so the G1 needs a policy to stand |
 

@@ -76,8 +76,9 @@ Here the client waves both arms (drive positions, top right) and pushes the left
 | `/sim/0/drives/<drive>/{position,velocity,applied_torque,demanded_torque}` | Drive feedback as the client reads it |
 | `/sim/0/imu/{gyro,specific_force}/{x,y,z}` | The newest IMU sample of each feedback record |
 | `/sim/0/soles/<side>/normal_force` | Ground force on each sole (truth) |
-| `/sim/0/base/height`, `/sim/0/gantry/tension` | Base height and gantry tension (truth) |
-| `/world/gantry/{rope,travel,bridge,trolley}`, `/sim/0/gantry/{position,command}/{x,y,z}` | The gantry cable while one hangs; with a crane (`serve --gantry`) its travel, bridge and trolley, and its actual and commanded position (truth) |
+| `/sim/0/base/height` | Base height (truth) |
+| `/world/gantry/{rope,anchor,plumb,status}`, `/sim/0/gantry/{tension_n,tension_share,length_m}` | The gantry cable while one hangs, or the label `no gantry`; see [The gantry](#the-gantry) (truth) |
+| `/world/gantry/{travel,bridge,trolley}`, `/sim/0/gantry/{position,command}/{x,y,z}` | With a crane (`serve --gantry`): its travel, bridge and trolley, and its actual and commanded position (truth) |
 | `/sim/0/host/{late_steps,keeping_up,session}` | Whether the host keeps up with real time; session changes |
 
 Options: `--fps` sets how often the segment is read (30 by default), `--seconds` stops after a while, `--wait` how long to wait for the segment to appear, and `--connect URL` streams into a viewer you started yourself.
@@ -125,6 +126,39 @@ plant.log("base_height", plant.truth().root_pose_w[:, 2], group="base")
 ![The scene with robot 0's knee and base signals](images/scene-signals.png)
 
 The reported position is the true one quantized to the knee drive's encoder (4096 counts per revolution, about 1.5 mrad), so the two lines lie on top of each other until you zoom in. Robot 0 stays up for the whole recording: its base settles at about 0.88 m on the terrain, and its knee torque stays within about 10 Nm while the arms wave and the pushes come.
+
+## The gantry
+
+Both views show whether a robot hangs from a gantry rope, and what the rope carries (`humanoid_sim.signals.gantry_view`). `view-runtime` draws it at `/world/gantry`; `SceneRecorder` draws every recorded env's at `/world/gantry/<env>`, finding the gantry through the env's action terms (`plant.gantry`) or from `SceneRecorder(..., gantry=sim.gantry)`.
+
+| Entity (under the env's gantry path) | Content |
+|---|---|
+| `rope` | A line from the anchor to the harness hook, coloured by the rope's load (below) |
+| `anchor` | A marker at the rope's top: the fixed anchor, or a crane's hoist |
+| `plumb` | A line straight down from the anchor, as long as the rope's unstretched length, so a rope that leans or is stretched shows against it |
+| `status` | The label `gantry: taut 0.88 W` (tension over the robot's weight `W = m g`), `gantry: slack`, `gantry: over-stretched 1.35 W` or `gantry: caught 2.40 W`; `no gantry` for a robot without one, floating above its base |
+| `travel`, `bridge`, `trolley` | With a mounted crane: its reach, and its bridge and trolley where they are (the frame's posts are not in a `GantryRig`) |
+| `/sim/<env>/gantry/{tension_n,tension_share}` | The rope's tension, in N and as a share of `W` |
+| `/sim/<env>/gantry/{length_m,rest_length_m}` | Hook to anchor, and the cable's unstretched length (training scenes only: the runtime's truth does not carry it) |
+
+The colour is the rope's class, from its tension against `W`:
+
+| Class | Colour | When |
+|---|---|---|
+| slack | grey | Its length is at or below its unstretched length, so it pulls nothing |
+| taut | green | It carries up to `OVERLOAD_FACTOR` (1.5) times the full weight. The full weight is the stretch `W / k` of a cable that just holds the robot (`support.full_weight_stretch_m`, 2 cm, for the harness cable), where a hung robot sits while swings and pushes move it around |
+| over-stretched | red | It carries more than 1.5 weights, or is stretched beyond 1.5 times `W / k` |
+| caught | red | The tension is over `CAUGHT_SHARE` (3) times the weight, as when a rope stops a falling robot |
+
+A rope hung from the wrong anchor, such as one built over a robot's default spawn point when the robot starts elsewhere, shows at once: it leans away from its plumb line and is red.
+
+A training task can add its own words to the label: `recorder.notes[env] = "phase: stand"` makes it `gantry: taut 0.88 W | phase: stand`. The recorder never imports task code, so the task sets the string whenever its operator changes phase or the episode ends.
+
+`examples/train_scene.py --gantry` hangs the robots by env index modulo 4 with a rope cut to carry 80% of the weight (the robot settles at about its full weight), a slack rope, no rope and a rope whose anchor is 1.0 m off to the side of the robot, so that the rope is over-stretched and yanks it:
+
+![Four robots 0.37 s in: a green taut rope, a grey slack one, the label no gantry, and a red rope that has just caught its robot, with the tension of each rope over its robot's weight on the right](images/scene-gantry.png)
+
+The labels and lines come from the last physics step, at the recorder's own rate. With no recorder, nothing is drawn or computed.
 
 ## Regenerating the images
 
