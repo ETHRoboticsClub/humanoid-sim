@@ -472,7 +472,7 @@ Every `log` call copies to the host, so keep it to inspection runs. Opening and 
 
 ### Recording a scene
 
-`SceneRecorder(env, usd, *, rrd=None, connect=None, envs=None)` (`src/humanoid_sim/signals/scene.py`) records the robots of an Isaac Lab scene into one [Rerun](glossary.md#rerun) recording. It logs the ground once (the generated terrain read from the USD stage, or a 40 m square for the flat ground) and each visual mesh of the robot once. Every `frame(t_ns)` call then logs the body poses of the recorded envs as instance poses of those meshes. `envs` lists the env indices to record (default all), `rrd` writes a file and `connect` streams to a running viewer; the recording's application id is `humanoid-sim scene`. `close()` ends the recording.
+`SceneRecorder(env, usd, *, rrd=None, connect=None, envs=None)` (`src/humanoid_sim/signals/scene.py`) records the robots of an Isaac Lab scene into one [Rerun](glossary.md#rerun) recording. It logs the ground once (the generated terrain read from the USD stage, or a 40 m square for the flat ground) and each visual mesh of the robot once. Every `frame(t_ns)` call then logs the body poses of the recorded envs as instance poses of those meshes. `envs` lists the env indices to record (default all), `rrd` writes a file and `connect` streams to a running viewer; the recording's application id is `humanoid-sim scene`. Each recorded env also shows its gantry rope or a `no gantry` label, and its tension as signals: see [The gantry](visualization.md#the-gantry). `close()` ends the recording.
 
 A frame copies `[envs, bodies, 7]` poses from the GPU, so record at a low rate (every few policy steps) and use it for debugging and showcases. Leave it out of a training loop that has to stay free of host syncs.
 

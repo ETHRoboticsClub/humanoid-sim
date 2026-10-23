@@ -143,7 +143,8 @@ class SensorSession:
             from humanoid_sim.signals.scene import SceneRecorder
 
             self.recorder = SceneRecorder(self.sim.backend, self.usd, rrd=cfg.rrd, app_id="humanoid-sim rtx sensors",
-                                          scene=self.boxes, draw="boxes" if self.boxes else None)
+                                          scene=self.boxes, draw="boxes" if self.boxes else None,
+                                          gantry=self.sim.gantry)
         self.counts = {"steps": 0, "renders": 0, "camera_frames": 0, "lidar_sweeps": 0, "lidar_points": 0}
         self.ms = {"physics": [], "render": [], "camera_read": [], "lidar_read": [], "publish": []}
         self._saved: dict[str, bool] = {}  # every image stream seen: whether it is depth

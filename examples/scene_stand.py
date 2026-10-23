@@ -62,7 +62,7 @@ def main() -> None:
     sim = SimCore(usd, device=args.device, robot=args.robot, base_height_m=height + STANDING_CLEARANCE_M,
                   fixed_base=args.fixed_base, contacts=True, scene=scene)
     recorder = SceneRecorder(sim.backend, usd, rrd=args.rrd, app_id="humanoid-sim scene", scene=scene, draw=args.draw,
-                             detail=args.detail)
+                             detail=args.detail, gantry=sim.gantry)
     try:
         plant = sim.plant
         q = pose.to(device=plant.cfg.device, dtype=sim.joint_state()[0].dtype).unsqueeze(0)
