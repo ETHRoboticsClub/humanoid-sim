@@ -124,7 +124,7 @@ SHOTS = [
     Shot("scene-row", "train_scene_24.rrd", 2.2,
          scene_blueprint((7.0, -33.0, 4.0), (0.0, -18.0, 0.4)), size="1800x800",
          note="python examples/train_scene.py --num-envs 24 --seconds 8 --rrd outputs/shots/train_scene_24.rrd"),
-    Shot("scene-gantry", "train_scene_gantry.rrd", 3.0, gantry_blueprint(4), size="1800x800",
+    Shot("scene-gantry", "train_scene_gantry.rrd", 0.8, gantry_blueprint(4), size="1800x800",
          note="python examples/train_scene.py --num-envs 4 --seconds 4 --gantry --rrd outputs/shots/train_scene_gantry.rrd"),
     Shot("scene-signals", "train_scene_6.rrd", 2.6, train_signals_blueprint(),
          note="as scene-hero"),

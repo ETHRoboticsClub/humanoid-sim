@@ -142,8 +142,8 @@ def hang_ropes(env, plant) -> None:
     hook = pose[:, :3] + point
     anchor = hook + torch.tensor([0.0, 0.0, support["overhead_m"]], device=dev)
     kind = torch.arange(n, device=dev) % 4
+    reach = (anchor - hook).norm(dim=1)  # the rope is cut for the right anchor, then hung from a wrong one
     anchor[kind == 3, 0] += OFF_ANCHOR_M
-    reach = (anchor - hook).norm(dim=1)
     carried = torch.where(kind == 1, -SLACK_M, LOAD_SHARE * mass * GRAVITY_M_S2 / k)  # stretch under the rope, m
     rest = (reach - carried).clamp(min=0.05)[:, None]
     ids = torch.nonzero(kind != 2).squeeze(1)
