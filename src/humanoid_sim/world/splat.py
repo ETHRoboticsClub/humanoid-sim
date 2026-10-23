@@ -23,13 +23,20 @@ only view-dependent shading); ``half`` stores the coefficients as ``half3`` (``.
 and Newton read when the float version is absent. Physics never sees a splat: the robot collides with the boxes,
 and a lidar sees the scan mesh and the boxes.
 
-    humanoid-sim splat-usd hangar_splat.ply hangar_splat.usdc --spawn -4.42 3.48
+Parts of the room that move, such as a gantry crane's bridge, trolley and hook, can be cut out into prims of their
+own (:func:`split`, ``parts``): each part's Gaussians go under an Xform ``/Splat/<part>`` whose translation (zero as
+written) a renderer sets to move it. Gaussians in a ``drop`` box are left out, for things the scan caught that the
+simulation draws itself (the robot hanging in the gantry, its rope). A part's boxes are given in the PLY's frame.
+
+    humanoid-sim splat-usd hangar_splat.ply hangar_splat.usdc --spawn -4.42 3.48 [--parts crane_parts.json]
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -146,11 +153,47 @@ def extent(splat: Splat) -> tuple[np.ndarray, np.ndarray]:
     return splat.positions.min(axis=0) - pad, splat.positions.max(axis=0) + pad
 
 
-def write_usd(splat: Splat, out: str | Path, *, half: bool = False, source: str | None = None) -> Path:
+def select(splat: Splat, mask: np.ndarray) -> Splat:
+    """The Gaussians where ``mask`` ``[N]`` is true."""
+    return Splat(positions=splat.positions[mask], orientations_xyzw=splat.orientations_xyzw[mask],
+                 scales=splat.scales[mask], opacities=splat.opacities[mask], sh=splat.sh[mask], sh_degree=splat.sh_degree)
+
+
+def in_boxes(positions: np.ndarray, boxes: list[dict]) -> np.ndarray:
+    """Which centres ``[N, 3]`` lie in any of ``boxes``: each ``center`` ``[3]``, ``half`` ``[3]`` (half extents) and
+    ``yaw`` (rad, about the vertical, default 0)."""
+    inside = np.zeros(len(positions), dtype=bool)
+    for box in boxes:
+        c, h, yaw = np.asarray(box["center"], float), np.asarray(box["half"], float), float(box.get("yaw", 0.0))
+        d = positions - c
+        cos, sin = math.cos(yaw), math.sin(yaw)
+        local = np.stack([cos * d[:, 0] + sin * d[:, 1], -sin * d[:, 0] + cos * d[:, 1], d[:, 2]], axis=1)
+        inside |= np.all(np.abs(local) <= h, axis=1)
+    return inside
+
+
+def split(splat: Splat, parts: dict[str, list[dict]]) -> tuple[Splat, dict[str, Splat]]:
+    """The room without its parts, and each part (a name and its boxes, see :func:`in_boxes`); a Gaussian in
+    several goes to the first. Gaussians in the ``drop`` part's boxes are in neither."""
+    taken = np.zeros(len(splat), dtype=bool)
+    out = {}
+    for name, boxes in parts.items():
+        if name != "drop" and (not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or name in ("Gaussians", "Looks")):
+            raise ValueError(f"part {name!r}: a USD prim name other than Gaussians and Looks")
+        mask = in_boxes(splat.positions, boxes) & ~taken
+        taken |= mask
+        if name != "drop":
+            out[name] = select(splat, mask)
+    return select(splat, ~taken), out
+
+
+def write_usd(splat: Splat, out: str | Path, *, half: bool = False, source: str | None = None,
+              parts: dict[str, Splat] | None = None) -> Path:
     """Write ``splat`` (already placed) to a new USD layer at ``out`` (``.usd``, ``.usdc`` or ``.usda``), its
-    default prim ``/Splat`` holding the Gaussians at :data:`PRIM_PATH`. ``source`` is recorded in the layer's
+    default prim ``/Splat`` holding the Gaussians at :data:`PRIM_PATH` and each of ``parts`` at
+    ``/Splat/<part>/Gaussians`` under an Xform with a zero translation. ``source`` is recorded in the layer's
     documentation."""
-    from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
+    from pxr import Sdf, Usd, UsdGeom, UsdShade
 
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -162,7 +205,25 @@ def write_usd(splat: Splat, out: str | Path, *, half: bool = False, source: str 
     if source:
         stage.GetRootLayer().documentation = source
 
-    prim = stage.DefinePrim(PRIM_PATH, "ParticleField3DGaussianSplat")
+    material = UsdShade.Material.Define(stage, MATERIAL_PATH)
+    shader = UsdShade.Shader.Define(stage, f"{MATERIAL_PATH}/Shader")
+    shader.SetSourceAsset(Sdf.AssetPath("ParticleFieldEmissive.mdl"), "mdl")
+    shader.SetSourceAssetSubIdentifier("ParticleFieldEmissive", "mdl")
+    out_port = shader.CreateOutput("out", Sdf.ValueTypeNames.Token)
+    for name in ("surface", "volume", "displacement"):
+        material.CreateOutput(f"mdl:{name}", Sdf.ValueTypeNames.Token).ConnectToSource(out_port)
+    _write_gaussians(stage, PRIM_PATH, splat, half, material)
+    for name, part in (parts or {}).items():
+        UsdGeom.Xform.Define(stage, f"/Splat/{name}").AddTranslateOp()
+        _write_gaussians(stage, f"/Splat/{name}/Gaussians", part, half, material)
+    stage.GetRootLayer().Save()
+    return out
+
+
+def _write_gaussians(stage, path: str, splat: Splat, half: bool, material) -> None:
+    from pxr import Gf, Sdf, UsdShade, Vt
+
+    prim = stage.DefinePrim(path, "ParticleField3DGaussianSplat")
     T = Sdf.ValueTypeNames
     prim.CreateAttribute("positions", T.Point3fArray).Set(Vt.Vec3fArray.FromNumpy(splat.positions))
     prim.CreateAttribute("orientations", T.QuatfArray).Set(Vt.QuatfArray.FromNumpy(splat.orientations_xyzw))
@@ -179,31 +240,27 @@ def write_usd(splat: Splat, out: str | Path, *, half: bool = False, source: str 
     lo, hi = extent(splat)
     prim.CreateAttribute("extent", T.Float3Array).Set(Vt.Vec3fArray([Gf.Vec3f(*map(float, lo)),
                                                                       Gf.Vec3f(*map(float, hi))]))
-
-    material = UsdShade.Material.Define(stage, MATERIAL_PATH)
-    shader = UsdShade.Shader.Define(stage, f"{MATERIAL_PATH}/Shader")
-    shader.SetSourceAsset(Sdf.AssetPath("ParticleFieldEmissive.mdl"), "mdl")
-    shader.SetSourceAssetSubIdentifier("ParticleFieldEmissive", "mdl")
-    out_port = shader.CreateOutput("out", Sdf.ValueTypeNames.Token)
-    for name in ("surface", "volume", "displacement"):
-        material.CreateOutput(f"mdl:{name}", Sdf.ValueTypeNames.Token).ConnectToSource(out_port)
     UsdShade.MaterialBindingAPI.Apply(prim).Bind(material)
-    stage.GetRootLayer().Save()
-    return out
 
 
 def convert(ply: str | Path, out: str | Path, *, spawn_m: tuple[float, float] = (0.0, 0.0),
-            sh_degree: int | None = None, half: bool = False) -> dict:
-    """Convert a 3DGS PLY to a USD splat placed with ``spawn_m`` at the origin; returns what was written."""
+            sh_degree: int | None = None, half: bool = False, parts: str | Path | None = None) -> dict:
+    """Convert a 3DGS PLY to a USD splat placed with ``spawn_m`` at the origin, with the moving ``parts`` (a JSON
+    object of part names to boxes in the PLY's frame, see :func:`split`) cut out; returns what was written."""
     ply = Path(ply)
     h = hashlib.sha256()
     with ply.open("rb") as f:
         for block in iter(lambda: f.read(1 << 24), b""):
             h.update(block)
-    splat = placed(read_ply(ply), spawn_m, sh_degree)
-    path = write_usd(splat, out, half=half,
+    room, cut = read_ply(ply), {}
+    if parts is not None:
+        room, cut = split(room, json.loads(Path(parts).read_text()))
+    splat = placed(room, spawn_m, sh_degree)
+    cut = {name: placed(part, spawn_m, sh_degree) for name, part in cut.items()}
+    path = write_usd(splat, out, half=half, parts=cut,
                      source=f"{ply.name} sha256 {h.hexdigest()}, spawn {list(spawn_m)}, degree {splat.sh_degree}")
     lo, hi = extent(splat)
     return {"usd": str(path), "ply": str(ply), "ply_sha256": h.hexdigest(), "gaussians": len(splat),
+            "parts": {name: len(part) for name, part in cut.items()},
             "sh_degree": splat.sh_degree, "half": half, "spawn_m": list(spawn_m), "extent_min": lo.tolist(),
             "extent_max": hi.tolist(), "bytes": path.stat().st_size}

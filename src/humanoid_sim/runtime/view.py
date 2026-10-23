@@ -6,7 +6,9 @@ demands or commands, so it can watch a session a client such as Controls is driv
 ``sim_time_ns``. Entity paths: ``/world/robot/<body>``, ``/world/scene/{scan,floor,boxes}`` (the host's scan, or its
 static boxes, when its scene files are readable here with the same digests), ``/sim/0/drives/<drive>/{position,velocity,applied_torque,
 demanded_torque}``, ``/sim/0/imu/{gyro,specific_force}/{x,y,z}``, ``/sim/0/soles/<side>/normal_force``,
-``/sim/0/base/height``, ``/sim/0/gantry/tension``, ``/sim/0/host/{late_steps,keeping_up}``.
+``/sim/0/base/height``, ``/sim/0/gantry/tension``, ``/sim/0/host/{late_steps,keeping_up}``. A cable is drawn as
+``/world/gantry/rope``; with a crane, ``/world/gantry/{travel,bridge,trolley}`` and
+``/sim/0/gantry/{position,command}/{x,y,z}``.
 """
 
 from __future__ import annotations
@@ -84,6 +86,9 @@ class RuntimeView:
         desc = self.seg.descriptor()
         self.drives, self.joints = desc["drives"], desc["joints"]
         self.soles = desc.get("soles", [])
+        from humanoid_sim.world.trolley import GantryRig
+
+        self.rig = None if not desc.get("gantry") else GantryRig.from_dict(desc["gantry"])
         self.scene = self._scene(desc.get("scene"))
         # The scan when the host has one readable here and nothing else is asked for, else the boxes.
         self.draw = None if self.scene is None else (
@@ -107,6 +112,10 @@ class RuntimeView:
         for d in self.drives:
             for name in ("position", "velocity", "applied_torque", "demanded_torque"):
                 rr.log(f"/sim/0/drives/{d}/{name}", rr.SeriesLines(names=[d]), static=True)
+        if self.rig is not None:
+            outline = self.rig.travel_outline_w()
+            rr.log("/world/gantry/travel", rr.LineStrips3D([np.vstack([outline, outline[:1]])],
+                                                           colors=[(120, 120, 120)]), static=True)
         for group in ("gyro", "specific_force"):
             for axis, color in zip("xyz", ((220, 80, 80), (80, 180, 80), (80, 120, 220))):
                 rr.log(f"/sim/0/imu/{group}/{axis}", rr.SeriesLines(names=[axis], colors=[color]), static=True)
@@ -152,6 +161,7 @@ class RuntimeView:
                 rr.log(f"/world/robot/{name}", rr.Transform3D(translation=poses[b, :3], quaternion=poses[b, 3:]))
             rr.log("/sim/0/base/height", rr.Scalars(float(t["base_position_m"][2])))
             rr.log("/sim/0/gantry/tension", rr.Scalars(float(t["gantry_tension_n"])))
+            self._gantry(t)
             for k, side in enumerate(("left", "right")[: len(self.soles)]):
                 rr.log(f"/sim/0/soles/{side}/normal_force", rr.Scalars(float(t["sole"]["normal_force_n"][k])))
             self.frames += 1
@@ -174,6 +184,26 @@ class RuntimeView:
             rr.log("/sim/0/host/late_steps", rr.Scalars(float(f["late_steps"])))
             rr.log("/sim/0/host/keeping_up", rr.Scalars(float(f["keeping_up"])))
         return True
+
+    def _gantry(self, t) -> None:
+        """The rope while a cable hangs, and the crane where it is."""
+        rr = self.rr
+        top, harness = np.asarray(t["gantry_top_m"]), np.asarray(t["gantry_harness_m"])
+        if np.isfinite(top).all() and np.isfinite(harness).all():
+            rr.log("/world/gantry/rope", rr.LineStrips3D([[top, harness]], colors=[(230, 160, 40)], radii=0.006))
+        else:
+            rr.log("/world/gantry/rope", rr.Clear(recursive=False))
+        position = np.asarray(t["gantry_position_m"])
+        if self.rig is None or not np.isfinite(position).all():
+            return
+        x, y = position[:2]
+        y0, y1 = self.rig.travel_y_m
+        rr.log("/world/gantry/bridge", rr.LineStrips3D([[self.rig.to_world((x, y0, 0)), self.rig.to_world((x, y1, 0))]],
+                                                       colors=[(90, 90, 200)], radii=0.03))
+        rr.log("/world/gantry/trolley", rr.Points3D([self.rig.to_world((x, y, 0))], radii=0.08, colors=[(90, 90, 200)]))
+        for name, value in (("position", position), ("command", np.asarray(t["gantry_command_m"]))):
+            for axis, v in zip("xyz", value):
+                rr.log(f"/sim/0/gantry/{name}/{axis}", rr.Scalars(float(v)))
 
     def reopen(self, wait_s: float) -> None:
         """Follow the next session at the same path (``serve --persist`` opens a new segment there); plant time

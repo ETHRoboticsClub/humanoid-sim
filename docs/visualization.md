@@ -77,6 +77,7 @@ Here the client waves both arms (drive positions, top right) and pushes the left
 | `/sim/0/imu/{gyro,specific_force}/{x,y,z}` | The newest IMU sample of each feedback record |
 | `/sim/0/soles/<side>/normal_force` | Ground force on each sole (truth) |
 | `/sim/0/base/height`, `/sim/0/gantry/tension` | Base height and gantry tension (truth) |
+| `/world/gantry/{rope,travel,bridge,trolley}`, `/sim/0/gantry/{position,command}/{x,y,z}` | The gantry cable while one hangs; with a crane (`serve --gantry`) its travel, bridge and trolley, and its actual and commanded position (truth) |
 | `/sim/0/host/{late_steps,keeping_up,session}` | Whether the host keeps up with real time; session changes |
 
 Options: `--fps` sets how often the segment is read (30 by default), `--seconds` stops after a while, `--wait` how long to wait for the segment to appear, and `--connect URL` streams into a viewer you started yourself.
