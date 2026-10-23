@@ -108,7 +108,7 @@ def train_signals_blueprint():
 def gantry_blueprint(envs: int):
     return panels(rrb.Horizontal(
         rrb.Spatial3DView(name="Training scene with gantry ropes", origin="/world",
-                          eye_controls=eye((4.2, -4.4, 1.9), (0.0, -3.4, 1.3)),
+                          eye_controls=eye((11.0, -3.0, 3.5), (0.0, -3.0, 1.2)),
                           background=rrb.Background(color=(232, 236, 240))),
         rrb.TimeSeriesView(name="Rope tension over the robot's weight, envs 0 to 3", origin="/sim",
                            contents=[f"/sim/{e}/gantry/tension_share" for e in range(envs)]),

@@ -26,7 +26,7 @@ STATE_RGB = {SLACK: (150, 150, 150), TAUT: (60, 190, 90), OVER: (225, 60, 50), C
 FULL_WEIGHT_SHARE = 1.0  # tension over weight at the full-weight stretch: more is over-stretched
 CAUGHT_SHARE = 2.0  # tension over weight beyond which the rope has caught the robot: twice what it hangs by
 
-ROPE_RADIUS_M = 0.006
+ROPE_RADIUS_M = 0.015
 ANCHOR_RADIUS_M = 0.05
 ANCHOR_RGB = (240, 240, 240)
 PLUMB_RGB = (110, 110, 130)  # straight down from the anchor, as far as the rope is long
