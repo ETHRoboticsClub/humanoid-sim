@@ -561,7 +561,8 @@ def test_a_client_cable_hangs_from_the_harness_hook(tmp_path, robot):
                                  "cable": {"overhead_distance_m": overhead, "length_breakpoints_s_m": [[0.0, 0.99]],
                                            "stiffness_n_m": 20000.0, "damping_n_s_m": 500.0}})
         assert ack == "gantry"
-        host.step()
+        for _ in range(2):  # a rope asked for between steps hangs after the next one
+            host.step()
         top, point = host.sim.gantry.top_w[0].double(), host.sim.gantry.harness_w[0].double()
         assert torch.allclose(top, hook + torch.tensor([0.0, 0.0, overhead], dtype=torch.float64), atol=0.005)
         assert torch.allclose(point, hook, atol=0.005)
