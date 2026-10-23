@@ -225,6 +225,7 @@ The fidelity gaps the runtime publishes:
 - ankle as pitch and roll hinges driven through the crank transmission (no closed chain)
 - IMU errors from the rig's model: white noise, turn-on bias, Gauss-Markov drift (SET_FIDELITY ideal turns them off); the turn-on bias is redrawn at every IMU reset, not only at power-on
 - drive delay is each family's fixed figure (actuators.yaml drive_delay_s), without per-cycle jitter
+- angular momentum is not conserved under fast joint motion at the 4 ms MJWarp step: a hung robot whose joints move fast picks up a spin about the vertical that the spreader bar's straps then turn back and damp
 - for a robot whose description records no delay for some families (the G1's): drive delay unmeasured for those families, whose demands act when the bus delivers them
 
 ### Demands
