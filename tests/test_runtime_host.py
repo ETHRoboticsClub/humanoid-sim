@@ -536,3 +536,35 @@ def test_a_suspended_robot_hangs_by_its_torso_with_the_drives_off(tmp_path, robo
         assert sum(tension) / len(tension) == pytest.approx(urdf_mass_kg(robot) * 9.81, rel=0.1)
     finally:
         host.close()
+
+
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+def test_a_client_cable_hangs_from_the_harness_hook(tmp_path, robot):
+    """SET_SUPPORT's cable with ``attachment_bodies`` hangs from the midpoint of those bodies on the harness body, as
+    the lab holds the robot, with its anchor ``overhead_distance_m`` straight above that point; the descriptor
+    names the harness a client needs for it. The oracle is the bodies' own world positions at hang time."""
+    pytest.importorskip("isaaclab_newton")
+    from humanoid_sim.runtime.host import RuntimeHost
+
+    harness = load_profile(robot)["support"]["harness"]
+    host = RuntimeHost(tmp_path / "plant", built_usd(robot), device="cpu", robot=robot, support="suspended",
+                       compile=False)
+    try:
+        assert host._descriptor("suspended")["harness"] == harness
+        host._reset({"pose": host.start_pose})
+        host.step()
+        names = host.robot.body_names
+        ids = [names.index(b) for b in harness["shoulders"]]
+        hook = host.robot.data.body_link_pose_w.torch[0, ids, :3].mean(0).double()
+        overhead = 1.0
+        ack = host._set_support({"support": "gantry", "attachment_bodies": harness["shoulders"],
+                                 "cable": {"overhead_distance_m": overhead, "length_breakpoints_s_m": [[0.0, 0.99]],
+                                           "stiffness_n_m": 20000.0, "damping_n_s_m": 500.0}})
+        assert ack == "gantry"
+        for _ in range(2):  # a rope asked for between steps hangs after the next one
+            host.step()
+        top, point = host.sim.gantry.top_w[0].double(), host.sim.gantry.harness_w[0].double()
+        assert torch.allclose(top, hook + torch.tensor([0.0, 0.0, overhead], dtype=torch.float64), atol=0.005)
+        assert torch.allclose(point, hook, atol=0.005)
+    finally:
+        host.close()

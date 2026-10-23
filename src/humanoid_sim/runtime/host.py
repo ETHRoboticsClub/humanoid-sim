@@ -241,6 +241,11 @@ class RuntimeHost:
         names = [n.rsplit("/", 1)[-1] for n in contacts.sensor_names]
         self._sole_contacts = torch.tensor([names.index(s["body"]) for s in self._soles], device=self.device)
         self._mass = self.robot.data.body_mass.torch[0]
+        # The truth's sole terms for both plates in one batch: each plate's corners (0-7), bottom-face corners
+        # (8-11) and axes (12-14) in its body's frame, turned into the world by one rotation per publish.
+        self._sole_ids = torch.tensor([s["id"] for s in self._soles], device=self.device)
+        self._sole_points = torch.stack([torch.cat([s["corners"], s["face"], s["axes"]]) for s in self._soles])
+        self._sole_half = torch.stack([s["half"] for s in self._soles])
         # Back-drive friction: the 1:1 drives' joints, their friction enabled and disabled.
         one_to_one = [(k, self.joints.index(d.joints[0])) for k, d in
                       enumerate(self.desc.drives[n] for n in self.drives) if d.crank is None]
@@ -341,7 +346,8 @@ class RuntimeHost:
     def _descriptor(self, support: str) -> dict:
         return {
             "robot": self.desc.robot, "drives": self.drives, "joints": self.joints, "support": support,
-            "bodies": list(self.robot.body_names), "description": self.desc.identity(),
+            "bodies": list(self.robot.body_names), "harness": self._support_cfg["harness"],
+            "description": self.desc.identity(),
             "physics": {"engine": f"isaaclab/{self.sim.solver}", "period_ns": self.period_ns,
                         "integrator": self.sim.integrator},
             "units": {"drive": "physical drive-output frame (crank angle for ankle cranks), SI",
@@ -615,12 +621,13 @@ class RuntimeHost:
                                   dry_run=dry_run)
         elif "cable" in args:
             c = args["cable"]
-            attachment = args["attachment_local_m"]
+            bodies = args.get("attachment_bodies")
+            attachment = None if bodies else args["attachment_local_m"]
             overhead, lengths = float(c["overhead_distance_m"]), c["length_breakpoints_s_m"]
             stiffness, damping = float(c["stiffness_n_m"]), float(c["damping_n_s_m"])
 
             def hang(*, dry_run):
-                gantry.hang_cable(env, t_ns, attachment_b=attachment, overhead_m=overhead,
+                gantry.hang_cable(env, t_ns, attachment_b=attachment, attachment_bodies=bodies, overhead_m=overhead,
                                   length_breakpoints_s_m=lengths, stiffness_n_m=stiffness, damping_n_s_m=damping,
                                   dry_run=dry_run)
         else:
@@ -848,12 +855,23 @@ class RuntimeHost:
         self._publish()
 
     def _publish(self) -> None:
-        """Feedback every step; truth every ``truth_every`` steps (its ``sim_time_ns`` says when)."""
-        self._publish_feedback()
+        """Feedback every step; truth every ``truth_every`` steps (its ``sim_time_ns`` says when). A step that
+        publishes both brings them to the host in one transfer."""
+        feedback = self._feedback_flat()
         if self.step_count % self.truth_every == 0 or self._truth_due:
-            self._publish_truth()
+            host = self._to_host("publish", torch.cat([feedback, self._truth_flat()]))
+            self._write_feedback(host[:feedback.numel()])
+            self._write_truth(host[feedback.numel():])
             self._truth_due = False
+        else:
+            self._write_feedback(self._to_host("feedback", feedback))
         self.seg.heartbeat()
+
+    def _publish_feedback(self) -> None:
+        self._write_feedback(self._to_host("feedback", self._feedback_flat()))
+
+    def _publish_truth(self) -> None:
+        self._write_truth(self._to_host("truth", self._truth_flat()))
 
     def _to_host(self, name: str, value: torch.Tensor) -> np.ndarray:
         """``value`` on the host, as NumPy (a pinned buffer per ``name``, reused: copy out before the next call)."""
@@ -867,17 +885,20 @@ class RuntimeHost:
         self._copied.synchronize()
         return buf.numpy()
 
-    def _publish_feedback(self) -> None:
-        sim, n = self.sim, len(self.drives)
+    def _feedback_flat(self) -> torch.Tensor:
+        """The feedback's fields as one float64 vector on the device; the integer fields travel bit-for-bit."""
+        sim = self.sim
         fb = sim.feedback if sim.feedback is not None else sim.plant.feedback(*sim.joint_state())
         imu = sim.imu.samples
-        h = imu.gyro.shape[1]
-        # One transfer: the integer fields travel bit-for-bit as float64.
         ints = torch.cat([imu.seq[0], imu.sample_ns[0], imu.stamp_ns[0], imu.count[:1]]).view(torch.float64)
         flat = torch.cat([fb.position_rad[0], fb.velocity_rad_s[0], fb.applied_torque_nm[0],
                           fb.demanded_torque_nm[0], imu.gyro[0].reshape(-1), imu.specific_force[0].reshape(-1),
                           ]).to(torch.float64)
-        host = self._to_host("feedback", torch.cat([flat, ints]))
+        return torch.cat([flat, ints])
+
+    def _write_feedback(self, host: np.ndarray) -> None:
+        sim, n = self.sim, len(self.drives)
+        h = sim.imu.samples.gyro.shape[1]
         drive = host[: 4 * n].reshape(4, n)
         for (position, velocity), d in self._frozen_encoders():
             drive[0, d], drive[1, d] = position, velocity
@@ -904,28 +925,29 @@ class RuntimeHost:
         imu_rec["gyro_rad_s"][:valid], imu_rec["specific_force_m_s2"][:valid] = gyro[:valid], accel[:valid]
         self.seg.regions["feedback"].write(rec)
 
-    def _publish_truth(self) -> None:
-        sim, nj = self.sim, len(self.joints)
+    def _truth_flat(self) -> torch.Tensor:
+        """The truth's fields as one float64 vector on the device, both soles batched (21 values each)."""
+        sim = self.sim
         q, qd = sim.joint_state()
         data = self.robot.data
-        root = data.root_link_pose_w.torch[0]
-        vel = data.root_link_vel_w.torch[0]
-        com = (self._mass[:, None] * data.body_com_pos_w.torch[0]).sum(0) / self._mass.sum()
-        soles = []
+        mass = self._mass.sum()
+        com = (self._mass @ data.body_com_pos_w.torch[0]) / mass
+        pose = data.body_link_pose_w.torch[0, self._sole_ids]  # [soles, 7]
+        points = _quat_rotate(pose[:, None, 3:].expand(-1, self._sole_points.shape[1], 4), self._sole_points)
+        lowest = (pose[:, None, 2] + points[:, :8, 2]).amin(dim=1)
+        face = pose[:, None, :2] + points[:, 8:12, :2]
+        axes = points[:, 12:15]  # the plate's axes in the world
+        span = 2 * (axes[:, 0, 2].abs() * self._sole_half[:, 0] + axes[:, 1, 2].abs() * self._sole_half[:, 1])
         normal = self.sim.backend.contacts.data.net_forces_w.torch[0, self._sole_contacts, 2]
-        for k, s in enumerate(self._soles):
-            pose = data.body_link_pose_w.torch[0, s["id"]]
-            corners = pose[:3] + _quat_rotate(pose[3:].expand(8, 4), s["corners"])
-            face = pose[:3] + _quat_rotate(pose[3:].expand(4, 4), s["face"])
-            axes = _quat_rotate(pose[3:].expand(3, 4), s["axes"])  # the plate's axes in the world
-            span = 2 * (axes[0, 2].abs() * s["half"][0] + axes[1, 2].abs() * s["half"][1])
-            soles.append(torch.cat([pose, corners[:, 2].min().view(1), normal[k].view(1), axes[2], span.view(1),
-                                    face[:, :2].reshape(-1)]))
+        soles = torch.cat([pose, lowest[:, None], normal[:, None], axes[:, 2], span[:, None], face.reshape(-1, 8)], 1)
         crane = (torch.full((6,), float("nan"), device=self.device) if self.trolley is None
                  else torch.cat([self.trolley.position[0], self.trolley.command[0]]))
-        flat = self._to_host("truth", torch.cat([root, vel, com, q[0], qd[0], sim.gantry.tension_n[:1],
-                                                 self._mass.sum().view(1), *soles, sim.gantry.top_w[0],
-                                                 sim.gantry.harness_w[0], crane]).to(torch.float64))
+        return torch.cat([data.root_link_pose_w.torch[0], data.root_link_vel_w.torch[0], com, q[0], qd[0],
+                          sim.gantry.tension_n[:1], mass.view(1), soles.reshape(-1), sim.gantry.top_w[0],
+                          sim.gantry.harness_w[0], crane]).to(torch.float64)
+
+    def _write_truth(self, flat: np.ndarray) -> None:
+        sim, nj = self.sim, len(self.joints)
         i = 0
 
         def take(k):
@@ -942,7 +964,7 @@ class RuntimeHost:
         t["base_lin_vel_m_s"], t["base_ang_vel_rad_s"], t["com_m"] = vel_np[:3], vel_np[3:], com_np
         t["gantry_tension_n"], t["mass_kg"], t["num_joints"] = tension, mass, nj
         t["joint_pos_rad"][:nj], t["joint_vel_rad_s"][:nj] = q_np, qd_np
-        for k in range(len(soles)):
+        for k in range(len(self._soles)):
             s = take(21)
             t["sole"]["position_m"][k], t["sole"]["quat_xyzw"][k] = s[:3], s[3:7]
             t["sole"]["lowest_z_m"][k], t["sole"]["normal_force_n"][k] = s[7], s[8]

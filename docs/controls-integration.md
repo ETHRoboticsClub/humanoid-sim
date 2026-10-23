@@ -130,14 +130,14 @@ To watch the robot while Controls drives it, run `humanoid-sim view-runtime` on 
 
 ## Running Controls' integration tests on humanoid-sim
 
-The integration scenarios that run on the fake-coe bus can use humanoid-sim as their plant. `plant_options` in `sim_fixture.py` reads two variables:
+The integration scenarios that run on the fake-coe or Unitree bus can use humanoid-sim as their plant. `plant_options` in `sim_fixture.py` reads two variables:
 
 | Variable | Meaning |
 |---|---|
 | `ETHRC_TEST_PLANT` | `mujoco` (default) or `humanoid-sim`; any other value fails a fake-coe scenario |
 | `ETHRC_TEST_SIM_SEGMENT` | The segment path, required with `humanoid-sim` |
 
-With `ETHRC_TEST_PLANT=humanoid-sim`, every scenario launched on the fake-coe bus gets `--plant humanoid-sim --sim-segment $ETHRC_TEST_SIM_SEGMENT`. These are the CTest targets that set `ETHRC_TEST_BUS=fake-coe` (`<scenario>_fake_coe`) and the scenarios that start the fake-coe lane themselves; scenarios on the Python or Unitree buses ignore the variables.
+With `ETHRC_TEST_PLANT=humanoid-sim`, every scenario launched on the fake-coe or Unitree bus gets `--plant humanoid-sim --sim-segment $ETHRC_TEST_SIM_SEGMENT`. These are the CTest targets that set `ETHRC_TEST_BUS=fake-coe` or `unitree` (`<scenario>_fake_coe`, `<scenario>_unitree`) and the scenarios that start those lanes themselves (the `g1_*` scenarios); scenarios on the Python bus ignore the variables. For the G1's scenarios, `scripts/sim/humanoid_sim_scenarios.py` starts the sim each one needs ([Running the G1 scenarios](#running-the-g1-scenarios)).
 
 Each scenario starts and stops its own Controls session, so the sim must serve client after client:
 
@@ -159,7 +159,7 @@ Here `/srv/hsim` is the host directory the sim serves into, directly or from its
 
 ## The G1 lane
 
-Controls' G1 lane runs the production G1 host (`ethrc_body_host`) on its `LowCmd` bus against a fake motor board (`ethrc_fake_unitree`), through the same shared segment it uses with Unitree's bridge on the robot. The board's plant host steps a MuJoCo plant by default; with `--physics humanoid-sim` humanoid-sim is the plant. It is on Controls' `master`:
+Controls' G1 lane runs the production G1 host (`ethrc_body_host`) on its `LowCmd` bus against a fake motor board (`ethrc_fake_unitree`), through the same shared segment it uses with Unitree's bridge on the robot. The board's plant host steps a MuJoCo plant by default; with `--physics humanoid-sim` humanoid-sim is the plant. The adapter is on Controls' `master`; the gantry, the plant truth, SLAM truth, the compose plant choice and the scenario runner are on Controls' `feat/g1-sim-lane`:
 
 | File | Role |
 |---|---|
@@ -169,6 +169,9 @@ Controls' G1 lane runs the production G1 host (`ethrc_body_host`) on its `LowCmd
 | `scripts/sim/launch.py` | `--bus unitree --plant humanoid-sim --sim-segment PATH` |
 | `ros2_ws/src/sim/ethrc_fake_unitree/test/test_sim_plant.py` | Unit tests against a stand-in sim |
 | `ros2_ws/src/sim/ethrc_fake_unitree/test/test_sim_plant_live.py` | The adapter against a live sim (`ETHRC_TEST_HUMANOID_SIM_SEGMENT`) |
+| `scripts/sim/humanoid_sim_world.py` | The session's environment as `serve --scene --spawn` |
+| `scripts/sim/humanoid_sim_scenarios.py` | Controls' G1 scenarios on humanoid-sim, or on MuJoCo beside it |
+| `containers/compose.sim.humanoid-sim.yaml` | `just sim-isaac` (`SIM_ROBOT=g1` for the G1): the sim, its viewer and the stack |
 
 Serve the variant Controls runs, with the support the session asks for and the truth every step:
 
@@ -180,7 +183,31 @@ The G1's motor driver runs each motor's PD itself, and so does humanoid-sim, so 
 
 `LowState` reads what the sim's motors measure. Its IMU gyroscope and accelerometer are the newest sample of the sim's IMU model; its quaternion, on the robot the board's own estimate, is the true orientation: the truth region's base orientation through the URDF's `imu_joint`, as the MuJoCo plant reports its site's. The plant host refuses a truth more than one physics step behind the feedback, hence `--truth-every 1`. The sim welds the Dex3 fingers, so each declared hand is a kinematic `FakeDex3` stepped with the loop, outside the body's physics. Both are in the status's `fidelity_gaps`.
 
-The sim's support is fixed when it starts: the plant host exits if `--profile` differs from it and refuses `/sim/profile` requests. `/sim/reset` sends `RESET` to the home pose. The gantry test seam, `--slam-truth` and the launcher's navigation need MuJoCo's world and are not served.
+The sim's support is fixed when it starts: the plant host exits if `--profile` differs from it and refuses `/sim/profile` requests. `/sim/reset` sends `RESET` to the home pose and, in a free session, `SET_SUPPORT` free.
+
+### The test gantry and the plant's truth
+
+Controls' G1 scenarios that stand or walk the free robot boot it hanging from the fake board's test-only gantry and lower it under a policy (`g1_walk`, `g1_sonic_navigation`, `g1_sonic_teleop`). On humanoid-sim each gantry request becomes the sim's own commands, posted one at a time after each ack so the plant host's 2 ms loop never waits (`SimGantryRequest` in `sim_plant.py`):
+
+1. `PRESCRIBE_POSE` with the request's joint angles (every other joint at zero), the root where it is, and `floor_clearance_m` as the request's lift: the lowest sole-plate corner that far above the floor.
+2. `SET_SUPPORT` with the request's tension program or cable. A request that names the harness body (`attachment_body`, `torso_link` on the G1, as the lab holds it) hangs from the harness hook: the plant host sends the descriptor's `harness.shoulders` as `attachment_bodies` (ABI 3.3), so the rope holds the midpoint of the shoulders on the torso. Any other body is refused.
+3. `PRESCRIBE_POSE` `{"release": true}`, so the body moves under the rope.
+
+A request with a field the sim cannot take is refused before any command; a refusal from the sim releases the pose and refuses the request, which changes nothing. A request written before the plant host starts boots the robot hanging: the sim holds its start pose until the first demands, and the plant host completes the request before it writes them. The answer reports the plant time the rope took effect.
+
+The truth file the scenarios use as their oracle (`plant-truth.json`) reads the sim's truth region: the root position, the floor clearance (the lower sole's `lowest_z_m`), the rope's tension, the body's mass and the plant time, stamped with the wall-clock time the sim's feedback maps it to. The scenarios size the boot rope by the sim's own mass (`humanoid_sim_mass_kg` in Controls' `sim_fixture.py`).
+
+### SLAM truth and the world
+
+`--slam-truth` publishes the SLAM contract (`nav_base` pose, status, the map) from the plant's truth: the pose from the sim's truth region, the occupancy grid from Controls' MuJoCo model of the environment. The simulated Mid-360 casts its rays on the same model. Both are only right when the sim serves the world Controls maps, so the plant host compares the descriptor's `scene` with the environment's boxes file and spawn point and exits on a mismatch. `scripts/sim/humanoid_sim_world.py` writes the arguments that serve it:
+
+```bash
+python3 scripts/sim/humanoid_sim_world.py --environment hangar --into /srv/hsim   # in Controls' image
+humanoid-sim --robot g1_29dof_with_hand_rev_1_0 serve --segment /srv/hsim/plant --support suspended \
+  --truth-every 1 --persist $(cat /srv/hsim/world.args)
+```
+
+`empty` needs no arguments; `hangar` and `hangar_scan` serve `hangar_proxy.npz` (Git LFS) with the hangar's spawn point at the origin. `just sim-isaac` serves the same world from `SIM_ENVIRONMENT` in its compose file, under the lab gantry's crane. The `room` is built in Controls' code and has no boxes file, so `g1_explore` cannot run on humanoid-sim yet. With SLAM truth served, the launcher starts the G1's navigation (`body-tf`, `sim-lidar`, the map relay and Nav2) on humanoid-sim as on MuJoCo.
 
 `test_sim_plant_live.py` checks the adapter against a running sim. In the humanoid-sim image, with a Controls checkout mounted at `/controls` and its Python packages on `PYTHONPATH`:
 
@@ -190,6 +217,39 @@ ETHRC_TEST_HUMANOID_SIM_SEGMENT=/tmp/plant python -m pytest /controls/ros2_ws/sr
 ```
 
 It steps the left knee 0.2 rad with every motor at its deploy gains and checks that the knee gets there, that every motor applies `kp (target - q)` at rest, that the IMU reads a still, upright pelvis, and that limp motors apply no torque. It passes on Warp's CPU device.
+
+### Running the G1 scenarios
+
+`scripts/sim/humanoid_sim_scenarios.py` in Controls runs Controls' G1 scenarios on humanoid-sim. Each scenario's session asks for a support and a world; the script starts one `serve --persist --truth-every 1` per support and world, with the world from `humanoid_sim_world.py`, runs each scenario in Controls' simulation-tests image (`scripts/ci/test-ros.sh --e2e --only`) with `ETHRC_TEST_PLANT=humanoid-sim`, samples the plant host's status while it runs, and prints one JSON line per scenario: pass or fail, the plant's real-time factor over the session, the sim's late steps, the board's command-loss timeouts and the host's longest command gap. `--plant mujoco` runs the same scenarios on MuJoCo for a side-by-side, and `sim_plant_live` runs `test_sim_plant_live.py` against the same sim. On a GPU node with humanoid-sim installed:
+
+```bash
+scripts/sim/humanoid_sim_scenarios.py --controls-image ethrc-controls:simulation-tests \
+  --sim-command humanoid-sim --sim-repo ../humanoid-sim --sim-cpus 0,4 --controls-cpus 1-3,5-7 \
+  --env G1_WALK_BUNDLE=/bundle --volume "$PWD/../g1_walk_bundle:/bundle" \
+  --volume "$PWD/ros2_ws/policy_checkpoints:/opt/ethrc/repository/ros2_ws/policy_checkpoints" \
+  sim_plant_live g1_policy g1_walk g1_sonic_teleop g1_sonic_navigation
+```
+
+`g1_walk` needs a walking bundle in `G1_WALK_BUNDLE`, and the SONIC scenarios need `gear-sonic-v1.1` in the policy library (Controls' `scripts/policy/install_sonic.py`). `g1_explore` runs in the room, which has no boxes file, so it cannot run here yet.
+
+### Real time
+
+The G1 lane is wall-clocked: the board's command loss, the body host and the policies run on the wall clock, and the scenarios fail a phase in which the plant falls behind it by more than 5 % (`keeping_up` in Controls' `g1_walk_scenario.py`). Three things decide whether the sim keeps up beside Controls' stack on one machine:
+
+- **The step's own cost.** On an L40S node one step of the free G1 takes 1.6 ms with the truth published every step (1.15 ms every fifth): the physics 0.9 ms, the feedback 0.19 ms, the truth 0.61 ms. A rope adds its own per-step work; the runtime publishes feedback and truth in one transfer and batches the soles, and the rope pushes only the points it uses.
+- **The CPU.** The step is a chain of kernel launches and two waits on the GPU, so a CPU thread that the stack preempts starts it late. Controls' stack (SONIC, Nav2, the API) loads 6 to 8 CPUs during a scenario. The scenario script runs the stack 10 nice levels below the sim, and the compose simulation runs the sim 10 levels up (`CAP_SYS_NICE`). On a node with 8 vCPUs, give the sim one physical core of its own (`--sim-cpus 0,4 --controls-cpus 1-3,5-7`; `lscpu -e` shows which CPUs share a core).
+- **The GPU.** Another job on the same GPU delays each step's kernels.
+
+Measured on 2026-10-20 (the plant's real-time factor over each scenario's session):
+
+| Host | Scenarios | Real-time factor | Late steps |
+|---|---|---|---|
+| L40S node, 8 vCPUs, sim on its own core | g1_policy (suspended) | 0.998 | 2 in 33 s |
+| | g1_walk (free, gantry, walking) | 0.997 | 24 in 51 s |
+| | g1_sonic_navigation (free, hangar) | 0.992 | 86 in 53 s |
+| GB10 Spark, 20 cores, sim alone behind a 2 ms client | free, holding still | 1.000 (0.995 with 18 busy processes) | 0 in 30 s (32 with 18 busy) |
+| Apple silicon Mac, Warp's CPU device, sim alone | free, holding still | 0.91 | 563 in 30 s |
+| L4 node, 8 vCPUs, before the batched truth | free scenarios | 0.90 | about 20 per second |
 
 ## Shared volume, clock and permissions
 
