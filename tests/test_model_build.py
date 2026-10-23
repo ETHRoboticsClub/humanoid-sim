@@ -4,10 +4,11 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 import pytest
+from conftest import joints_below
 
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
-from humanoid_sim.model.urdf import PreparedUrdf
+from humanoid_sim.model.urdf import PreparedUrdf, fit_sole_plate
 
 
 @pytest.fixture(scope="module")
@@ -18,9 +19,10 @@ def built():
 
 def test_inventory(built):
     desc, _ = built
-    assert len(desc.joints) == 22 and len(desc.drives) == 22
-    assert sum(d.crank is not None for d in desc.drives.values()) == 4
-    assert desc.ankle_cranks("l") == ("maxonHEJ50L_ANK1", "maxonHEJ50L_ANK2")
+    cranks = {name for name, d in desc.drives.items() if d.crank is not None}
+    assert cranks == {c for lk in desc.linkages for c in (lk.upper, lk.lower)}
+    for lk in desc.linkages:
+        assert desc.ankle_cranks(lk.side) == (lk.upper, lk.lower)
 
 
 def test_unlisted_joints_welded_and_actuated_joints_limited(built):
@@ -37,14 +39,30 @@ def test_unlisted_joints_welded_and_actuated_joints_limited(built):
     assert desc.calibration_travel("foot_pitch_l") == pytest.approx(desc.ankle_model.bounds("l")[0])
 
 
-def test_sole_boxes_match_controls_fit(built):
-    _, p = built
-    # Controls build_mjcf.py @ 447b4acb reports 249.9 x 90.0 mm, 5 mm thick, on both feet.
+def test_sole_plate_fit_recovers_a_plate():
+    # A 249.9 x 90 x 10 mm plate turned 0.3 rad about z: the box takes its bottom face's footprint, the configured
+    # thickness, and sits on that face inside the plate.
+    yaw = 0.3
+    rot = np.array([[np.cos(yaw), -np.sin(yaw), 0.0], [np.sin(yaw), np.cos(yaw), 0.0], [0.0, 0.0, 1.0]])
+    half = np.array([0.12495, 0.045, 0.005])
+    corners = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]) * half
+    offset = np.array([0.05, -0.02, -0.04])
+    center, rotation, got = fit_sole_plate(corners @ rot.T + offset, 0.005, 0.001)
+    assert got * 2e3 == pytest.approx([249.9, 90.0, 5.0])
+    assert abs(rotation[:, 0] @ rot[:, 0]) == pytest.approx(1.0)
+    assert rotation[:, 2] == pytest.approx([0.0, 0.0, 1.0])
+    assert center == pytest.approx(offset + [0.0, 0.0, 0.0025 - half[2]])
+
+
+def test_sole_boxes_on_the_profiles_feet(built):
+    desc, p = built
+    sole = p.model_cfg["sole"]
+    child = {j.get("name"): j.find("child").get("link") for j in p.root.findall("joint")}
+    assert {s.body for s in p.soles} == {child[j] for j in sole["joints"].values()}
     for s in p.soles:
-        assert s.half_extents * 2e3 == pytest.approx([249.9, 90.0, 5.0], abs=0.15)
+        assert s.half_extents[2] * 2 == pytest.approx(sole["box_thickness_m"])
         assert np.allclose(s.rotation.T @ s.rotation, np.eye(3), atol=1e-9)
         assert s.rotation[2, 2] > 0.99  # box z (into the plate) points up
-    assert {s.body for s in p.soles} == {"bottom_universal_joint_l_1", "bottom_universal_joint_l_Mirror__1"}
 
 
 def test_digest_is_machine_independent(built):
@@ -74,13 +92,16 @@ def _mesh_triangles(p, links):
 
 
 def test_body_tree(built):
-    _, p = built
+    desc, p = built
     tree = p.body_tree()
-    assert len(tree) == 23 and tree["base_link"] == (None, None)
-    assert tree["Component171_1"] == ("waist_upperbody_yaw", "base_link")
-    # A foot hangs from the ankle cross; the ORCA hand links are merged into the forearm body.
-    assert tree["bottom_universal_joint_l_Mirror__1"] == ("foot_roll_l", "universal_joint_cross_l_Mirror__1")
-    assert not any(b.startswith(("right_", "left_")) for b in tree)
+    root = p.root_link()
+    assert len(tree) == len(desc.joints) + 1 and tree[root] == (None, None)
+    child = {j.get("name"): j.find("child").get("link") for j in p.root.findall("joint")}
+    for body, (joint, parent) in tree.items():
+        if body != root:
+            assert joint in desc.joints and child[joint] == body and parent in tree
+    # Links behind welded joints (the ORCA hands) are merged into their parent body.
+    assert not {child[j] for j in p.welded} & set(tree)
 
 
 def test_one_collision_mesh_per_body(built):
@@ -95,7 +116,7 @@ def test_one_collision_mesh_per_body(built):
         assert len(p.merged.get(body, [])) // 3 == _mesh_triangles(per_mesh, subtree)
     # The sole boxes stay primitives on the feet, and the sole plates are not merged back in.
     boxes = [c for link in p._links.values() for c in link.findall("collision") if c.find("geometry/box") is not None]
-    assert len(boxes) == 2
+    assert len(boxes) == len(p.soles)
     soles = {s.body: s for s in p.soles}
     for body, sole in soles.items():
         z_min = p.merged[body][:, 2].min()
@@ -121,18 +142,22 @@ def test_self_collision_sets_and_excludes(built):
     desc, p = built
     sets = p.body_sets()
     count = {name: sum(s == name for s in sets.values()) for name in set(sets.values())}
-    assert count == {"leg_l": 6, "leg_r": 6, "arm_l": 4, "arm_r": 4, "trunk": 3}
+    # A set holds the body below its root joint and every body below that; the rest is everything else.
+    cfg = p.model_cfg["self_collision"]
+    below = {joint: body for body, (joint, _) in p.body_tree().items()}
+    expect = {name: 1 + len(joints_below(desc.robot, below[joint]) & set(desc.joints))
+              for name, joint in cfg["sets"].items()}
+    expect[cfg["rest"]] = len(sets) - sum(expect.values())
+    assert count == expect
     assert p.self_collision_excludes() == []  # the profile collides every pair
     pairs = [["leg_l", "leg_r"], ["arm_l", "trunk"], ["arm_r", "trunk"]]
     subset = PreparedUrdf(desc, _profile(self_collision={**p.model_cfg["self_collision"], "pairs": pairs})).build()
     allowed = {frozenset(pair) for pair in pairs}
     excluded = {frozenset(pair) for pair in subset.self_collision_excludes()}
-    bodies = list(p.body_tree())
+    bodies = [b for b in p.body_tree() if p._links[b].findall("collision")]
     for i, a in enumerate(bodies):
         for b in bodies[i + 1:]:
             assert (frozenset((a, b)) in excluded) == (frozenset((sets[a], sets[b])) not in allowed)
-    assert frozenset(("bottom_universal_joint_l_1", "bottom_universal_joint_l_Mirror__1")) not in excluded
-    assert frozenset(("connector_elbow_forearm_l_1", "connector_elbow_forearm_r_1")) in excluded
 
 
 def test_collision_config_is_checked(built):

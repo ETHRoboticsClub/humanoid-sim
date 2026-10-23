@@ -62,8 +62,8 @@ def test_fit_writes_start_values_times_multipliers_and_leaves_the_rest():
     space = FitSpace([Group("elbow", elbow)], params=("damping",), start={"elbow.armature": 0.0055})
     robot = _Robot(desc.joints)
     _write(robot, desc, space, np.array([[0.0], [math.log(2.0)]]))
-    d0 = desc.joints["elbow_flexion_l"].damping
-    assert np.allclose(robot.written["damping"].numpy(), [[d0, d0], [2 * d0, 2 * d0]])
+    d0 = [desc.joints[j].damping for j in elbow]
+    assert np.allclose(robot.written["damping"].numpy(), [d0, [2 * d for d in d0]])
     assert np.allclose(robot.written["armature"].numpy(), 0.0055)  # start value, not fitted
     assert "friction" not in robot.written  # neither fitted nor moved: the solver keeps the description's
 

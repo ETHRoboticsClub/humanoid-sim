@@ -44,7 +44,7 @@ def _inside_by_tendons(stops, chain, side, qp, qr):
 
 def test_four_stops_per_ankle_on_its_shank_and_foot(setup):
     desc, urdf, stops = setup
-    assert len(stops) == 4 * len(desc.linkages) == 8
+    assert len(stops) == 4 * len(desc.linkages)
     for lk in desc.linkages:
         chain = AnkleChain.from_urdf(urdf, *lk.joints)
         own = [s for s in stops if s.side == lk.side]
@@ -105,7 +105,9 @@ def test_ankle_stops_setting_is_explicit():
 
 
 def test_a_robot_without_cranks_has_no_stops():
-    assert crank_stops(Description.load("g1_29dof_rev_1_0")) == []
+    desc = Description.load(ROBOT)
+    desc.linkages = []
+    assert crank_stops(desc) == []
 
 
 # -- physics (Isaac Lab image) -----------------------------------------------------------------------------------
@@ -171,7 +173,7 @@ def test_cranks_driven_past_their_stops_stop_at_them(request):
     n = len(CRANK_DIRECTIONS)
     sim = SimCore(built_usd(ROBOT), device="cpu", robot=ROBOT, fixed_base=True, num_envs=n)
     request.addfinalizer(sim.close)
-    assert check_crank_stops(ROBOT, sim.profile["physics"]) == 8
+    assert check_crank_stops(ROBOT, sim.profile["physics"]) == 4 * len(sim.desc.linkages)
     p, desc, joints = sim.plant, sim.desc, list(sim.desc.joints)
     q, qd = sim.joint_state()
     target, _, _ = p.map.drive_state(q, qd)

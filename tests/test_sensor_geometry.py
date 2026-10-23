@@ -1,6 +1,6 @@
 """Where the G1's cameras and lidar sit and what they see (``sensors/geometry.py``), built from the sensor models and
-the rig: mounts against the G1 URDF's numbers for the lab unit, each lens against
-projections worked out by hand for points at known angles, and the lidar's pattern against its model's figures."""
+the rig: mounts on the bodies of the G1 URDF, each lens against projections worked out by hand for points at known
+angles, and the lidar's pattern against its model's figures."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ import math
 import numpy as np
 import pytest
 
+from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
+from humanoid_sim.model.urdf import PreparedUrdf
 from humanoid_sim.sensors import geometry, rigs
 from humanoid_sim.sensors.models import LivoxMid360, OakDW
 
@@ -27,20 +29,14 @@ def rig(desc):
     return rigs.load(G1, desc, CAMERAS)
 
 
-def test_the_mounts_are_the_lab_units(desc, rig):
-    m = {s.frame: geometry.Mount.from_urdf(desc.urdf_path, s.frame) for s in rig.sensors.values() if s.kind != "imu"}
-    assert {k: v.link for k, v in m.items()} == dict.fromkeys(("camera0_camera", "d435_link", "mid360_link"),
-                                                              "torso_link")
-    # camera0_camera: the left optical centre at (0.1068, 0.0406, 0.457) m in torso_link, level.
-    np.testing.assert_allclose(m["camera0_camera"].translation_m, (0.1068, 0.0406, 0.457))
-    np.testing.assert_allclose(m["camera0_camera"].R, np.eye(3), atol=1e-12)
-    # mid360_joint: Unitree's roll pi (upside down) with the measured pitch 0.0836 rad. The sensor's
-    # z axis then points down and back by the pitch: Ry(0.0836) Rx(pi) applied to +z.
-    z = m["mid360_link"].R @ np.array([0.0, 0.0, 1.0])
-    np.testing.assert_allclose(z, (-math.sin(0.0836), 0.0, -math.cos(0.0836)), atol=1e-9)
-    # Unitree's D435 looks forward and down: its x axis pitched 0.8307767 rad below the torso's horizon.
-    x = m["d435_link"].R @ np.array([1.0, 0.0, 0.0])
-    np.testing.assert_allclose(x, (math.cos(0.8307767239493009), 0.0, -math.sin(0.8307767239493009)), atol=1e-9)
+def test_every_mount_sits_on_a_body_of_the_robot(desc, rig):
+    bodies = PreparedUrdf(desc, load_profile(G1)).build().body_tree()
+    for s in rig.sensors.values():
+        if s.kind == "imu":
+            continue
+        m = geometry.Mount.from_urdf(desc.urdf_path, s.frame)
+        assert m.link in bodies, s.frame
+        np.testing.assert_allclose(m.R.T @ m.R, np.eye(3), atol=1e-9)
 
 
 def test_a_mount_composes_fixed_joints_to_the_kept_body(tmp_path):

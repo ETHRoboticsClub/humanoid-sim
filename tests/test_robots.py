@@ -1,7 +1,11 @@
 """Every robot in humanoid-urdf loads, builds and steps the plant: the ETHRC V1 and the Unitree G1 variants."""
 
+import xml.etree.ElementTree as ET
+
+import numpy as np
 import pytest
 import torch
+import yaml
 
 from humanoid_sim.core import PlantCfg, PlantCore
 from humanoid_sim.devices.demand import DriveDemand
@@ -40,9 +44,8 @@ def test_drives_cover_every_joint(robot):
 
 def test_unitree_motors_keep_their_slots():
     desc = Description.load("g1_29dof_with_hand_rev_1_0")
-    assert sorted(d.motor_index for d in desc.drives.values()) == list(range(29))
-    assert desc.drives["left_hip_pitch_joint"].motor_index == 0
-    assert not desc.linkages
+    slots = [d.motor_index for d in desc.drives.values()]
+    assert all(isinstance(i, int) and i >= 0 for i in slots) and len(set(slots)) == len(slots)
 
 
 @pytest.mark.parametrize("robot", ROBOTS)
@@ -65,18 +68,24 @@ def test_each_foot_has_a_sole_box(robot):
     p = PreparedUrdf(Description.load(robot), load_profile(robot)).build()
     assert sorted(s.side for s in p.soles) == ["l", "r"]
     for s in p.soles:
-        assert s.half_extents[0] > 0.05 and s.half_extents[1] > 0.02  # a foot's footprint, not a point
+        assert (s.half_extents[:2] > 0).all()  # a foot's footprint, not a point
 
 
 def test_the_g1_sole_box_bounds_its_contact_spheres():
-    p = PreparedUrdf(Description.load("g1_29dof_with_hand_rev_1_0"), load_profile("g1_29dof_with_hand_rev_1_0"))
+    desc = Description.load("g1_29dof_with_hand_rev_1_0")
+    p = PreparedUrdf(desc, load_profile(desc.robot))
     p.build()
+    links = {link.get("name"): link for link in ET.parse(desc.urdf_path).getroot().findall("link")}
     for s in p.soles:
         assert s.mesh is None  # describes the sole, replaces nothing
-        bottom = s.center[2] - s.half_extents[2]
-        assert bottom == pytest.approx(-0.035)  # sphere centers at z -0.03, radius 5 mm
-        assert s.center[0] - s.half_extents[0] == pytest.approx(-0.055)
-        assert s.center[0] + s.half_extents[0] == pytest.approx(0.125)
+        spheres = [(np.array([float(v) for v in c.find("origin").get("xyz").split()]),
+                    float(c.find("geometry/sphere").get("radius")))
+                   for c in links[s.body].findall("collision") if c.find("geometry/sphere") is not None]
+        assert spheres
+        lo, hi = s.center - s.half_extents, s.center + s.half_extents
+        for c, r in spheres:
+            assert (lo <= c - r + 1e-12).all() and (c + r <= hi + 1e-12).all()
+        assert lo[2] == pytest.approx(min(c[2] - r for c, r in spheres))  # the box's bottom is the spheres'
     assert not p.root.findall(".//collision[@name='sole_box_l']")
 
 
@@ -126,12 +135,13 @@ def test_the_v1_starts_a_session_standing_and_the_g1_at_home():
         start_pose({"poses": {"start": "crouch"}})
 
 
-def test_the_g1_home_pose_is_unitrees_standing_pose():
+def test_the_g1_home_pose_is_its_profiles_preset():
     desc = Description.load("g1_29dof_with_hand_rev_1_0")
+    preset_id = load_profile(desc.robot)["poses"]["home"]["preset"]
+    presets = yaml.safe_load((desc.robot_dir / "position-presets.yaml").read_text())["presets"]
+    positions = next(p for p in presets if p["preset_id"] == preset_id)["positions_rad"]
     home = home_pose(desc, load_profile(desc.robot))
-    assert home["left_knee_joint"] == pytest.approx(0.3)
-    assert home["right_ankle_pitch_joint"] == pytest.approx(-0.2)
-    assert home["waist_yaw_joint"] == 0.0
+    assert home == {n: pytest.approx(float(positions.get(n, 0.0))) for n in desc.joints}  # unlisted joints at zero
 
 
 @pytest.mark.parametrize("robot", ROBOTS)

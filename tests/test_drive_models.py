@@ -2,7 +2,7 @@
 
 import pytest
 
-from humanoid_sim.devices.models import MODELS, Hej50, Hej90, UnitreeMotor, drive_models
+from humanoid_sim.devices.models import MODELS, drive_models
 from humanoid_sim.model.description import Description, robots
 
 
@@ -15,31 +15,33 @@ def test_every_drive_has_its_family_model(robot):
         assert model.family == desc.drives[name].family and MODELS[model.family] is type(model)
 
 
-def test_the_v1_drives_take_their_delay_from_the_description():
-    desc = Description.load("ethrc_v1")
+@pytest.mark.parametrize("robot", robots())
+def test_drives_take_their_delay_from_the_description(robot):
+    desc = Description.load(robot)
     models = drive_models(desc)
-    assert isinstance(models["maxonHEJ90L4"], Hej90) and isinstance(models["maxonHEJ50L_ANK1"], Hej50)
-    for model in models.values():
-        assert model.delay_measured
-        assert model.drive_delay_ns == round(float(desc.family(model.family)["drive_delay_s"]) * 1e9)
+    for name, model in models.items():
+        recorded = desc.family_value(model.family, "drive_delay_s")
+        assert model.delay_measured == (recorded is not None)
+        assert model.drive_delay_ns == (0 if recorded is None else round(float(recorded) * 1e9))
         assert isinstance(model.drive_delay_ns, int)
-    # One instance per family.
-    assert models["maxonHEJ90L4"] is models["maxonHEJ90R4"]
+        # One instance per family.
+        assert all(models[other] is model for other, d in desc.drives.items() if d.family == model.family)
 
 
 def test_a_family_without_a_recorded_delay_has_none_modeled():
-    models = drive_models(Description.load("g1_29dof_rev_1_0"))
-    assert all(isinstance(m, UnitreeMotor) and m.drive_delay_ns == 0 and not m.delay_measured
-               for m in models.values())
+    desc = Description.load("ethrc_v1")
+    for family in desc.table["families"].values():
+        family.pop("drive_delay_s", None)
+    assert all(m.drive_delay_ns == 0 and not m.delay_measured for m in drive_models(desc).values())
 
 
 def test_a_bad_delay_or_an_unknown_family_is_refused():
     desc = Description.load("ethrc_v1")
-    desc.table["families"]["HEJ90-48-140"]["drive_delay_s"] = -0.001
+    name, drive = next(iter(desc.drives.items()))
+    desc.table["families"][drive.family]["drive_delay_s"] = -0.001
     with pytest.raises(ValueError, match="non-negative"):
         drive_models(desc)
     desc = Description.load("ethrc_v1")
-    desc.drives["maxonHEJ90L4"] = desc.drives["maxonHEJ90L4"].__class__(
-        **{**desc.drives["maxonHEJ90L4"].__dict__, "family": "HEJ120"})
+    desc.drives[name] = drive.__class__(**{**drive.__dict__, "family": "HEJ120"})
     with pytest.raises(ValueError, match="no drive model"):
         drive_models(desc)

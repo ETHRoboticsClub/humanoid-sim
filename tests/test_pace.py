@@ -255,12 +255,13 @@ def test_blocks_cover_every_entry_once(plant):
     parts = blocks(space, plant, list(range(len(drives))))
     entries = np.concatenate([idx for idx, _ in parts])
     assert len(entries) == len(set(entries.tolist())) == space.dim - 1  # every entry once, the fixed bias out
-    assert len(parts) == 18 + 2 + 1  # 1:1 drives, ankles, the delay
+    one_to_one = [i for i, d in enumerate(drives) if plant.desc.drives[d].crank is None]
+    assert len(parts) == len(one_to_one) + len(plant.desc.linkages) + 1  # 1:1 drives, ankles, the delay
     up, lo = plant.desc.ankle_cranks("l")
     ankle = next(ds for _, ds in parts if drives.index(up) in ds)
     assert sorted(ankle) == sorted([drives.index(up), drives.index(lo)])
     assert parts[-1][1] == list(range(len(drives)))  # the delay scores on everything
-    skipped = blocks(space, plant, [d for d in range(len(drives)) if d != 3])
+    skipped = blocks(space, plant, [d for d in range(len(drives)) if d != one_to_one[0]])
     assert len(skipped) == len(parts) - 1
 
 

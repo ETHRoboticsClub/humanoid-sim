@@ -98,7 +98,7 @@ def desc():
 def test_plant_core_on_description(desc):
     joints = list(desc.joints)
     plant = PlantCore(desc, joints, 2, PlantCfg(dtype=D64))
-    assert plant.map.num_drives == 22 and len(plant.map.ankles) == 2
+    assert plant.map.num_drives == len(desc.drives) and len(plant.map.ankles) == len(desc.linkages)
     standing = torch.tensor([desc.joints[n].standing_offset_rad for n in joints], dtype=D64).expand(2, -1)
     qdrv, _, _ = plant.map.drive_state(standing, torch.zeros_like(standing))
     demand = DriveDemand.pd(qdrv.clone(), plant.drive_stiffness.expand(2, -1), plant.drive_damping.expand(2, -1))
@@ -107,11 +107,13 @@ def test_plant_core_on_description(desc):
     # Demanding the current pose at the baseline gains: zero force, target = current pose.
     assert torch.allclose(target, standing, atol=1e-9)
     fb = plant.feedback(standing, torch.zeros_like(standing))
-    assert torch.allclose(fb.applied_torque_nm, torch.zeros(2, 22, dtype=D64), atol=1e-9)
-    # Ankle solver gains are the crank gains through J at standing: pitch ~ 2 kp / 0.96^2 for the crank pair.
-    i = joints.index("foot_pitch_l")
-    kp = desc.drives["maxonHEJ50L_ANK1"].baseline_stiffness
-    assert 1.45 * kp < plant.k0[0, i].item() < 2.3 * kp
+    assert torch.allclose(fb.applied_torque_nm, torch.zeros(2, len(desc.drives), dtype=D64), atol=1e-9)
+    # Ankle solver gains are the crank gains through J at standing: diag(J^T K J).
+    for lk in desc.linkages:
+        cols = [joints.index(j) for j in lk.joints]
+        jac = desc.ankle_transmission(lk.side, dtype=D64).jacobian(standing[:1, cols])[0]
+        k = torch.tensor([desc.drives[c].baseline_stiffness for c in (lk.upper, lk.lower)], dtype=D64)
+        assert torch.allclose(plant.k0[0, cols], (jac**2 * k[:, None]).sum(0))
 
 
 def test_drive_deviations_and_per_drive_arrival():
