@@ -73,7 +73,7 @@ def _env(robot, num_envs=2):
     @configclass
     class EnvCfg(ManagerBasedRLEnvCfg):
         decimation = 5
-        episode_length_s = 3.0
+        episode_length_s = 9.2
         actions = Actions()
         observations = Observations()
         rewards = Rewards()
@@ -113,10 +113,12 @@ def test_manager_based_env_steps_the_plant(robot):
         obs, _ = env.reset()
         assert obs["policy"].shape == (2, drives + 6)
         t0 = plant.t_ns
-        for _ in range(140):  # 2.8 s: holding the standing pose rigidly, it tips over and comes to rest
+        # 9 s: holding the standing pose rigidly, it tips over and comes to rest. Rest takes up to about 7.5 s
+        # on the G1 with hands: its arm drives at stall press each hand along its hip until it stops.
+        for _ in range(450):
             obs, _, _, truncated, _ = env.step(torch.zeros(2, drives))
             assert not truncated.any()
-        assert plant.t_ns - t0 == 140 * 5 * plant.period_ns
+        assert plant.t_ns - t0 == 450 * 5 * plant.period_ns
         assert torch.isfinite(obs["policy"]).all()
         # IMU frame: at rest the sensor reads gravity's reaction in the chip frame of the description's mount.
         _, _, rpy = plant.desc.imu_mount()
@@ -137,7 +139,7 @@ def test_manager_based_env_steps_the_plant(robot):
         diagonal = [0, 4, 8]  # of the row-major 3x3 inertia; near-zero products of inertia get revalidated
         written = plant.robot.data.body_inertia.torch[..., diagonal] / plant._inertia0[..., diagonal]
         assert torch.allclose(written, scale.unsqueeze(-1).expand_as(written), rtol=1e-4)
-        # Episode end at 3 s: the reset envs start again, IMU delivery restarts from zero.
+        # Episode end at 9.2 s: the reset envs start again, IMU delivery restarts from zero.
         dones = 0
         for _ in range(11):
             _, _, _, truncated, _ = env.step(torch.zeros(2, drives))
