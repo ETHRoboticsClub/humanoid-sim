@@ -23,8 +23,8 @@ another), so the session starts when the client does, as a plant started with it
 hanging with idle drives between clients would sag to its rest pose first.
 
 A suspended session hangs the robot from the lab gantry, its soles ``SUSPENDED_LIFT_M`` above the ground: one cable
-from the harness hook on the torso (the profile's ``support``) to an anchor overhead, carrying the robot's weight at
-its full-weight stretch, so the waist carries the hanging legs as on the lab's gantry. It is turned about the hook to
+from an anchor overhead to a spreader bar over the harness hook on the torso (the profile's ``support``), a strap from
+each end of the bar to a shoulder, carrying the robot's weight at its full-weight stretch, so the waist carries the hanging legs as on the lab's gantry. It is turned about the hook to
 rest with its centre of mass below it, and a swing dies away over several periods (``support.swing_damping_ratio``). A reset to a named pose puts
 the robot back at that height; every reset rehangs the cable where the robot then is. A rope requested after a pose
 write is checked at once and hung after the next step, since body poses update only in a step. The descriptor's
@@ -449,6 +449,7 @@ class RuntimeHost:
         """The gantry cable at the harness hook, its unstretched length short of the overhead distance by the
         stretch that carries the robot's weight, so it holds the robot where it hangs: critically damped along the
         cable, and across it at ``support.swing_damping_ratio`` of the robot's swing as a pendulum from the anchor.
+        The shoulders hang from a spreader bar ``support.spreader_width_m`` wide, or as wide as they are apart.
         With ``level`` the robot is first turned about the hook to the attitude it comes to rest in. With a crane
         (``--gantry``) whose travel reaches over the hook, the cable hangs from the crane's hook, the trolley placed
         over it and the hoist that stretch short; a suspended robot out of its reach is refused."""
@@ -479,12 +480,14 @@ class RuntimeHost:
         if crane is not None:
             self.trolley.place(env, torch.tensor(crane))
             self.sim.gantry.hang_hoist(env, attachment_bodies=cfg["harness"]["shoulders"], stiffness_n_m=stiffness,
-                                       damping_n_s_m=damping, swing_damping_n_s_m=swing_damping)
+                                       damping_n_s_m=damping, swing_damping_n_s_m=swing_damping,
+                                       spreader_width_m=cfg["spreader_width_m"])
             return
         self.sim.gantry.hang_cable(
             env, self.sim.t_ns, attachment_bodies=cfg["harness"]["shoulders"],
             overhead_m=cfg["overhead_m"], length_breakpoints_s_m=[(0.0, cfg["overhead_m"] - cfg["full_weight_stretch_m"])],
-            stiffness_n_m=stiffness, damping_n_s_m=damping, swing_damping_n_s_m=swing_damping, dry_run=dry_run)
+            stiffness_n_m=stiffness, damping_n_s_m=damping, swing_damping_n_s_m=swing_damping,
+            spreader_width_m=cfg["spreader_width_m"], dry_run=dry_run)
 
     def _hook_and_com(self) -> tuple[torch.Tensor, torch.Tensor]:
         """The harness hook (midway between the shoulder links, whose origins are their joints) and the centre of
