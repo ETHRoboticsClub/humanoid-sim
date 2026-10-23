@@ -94,8 +94,8 @@ def test_the_gravity_the_viewers_use_is_the_sims():
 
 def test_classes_for_known_tensions():
     w = WEIGHT_N
-    cases = [(0.0, gv.SLACK), (0.5 * w, gv.TAUT), (w, gv.TAUT), (1.01 * w, gv.OVER), (1.9 * w, gv.OVER),
-             (2.01 * w, gv.CAUGHT)]
+    cases = [(0.0, gv.SLACK), (0.5 * w, gv.TAUT), (w, gv.TAUT), (1.01 * w, gv.TAUT), (1.49 * w, gv.TAUT),
+             (1.51 * w, gv.OVER), (2.9 * w, gv.OVER), (3.01 * w, gv.CAUGHT)]
     for tension, expected in cases:
         assert gv.rope_state(tension, w) == expected, tension
 
@@ -103,7 +103,7 @@ def test_classes_for_known_tensions():
 def test_classes_for_known_lengths():
     w, stretch = WEIGHT_N, WEIGHT_N / STIFFNESS  # 4.905 cm under the full weight
     for extension, expected in [(-0.1, gv.SLACK), (0.0, gv.SLACK), (0.5 * stretch, gv.TAUT),
-                                (0.99 * stretch, gv.TAUT), (1.01 * stretch, gv.OVER)]:
+                                (1.01 * stretch, gv.TAUT), (1.49 * stretch, gv.TAUT), (1.51 * stretch, gv.OVER)]:
         tension = max(0.0, STIFFNESS * extension)
         assert gv.rope_state(tension, w, extension_m=extension, stretch_m=stretch) == expected, extension
     # A damper can hide the stretch from the tension: the length still says over-stretched.
@@ -125,7 +125,7 @@ def test_status_texts():
     (2.0, gv.STATE_RGB[gv.SLACK], 0.0),  # 2.0 m of rope for a 2.0 m gap: slack
     (2.1, gv.STATE_RGB[gv.SLACK], 0.0),
     (2.0 - 0.5 * WEIGHT_N / STIFFNESS, gv.STATE_RGB[gv.TAUT], 0.5 * WEIGHT_N),  # carries half the weight
-    (2.0 - 1.5 * WEIGHT_N / STIFFNESS, gv.STATE_RGB[gv.OVER], 1.5 * WEIGHT_N),  # one and a half weights
+    (2.0 - 2.0 * WEIGHT_N / STIFFNESS, gv.STATE_RGB[gv.OVER], 2.0 * WEIGHT_N),  # two weights
 ])
 def test_the_rope_joins_the_anchor_to_the_hook_in_the_colour_of_its_load(rest_m, color, tension_n):
     robot = Robot()
@@ -154,7 +154,7 @@ def test_a_rope_hung_from_the_wrong_anchor_is_slanted_and_red():
     rec._gantry(0, BASES)
     _, strips, colors, _ = rr.last("/world/gantry/1/rope")
     assert strips[0] == pytest.approx(np.array([stretched, [0.0, 0.0, HOOK_Z]]), abs=1e-5)
-    assert colors == [gv.STATE_RGB[gv.CAUGHT]]  # 1.5 kN against a 98 N weight
+    assert colors == [gv.STATE_RGB[gv.CAUGHT]]  # 1.5 kN against a 98 N weight, past three weights
     expected = STIFFNESS * (math.sqrt(1.0 + 2.0 ** 2) - 2.0)
     assert rr.scalars("/sim/1/gantry/tension_n")[-1] == pytest.approx(expected, rel=1e-4)
     assert "caught" in rr.last("/world/gantry/1/status")[3][0]

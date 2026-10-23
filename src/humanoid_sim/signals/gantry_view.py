@@ -5,10 +5,11 @@ anchor, a plumb line under it, the crane's travel, bridge and trolley, a status 
 The rope is classed from its tension against the robot's weight ``W`` (``mass · g``):
 
 * ``SLACK`` (grey): the cable is at or below its unstretched length and pulls nothing;
-* ``TAUT`` (green): it carries up to the full weight, the stretch ``W / k`` of a cable that holds the robot just up;
-* ``OVER`` (red): it carries more than the full weight, or is stretched past ``W / k``, which a hung robot only
-  reaches when it was hung off its anchor, falls, or is pulled;
-* ``CAUGHT`` (red): the tension spiked over ``CAUGHT_SHARE`` of the weight, as when a falling robot is stopped.
+* ``TAUT`` (green): it carries up to ``OVERLOAD_FACTOR`` times the full weight, the stretch ``W / k`` of a cable that
+  holds the robot just up; a hung robot sits at 1 W and swings and pushes move it around that;
+* ``OVER`` (red): it carries more than ``OVERLOAD_FACTOR`` times the weight, or is stretched past that many times
+  ``W / k``, which a hung robot only reaches when it was hung off its anchor, falls, or is pulled;
+* ``CAUGHT`` (red): the tension spiked over ``CAUGHT_SHARE`` times the weight, as when a falling robot is stopped.
 
 Entity paths, under the ``world`` and ``sim`` prefixes the caller gives: ``<world>/{rope,anchor,plumb,status}``,
 ``<world>/{travel,bridge,trolley}`` with a crane, and ``<sim>/{tension_n,tension_share,length_m,rest_length_m}``
@@ -23,8 +24,8 @@ SLACK, TAUT, OVER, CAUGHT = 0, 1, 2, 3
 STATE_WORDS = {SLACK: "slack", TAUT: "taut", OVER: "over-stretched", CAUGHT: "caught"}
 STATE_RGB = {SLACK: (150, 150, 150), TAUT: (60, 190, 90), OVER: (225, 60, 50), CAUGHT: (225, 60, 50)}
 
-FULL_WEIGHT_SHARE = 1.0  # tension over weight at the full-weight stretch: more is over-stretched
-CAUGHT_SHARE = 2.0  # tension over weight beyond which the rope has caught the robot: twice what it hangs by
+OVERLOAD_FACTOR = 1.5  # a rope may carry this many weights (stretch it this many full-weight stretches) before it is red
+CAUGHT_SHARE = 3.0  # tension over weight beyond which the rope has caught the robot: a fall stopped by the rope
 
 ROPE_RADIUS_M = 0.015
 ANCHOR_RADIUS_M = 0.05
@@ -48,13 +49,13 @@ def full_weight_stretch_m(weight_n, stiffness_n_m):
 def rope_state(tension_n, weight_n, *, extension_m=None, stretch_m=None):
     """The class (``SLACK``, ``TAUT``, ``OVER`` or ``CAUGHT``) of a rope, elementwise. ``extension_m`` (length less
     unstretched length) decides slack when given, else a tension of zero does; ``stretch_m`` (the full-weight
-    stretch) adds over-stretched beyond it, whatever the tension, as a damper can hide it."""
+    stretch) adds over-stretched beyond ``OVERLOAD_FACTOR`` times it, whatever the tension, as a damper can hide it."""
     tension = np.asarray(tension_n, dtype=np.float64)
     weight = np.asarray(weight_n, dtype=np.float64)
     slack = tension <= 0.0 if extension_m is None else np.asarray(extension_m) <= 0.0
-    over = tension > FULL_WEIGHT_SHARE * weight
+    over = tension > OVERLOAD_FACTOR * weight
     if extension_m is not None and stretch_m is not None:
-        over = over | (np.asarray(extension_m) > np.asarray(stretch_m))
+        over = over | (np.asarray(extension_m) > OVERLOAD_FACTOR * np.asarray(stretch_m))
     state = np.where(over, OVER, TAUT)
     state = np.where(tension > CAUGHT_SHARE * weight, CAUGHT, state)
     return np.where(slack, SLACK, state)

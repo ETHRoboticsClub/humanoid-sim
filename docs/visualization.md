@@ -146,15 +146,15 @@ The colour is the rope's class, from its tension against `W`:
 | Class | Colour | When |
 |---|---|---|
 | slack | grey | Its length is at or below its unstretched length, so it pulls nothing |
-| taut | green | It carries up to the full weight, the stretch `W / k` of a cable that just holds the robot (`support.full_weight_stretch_m`, 2 cm, for the harness cable) |
-| over-stretched | red | It carries more than the full weight, or is stretched beyond `W / k` |
-| caught | red | The tension is over `CAUGHT_SHARE` (2) times the weight, as when a rope stops a falling robot |
+| taut | green | It carries up to `OVERLOAD_FACTOR` (1.5) times the full weight. The full weight is the stretch `W / k` of a cable that just holds the robot (`support.full_weight_stretch_m`, 2 cm, for the harness cable), where a hung robot sits while swings and pushes move it around |
+| over-stretched | red | It carries more than 1.5 weights, or is stretched beyond 1.5 times `W / k` |
+| caught | red | The tension is over `CAUGHT_SHARE` (3) times the weight, as when a rope stops a falling robot |
 
 A rope hung from the wrong anchor, such as one built over a robot's default spawn point when the robot starts elsewhere, shows at once: it leans away from its plumb line and is red.
 
 A training task can add its own words to the label: `recorder.notes[env] = "phase: stand"` makes it `gantry: taut 0.88 W | phase: stand`. The recorder never imports task code, so the task sets the string whenever its operator changes phase or the episode ends.
 
-`examples/train_scene.py --gantry` hangs the robots by env index modulo 4 with a rope at 80% of the weight, a slack rope, no rope and a rope whose anchor is 0.6 m off to the side:
+`examples/train_scene.py --gantry` hangs the robots by env index modulo 4 with a rope at 80% of the weight, a slack rope, no rope and a rope whose anchor is 1.0 m off to the side:
 
 ![Four robots in a row: green taut rope, grey slack rope, the label no gantry, and a red leaning rope](images/scene-gantry.png)
 

@@ -126,7 +126,7 @@ def robot_usd() -> Path:
 
 # What `--gantry` hangs, by env index modulo 4: a rope carrying 80% of the weight, a slack rope, no rope, and a rope
 # whose anchor is off to the side by `OFF_ANCHOR_M` (the mistake of building the anchor from the wrong robot position).
-LOAD_SHARE, SLACK_M, OFF_ANCHOR_M = 0.8, 0.05, 0.6
+LOAD_SHARE, SLACK_M, OFF_ANCHOR_M = 0.8, 0.05, 1.0
 
 
 def hang_ropes(env, plant) -> None:
