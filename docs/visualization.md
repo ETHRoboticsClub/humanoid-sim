@@ -154,9 +154,9 @@ A rope hung from the wrong anchor, such as one built over a robot's default spaw
 
 A training task can add its own words to the label: `recorder.notes[env] = "phase: stand"` makes it `gantry: taut 0.88 W | phase: stand`. The recorder never imports task code, so the task sets the string whenever its operator changes phase or the episode ends.
 
-`examples/train_scene.py --gantry` hangs the robots by env index modulo 4 with a rope at 80% of the weight, a slack rope, no rope and a rope whose anchor is 1.0 m off to the side:
+`examples/train_scene.py --gantry` hangs the robots by env index modulo 4 with a rope cut to carry 80% of the weight (the robot settles at about its full weight), a slack rope, no rope and a rope whose anchor is 1.0 m off to the side of the robot, so that the rope is over-stretched and yanks it:
 
-![Four robots in a row: green taut rope, grey slack rope, the label no gantry, and a red leaning rope](images/scene-gantry.png)
+![Four robots 0.37 s in: a green taut rope, a grey slack one, the label no gantry, and a red rope that has just caught its robot, with the tension of each rope over its robot's weight on the right](images/scene-gantry.png)
 
 The labels and lines come from the last physics step, at the recorder's own rate. With no recorder, nothing is drawn or computed.
 
