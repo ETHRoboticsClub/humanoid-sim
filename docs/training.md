@@ -35,7 +35,7 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `StaticBoxes` | `src/humanoid_sim/world/boxes.py` | A room's walls and furniture as static boxes, read from a file, described in [world.md](world.md#static-boxes) |
 | `initial_pose`, `POSES` | `src/humanoid_sim/model/poses.py`, re-exported by `humanoid_sim.train.scene` | The joint positions and base height of a named initial pose |
 | `heightfield_terrain_cfg` | `src/humanoid_sim/world/terrain.py` | The terrain-importer config for a heightfield terrain the caller lays out, described in [world.md](world.md#heightfield-terrain) |
-| `ForcePush`, `Gantry` | `src/humanoid_sim/world/` | Pushes and gantry ropes a task applies, described in [world.md](world.md) |
+| `ForcePush`, `Gantry` | `src/humanoid_sim/world/` | Pushes a task applies, and the gantry rope the plant applies once a task hangs it (`plant.gantry`), described in [world.md](world.md) |
 | `DriveDemand` | `src/humanoid_sim/devices/demand.py` | One SI demand per env and drive: law, targets, gains, torque limit |
 | `SceneRecorder` | `src/humanoid_sim/signals/scene.py` | Records many envs of a scene to one Rerun recording |
 
@@ -67,7 +67,7 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 Isaac Lab's `ManagerBasedRLEnv.step` calls each action term's `process_actions` once per env step and `apply_actions` before every physics step. `PlantAction` uses them like this:
 
 1. `process_actions(actions)` calls your `demands(actions)` and hands the result to `RobotPlant.submit`. Each drive queues the demand to take effect at `sent_ns` plus its randomized `latency` plus its own delay ([latency](glossary.md#latency)).
-2. `apply_actions()` calls `RobotPlant.pre_physics()`. With the state at the start of the physics step it appends drive feedback to the history and steps the IMU delivery model; then it runs the drive bank over the step (every demand in force during the step, weighted by the time it covers), maps drive torque to joint torque through the ankle transmission, and writes the position target that makes the solver's constant PD produce that torque. `plant.t_ns` then advances by one physics period.
+2. `apply_actions()` calls `RobotPlant.pre_physics()`. With the state at the start of the physics step it appends drive feedback to the history and steps the IMU delivery model; then it runs the drive bank over the step (every demand in force during the step, weighted by the time it covers), maps drive torque to joint torque through the ankle transmission, writes the position target that makes the solver's constant PD produce that torque, and adds the gantry rope's force (`plant.gantry`, nothing until a rope is hung). `plant.t_ns` then advances by one physics period.
 3. When envs finish an episode, Isaac Lab runs the reset events, which write the new state, and then the action manager's reset, which calls `RobotPlant.reset(env_ids)`.
 
 The solver's PD gains are constant per joint and written once at spawn. The drives' own gains, the torque-speed envelope and the torque cap are all realized by moving the position target ([target shaping](glossary.md#target-shaping), see [drives.md](drives.md)), so nothing in the solver model changes while training steps.
@@ -335,6 +335,7 @@ The contact sensor covers every body and also tracks force history (3 steps) and
 - Gain warnings and external joint torques (`plant.core.external_torque`) are cleared.
 - The reset-scope device parameters are redrawn for these envs and written. Solver parameters are not redrawn.
 - The feedback history is marked empty: every `history_ns` entry is -1. The history values themselves still hold the previous episode's feedback until new physics steps push it out.
+- The gantry rope (`plant.gantry`) is kept: hang a new one or release it from your reset events.
 - IMU delivery restarts at `plant.t_ns` with a new random sample phase and burst phase. `count` is 0, every slot has `sample_ns` and `stamp_ns` -1 and `seq` 0, and `gyro` and `specific_force` keep the previous episode's samples until new ones are delivered.
 
 `plant.t_ns` keeps running. `PlantAction.reset` calls `plant.reset(env_ids)` with no arguments after Isaac Lab's reset events, so the state comes from your events and the drives come back off. The first demand after the reset is submitted in the next env step and acts one latency later (10 to 20 ms with the example's randomization); a standing robot is unpowered until then. To have the drives hold from the first physics step, pass a demand from your own `reset`:
