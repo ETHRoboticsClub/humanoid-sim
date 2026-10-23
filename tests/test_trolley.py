@@ -91,6 +91,21 @@ def test_the_hangar_example_rig_loads_with_its_home_and_scan_position_in_reach()
     assert rig.contains(rig.home_m) and rig.contains(rig.scan_m)
 
 
+def test_the_hangar_crane_starts_clear_of_the_robot_the_scan_caught():
+    import json
+    from pathlib import Path
+
+    from humanoid_sim.world.splat import in_boxes
+
+    examples = Path(__file__).parents[1] / "examples"
+    rig = GantryRig.load(examples / "hangar_gantry.json")
+    drop = json.loads((examples / "hangar_crane_parts.json").read_text())["drop"]
+    # The hook's column, from the floor to the hoist: a robot hung from it at home stands clear of the scanned one.
+    column = np.array([rig.to_world(rig.home_m)[:2].tolist() + [z] for z in np.linspace(0.0, rig.anchor_z_m, 31)])
+    assert not in_boxes(column, drop).any()
+    assert in_boxes(np.array([rig.to_world(rig.scan_m)[:2].tolist() + [1.0]]), drop).all()
+
+
 def test_a_crane_over_a_hook_stretches_its_rope_by_the_given_length():
     from pathlib import Path
 
