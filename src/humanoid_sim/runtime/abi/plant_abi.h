@@ -16,10 +16,10 @@ extern "C" {
 #endif
 
 #define HSIM_PLANT_ABI_MAJOR 3
-#define HSIM_PLANT_ABI_MINOR 1
+#define HSIM_PLANT_ABI_MINOR 2
 #define HSIM_PLANT_MAGIC "HSIMPLNT"
-#define HSIM_PLANT_LAYOUT_HASH 0x8e1d3042ca178a4dULL
-#define HSIM_PLANT_SEGMENT_BYTES 56128
+#define HSIM_PLANT_LAYOUT_HASH 0x31f7d253854e2509ULL
+#define HSIM_PLANT_SEGMENT_BYTES 56256
 
 #define HSIM_PLANT_MAX_DRIVES 64
 #define HSIM_PLANT_MAX_JOINTS 64
@@ -43,6 +43,7 @@ enum {
   HSIM_CMD_PRESCRIBE_POSE = 7,
   HSIM_CMD_DETACH = 8,
   HSIM_CMD_SET_FIDELITY = 9,
+  HSIM_CMD_MOVE_GANTRY = 10,
 }; // arguments: plant_abi.py
 
 enum { HSIM_ACK_OK = 0, HSIM_ACK_REJECTED = 1, HSIM_ACK_UNKNOWN = 2, HSIM_ACK_FAILED = 3 };
@@ -164,6 +165,9 @@ typedef struct {
   uint32_t num_joints, _pad1;
   double joint_pos_rad[HSIM_PLANT_MAX_JOINTS], joint_vel_rad_s[HSIM_PLANT_MAX_JOINTS];
   HsimSole sole[HSIM_PLANT_SOLES]; // left, right
+  // Gantry rope's top and harness point (world, NaN without a cable); crane position and command (gantry axes,
+  // NaN without a crane).
+  double gantry_top_m[3], gantry_harness_m[3], gantry_position_m[3], gantry_command_m[3];
 } HsimTruth;
 
 #undef HSIM_REGION_HEAD
@@ -180,13 +184,13 @@ static_assert(sizeof(HsimHeader) == 272, "header layout");
 static_assert(sizeof(HsimDemandRecord) == 3600, "demand record layout");
 static_assert(sizeof(HsimDemands) == 28848, "demands layout");
 static_assert(sizeof(HsimFeedback) == 4440, "feedback layout");
-static_assert(sizeof(HsimTruth) == 1536, "truth layout");
+static_assert(sizeof(HsimTruth) == 1632, "truth layout");
 #else
 _Static_assert(sizeof(HsimHeader) == 272, "header layout");
 _Static_assert(sizeof(HsimDemandRecord) == 3600, "demand record layout");
 _Static_assert(sizeof(HsimDemands) == 28848, "demands layout");
 _Static_assert(sizeof(HsimFeedback) == 4440, "feedback layout");
-_Static_assert(sizeof(HsimTruth) == 1536, "truth layout");
+_Static_assert(sizeof(HsimTruth) == 1632, "truth layout");
 #endif
 
 #ifdef __cplusplus

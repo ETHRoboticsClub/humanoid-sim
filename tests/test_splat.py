@@ -166,3 +166,22 @@ def test_the_degree_follows_the_rest_count(tmp_path):
     g = _gaussians(n=2)
     _write_ply(tmp_path / "s.ply", g)
     assert sp.read_ply(tmp_path / "s.ply").sh_degree == int(math.isqrt(3 * (K - 1) // 3 + 1) - 1) == DEGREE
+
+
+def test_parts_are_written_under_xforms_that_move_them(tmp_path):
+    from pxr import Gf, Usd, UsdGeom
+
+    g = _gaussians(n=6)
+    _write_ply(tmp_path / "s.ply", g)
+    room = sp.read_ply(tmp_path / "s.ply")
+    first = g["xyz"][0]
+    rest, parts = sp.split(room, {"hook": [{"center": first.tolist(), "half": [1e-3] * 3}]})
+    sp.write_usd(rest, tmp_path / "s.usda", parts=parts)
+    stage = Usd.Stage.Open(str(tmp_path / "s.usda"))
+    assert len(stage.GetPrimAtPath(sp.PRIM_PATH).GetAttribute("positions").Get()) == 5
+    hook = stage.GetPrimAtPath("/Splat/hook/Gaussians")
+    np.testing.assert_allclose(np.array(hook.GetAttribute("positions").Get()), [first], atol=1e-5)
+    op = UsdGeom.Xformable(stage.GetPrimAtPath("/Splat/hook")).GetOrderedXformOps()[0]
+    op.Set(Gf.Vec3d(0.0, 0.0, -1.0))
+    world = UsdGeom.Xformable(hook).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    assert tuple(world.ExtractTranslation()) == (0.0, 0.0, -1.0)

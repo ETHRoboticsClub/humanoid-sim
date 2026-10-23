@@ -9,7 +9,9 @@ onto the realtime clock through the host's own mapping (``plant_abi``: the feedb
 at ``sim_time_ns``).
 
 The scene is the host's: its static boxes and scan (from the descriptor, when the files are readable here with the
-same digests), and the room's splat for the cameras when one is given. Needs the Isaac Sim image
+same digests), and the room's splat for the cameras when one is given. With a gantry crane (the descriptor's ``gantry``,
+with ``scan_m``) and a splat whose crane parts were cut out (``splat-usd --parts``: ``bridge``, ``trolley``, ``hook``),
+each render moves those parts to where the truth has the crane. Needs the Isaac Sim image
 (``docker/Dockerfile.kit``) on an RTX GPU, like ``sensors/session.py``.
 """
 
@@ -57,12 +59,45 @@ class RuntimeRender:
                                   spawn_m=cfg.spawn_m if cfg.scene else spawn,
                                   scan_mesh=cfg.scan_mesh or scan_mesh)
         self.session = SensorSession(cfg)
+        self._crane = self._crane_parts(record.get("gantry")) if cfg.splat else {}
         joints = record["joints"]
         self._order = [joints.index(n) for n in desc.joints]  # the description's order, from the host's
         self.session_id = self.seg.session_id
         self._last_t = None
         self.lag_ms: list[float] = []  # plant time now minus the render's, when its frames are out
         self.host_keeping_up: list[bool] = []
+
+    @staticmethod
+    def _crane_parts(gantry: dict | None) -> dict:
+        """The rig and the translate op of each crane part the splat has, when the host has a crane."""
+        if not gantry or gantry.get("scan_m") is None:
+            return {}
+        import isaaclab.sim as sim_utils
+        from pxr import UsdGeom
+
+        from humanoid_sim.sensors.rtx import SPLAT_PRIM
+        from humanoid_sim.world.trolley import GantryRig
+
+        stage = sim_utils.get_current_stage()
+        ops = {}
+        for name in ("bridge", "trolley", "hook"):
+            prim = stage.GetPrimAtPath(f"{SPLAT_PRIM}/{name}")
+            if prim.IsValid():
+                translate = [op for op in UsdGeom.Xformable(prim).GetOrderedXformOps()
+                             if op.GetOpType() == UsdGeom.XformOp.TypeTranslate]
+                if translate:
+                    ops[name] = translate[0]
+        return {"rig": GantryRig.from_dict(gantry), "ops": ops} if ops else {}
+
+    def _move_crane(self, truth) -> None:
+        position = np.asarray(truth["gantry_position_m"], dtype=np.float64)
+        if not self._crane or not np.isfinite(position).all():
+            return
+        from pxr import Gf
+
+        offsets = self._crane["rig"].part_offsets(position)
+        for name, op in self._crane["ops"].items():
+            op.Set(Gf.Vec3d(*map(float, offsets[name])))
 
     def _read(self, region: str):
         try:
@@ -88,6 +123,7 @@ class RuntimeRender:
         q = np.asarray(tr["joint_pos_rad"], dtype=np.float64)[self._order]
         base = np.concatenate([tr["base_position_m"], tr["base_quat_xyzw"]])
         session.pose(t_ns, torch.as_tensor(q, device=device)[None], torch.as_tensor(base, device=device)[None])
+        self._move_crane(tr)
         session.clock_ns = plant_now_ns(fb[1], abi.mono_ns())
         dt = session.render_ns if self._last_t is None else t_ns - self._last_t
         session.render_at(t_ns, dt)

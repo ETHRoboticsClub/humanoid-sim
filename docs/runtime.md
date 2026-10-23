@@ -35,6 +35,7 @@ humanoid-sim serve --segment /run/hsim/plant --support suspended
 | `--scene PATH` | none | Static boxes around the robot, such as the walls and furniture of Controls' hangar (see [world.md](world.md#static-boxes)). |
 | `--spawn X Y` | `0 0` | With `--scene`: the scene point (m) the robot starts at, placed at the world origin. A spawn point inside a box is refused. |
 | `--scan-mesh OBJ`, `--scan-texture PNG`, `--scan-floor-texture PNG` | none | With `--scene`: the room's photo-textured scan and its floor, for viewers only (the physics collides with the boxes). The descriptor names them with their digests, and `view-runtime` draws them (see [world.md](world.md#the-scan-for-viewers)). |
+| `--gantry JSON` | none | A gantry crane (a `GantryRig` as JSON, in the scene file's frame, placed with `--spawn` like the boxes): `MOVE_GANTRY` moves it and a hoist rope hangs from its hook (see [world.md](world.md#gantry-crane)). |
 
 Four options of the top-level parser go before `serve`: `--solver` (`mjwarp` or `kamino`, default the profile's), `--robot` (default `ethrc_v1`, also written to the header's `robot_id`), `--assets` (default `outputs/assets`, relative to the working directory) and `--usd` (a robot USD to use instead of the built asset). Without `--usd`, `serve` exits with a message if the asset for the current description and profile is not built.
 
@@ -62,7 +63,7 @@ A session starts in the support chosen at startup, reported in the descriptor's 
 
 | Support | Base | What `SET_SUPPORT` can do |
 |---|---|---|
-| `suspended` | Hanging from the lab gantry: one cable from the harness hook on the torso (the midpoint of the shoulders, the profile's `support.harness`) to an anchor overhead, carrying the robot's weight, the feet 0.3 m above the floor in the start pose, turned to rest under the hook; a swing dies away over several periods. A reset to a named pose puts the robot back there; every reset rehangs the cable where the robot then is. | Release the rope (`free`), rehang the harness where the robot is (`suspended`) or hang another rope (`gantry`). Any `base_pose` argument is rejected. |
+| `suspended` | Hanging from the lab gantry: one cable from the harness hook on the torso (the midpoint of the shoulders, the profile's `support.harness`) to an anchor overhead, carrying the robot's weight, the feet 0.3 m above the floor in the start pose, turned to rest under the hook; a swing dies away over several periods. With a crane (`--gantry`) the cable hangs from its hook, the trolley over the harness, and a robot out of the crane's reach is refused. A reset to a named pose puts the robot back there; every reset rehangs the cable where the robot then is. | Release the rope (`free`), rehang the harness where the robot is (`suspended`) or hang another rope (`gantry`). Any `base_pose` argument is rejected. |
 | `free` | Standing on the floor in the start pose, upright, at the origin | Hang a gantry rope (tension program or slack cable) or the harness (`suspended`), and release it with `{"support": "free"}` |
 
 The gantry and the floor are described in [world.md](world.md).
@@ -117,7 +118,7 @@ While paused, physics, plant time and the step counter stop. Commands and demand
 
 ## The segment
 
-The segment is one file of 56,128 bytes: a 272-byte header and six regions. Values are little-endian at natural alignment, and every region starts on a 64-byte boundary. Each region has one writer.
+The segment is one file of 56,256 bytes: a 272-byte header and six regions. Values are little-endian at natural alignment, and every region starts on a 64-byte boundary. Each region has one writer.
 
 | Region | Offset | Bytes | Writer | Contents |
 |---|---|---|---|---|
@@ -127,7 +128,7 @@ The segment is one file of 56,128 bytes: a 272-byte header and six regions. Valu
 | feedback | 45,632 | 4,440 | sim | Plant time, lateness, demand records taken, physical drive feedback, the latest raw IMU samples |
 | mailbox | 50,112 | 4,128 | client | One command: code and JSON arguments |
 | ack | 54,272 | 288 | sim | The last command handled: its number, a result code, a message |
-| truth | 54,592 | 1,536 | sim | Base pose and twist, centre of mass, joint state, gantry tension, sole plates |
+| truth | 54,592 | 1,632 | sim | Base pose and twist, centre of mass, joint state, gantry tension, sole plates, gantry rope and crane |
 
 `MAX_DRIVES` (64) and `MAX_JOINTS` (64) size the arrays. A robot with more drives or joints needs a new major ABI version. Only one client may write the demands and mailbox regions: a second writer would break the protocol below.
 
@@ -138,10 +139,10 @@ The header is written when the file is created; afterwards only `state` and `hea
 | Field | Type | Meaning |
 |---|---|---|
 | `magic` | char[8] | `HSIMPLNT`, written last when the file is filled |
-| `abi_major`, `abi_minor` | u16 | 3, 1 |
+| `abi_major`, `abi_minor` | u16 | 3, 2 |
 | `header_bytes` | u32 | 272 |
 | `layout_hash` | u64 | Hash of the layout (see [Validating a segment](#validating-a-segment)) |
-| `segment_bytes` | u64 | 56,128 |
+| `segment_bytes` | u64 | 56,256 |
 | `session_id` | u64 | This session |
 | `state` | u32 | 0 creating, 1 ready, 2 ended |
 | `num_drives`, `num_joints` | u32 | 22 and 22 for `ethrc_v1` |
@@ -182,7 +183,7 @@ A reader repeats three steps, up to 1000 times (`attempts`):
 
 | Check | Expected |
 |---|---|
-| File size | `SEGMENT_BYTES` (56,128) |
+| File size | `SEGMENT_BYTES` (56,256) |
 | `magic` | `HSIMPLNT` |
 | `abi_major` | This side's `ABI_MAJOR` (3) |
 | `layout_hash` | This side's `LAYOUT_HASH` |
@@ -190,7 +191,7 @@ A reader repeats three steps, up to 1000 times (`attempts`):
 
 While the file is missing or one of these fails it retries every 10 ms until `wait_s` has passed, then raises `FileNotFoundError` or `AbiError`. Once the segment is ready it compares `robot_id` and `description_digest` with the values given and raises `AbiError` on a mismatch. A different `abi_minor` is accepted.
 
-The layout hash (`layout_hash()`) is the first 8 bytes, little-endian, of a SHA-256 over every field's name, offset, type and shape and the region offsets. Any change to the layout changes it. `plant_abi.h` carries the same value as `HSIM_PLANT_LAYOUT_HASH` (`0x8e1d3042ca178a4d`), and `tests/test_runtime_abi.py` compiles the header and checks every struct size, field offset, region offset and the hash against the Python layout.
+The layout hash (`layout_hash()`) is the first 8 bytes, little-endian, of a SHA-256 over every field's name, offset, type and shape and the region offsets. Any change to the layout changes it. `plant_abi.h` carries the same value as `HSIM_PLANT_LAYOUT_HASH` (`0x31f7d253854e2509`), and `tests/test_runtime_abi.py` compiles the header and checks every struct size, field offset, region offset and the hash against the Python layout.
 
 The description digest (`description_digest(urdf, actuators)`) is the SHA-256 over the URDF and `actuators.yaml` of the robot description in `third_party/humanoid-urdf`, each as its file name followed by its bytes. The sim writes `Description.digest`. A client computes the digest from its own checkout of humanoid-urdf and passes it to `Segment.open`: equal digests mean both sides run the same description.
 
@@ -210,11 +211,12 @@ The descriptor region holds one JSON object (sorted keys, at most 16,384 bytes) 
 | `units` | One sentence each for `drive`, `joint`, `imu` and `time` |
 | `imu` | `parent`: the link the URDF's `imu_joint` mounts the IMU on. The rig's IMU ([sensors.md](sensors.md#sensor-models-and-the-rig)): `model` (its model name in `src/humanoid_sim/sensors/models.py`, `mti-610` on the V1), `product`, `frame` (the link it sits at), `sample_period_ns`, `burst_period_ns` and `in_burst_spacing_ns`. ABI 3.1 added all but `parent`. |
 | `soles` | The two sole bodies, left then right |
-| `commands` | Command codes to names, `{"1": "reset", ..., "9": "set_fidelity"}` |
+| `commands` | Command codes to names, `{"1": "reset", ..., "10": "move_gantry"}` |
 | `faults` | `encoder_freeze`, `imu_spike`, `imu_bias`, `power_sag` |
 | `drive_models` | One entry per drive model the robot has: `model` (its class), `family`, `product`, `interface`, `drive_delay_ns`, `delay_measured` and the `drives` it is ([drives.md](drives.md#drive-models)) |
 | `fidelity_gaps` | What the runtime does not model (`fidelity_gaps` in `host.py`) |
 | `scene` | Null, or with `--scene`: `file`, its `sha256`, the number of `boxes`, `spawn_m`, `spawn_clearance_m` (the horizontal distance from the spawn point to the nearest box) and `scan` (null, or the `mesh`, `texture` and `floor_texture` files, each as `file` and `sha256`). The truth is in the world frame, whose origin is the scene point `spawn_m`. |
+| `gantry` | Null, or with `--gantry`: the crane's `GantryRig` fields in the world frame (`center_m` moved by the spawn point): `center_m`, `yaw_rad`, `anchor_z_m`, `travel_x_m`, `travel_y_m`, `hook_z_m`, `max_speed_m_s`, `max_accel_m_s2`, `home_m`, `scan_m` |
 
 The fidelity gaps the runtime publishes:
 
@@ -317,6 +319,8 @@ The truth region is the oracle tests need. The host writes it at the start of a 
 | `num_joints` | u32 | Joints filled in |
 | `joint_pos_rad`, `joint_vel_rad_s` | f64[64] | Joint state in URDF joint coordinates, in descriptor `joints` order |
 | `sole` | `HsimSole[2]` | Left, then right |
+| `gantry_top_m`, `gantry_harness_m` | f64[3], f64[3] | The cable's top (its fixed anchor, or the crane's hoist) and the harness point it pulls on, on the last step; NaN without a cable |
+| `gantry_position_m`, `gantry_command_m` | f64[3], f64[3] | The crane's actual and commanded position in the gantry's axes (x, y, hook height); NaN without a crane |
 
 Each sole entry describes the sole plate, the contact box fitted to the bottom of each foot (see [robot-model.md](robot-model.md)):
 
@@ -378,6 +382,7 @@ The home pose is the one to use when a free robot should stand. Both poses are c
 | `{"support": "gantry", "tension_breakpoints_s_n": [[t, N], ...], "attachment_local_m": [x, y, z]}` | any | A vertical tension program on one base-frame point, or on two with `[[x, y, z], [x, y, z]]`: `gantry` |
 | `{"support": "gantry", "tension_breakpoints_s_n": [[t, N], ...], "attachment_bodies": [name, ...]}` | any | The same, on one or two points of the harness body (the profile's `support.harness.body`) where the named bodies are now: `gantry` |
 | `{"support": "gantry", "cable": {"overhead_distance_m": m, "length_breakpoints_s_m": [[t, m], ...], "stiffness_n_m": k, "damping_n_s_m": c}, "attachment_local_m": [x, y, z]}` | any | A slack cable: `gantry` |
+| `{"support": "gantry", "hoist": {"stiffness_n_m": k, "damping_n_s_m": c, "swing_damping_n_s_m": s}, "attachment_local_m": [x, y, z]}` | any, with `--gantry` | A slack cable from the crane's hook to one base-frame point (or, with `attachment_bodies`, the midpoint of those bodies on the harness body): its top follows the trolley and its unstretched length the hoist (`swing_damping_n_s_m` defaults to 0): `gantry` |
 
 A tension program has 1 to 8 breakpoints, at non-negative increasing times counted from the command, linear between them and held beyond both ends, with non-negative tensions. The force is vertical and split evenly over the one or two points. Either `attachment_local_m` or `attachment_bodies` is required; when both are given, the bodies are used. A cable runs from one base-frame point to an anchor `overhead_distance_m` above where that point is when the cable is hung. Its unstretched length follows the program (positive lengths), and it pulls along the rope only when stretched: `T = max(0, k · extension + c · extension rate)`, with `k` positive and `c` non-negative. Hanging a rope replaces the previous one; a rejected rope leaves the previous one hanging. A rope requested after a pose write (a reset, the session's start) is checked at once and hangs after the next step. A reset that moves the base releases a client's rope, whose anchor stays where it was hung, and rehangs the harness cable. [world.md](world.md) describes both.
 
@@ -429,6 +434,14 @@ The pose is written, with zero velocities, before every physics step until it is
 ### SET_FIDELITY (9)
 
 `{"imu": "ideal"}` or `{"imu": "real"}`: the IMU without or with its white noise, from the next sample, for this session. Every session starts `real`. Bias and spike faults apply in both. Acks: `imu ideal`, `imu real`.
+
+### MOVE_GANTRY (10)
+
+```json
+{"position_m": [0.4, -0.2, 1.6], "frame": "gantry"}
+```
+
+With `--gantry` only. Commands the crane: the bridge to `x`, the trolley to `y` (both in the gantry's axes, from its `center_m`) and the hook to height `z` above the floor. With `"frame": "world"`, `x` and `y` are a world point the trolley goes over; `z` is the hook height either way. A position outside the travel (the descriptor's `travel_x_m`, `travel_y_m`, `hook_z_m`) is rejected. The crane moves there axis by axis within `max_speed_m_s` and `max_accel_m_s2`; the truth's `gantry_command_m` holds the command and `gantry_position_m` where it is. A new command replaces the last. Each session starts with the crane at `home_m`. Ack: `moving to <x>, <y>, <z>` (gantry axes).
 
 ## Writing a client
 

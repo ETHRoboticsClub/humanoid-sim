@@ -13,6 +13,7 @@ Around the robot, humanoid-sim has a ground (a flat plane, or in training a heig
 | Lab gantry (harness cable on the torso) | none | none | `--support suspended` (default) |
 | Base orientation prescribed through base joints | none | `--base yaw` (default) or `--base orientation` | none |
 | Gantry rope | `plant.gantry`, hung by your task | none | `SET_SUPPORT` command |
+| Gantry crane (rope top moving in x, y; hoist in z) | `plant.gantry.mount(rig)` | none | `--gantry`, then `MOVE_GANTRY` |
 | Force pushes on a body | `ForcePush` | none | `APPLY_DISTURBANCE` body wrench |
 | Torque on a joint | `plant.core.external_torque` | none | `APPLY_DISTURBANCE` joint torque |
 
@@ -193,6 +194,8 @@ Controls' hangar also has a Gaussian splat of the room, `hangar_splat.ply` (4.5 
 humanoid-sim splat-usd $H/hangar_splat.ply outputs/rtx/hangar_splat.usdc --spawn -4.42 3.48 --half
 ```
 
+`--parts PARTS.json` cuts parts that move out of the room, each into a prim of its own (`/Splat/<part>/Gaussians` under an Xform), and leaves out Gaussians in `drop` boxes. The file maps part names to boxes in the PLY's frame, `{"center": [x, y, z], "half": [x, y, z], "yaw": rad}`; a Gaussian in several boxes goes to the first part. The render runtime moves parts named `bridge`, `trolley` and `hook` with the [gantry crane](#gantry-crane).
+
 `--half` stores the colour coefficients at half precision (the hangar's file is then 632 MB, written in about 10 s); `--sh-degree` drops the higher spherical-harmonic degrees, which shade by viewing direction. Physics never sees the splat. `tests/test_splat.py` writes a PLY from known Gaussians and reads the USD back through the schema and through Newton.
 
 ### What the boxes cost
@@ -276,6 +279,48 @@ Body poses are stale right after a reset writes the state, so a rope hung from a
 
 The tests exercise the gantry through `SimCore` (`tests/test_supports.py`): a tension equal to the robot's weight holds its centre of mass in place, and a cable settles at its unstretched length plus weight over stiffness.
 
+### Gantry crane
+
+A crane moves the rope's top: its bridge runs along the runway rails (the crane's x), its trolley along the bridge (y), and its hoist pays the rope out (z). `GantryRig` (`src/humanoid_sim/world/trolley.py`) describes one, and `Trolley` keeps its commanded and actual position per env. A position is `(x, y, z)`: x and y in the crane's axes from `center_m` (turned by `yaw_rad`), z the hook's height above the floor. The rope's top is the hoist, `anchor_z_m` above the floor over `(x, y)`, and its unstretched length is `anchor_z_m - z`. The actual position follows the command axis by axis, at most `max_speed_m_s` fast and `max_accel_m_s2` hard, braking to stop on it (within a millimetre), so it lags the command.
+
+| `GantryRig` field | Meaning |
+|---|---|
+| `center_m`, `yaw_rad` | Origin of the crane's axes (scene file's frame, until `placed(spawn_m)` moves it like the boxes) and the runway's heading |
+| `anchor_z_m` | Height of the rope's top |
+| `travel_x_m`, `travel_y_m`, `hook_z_m` | `(low, high)` travel of the bridge, the trolley and the hook height |
+| `max_speed_m_s`, `max_accel_m_s2` | Limits per axis (x, y, z) |
+| `home_m` | Where the crane starts |
+| `scan_m` | Where it stood when the room was scanned (optional), for moving its part of a splat |
+
+`GantryRig.load(path)` reads one from a JSON object with these fields.
+
+| Call | Effect |
+|---|---|
+| `gantry.mount(rig, origin_w=None)` | A crane over every env (moved by `origin_w` `[E, 3]` per env), at home; returns its `Trolley`. `gantry.apply` advances it before every physics step. |
+| `trolley.set_command(env_ids, xyz)` | Command `[n, 3]` or `[3]`, clamped to the travel |
+| `trolley.place(env_ids, xyz)` | Put it there at rest, with its command, for resets |
+| `trolley.command`, `trolley.position`, `trolley.velocity` | `[E, 3]` |
+| `gantry.hang_hoist(env_ids, *, stiffness_n_m, damping_n_s_m, swing_damping_n_s_m=0.0, attachment_b=None, attachment_bodies=None, point_b=None, harness=False, dry_run=False)` | A slack cable from a harness point to the hook: a base-frame `attachment_b`, the midpoint of `attachment_bodies` on the harness body (as `hang_cable`), or, at resets where body poses are stale, `point_b` in the harness body's frame (`harness=True`) or the base's. Gains are floats (checked) or `[n]` tensors |
+| `gantry.top_w`, `gantry.harness_w` | `[E, 3]`: the cable's top and harness point on the last step, NaN without a cable |
+
+A hoist rope pulls like a slack cable with its top at the trolley and its length the hoist's. Its damping acts on the rope's stretch rate: the harness point's velocity along the rope relative to the moving top, less the hoist's pay-out rate. Swing damping acts on the harness point's velocity across the rope, relative to the top.
+
+In training, mount the crane once and command it from your events or action term:
+
+```python
+rig = GantryRig.load("examples/hangar_gantry.json").placed(spawn_m)
+trolley = plant.gantry.mount(rig, origin_w=env.scene.env_origins)
+hook_b = torch.tensor([0.0, 0.0, 0.25])  # the harness hook in the harness body's frame
+plant.gantry.hang_hoist(env_ids, point_b=hook_b, harness=True, stiffness_n_m=2.0e4, damping_n_s_m=500.0)
+trolley.set_command(env_ids, torch.tensor([0.0, 0.0, 1.9]))
+```
+
+In the runtime, `serve --gantry PATH` (placed with `--spawn`) mounts one, and a `suspended` session then hangs its harness cable from the crane's hook: the trolley is placed over the harness hook and the hoist set `support.full_weight_stretch_m` short, so the robot hangs where it is, and a robot whose hook is out of the crane's reach is refused (spawn it under the crane). Without a crane, or for a free session's `{"support": "suspended"}` out of its reach, the cable hangs from a fixed anchor as above. The crane: `MOVE_GANTRY` commands it, `SET_SUPPORT` with `hoist` hangs the robot from its hook, the truth reports `gantry_position_m` and `gantry_command_m`, and the descriptor's `gantry` its geometry ([runtime.md](runtime.md#move_gantry-10)). `view-runtime` draws its travel, bridge, trolley and rope; `render-runtime` moves the splat's `bridge`, `trolley` and `hook` parts when the rig has `scan_m`.
+
+Controls' hangar has a gantry about 7 m from its spawn point. Its geometry is not in the hangar's files: the boxes stop at 2 m (furniture) or are walls, and the robot hanging in it when the room was scanned is box 157 of `hangar_proxy.npz`. `examples/hangar_gantry.json` is that gantry measured from the scan and the splat, to about 5 cm: the runway frame's posts and top (z ≈ 3.05 m), the bridge and the hook where it stood during the scan (`scan_m`). Its limits are modeled, not measured: travel about 0.25 m inside the posts, the hook from 0.8 to 2.6 m, 0.3 m/s along the runway and the bridge and 0.1 m/s on the hoist (an electric chain hoist's speed). `examples/hangar_crane_parts.json` is the crop boxes `splat-usd --parts` cuts the crane's Gaussians out with.
+
+To measure another gantry, crop the points above the furniture (z over 2.2 m) to find the runway frame, fit lines to its long edges for the yaw, take the posts from points between 1.3 and 2 m, and the bridge and hook from the splat (the scan mesh does not resolve the bridge).
+
 ### Prescribed pose (runtime)
 
 The runtime's `PRESCRIBE_POSE` command holds a given joint pose, and the base pose in a free session, by writing the state before every step until released. It holds the robot kinematically while a test is set up and models no physical support; see [runtime.md](runtime.md).
@@ -341,3 +386,4 @@ A `RESET` command clears all active disturbances. Faults (`INJECT_FAULT`: encode
 - There is no triangle-mesh terrain (stairs with vertical risers, mesh obstacles), for the collision reason above.
 - Replays and the runtime have no terrain; they always use the flat ground at the profile's friction.
 - The training scene has no fixed-base or base-joint option; supports in training are limited to a `Gantry` your task applies.
+- A gantry crane is its rope's top only: the frame, bridge and hook do not collide, the rope has no mass and is drawn as a line, and the crane follows its command whatever the rope pulls.

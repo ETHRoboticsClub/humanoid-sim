@@ -402,11 +402,20 @@ def _add_scene_args(parser) -> None:
                         help="the scene point (m) the robot starts at, placed at the world origin (default 0 0)")
 
 
+def _gantry(args):
+    """The crane of ``--gantry``, placed with ``--spawn`` like the scene, or None."""
+    if args.gantry is None:
+        return None
+    from humanoid_sim.world.trolley import GantryRig
+
+    return GantryRig.load(args.gantry).placed(tuple(args.spawn or (0.0, 0.0)))
+
+
 def cmd_serve(args) -> int:
     from humanoid_sim.runtime.host import EXIT_CLIENT_LOST, EXIT_DETACHED, RuntimeHost
 
     host = RuntimeHost(args.segment, _usd(args), device=args.device, robot=args.robot, solver=args.solver,
-                       support=args.support, pose=args.pose, scene=_scene(args),
+                       support=args.support, pose=args.pose, scene=_scene(args), gantry=_gantry(args),
                        bus_period_ns=int(args.bus_period_us * 1000),
                        client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
                        sim_revision=_revision(), truth_every=args.truth_every)
@@ -440,7 +449,8 @@ def cmd_splat_usd(args) -> int:
     from humanoid_sim.world.splat import convert
 
     spawn = (0.0, 0.0) if args.spawn is None else tuple(args.spawn)
-    print(json.dumps(convert(args.ply, args.out, spawn_m=spawn, sh_degree=args.sh_degree, half=args.half), indent=1))
+    print(json.dumps(convert(args.ply, args.out, spawn_m=spawn, sh_degree=args.sh_degree, half=args.half,
+                             parts=args.parts), indent=1))
     return 0
 
 
@@ -657,6 +667,8 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--scan-texture", default=None, help="the scan's texture (PNG)")
     sv.add_argument("--scan-floor-texture", default=None, help="the scan's floor seen from above (PNG), drawn over "
                     "the scene file's floor_corners")
+    sv.add_argument("--gantry", default=None, help="a gantry crane over the scene (JSON, world/trolley.py's "
+                    "GantryRig, in the scene file's frame): MOVE_GANTRY moves it, a hoist rope hangs from it")
     sv.set_defaults(func=cmd_serve)
 
     sp = sub.add_parser("splat-usd", help="convert a 3D Gaussian Splatting PLY (a scanned room) to a USD splat for "
@@ -665,6 +677,8 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("out", help="the USD file to write (.usdc for a large splat)")
     sp.add_argument("--spawn", nargs=2, type=float, default=None, metavar=("X", "Y"),
                     help="the scene point (m) placed at the world origin, as for --scene (default 0 0)")
+    sp.add_argument("--parts", default=None, help="JSON: part names to boxes in the PLY's frame ({center, half, "
+                    "yaw}); each part is written as a prim of its own that a renderer moves, 'drop' boxes are cut")
     sp.add_argument("--sh-degree", type=int, default=None, help="keep spherical harmonics up to this degree "
                     "(default: all the PLY has; 0 keeps each Gaussian's base colour only)")
     sp.add_argument("--half", action="store_true", help="store the coefficients as half floats")

@@ -63,7 +63,7 @@ from pathlib import Path
 import numpy as np
 
 ABI_MAJOR = 3
-ABI_MINOR = 1
+ABI_MINOR = 2
 MAGIC = b"HSIMPLNT"
 ALIGN = 64
 
@@ -86,7 +86,9 @@ STATE_CREATING, STATE_READY, STATE_ENDED = 0, 1, 2
 # SET_SUPPORT      {"support": "free"}; {"support": "gantry", "tension_breakpoints_s_n": [[s, N], ...],
 #                  "attachment_local_m": [x,y,z] | null, "attachment_bodies": [name, ...] | null}; or a cable,
 #                  {"support": "gantry", "attachment_local_m": [x,y,z], "cable": {"overhead_distance_m": m,
-#                  "length_breakpoints_s_m": [[s, m], ...], "stiffness_n_m": k, "damping_n_s_m": c}}
+#                  "length_breakpoints_s_m": [[s, m], ...], "stiffness_n_m": k, "damping_n_s_m": c}}; or a rope
+#                  from the gantry crane's hook, {"support": "gantry", "attachment_local_m": [x,y,z], "hoist":
+#                  {"stiffness_n_m": k, "damping_n_s_m": c, "swing_damping_n_s_m": s}}
 # APPLY_DISTURBANCE {"body": name, "force_n": [x,y,z], "torque_nm": [x,y,z], "duration_s": s}, or a torque on one
 #                  joint outside the drive's feedback: {"joint" | "drive" (1:1): name, "torque_nm": Nm,
 #                  "frequency_hz": f (0: constant), "duration_s": s | null (until cleared)}; torque_nm 0 clears it
@@ -96,6 +98,8 @@ STATE_CREATING, STATE_READY, STATE_ENDED = 0, 1, 2
 # DETACH           {}: the client is leaving; the sim acks and ends the session
 # SET_FIDELITY     {"imu": "ideal" | "real"}: the IMU without or with its model errors, for this session; every
 #                  session starts real
+# MOVE_GANTRY      {"position_m": [x, y, z], "frame": "gantry" | "world"}: command the crane's bridge (x), trolley
+#                  (y) and hook height (z); in the gantry's axes (default) or with x, y in the world frame
 CMD_NONE = 0
 CMD_RESET = 1
 CMD_PAUSE = 2
@@ -106,6 +110,7 @@ CMD_INJECT_FAULT = 6
 CMD_PRESCRIBE_POSE = 7
 CMD_DETACH = 8
 CMD_SET_FIDELITY = 9
+CMD_MOVE_GANTRY = 10
 COMMANDS = {
     CMD_RESET: "reset",
     CMD_PAUSE: "pause",
@@ -116,6 +121,7 @@ COMMANDS = {
     CMD_PRESCRIBE_POSE: "prescribe_pose",
     CMD_DETACH: "detach",
     CMD_SET_FIDELITY: "set_fidelity",
+    CMD_MOVE_GANTRY: "move_gantry",
 }
 
 # Ack results.
@@ -266,6 +272,10 @@ TRUTH = _region(
     ("joint_pos_rad", "<f8", (MAX_JOINTS,)),
     ("joint_vel_rad_s", "<f8", (MAX_JOINTS,)),
     ("sole", SOLE, (SOLES,)),
+    ("gantry_top_m", "<f8", (3,)),
+    ("gantry_harness_m", "<f8", (3,)),
+    ("gantry_position_m", "<f8", (3,)),
+    ("gantry_command_m", "<f8", (3,)),
 )
 
 REGIONS = (

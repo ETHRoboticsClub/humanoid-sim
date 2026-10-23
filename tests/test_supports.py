@@ -199,6 +199,92 @@ def test_ropes_of_all_envs_pull_on_one_body():
     assert g.body_id == 1
 
 
+
+class _Bases:
+    """Two envs' bases at rest 1 m up, or moving at ``velocity``; keeps the force on rope point 0 of each step."""
+
+    def __init__(self, velocity=(0.0, 0.0, 0.0)):
+        self.num_instances, self.device, self.body_names = 2, "cpu", ["base"]
+        pose = torch.tensor([[0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]]).expand(2, 1, 7)
+        vel = torch.tensor([[*velocity, 0.0, 0.0, 0.0]]).expand(2, 1, 6)
+        self.data = type("Data", (), {"body_link_pose_w": type("T", (), {"torch": pose})(),
+                                      "body_link_vel_w": type("T", (), {"torch": vel})()})()
+        self.forces = []  # [E, 3] per rope point, two per step
+        robot = self
+
+        class Composer:
+            def add_forces_and_torques_index(self, *, forces, torques, positions, body_ids, env_ids, is_global):
+                robot.forces.append(forces[:, 0].clone())
+
+        self.instantaneous_wrench_composer = Composer()
+
+    @property
+    def point0(self):
+        """The force on rope point 0, per step."""
+        return self.forces[::2]
+
+
+def _hoist(robot, *, swing=0.0, damping=0.0):
+    """A crane over both envs, its hook 2 m below the hoist at 3.3 m: 2 cm short of the harness point (1.3 m)."""
+    from humanoid_sim.world.supports import Gantry
+    from humanoid_sim.world.trolley import GantryRig
+
+    gantry = Gantry(robot)
+    rig = GantryRig(center_m=(0.0, 0.0), yaw_rad=0.0, anchor_z_m=3.3, travel_x_m=(-2.0, 2.0), travel_y_m=(-1.0, 1.0),
+                    hook_z_m=(0.5, 2.5), max_speed_m_s=(0.5, 0.5, 0.2), max_accel_m_s2=(1.0, 1.0, 0.5),
+                    home_m=(0.0, 0.0, 1.32))
+    trolley = gantry.mount(rig)
+    gantry.hang_hoist(torch.arange(2), attachment_b=[0.0, 0.0, 0.3], stiffness_n_m=1000.0, damping_n_s_m=damping,
+                      swing_damping_n_s_m=swing)
+    return gantry, trolley
+
+
+def test_a_hoist_rope_hangs_from_the_moving_trolley():
+    robot = _Bases()
+    gantry, trolley = _hoist(robot)
+    gantry.apply(0)
+    assert gantry.tension_n.tolist() == [pytest.approx(20.0, rel=1e-3)] * 2
+    # Env 1's trolley 1 m along x: its rope leans toward it, and the hook still 2 m under the hoist.
+    trolley.place(torch.tensor([1]), torch.tensor([1.0, 0.0, 1.32]))
+    gantry.apply(4_000_000)
+    stretch = 5 ** 0.5 - 1.98
+    assert gantry.tension_n[1].item() == pytest.approx(1000.0 * stretch, rel=1e-3)
+    assert robot.point0[-1][1].tolist() == pytest.approx([1000.0 * stretch / 5 ** 0.5, 0.0,
+                                                          2000.0 * stretch / 5 ** 0.5], rel=1e-3)
+    assert gantry.top_w[1].tolist() == pytest.approx([1.0, 0.0, 3.3])
+    assert gantry.harness_w[1].tolist() == pytest.approx([0.0, 0.0, 1.3])
+
+
+def test_the_hoist_lifts_and_lowers_the_robot():
+    gantry, trolley = _hoist(_Bases())
+    trolley.set_command(torch.arange(2), torch.tensor([[0.0, 0.0, 1.42], [0.0, 0.0, 1.0]]))
+    for k in range(1, 1001):  # 4 s: both hooks there
+        gantry.apply(k * 4_000_000)
+    assert trolley.position[:, 2].tolist() == pytest.approx([1.42, 1.0], abs=1e-4)
+    assert gantry.tension_n.tolist() == [pytest.approx(120.0, rel=1e-3), 0.0]  # 12 cm stretched; slack
+
+
+def test_hoist_damping_acts_on_motion_relative_to_the_trolley():
+    robot = _Bases(velocity=(0.5, 0.0, 0.0))
+    gantry, trolley = _hoist(robot, swing=10.0, damping=50.0)
+    trolley.velocity[0, 0] = 0.5  # env 0's trolley moves with the robot, env 1's stands
+    trolley.set_command(torch.tensor([0]), torch.tensor([2.0, 0.0, 1.32]))
+    gantry.apply(0)
+    assert robot.point0[-1][0].tolist() == pytest.approx([0.0, 0.0, 20.0], abs=1e-4)
+    assert robot.point0[-1][1].tolist() == pytest.approx([-5.0, 0.0, 20.0], abs=1e-4)
+
+
+def test_hanging_from_a_hoist_needs_a_crane_and_sane_gains():
+    from humanoid_sim.world.supports import Gantry
+
+    with pytest.raises(ValueError, match="mount a gantry rig"):
+        Gantry(_Bases()).hang_hoist(torch.arange(2), attachment_b=[0.0, 0.0, 0.3], stiffness_n_m=1.0,
+                                    damping_n_s_m=0.0)
+    gantry, _ = _hoist(_Bases())
+    with pytest.raises(ValueError, match="stiffness must be positive"):
+        gantry.hang_hoist(torch.arange(2), attachment_b=[0.0, 0.0, 0.3], stiffness_n_m=0.0, damping_n_s_m=0.0)
+
+
 def _sim(robot, request, height):
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.sim import SimCore

@@ -257,6 +257,57 @@ def test_detach_and_next_session(tmp_path, robot):
 
 
 @pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+def test_the_crane_lifts_and_carries_a_hoisted_robot(tmp_path, robot):
+    pytest.importorskip("isaaclab_newton")
+    from humanoid_sim.runtime.host import RuntimeHost
+    from humanoid_sim.world.trolley import GantryRig
+
+    rig = GantryRig(center_m=(0.0, 0.0), yaw_rad=0.0, anchor_z_m=4.0, travel_x_m=(-1.0, 1.0), travel_y_m=(-1.0, 1.0),
+                    hook_z_m=(0.5, 3.0), max_speed_m_s=(0.5, 0.5, 0.5), max_accel_m_s2=(2.0, 2.0, 2.0),
+                    home_m=(0.0, 0.0, 0.5))
+    path = tmp_path / "plant"
+    host = RuntimeHost(path, built_usd(robot), device="cpu", robot=robot, support="free", compile=False, gantry=rig)
+    try:
+        seg = abi.Segment.open(path, wait_s=1)
+        assert seg.descriptor()["gantry"]["anchor_z_m"] == 4.0
+        n = seg.num_drives
+        seg.write_demands(abi.pd_demand(np.zeros(n), 0.0, 0.0, law=abi.LAW_DISABLED), cycle=1)
+        host.step()
+
+        def truth():
+            host._publish_truth()
+            return seg.regions["truth"].read()[1]
+
+        with pytest.raises(ValueError, match="outside the gantry's travel"):
+            host._move_gantry({"position_m": [2.0, 0.0, 1.0]})
+        hoist = {"stiffness_n_m": 20000.0, "damping_n_s_m": 500.0, "swing_damping_n_s_m": 50.0}
+        assert host._set_support({"support": "gantry", "hoist": hoist, "attachment_local_m": [0.0, 0.0, 0.3]}) \
+            == "gantry"
+        t0 = truth()
+        harness_z = float(t0["base_position_m"][2]) + 0.3
+        weight = float(t0["mass_kg"]) * 9.81
+        # Hook 10 cm above the harness: the robot comes up by that less the rope's stretch under its weight.
+        host._move_gantry({"position_m": [0.0, 0.0, harness_z + 0.1]})
+        for _ in range(250):
+            host.step()
+        t1 = truth()
+        assert t1["gantry_command_m"].tolist() == pytest.approx([0.0, 0.0, harness_z + 0.1], abs=1e-6)
+        assert t1["gantry_position_m"].tolist() == pytest.approx(t1["gantry_command_m"].tolist(), abs=1e-3)
+        assert float(t1["base_position_m"][2]) > float(t0["base_position_m"][2]) + 0.03
+        assert float(t1["gantry_tension_n"]) > 0.5 * weight
+        # The trolley 30 cm along x carries the hanging robot with it.
+        assert host._move_gantry({"position_m": [0.3, 0.0, harness_z + 0.1]}).startswith("moving to 0.300")
+        for _ in range(500):
+            host.step()
+        t2 = truth()
+        assert t2["gantry_top_m"].tolist() == pytest.approx([0.3, 0.0, 4.0], abs=1e-3)
+        assert float(t2["base_position_m"][0]) > 0.15
+        seg.close()
+    finally:
+        host.close()
+
+
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
 def test_demand_intake_queues_what_the_record_says(tmp_path, robot):
     """The packed, graphed intake queues exactly the demand built field by field from the record."""
     pytest.importorskip("isaaclab_newton")

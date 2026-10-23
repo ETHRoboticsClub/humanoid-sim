@@ -40,6 +40,10 @@ and furniture, starting at the scene's spawn point (the world origin); the descr
 its digest and the spawn point, so the client can map the truth's world frame to the scene's. A spawn point inside
 a box is refused.
 
+With ``gantry`` (:class:`~humanoid_sim.world.trolley.GantryRig`, in world coordinates) a crane stands over the
+scene: MOVE_GANTRY commands its bridge, trolley and hoist, a hoist rope (SET_SUPPORT ``hoist``) hangs from its hook,
+and the truth reports where it is. The descriptor's ``gantry`` gives its geometry and limits.
+
 IMU sample times (``sample_ns``, ``stamp_ns``) are plant time; the feedback region's ``sim_time_ns`` and
 ``written_mono_ns`` map them to the host clock.
 """
@@ -61,6 +65,7 @@ from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
 from humanoid_sim.world.supports import NONE, _quat_rotate, level_under
+from humanoid_sim.world.trolley import GantryRig
 
 EXIT_DONE = 0  # max steps or a stop request
 EXIT_CLIENT_LOST = 3
@@ -183,7 +188,7 @@ class RuntimeHost:
                  bus_period_ns: int = 1_500_000,
                  client_timeout_ns: int = 500_000_000,
                  seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True,
-                 scene: StaticBoxes | None = None):
+                 scene: StaticBoxes | None = None, gantry: GantryRig | None = None):
         from humanoid_sim.devices.models import drive_models
         from humanoid_sim.model.asset import asset_meta, load_profile
         from humanoid_sim.model.description import Description
@@ -216,6 +221,8 @@ class RuntimeHost:
                                                           bus_period_ns,
                                                           int(load_profile(robot)["physics"]["period_ns"])))
         self.device = torch.device(device)
+        self.rig = gantry
+        self.trolley = None if gantry is None else self.sim.gantry.mount(gantry)
         self._intake = _DemandIntake(self.sim.plant, len(self.sim.plant.map.drive_names), self.device,
                                      cuda_graph=cuda, compile=compile and cuda)
         self.desc = self.sim.desc
@@ -299,6 +306,8 @@ class RuntimeHost:
         for key in list(self._faults):
             self._clear_fault(key)
         self._release_rope()
+        if self.trolley is not None:
+            self.trolley.place(torch.tensor([0], device=self.device), torch.tensor(self.rig.home_m))
         self.sim.imu.set_noise(True)
         self._reset({"pose": self.start_pose})
         self._open_session()
@@ -316,6 +325,8 @@ class RuntimeHost:
             if i == 0 and self._support_cfg["harness"] is not None:
                 self._harness_cable(dry_run=False)
         self.sim.gantry.release(torch.tensor([0], device=self.device))
+        if self.trolley is not None:
+            self.trolley.place(torch.tensor([0], device=self.device), torch.tensor(self.rig.home_m))
         r.write_root_pose_to_sim_index(root_pose=root)
         r.write_root_velocity_to_sim_index(root_velocity=vel)
         self.sim.write_joint_state(q, qd)
@@ -341,6 +352,7 @@ class RuntimeHost:
             "drive_models": self._drive_model_table(),
             "fidelity_gaps": fidelity_gaps(self.drive_models),
             "scene": None if self.scene is None else self.scene.describe(),
+            "gantry": None if self.rig is None else self.rig.describe(),
         }
 
     def _drive_model_table(self) -> list[dict]:
@@ -386,7 +398,8 @@ class RuntimeHost:
         handler = {abi.CMD_RESET: self._reset, abi.CMD_PAUSE: self._pause, abi.CMD_RESUME: self._resume,
                    abi.CMD_SET_SUPPORT: self._set_support, abi.CMD_APPLY_DISTURBANCE: self._disturb,
                    abi.CMD_INJECT_FAULT: self._inject, abi.CMD_PRESCRIBE_POSE: self._prescribe,
-                   abi.CMD_DETACH: self._detach, abi.CMD_SET_FIDELITY: self._set_fidelity}.get(command)
+                   abi.CMD_DETACH: self._detach, abi.CMD_SET_FIDELITY: self._set_fidelity,
+                   abi.CMD_MOVE_GANTRY: self._move_gantry}.get(command)
         if handler is None:
             self.seg.ack(seq, abi.ACK_UNKNOWN, f"unknown command {command}")
             return
@@ -437,27 +450,42 @@ class RuntimeHost:
         """The gantry cable at the harness hook, its unstretched length short of the overhead distance by the
         stretch that carries the robot's weight, so it holds the robot where it hangs: critically damped along the
         cable, and across it at ``support.swing_damping_ratio`` of the robot's swing as a pendulum from the anchor.
-        With ``level`` the robot is first turned about the hook to the attitude it comes to rest in."""
+        With ``level`` the robot is first turned about the hook to the attitude it comes to rest in. With a crane
+        (``--gantry``) whose travel reaches over the hook, the cable hangs from the crane's hook, the trolley placed
+        over it and the hoist that stretch short; a suspended robot out of its reach is refused."""
         cfg = self._support_cfg
         if cfg["harness"] is None:
             raise ValueError(f"{self.desc.robot}: its profile names no support.harness to suspend it by")
         mass = float(self._mass.sum())
         stiffness = mass * GRAVITY_M_S2 / cfg["full_weight_stretch_m"]
-        swing_damping = 0.0
+        env = torch.tensor([0], device=self.device)
+        swing_damping, overhead_m, crane = 0.0, cfg["overhead_m"], None
         if not dry_run:
             hook, com = self._hook_and_com()
-            reach_m = cfg["overhead_m"] + float((com - hook).norm())
+            if self.trolley is not None:
+                crane = self.rig.over(hook, cfg["full_weight_stretch_m"])
+                if crane is None and self.support == "suspended":
+                    raise ValueError(f"the harness hook at {[round(float(v), 2) for v in hook]} is outside the "
+                                     "gantry crane's travel: spawn the robot under it")
+                if crane is not None:
+                    overhead_m = self.rig.anchor_z_m - float(hook[2])
+            reach_m = overhead_m + float((com - hook).norm())
             # The hook moves overhead / reach as fast as the centre of mass swings, so the damper there needs
             # (reach / overhead)^2 more to give the swing its ratio.
             swing_damping = (2.0 * cfg["swing_damping_ratio"] * mass * math.sqrt(GRAVITY_M_S2 / reach_m)
-                             * (reach_m / cfg["overhead_m"]) ** 2)
+                             * (reach_m / overhead_m) ** 2)
             if level:
                 self._level_under(hook, com)
+        damping = 2.0 * math.sqrt(stiffness * mass)
+        if crane is not None:
+            self.trolley.place(env, torch.tensor(crane))
+            self.sim.gantry.hang_hoist(env, attachment_bodies=cfg["harness"]["shoulders"], stiffness_n_m=stiffness,
+                                       damping_n_s_m=damping, swing_damping_n_s_m=swing_damping)
+            return
         self.sim.gantry.hang_cable(
-            torch.tensor([0], device=self.device), self.sim.t_ns, attachment_bodies=cfg["harness"]["shoulders"],
+            env, self.sim.t_ns, attachment_bodies=cfg["harness"]["shoulders"],
             overhead_m=cfg["overhead_m"], length_breakpoints_s_m=[(0.0, cfg["overhead_m"] - cfg["full_weight_stretch_m"])],
-            stiffness_n_m=stiffness, damping_n_s_m=2.0 * math.sqrt(stiffness * mass),
-            swing_damping_n_s_m=swing_damping, dry_run=dry_run)
+            stiffness_n_m=stiffness, damping_n_s_m=damping, swing_damping_n_s_m=swing_damping, dry_run=dry_run)
 
     def _hook_and_com(self) -> tuple[torch.Tensor, torch.Tensor]:
         """The harness hook (midway between the shoulder links, whose origins are their joints) and the centre of
@@ -569,7 +597,19 @@ class RuntimeHost:
         if kind != "gantry":
             raise ValueError(f"unknown support {kind!r}")
         t_ns, gantry = self.sim.t_ns, self.sim.gantry
-        if "cable" in args:
+        if "hoist" in args:
+            h = args["hoist"]
+            if self.trolley is None:
+                raise ValueError("no gantry crane: start the host with one (--gantry)")
+            stiffness, damping = float(h["stiffness_n_m"]), float(h["damping_n_s_m"])
+            swing = float(h.get("swing_damping_n_s_m", 0.0))
+            point, bodies = args.get("attachment_local_m"), args.get("attachment_bodies")
+
+            def hang(*, dry_run):
+                gantry.hang_hoist(env, attachment_b=None if bodies else point, attachment_bodies=bodies,
+                                  stiffness_n_m=stiffness, damping_n_s_m=damping, swing_damping_n_s_m=swing,
+                                  dry_run=dry_run)
+        elif "cable" in args:
             c = args["cable"]
             attachment = args["attachment_local_m"]
             overhead, lengths = float(c["overhead_distance_m"]), c["length_breakpoints_s_m"]
@@ -588,6 +628,23 @@ class RuntimeHost:
                                     dry_run=dry_run)
         self._hang(hang, harness=False)
         return "gantry"
+
+    def _move_gantry(self, args: dict) -> str:
+        if self.trolley is None:
+            raise ValueError("no gantry crane: start the host with one (--gantry)")
+        xyz = [float(v) for v in args["position_m"]]
+        frame = args.get("frame", "gantry")
+        if len(xyz) != 3 or not all(map(math.isfinite, xyz)):
+            raise ValueError("position_m: three finite numbers")
+        if frame == "world":
+            xyz = list(self.rig.from_world(xyz))
+        elif frame != "gantry":
+            raise ValueError(f"frame {frame!r}: gantry or world")
+        if not self.rig.contains(xyz):
+            raise ValueError(f"{[round(v, 3) for v in xyz]} is outside the gantry's travel: x {self.rig.travel_x_m}, "
+                             f"y {self.rig.travel_y_m}, hook z {self.rig.hook_z_m}")
+        self.trolley.set_command(torch.tensor([0], device=self.device), torch.tensor(xyz))
+        return "moving to " + ", ".join(f"{v:.3f}" for v in xyz)
 
     def _disturb(self, args: dict) -> str:
         if "joint" in args or "drive" in args:
@@ -860,8 +917,11 @@ class RuntimeHost:
             span = 2 * (axes[0, 2].abs() * s["half"][0] + axes[1, 2].abs() * s["half"][1])
             soles.append(torch.cat([pose, corners[:, 2].min().view(1), normal[k].view(1), axes[2], span.view(1),
                                     face[:, :2].reshape(-1)]))
+        crane = (torch.full((6,), float("nan"), device=self.device) if self.trolley is None
+                 else torch.cat([self.trolley.position[0], self.trolley.command[0]]))
         flat = self._to_host("truth", torch.cat([root, vel, com, q[0], qd[0], sim.gantry.tension_n[:1],
-                                                 self._mass.sum().view(1), *soles]).to(torch.float64))
+                                                 self._mass.sum().view(1), *soles, sim.gantry.top_w[0],
+                                                 sim.gantry.harness_w[0], crane]).to(torch.float64))
         i = 0
 
         def take(k):
@@ -884,6 +944,8 @@ class RuntimeHost:
             t["sole"]["lowest_z_m"][k], t["sole"]["normal_force_n"][k] = s[7], s[8]
             t["sole"]["plate_normal_w"][k], t["sole"]["plate_face_height_span_m"][k] = s[9:12], s[12]
             t["sole"]["face_xy_m"][k] = s[13:21].reshape(4, 2)
+        t["gantry_top_m"], t["gantry_harness_m"] = take(3), take(3)
+        t["gantry_position_m"], t["gantry_command_m"] = take(3), take(3)
         self.seg.regions["truth"].write(t)
 
     def _frozen_encoders(self):
