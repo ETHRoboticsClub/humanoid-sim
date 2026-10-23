@@ -37,7 +37,7 @@ TROLLEY_RADIUS_M = 0.08
 LABEL_RADIUS_M = 0.01
 LABEL_LIFT_M = 0.6  # a label with no rope floats this far above the robot's base
 NO_GANTRY = "no gantry"
-NO_GANTRY_RGB = (120, 120, 120)
+LABEL_RGB = (245, 245, 245)  # the label is drawn on a grey plate: the rope carries the state colour
 
 
 def full_weight_stretch_m(weight_n, stiffness_n_m):
@@ -77,7 +77,7 @@ def log_no_gantry(rr, world: str, base_w) -> None:
     """The label of a robot with no gantry (and no stale rope drawn from a gantry it had)."""
     for name in ("rope", "anchor", "plumb"):
         rr.log(f"{world}/{name}", rr.Clear(recursive=False))
-    log_label(rr, f"{world}/status", np.asarray(base_w) + [0.0, 0.0, LABEL_LIFT_M], NO_GANTRY, NO_GANTRY_RGB)
+    log_label(rr, f"{world}/status", np.asarray(base_w) + [0.0, 0.0, LABEL_LIFT_M], NO_GANTRY, LABEL_RGB)
 
 
 def log_env(rr, world: str, sim: str, *, top, hook, rest_m: float, tension_n: float, weight_n: float,
@@ -104,11 +104,11 @@ def log_env(rr, world: str, sim: str, *, top, hook, rest_m: float, tension_n: fl
         rr.log(f"{sim}/length_m", rr.Scalars(length))
         if np.isfinite(rest_m):
             rr.log(f"{sim}/rest_length_m", rr.Scalars(float(rest_m)))
-        log_label(rr, f"{world}/status", top, text, rgb)
+        log_label(rr, f"{world}/status", top, text, LABEL_RGB)
     else:
         for name in ("rope", "anchor", "plumb"):
             rr.log(f"{world}/{name}", rr.Clear(recursive=False))
-        log_label(rr, f"{world}/status", np.asarray(base_w) + [0.0, 0.0, LABEL_LIFT_M], text, STATE_RGB[state])
+        log_label(rr, f"{world}/status", np.asarray(base_w) + [0.0, 0.0, LABEL_LIFT_M], text, LABEL_RGB)
     return state
 
 

@@ -189,7 +189,7 @@ class RuntimeView:
     def _gantry(self, t) -> None:
         """The rope while a cable hangs (coloured by what it carries, with its status), a "no gantry" label
         otherwise, and the crane where it is. The truth does not carry the cable's unstretched length, so the
-        rest length is not drawn. A truth with no mass (the host fills it from its first step) draws no rope."""
+        rest length is not drawn. A truth without a mass has no weight to compare the tension with, so it draws "no gantry"."""
         rr = self.rr
         top, harness = np.asarray(t["gantry_top_m"]), np.asarray(t["gantry_harness_m"])
         tension, base = float(t["gantry_tension_n"]), np.asarray(t["base_position_m"])
