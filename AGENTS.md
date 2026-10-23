@@ -18,6 +18,7 @@ The robot below Controls: drives, ankle mechanism and body, on Isaac Lab 3.0 / N
 - **Backends:** selected explicitly; no silent fallback. Unknown names raise.
 - **Modeled vs verified:** anything inferred from code or datasheets is labelled `modeled` until traces verify it. The description is loaded hash-verified.
 - **Description-driven:** the model build and device inventory come from `third_party/humanoid-urdf`. No robot constant is typed into this repo; if a fact is missing, add it to humanoid-urdf.
+- **Tests test the code, not the description:** a legitimate edit to humanoid-urdf's values (limits, masses, gains, delays, poses, joint counts) must not fail a test. Use fixture values or expectations read from the description at runtime. Replays and sysid against robot captures are the exception: they validate the sim against the robot.
 - **Batched:** device and transmission math is torch over `[envs, ...]`. No host syncs in steady state.
 - **Solver gains** are written at reset only. Gain changes and envelopes are target shaping.
 
