@@ -18,6 +18,7 @@ from conftest import PARTS, PHYSICS_ROBOTS, built_usd, gravity_torque, joints_be
 from humanoid_sim.model.asset import asset_dir, load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.poses import pose_joint_positions, start_pose
+from humanoid_sim.model.urdf import PreparedUrdf
 from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.sensors import rigs
 
@@ -456,7 +457,7 @@ def test_a_disabled_drive_is_back_driven_through_its_gearbox(tmp_path, robot):
 
 
 def test_the_host_serves_the_g1(tmp_path):
-    """Another robot in humanoid-urdf serves the same way: the G1's 29 motors take SI demands and the truth reports
+    """Another robot in humanoid-urdf serves the same way: the G1's motors take SI demands and the truth reports
     its soles (the boxes bounding its contact spheres)."""
     pytest.importorskip("isaaclab_newton")
     import torch
@@ -475,8 +476,10 @@ def test_the_host_serves_the_g1(tmp_path):
         client = abi.Segment.open(path, robot_id=robot, description_digest=desc.digest, wait_s=1)
         info = client.descriptor()
         drives = info["drives"]
-        assert len(drives) == client.num_drives == 29
-        assert info["soles"] == ["left_ankle_roll_link", "right_ankle_roll_link"]
+        n = len(desc.drives)
+        assert len(drives) == client.num_drives == n
+        soles = PreparedUrdf(desc, load_profile(robot)).build().soles
+        assert info["soles"] == [s.body for s in sorted(soles, key=lambda s: s.side)]
         q, _ = host._named_pose("home")
         hold = host.sim.plant.map.drive_state(q.to(host.sim.plant.cfg.dtype), torch.zeros_like(q))[0][0].numpy()
         demand = abi.pd_demand(hold, [desc.drives[d].baseline_stiffness for d in drives],
@@ -486,8 +489,8 @@ def test_the_host_serves_the_g1(tmp_path):
             host.step()
         assert host.attached
         fb = _feedback(client)["drive"]
-        assert np.abs(fb["position_rad"][:29] - hold).max() < 0.1  # hanging, at the deploy gains
-        assert np.abs(fb["applied_torque_nm"][:29]).max() > 0.1
+        assert np.abs(fb["position_rad"][:n] - hold).max() < 0.1  # hanging, at the deploy gains
+        assert np.abs(fb["applied_torque_nm"][:n]).max() > 0.1
         _, truth = client.regions["truth"].read()
         soles = truth["sole"]
         assert (soles["lowest_z_m"] > 0.2).all() and (soles["normal_force_n"] == 0).all()  # hung 0.3 m up
@@ -498,7 +501,7 @@ def test_the_host_serves_the_g1(tmp_path):
         # after.
         host.step()
         host.step()
-        assert np.abs(_feedback(client)["drive"]["demanded_torque_nm"][:29]).max() == 0.0
+        assert np.abs(_feedback(client)["drive"]["demanded_torque_nm"][:n]).max() == 0.0
         client.close()
     finally:
         host.close()

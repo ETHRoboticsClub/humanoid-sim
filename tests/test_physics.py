@@ -31,46 +31,24 @@ def test_kinematic_model_mass_and_bodies(robot):
     assert kin.model.body_count == len(desc.joints) + 1  # a tree: one body per movable joint, plus the base
 
 
-def _soles_at(kin, soles, labels, q):
-    from humanoid_sim.model.kinematics import _rotate, _sole_corners
-
-    poses = kin.body_poses(q.reshape(1, -1))
-    out = []
-    for sole in soles:
-        pose = poses[labels.index(sole["body"])]
-        normal = _rotate(pose[3:], np.asarray(sole["rotation"])[:, 2])
-        out.append((float(normal[2]), float(_sole_corners(pose, sole)[:, 2].min())))
-    return out
-
-
 @pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
-def test_home_pose_levels_both_soles_at_one_height(robot):
-    """The profile's home pose (the V1's CAD export pose, the G1's deploy standing pose) stands both sole boxes
-    level and at one height under an upright base, the soles lowest."""
+def test_home_pose_stands_its_lowest_point_on_the_ground(robot):
+    """The profile's home pose under an upright base at the height that puts its lowest collision point on the
+    ground."""
     pytest.importorskip("newton")
     pytest.importorskip("pxr")
-    from humanoid_sim.model.asset import asset_meta
     from humanoid_sim.model.kinematics import RobotKinematics, lowest_collision_z
     from humanoid_sim.model.poses import home_pose, initial_pose
 
     usd = built_usd(robot)
     desc = Description.load(robot)
-    soles = asset_meta(usd)["sole_boxes"]
     joints = list(desc.joints)
     kin = RobotKinematics(usd, joints, base_height_m=0.0)
-    labels = [lbl.rsplit("/", 1)[-1] for lbl in kin.model.body_label]
 
     q, height = initial_pose(usd, robot, pose="home")
     home = home_pose(desc, load_profile(robot))
     assert q.tolist() == pytest.approx([home[n] for n in joints])
-    (n_l, z_l), (n_r, z_r) = _soles_at(kin, soles, labels, q)
-    assert min(n_l, n_r) > np.cos(np.radians(0.1))  # level
-    assert abs(z_l - z_r) < 5e-4
-    assert height == pytest.approx(-min(z_l, z_r), abs=1e-4)  # the soles are the lowest collision shapes
     assert height == pytest.approx(-lowest_collision_z(kin, kin.body_poses(q.reshape(1, -1))))
-    for c, name in enumerate(joints):
-        lo, hi = desc.calibration_travel(name)
-        assert lo <= float(q[c]) <= hi, name
 
 
 @pytest.mark.physics

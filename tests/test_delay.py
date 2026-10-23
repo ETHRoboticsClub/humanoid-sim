@@ -21,7 +21,7 @@ def test_regions_cover_every_drive_once():
     drives = list(desc.drives)
     regions = drive_regions(desc, drives)
     assert sorted(i for idx in regions.values() for i in idx) == list(range(len(drives)))
-    assert len(regions["ankle"]) == 4
+    assert sorted(regions.get("ankle", [])) == [i for i, d in enumerate(drives) if desc.drives[d].crank is not None]
 
 
 @pytest.mark.physics
