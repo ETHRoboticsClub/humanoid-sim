@@ -305,15 +305,7 @@ A crane moves the rope's top: its bridge runs along the runway rails (the crane'
 
 A hoist rope pulls like a slack cable with its top at the trolley and its length the hoist's. Its damping acts on the rope's stretch rate: the harness point's velocity along the rope relative to the moving top, less the hoist's pay-out rate. Swing damping acts on the harness point's velocity across the rope, relative to the top.
 
-In training, mount the crane once and command it from your events or action term:
-
-```python
-rig = GantryRig.load("examples/hangar_gantry.json").placed(spawn_m)
-trolley = plant.gantry.mount(rig, origin_w=env.scene.env_origins)
-hook_b = torch.tensor([0.0, 0.0, 0.25])  # the harness hook in the harness body's frame
-plant.gantry.hang_hoist(env_ids, point_b=hook_b, harness=True, stiffness_n_m=2.0e4, damping_n_s_m=500.0)
-trolley.set_command(env_ids, torch.tensor([0.0, 0.0, 1.9]))
-```
+The crane is the lab's, under a runtime client's control in the hangar scene; it is not a training support. Training hangs its ropes from a fixed anchor (`hang_cable`, `hang_cables`, `hang_tension`).
 
 In the runtime, `serve --gantry PATH` (placed with `--spawn`) mounts one, and a `suspended` session then hangs its harness cable from the crane's hook: the trolley is placed over the harness hook and the hoist set `support.full_weight_stretch_m` short, so the robot hangs where it is, and a robot whose hook is out of the crane's reach is refused (spawn it under the crane). Without a crane, or for a free session's `{"support": "suspended"}` out of its reach, the cable hangs from a fixed anchor as above. The crane: `MOVE_GANTRY` commands it, `SET_SUPPORT` with `hoist` hangs the robot from its hook, the truth reports `gantry_position_m` and `gantry_command_m`, and the descriptor's `gantry` its geometry ([runtime.md](runtime.md#move_gantry-10)). `view-runtime` draws its travel, bridge, trolley and rope; `render-runtime` moves the splat's `bridge`, `trolley` and `hook` parts when the rig has `scan_m`.
 

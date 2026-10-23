@@ -36,7 +36,7 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `StaticBoxes` | `src/humanoid_sim/world/boxes.py` | A room's walls and furniture as static boxes, read from a file, described in [world.md](world.md#static-boxes) |
 | `initial_pose`, `POSES` | `src/humanoid_sim/model/poses.py`, re-exported by `humanoid_sim.train.scene` | The joint positions and base height of a named initial pose |
 | `heightfield_terrain_cfg` | `src/humanoid_sim/world/terrain.py` | The terrain-importer config for a heightfield terrain the caller lays out, described in [world.md](world.md#heightfield-terrain) |
-| `ForcePush`, `Gantry`, `GantryRig` | `src/humanoid_sim/world/` | Pushes a task applies, the gantry rope the plant applies once a task hangs it (`plant.gantry`), and a crane that moves the rope (`plant.gantry.mount`), described in [world.md](world.md) |
+| `ForcePush`, `Gantry`, `GantryRig` | `src/humanoid_sim/world/` | Pushes a task applies, and the gantry rope the plant applies once a task hangs it (`plant.gantry`), described in [world.md](world.md). The crane (`GantryRig`) is for the runtime, not training |
 | `DriveDemand` | `src/humanoid_sim/devices/demand.py` | One SI demand per env and drive: law, targets, gains, torque limit |
 | `SceneRecorder` | `src/humanoid_sim/signals/scene.py` | Records many envs of a scene to one Rerun recording |
 
