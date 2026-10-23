@@ -5,7 +5,7 @@ import torch
 from conftest import GRAVITY as G
 from conftest import PARTS, PHYSICS_ROBOTS, built_usd
 
-from humanoid_sim.world.supports import interp_program
+from humanoid_sim.world.supports import Gantry, interp_program
 
 
 def test_program_is_linear_between_breakpoints_and_held_beyond():
@@ -15,6 +15,58 @@ def test_program_is_linear_between_breakpoints_and_held_beyond():
     assert at(0).tolist() == [1.0, 5.0]
     assert at(150).tolist() == [2.0, pytest.approx(5.3)]
     assert at(5000).tolist() == [3.0, 7.0]
+
+
+class _Composer:
+    def __init__(self):
+        self.forces = []
+
+    def add_forces_and_torques_index(self, *, forces, torques, positions, body_ids, env_ids, is_global):
+        self.forces.append(forces[:, 0].clone())
+
+
+class _Robot:
+    """The articulation surface `Gantry` uses: two envs, base at rest 1 m up, or moving at `velocity`."""
+
+    def __init__(self, velocity=(0.0, 0.0, 0.0)):
+        self.num_instances, self.device, self.body_names = 2, "cpu", ["base"]
+        pose = torch.tensor([[0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]]).expand(2, 1, 7)
+        vel = torch.tensor([[*velocity, 0.0, 0.0, 0.0]]).expand(2, 1, 6)
+        self.data = type("Data", (), {"body_link_pose_w": type("T", (), {"torch": pose})(),
+                                      "body_link_vel_w": type("T", (), {"torch": vel})()})()
+        self.instantaneous_wrench_composer = _Composer()
+
+
+def _cables(gantry, swing=0.0):
+    """Anchors 1 m above the harness point (1.3 m up); env 0 keeps 0.98 m of rope, env 1 pays out to 1.5 m
+    from 2 s on."""
+    gantry.hang_cables(torch.arange(2), 1000, attachment_b=[0.0, 0.0, 0.3],
+                       anchor_w=torch.tensor([[0.0, 0.0, 2.3], [0.0, 0.0, 2.3]]),
+                       times_ns=torch.tensor([[0, 1], [0, 2_000_000_000]]),
+                       lengths_m=torch.tensor([[0.98, 0.98], [0.98, 1.5]]),
+                       stiffness_n_m=torch.tensor([1000.0, 2000.0]), damping_n_s_m=torch.zeros(2),
+                       swing_damping_n_s_m=torch.full((2,), swing))
+
+
+def test_cables_follow_each_envs_own_program_and_stiffness():
+    robot = _Robot()
+    gantry = Gantry(robot)
+    _cables(gantry)
+    gantry.apply(1000)  # 2 cm stretched in both envs
+    assert gantry.tension_n.tolist() == [pytest.approx(20.0, rel=1e-4), pytest.approx(40.0, rel=1e-4)]
+    assert robot.instantaneous_wrench_composer.forces[0][:, 2].tolist() == gantry.tension_n.tolist()
+    gantry.apply(1000 + 2_000_000_000)  # env 1 paid out past the 1 m to its anchor: slack
+    assert gantry.tension_n.tolist() == [pytest.approx(20.0, rel=1e-4), 0.0]
+
+
+def test_swing_damping_resists_motion_across_a_taut_cable_only():
+    robot = _Robot(velocity=(0.5, 0.0, 0.0))
+    gantry = Gantry(robot)
+    _cables(gantry, swing=10.0)
+    gantry.apply(1000 + 2_000_000_000)
+    force = robot.instantaneous_wrench_composer.forces[0]
+    assert force[0].tolist() == [pytest.approx(-5.0), 0.0, pytest.approx(20.0, rel=1e-4)]
+    assert force[1].tolist() == [0.0, 0.0, 0.0]  # slack: no swing damping either
 
 
 def _sim(robot, request, height):

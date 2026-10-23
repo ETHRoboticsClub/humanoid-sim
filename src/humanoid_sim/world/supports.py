@@ -1,12 +1,13 @@
 """Gantry supports: a rope that holds the robot up, attached to its base.
 
-Mirrors Controls' test gantry (``ethrc_sim/support.py`` @ 447b4acb), batched over envs:
+Mirrors Controls' test gantry (``ethrc_sim/support.py`` @ e3bce71e2), batched over envs:
 
 * **tension program**: a vertical force, linear in time between breakpoints and held beyond both ends, split
   evenly over points fixed in the base frame (one harness, or a rope per shoulder);
 * **slack cable**: one rope from a base-frame harness point to a world anchor ``overhead_m`` above where that
-  point was when the cable was hung. It pulls along the rope only beyond its unstretched length (also a program
-  in time): ``T = max(0, k · extension + c · extension rate)``.
+  point was when the cable was hung (or a given anchor). It pulls along the rope only beyond its unstretched
+  length (also a program in time): ``T = max(0, k · extension + c · extension rate)``; while taut, a swing
+  damping resists the harness point's motion across the rope (the wire's friction at its hook).
 
 Programs start when they are hung (times relative to then). Each env has its own rope or none. Forces go
 through the articulation's instantaneous wrench composer, which Isaac Lab clears after every physics step, so
@@ -68,6 +69,7 @@ class Gantry:
         self.anchor_w = torch.zeros(e, 3, device=dev)
         self.stiffness = torch.zeros(e, device=dev)
         self.damping = torch.zeros(e, device=dev)
+        self.swing_damping = torch.zeros(e, device=dev)
         # One program per env: tension (N) or unstretched cable length (m) over time.
         k = max_breakpoints
         self.program_ns = torch.arange(k, dtype=torch.int64, device=dev).expand(e, k).clone()
@@ -122,23 +124,45 @@ class Gantry:
 
     def hang_cable(self, env_ids: torch.Tensor, t_ns: int, *, attachment_b, overhead_m: float,
                    length_breakpoints_s_m: Sequence[tuple[float, float]], stiffness_n_m: float,
-                   damping_n_s_m: float) -> None:
+                   damping_n_s_m: float, swing_damping_n_s_m: float = 0.0) -> None:
         """One cable from the base-frame harness point ``attachment_b`` to an anchor ``overhead_m`` above where
         that point is now; unstretched length over time (s, m) from ``t_ns``."""
-        if overhead_m <= 0 or stiffness_n_m <= 0 or damping_n_s_m < 0:
-            raise ValueError("cable overhead distance and stiffness must be positive, damping non-negative")
+        if overhead_m <= 0 or stiffness_n_m <= 0 or damping_n_s_m < 0 or swing_damping_n_s_m < 0:
+            raise ValueError("cable overhead distance and stiffness must be positive, dampings non-negative")
         if any(float(length) <= 0 for _, length in length_breakpoints_s_m):
             raise ValueError("cable lengths must be positive")
         a = torch.as_tensor(attachment_b, dtype=torch.float32, device=self.device).reshape(3)
         root = self.robot.data.body_link_pose_w.torch[env_ids, self.body_id]
         point = root[:, :3] + _quat_rotate(root[:, 3:], a.expand(len(env_ids), 3))
         self._set_program(env_ids, t_ns, length_breakpoints_s_m)
+        self._hang_cable(env_ids, a, point + torch.tensor([0.0, 0.0, overhead_m], device=self.device),
+                         stiffness_n_m, damping_n_s_m, swing_damping_n_s_m)
+
+    def hang_cables(self, env_ids: torch.Tensor, t_ns: int, *, attachment_b, anchor_w: torch.Tensor,
+                    times_ns: torch.Tensor, lengths_m: torch.Tensor, stiffness_n_m: torch.Tensor,
+                    damping_n_s_m: torch.Tensor, swing_damping_n_s_m: torch.Tensor) -> None:
+        """One cable per env in ``env_ids`` ``[n]``, all from the base-frame harness point ``attachment_b``: world
+        anchors ``[n, 3]``, unstretched length programs ``times_ns`` (int64, from ``t_ns``, nondecreasing) and
+        ``lengths_m`` ``[n, K]`` with K up to ``max_breakpoints``, and per-env stiffness and dampings ``[n]``.
+        Batched for resets: nothing is checked on the host, so pass positive lengths and stiffness."""
+        k = self.program_ns.shape[1]
+        if times_ns.shape != lengths_m.shape or not 1 <= times_ns.shape[1] <= k:
+            raise ValueError(f"cable programs need matching [n, K] times and lengths, K from 1 to {k}")
+        pad = k - times_ns.shape[1]  # hold the last length, 1 ns apart
+        steps = torch.arange(1, pad + 1, dtype=torch.int64, device=self.device)
+        self.program_ns[env_ids] = t_ns + torch.cat([times_ns, times_ns[:, -1:] + steps], dim=1)
+        self.program[env_ids] = torch.cat([lengths_m, lengths_m[:, -1:].expand(-1, pad)], dim=1)
+        a = torch.as_tensor(attachment_b, dtype=torch.float32, device=self.device).reshape(3)
+        self._hang_cable(env_ids, a, anchor_w, stiffness_n_m, damping_n_s_m, swing_damping_n_s_m)
+
+    def _hang_cable(self, env_ids, attachment, anchor_w, stiffness, damping, swing_damping) -> None:
         self.points_b[env_ids] = 0.0
-        self.points_b[env_ids, 0] = a
+        self.points_b[env_ids, 0] = attachment
         self.num_points[env_ids] = 1
-        self.anchor_w[env_ids] = point + torch.tensor([0.0, 0.0, overhead_m], device=self.device)
-        self.stiffness[env_ids] = stiffness_n_m
-        self.damping[env_ids] = damping_n_s_m
+        self.anchor_w[env_ids] = anchor_w
+        self.stiffness[env_ids] = stiffness
+        self.damping[env_ids] = damping
+        self.swing_damping[env_ids] = swing_damping
         self.mode[env_ids] = CABLE
         self.active = True
 
@@ -177,7 +201,9 @@ class Gantry:
         rate = -(direction * v_point).sum(1)
         cable = (self.stiffness * extension + self.damping * rate).clamp(min=0.0)
         cable = torch.where((self.mode == CABLE) & (extension > 0), cable, 0.0)
-        force[:, 0] += direction * cable[:, None]
+        across = v_point + rate[:, None] * direction
+        swing = torch.where(cable > 0, self.swing_damping, 0.0)
+        force[:, 0] += direction * cable[:, None] - swing[:, None] * across
 
         self.tension_n = torch.where(self.mode == CABLE, cable, share * self.num_points.to(value.dtype))
         self.distance_m = torch.where(self.mode == CABLE, dist, 0.0)
