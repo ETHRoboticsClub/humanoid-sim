@@ -159,8 +159,9 @@ class Gantry:
         return spec.expand(len(env_ids), -1, -1)
 
     def _commit(self, env_ids: torch.Tensor, body_id: int, program: tuple[torch.Tensor, torch.Tensor]) -> None:
-        self.body_id = body_id
-        self._body = torch.tensor([body_id], device=self.device)
+        if body_id != self.body_id:  # a host copy, so not at every reset
+            self.body_id = body_id
+            self._body = torch.tensor([body_id], device=self.device)
         self.program_ns[env_ids], self.program[env_ids] = program
 
     def hang_tension(self, env_ids: torch.Tensor, t_ns: int, breakpoints_s_n: Sequence[tuple[float, float]], *,
