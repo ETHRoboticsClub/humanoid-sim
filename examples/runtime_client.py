@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     info = seg.descriptor()
     drives, bodies = info["drives"], info["bodies"]
     n = len(drives)
-    # Push a forearm: on a suspended robot (serve's default support) the base doesn't move.
+    # Push a forearm: on a suspended robot (serve's default support) the cable holds the base.
     pushed_body = next((b for b in bodies if "elbow" in b and (b.startswith("left") or b.endswith("l_1"))), bodies[0])
     joint_of = {d: desc.drives[d].joints[0] for d in drives}
 

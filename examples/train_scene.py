@@ -39,7 +39,7 @@ def make_env(num_envs: int, device: str, *, flat: bool):
     from humanoid_sim.devices.demand import DriveDemand
     from humanoid_sim.train import TrainPlantCfg
     from humanoid_sim.train.isaaclab import PlantAction, PlantActionCfg
-    from humanoid_sim.train.scene import robot_scene_cfg, robot_sim_cfg
+    from humanoid_sim.train.scene import robot_build, robot_scene_cfg, robot_sim_cfg
     from humanoid_sim.world.terrain import heightfield_terrain_cfg
 
     class ScriptedDrives(PlantAction):
@@ -111,7 +111,8 @@ def make_env(num_envs: int, device: str, *, flat: bool):
     cfg.scene = robot_scene_cfg(num_envs, robot_usd(), terrain=terrain, ground_friction=0.0 if flat else None,
                                 env_spacing=2.0)
     cfg.sim = robot_sim_cfg(device=device)
-    return ManagerBasedRLEnv(cfg)
+    with robot_build():
+        return ManagerBasedRLEnv(cfg)
 
 
 def robot_usd() -> Path:

@@ -638,7 +638,7 @@ def main(argv: list[str] | None = None) -> int:
     sv = sub.add_parser("serve", help="one robot in real time behind the runtime segment")
     sv.add_argument("--segment", required=True, help="segment file (on a volume shared with the plant host)")
     sv.add_argument("--support", choices=("suspended", "free"), default="suspended",
-                    help="suspended welds the base to the world; free stands it on the ground (gantry by command)")
+                    help="suspended hangs it from the lab gantry's harness cable; free stands it on the ground (gantry by command)")
     sv.add_argument("--pose", choices=("home", "standing"), default=None,
                     help="the pose every session starts in (default: the profile's poses.start)")
     sv.add_argument("--device", default="cuda:0")

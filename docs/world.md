@@ -9,9 +9,10 @@ Around the robot, humanoid-sim has a ground (a flat plane, or in training a heig
 | Static boxes (walls, furniture) | `robot_scene_cfg(..., scene=...)` | none | `--scene` and `--spawn` |
 | Start pose | `robot_scene_cfg(..., pose=...)`: `"home"` (default) or `"standing"` | the capture's first measured drive positions | the profile's `poses.start` (V1 `standing`, G1 `home`) or `--pose`; `RESET` can pick either |
 | Free base | always | none | `--support free` |
-| Fixed base | none | `--base fixed` | `--support suspended` (default) |
+| Fixed base | none | `--base fixed` | none |
+| Lab gantry (harness cable on the torso) | none | none | `--support suspended` (default) |
 | Base orientation prescribed through base joints | none | `--base yaw` (default) or `--base orientation` | none |
-| Gantry rope | `plant.gantry`, hung by your task | none | `SET_SUPPORT` command in a free session |
+| Gantry rope | `plant.gantry`, hung by your task | none | `SET_SUPPORT` command |
 | Force pushes on a body | `ForcePush` | none | `APPLY_DISTURBANCE` body wrench |
 | Torque on a joint | `plant.core.external_torque` | none | `APPLY_DISTURBANCE` joint torque |
 
@@ -221,11 +222,13 @@ A support holds the robot up while it is tested, the way the real robot hangs in
 
 No support: the robot stands or falls on the ground. Training scenes are free (`robot_scene_cfg` has no fixed-base option). A training robot spawns upright in the pose that `robot_scene_cfg`'s `pose` names; held rigidly, the V1's default home pose stands still on flat ground and its standing pose tips over within a second, and the G1 tips over from its home pose too, its ankles too soft at Unitree's deploy gains ([training.md](training.md#the-initial-pose)). In the runtime, `--support free` starts the robot standing on the ground; until a client attaches, the host holds it in its start pose, base included ([runtime.md](runtime.md)).
 
-### Suspended (fixed base)
+### Suspended (the lab gantry)
 
-The articulation's root is fixed to the world (`fix_root_link` in `articulation_cfg`), as in Controls' suspended profile. The runtime starts this way by default (`--support suspended`), with the base 0.3 m above its standing height so the feet hang clear of the ground. Replays use it with `--base fixed`.
+The runtime starts this way by default (`--support suspended`): the robot hangs from one cable, as on the lab's gantry, with its feet 0.3 m above the ground in the start pose. The cable runs from the harness hook, the midpoint of the shoulders on the torso (the profile's `support.harness`: `torso_link` on the G1, `Component171_1` on the V1), to an anchor `support.overhead_m` (1.25 m) above it, and stretches `support.full_weight_stretch_m` (2 cm) under the robot's weight, critically damped. Both figures are the test hypotheses of Controls' G1 gantry, not gantry measurements. Each hang starts with the robot turned about the hook until its centre of mass is straight below it, the attitude it comes to rest in, so a robot at rest stays at rest; across the rope the cable damps the harness point's motion at `support.swing_damping_ratio` (0.05) of the swing, so a push dies away over several periods, as on the lab gantry (a modeling choice, not measured). Holding the torso, the waist carries the hanging legs; welding the base instead would hold the G1 by its pelvis and fold its torso over the waist onto the stops whenever the drives are not stiff. 
 
-The choice is made when the scene is built and cannot change in a session: a suspended runtime session cannot release its base, and a free one cannot be suspended. Writing the base pose back every step would not suspend the robot either: the whole robot falls freely within each step, so the joints never carry its weight (`src/humanoid_sim/world/supports.py`).
+### Fixed base (replays)
+
+The articulation's root is fixed to the world (`fix_root_link` in `articulation_cfg`). Replays use it with `--base fixed`. Writing the base pose back every step would not suspend the robot: the whole robot falls freely within each step, so the joints never carry its weight (`src/humanoid_sim/world/supports.py`).
 
 ### Base joints (replays)
 
@@ -233,36 +236,34 @@ Replays of captures taken on the gantry can move the base with the capture's IMU
 
 ### Gantry rope
 
-`Gantry` (`src/humanoid_sim/world/supports.py`) mirrors Controls' test gantry (`ethrc_sim/support.py`), batched over envs. Each env has one rope or none, attached to the base (the articulation root unless `body` is given). A rope is one of two kinds.
+`Gantry` (`src/humanoid_sim/world/supports.py`) follows Controls' test gantry (`ethrc_sim/support.py`), batched over envs. Each env has one rope or none, all on one body: the base (the articulation root) for base-frame points, or the harness body (`Gantry(robot, harness=...)`, the profile's `support.harness.body`) for points named by `attachment_bodies`. Controls' gantry puts named bodies on the base instead. A rope is one of two kinds.
 
-A tension program (`hang_tension`) pulls straight up with a force that is piecewise linear in time between breakpoints `(s, N)` and held beyond both ends. The force is split evenly over points fixed in the base frame, up to `max_points` (2 by default). They are given as `attachment_b` (base-frame coordinates, m) or as `attachment_bodies`, whose positions at hang time are fixed in the base frame from then on (for example both shoulders, `shoulder_connector_l_1` and `shoulder_connector_r_1`).
+A tension program (`hang_tension`) pulls straight up with a force that is piecewise linear in time between breakpoints `(s, N)` and held beyond both ends. The force is split evenly over up to `max_points` points (2 by default), given as `attachment_b` (base-frame coordinates, m, on the base) or as `attachment_bodies`, whose positions at hang time are fixed on the harness body from then on (for example both shoulders, `shoulder_connector_l_1` and `shoulder_connector_r_1`, on the V1's torso).
 
-A slack cable (`hang_cable`) runs from one base-frame harness point to a world anchor `overhead_m` above where that point was when the cable was hung. Its unstretched length is a program of breakpoints `(s, m)`, so lengthening it lowers the robot. The cable pulls along its line only when stretched: `T = max(0, k * extension + c * extension_rate)` with `k = stiffness_n_m` and `c = damping_n_s_m`; while slack it pulls nothing. While taut, `swing_damping_n_s_m` (default 0) also resists the harness point's velocity across the line, the wire's friction at its hook, so a swing dies away. `hang_cables` hangs one cable per env in a single call, for resets: per-env anchors, length programs (`times_ns`, `lengths_m` as `[n, K]` tensors) and stiffness and dampings, with no host-side checks.
+A slack cable (`hang_cable`) runs from one harness point (base-frame `attachment_b`, or the midpoint of `attachment_bodies` on the harness body) to a world anchor `overhead_m` above where that point was when the cable was hung. Its unstretched length is a program of breakpoints `(s, m)`, so lengthening it lowers the robot. The cable pulls along its line only when stretched: `T = max(0, k * extension + c * extension_rate)` with `k = stiffness_n_m` and `c = damping_n_s_m`; while slack it pulls nothing.
 
 | Call | Arguments | Effect |
 |---|---|---|
 | `hang_tension(env_ids, t_ns, breakpoints_s_n, *, attachment_b=None, attachment_bodies=None)` | 1 to 8 breakpoints, tension ≥ 0 | Vertical tension program from `t_ns` |
-| `hang_cable(env_ids, t_ns, *, attachment_b, overhead_m, length_breakpoints_s_m, stiffness_n_m, damping_n_s_m, swing_damping_n_s_m=0.0)` | 1 to 8 breakpoints, lengths > 0 | Slack cable from `t_ns` |
-| `hang_cables(env_ids, t_ns, *, attachment_b, anchor_w, times_ns, lengths_m, stiffness_n_m, damping_n_s_m, swing_damping_n_s_m)` | `[n, 3]` anchors, `[n, K]` programs (K ≤ 8), `[n]` gains | One slack cable per env from `t_ns` |
+| `hang_cable(env_ids, t_ns, *, overhead_m, length_breakpoints_s_m, stiffness_n_m, damping_n_s_m, attachment_b=None, attachment_bodies=None)` | 1 to 8 breakpoints, lengths > 0 | Slack cable from `t_ns` |
 | `release(env_ids)` | `[n]` env ids | No rope for these envs |
+| `hang_cables(env_ids, t_ns, *, point_b, anchor_w, times_ns, lengths_m, stiffness_n_m, damping_n_s_m, swing_damping_n_s_m, harness=False)` | `[n, 3]` anchors, `[n, K]` programs (K ≤ 8), `[n]` gains | One slack cable per env from `t_ns`, for resets: no host-side checks, and anchors given since body poses are stale right after a reset |
 | `apply(t_ns)` | step start, plant time | Adds this step's rope forces |
 | `tension_n`, `distance_m` | `[E]` | Total rope force on the last step; cable length from harness point to anchor |
 
-Program times are relative to the hang time and must be non-negative and increasing. The forces go through the articulation's instantaneous wrench composer, which Isaac Lab clears after every write to the simulation, so `apply` has to run before every physics step; it adds to any other forces on the base. `SimCore` calls it in every step, so the runtime and any script built on `SimCore` only hang and release ropes. The `replay` command never hangs one.
+Program times are relative to the hang time and must be non-negative and increasing. A hang checks everything before it changes anything, so a rejected rope leaves the previous one; `dry_run=True` only checks. The forces go through the articulation's instantaneous wrench composer, which Isaac Lab clears after every write to the simulation, so `apply` has to run before every physics step; it adds to any other forces on that body. `SimCore` calls it in every step, so the runtime and any script built on `SimCore` only hang and release ropes. The `replay` command never hangs one.
 
-In the runtime, a free session hangs a rope with the `SET_SUPPORT` mailbox command (`{"support": "gantry", ...}` with a tension program or a cable) and drops it with `{"support": "free"}`; the truth region reports the rope tension. The argument names are in [runtime.md](runtime.md).
+In the runtime, any session hangs a rope with the `SET_SUPPORT` mailbox command (`{"support": "gantry", ...}` with a tension program or a cable, or `{"support": "suspended"}` for the harness cable) and drops it with `{"support": "free"}`; the truth region reports the rope tension. The argument names are in [runtime.md](runtime.md).
 
-In training the plant owns a `Gantry` (`plant.gantry`) and applies it in every `pre_physics()`, at the step start; until a task hangs a rope it does nothing. Resets keep the rope, so a task hangs (or releases) it from its reset events, which run before the plant's own reset:
+In training the plant owns a `Gantry` (`plant.gantry`, on the profile's harness body) and applies it in every `pre_physics()`, at the step start; until a task hangs a rope it does nothing. Resets keep the rope, so a task hangs (or releases) it from its reset events, which run before the plant's own reset:
 
 ```python
 from isaaclab.managers import EventTermCfg
 
-G = 9.81
-
 
 def hang_from_gantry(env, env_ids):
     plant = env.action_manager.get_term("drives").plant
-    weight_n = plant.robot.data.body_mass.torch[0].sum().item() * G  # once per reset: a host sync
+    weight_n = plant.robot.data.body_mass.torch[0].sum().item() * 9.81  # once per reset: a host sync
     # Carry the full weight for 1 s, then lower the tension to zero over 3 s.
     plant.gantry.hang_tension(env_ids, plant.t_ns, [(0.0, weight_n), (1.0, weight_n), (4.0, 0.0)],
                               attachment_b=[0.0, 0.0, 0.3])
@@ -270,6 +271,8 @@ def hang_from_gantry(env, env_ids):
 
 hang = EventTermCfg(func=hang_from_gantry, mode="reset")  # after the event that writes the reset state
 ```
+
+Body poses are stale right after a reset writes the state, so a rope hung from a reset event should not take its geometry from them: `hang_cables` takes the anchors, computed from the reset state, for example from the hook's position at the start pose by host kinematics (`RobotKinematics`).
 
 The tests exercise the gantry through `SimCore` (`tests/test_supports.py`): a tension equal to the robot's weight holds its centre of mass in place, and a cable settles at its unstretched length plus weight over stiffness.
 

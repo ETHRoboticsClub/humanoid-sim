@@ -24,6 +24,11 @@ The articulation's ``data.default_joint_pos`` holds the chosen pose, for a task'
 :func:`robot_sim_cfg` gives the ``SimulationCfg``: one physics step per period on a Newton solver (``mjwarp`` or
 ``kamino``), from the profile. humanoid-learning builds its environment config from these and steps the plant through
 :class:`~humanoid_sim.train.plant.RobotPlant`. Isaac Lab is imported lazily.
+
+Build the environment (or scene) inside :func:`robot_build`: it adds what the profile asks of the solver model and
+Newton cannot import from the USD, the ankle cranks' stops (``physics.mjwarp.ankle_stops``,
+:mod:`~humanoid_sim.physics.crank_stops`). :class:`~humanoid_sim.train.plant.RobotPlant` refuses a model built
+without it.
 """
 
 from __future__ import annotations
@@ -37,7 +42,7 @@ from humanoid_sim.physics.isaaclab import contact_sensor_cfg, imu_sensor_cfg
 from humanoid_sim.physics.joint_properties import JointProperties
 from humanoid_sim.world.boxes import StaticBoxes
 
-__all__ = ["POSES", "STANDING_CLEARANCE_M", "initial_pose", "plant_joint_properties", "robot_scene_cfg",
+__all__ = ["POSES", "STANDING_CLEARANCE_M", "initial_pose", "plant_joint_properties", "robot_build", "robot_scene_cfg",
            "robot_sim_cfg"]
 
 
@@ -107,3 +112,12 @@ def robot_sim_cfg(robot: str = "ethrc_v1", *, device: str = "cuda:0", solver: st
     physics = load_profile(robot)["physics"]
     return simulation_cfg(physics, device=device, period_s=int(physics["period_ns"]) / 1e9, solver=solver,
                           visualizers=visualizers)
+
+
+def robot_build(robot: str = "ethrc_v1", *, solver: str | None = None):
+    """Context to build the environment or scene in: the solver model gets the ankle cranks' stops when the profile
+    asks for them (:func:`~humanoid_sim.physics.crank_stops.crank_stop_hook`). ``solver``: as for
+    :func:`robot_sim_cfg`."""
+    from humanoid_sim.physics.crank_stops import crank_stop_hook
+
+    return crank_stop_hook(robot, load_profile(robot)["physics"], solver)

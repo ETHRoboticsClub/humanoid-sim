@@ -284,6 +284,21 @@ class PreparedUrdf:
                 out[link] = (j.get("name"), body_of(j.find("parent").get("link")))
         return out
 
+    def joint_frame(self, name: str) -> tuple[str, np.ndarray, np.ndarray]:
+        """A movable joint's parent body, the joint frame in that body's frame (``[4, 4]``, through the fixed joints
+        between them) and its unit axis in the joint frame. The child link's frame is the joint frame turned about
+        the axis by the joint angle."""
+        joint = next((j for j in self._joints if j.get("name") == name and j.get("type") != "fixed"), None)
+        if joint is None:
+            raise ValueError(f"no movable joint {name!r} in {self.source.name}")
+        link = joint.find("parent").get("link")
+        tree = self.body_tree()
+        body = tree[joint.find("child").get("link")][1]
+        tf = next(tf for lk, tf in self._fixed_subtree(body, np.eye(4)) if lk == link)
+        axis = np.array([float(v) for v in joint.find("axis").get("xyz").split()]) if joint.find("axis") is not None \
+            else np.array([1.0, 0.0, 0.0])  # URDF's default axis
+        return body, tf @ _origin(joint.find("origin")), axis / np.linalg.norm(axis)
+
     def merge_body_collisions(self) -> None:
         """One collision mesh per body: its own and its fixed-joint children's meshes, in the body frame."""
         for body in self.body_tree():

@@ -42,6 +42,17 @@ physics:
     # past its stop (under 2 mrad here), and Controls' range survey found that stop 4 mrad out. The real stops'
     # stiffness is not measured (modeled).
     joint_limits: mujoco
+    # Ankle stops of a robot with crank linkages (the V1): cranks or hinges. cranks: each crank's measured stop
+    # (the description's position_limit, the ankle's only limit) as a solver constraint, one spatial tendon per crank
+    # and stop from the stopped crank's rod ball to the rod's foot ball, limited to the rod's length
+    # (physics/crank_stops.py), on top of the hinges' box. hinges: the box alone, the axis hull of what the stops
+    # allow, whose corners need a crank past its stop (driven there, the V1's cranks go 0.5 rad past their stops).
+    ankle_stops: cranks
+    # The stops' constraint (MuJoCo solref: time constant s, damping ratio). Twice the 4 ms period, the stiffest
+    # MuJoCo's solver keeps stable (its XML reference, solref; it raises anything shorter to that): a crank pushed
+    # with its 22 Nm/rad baseline spring 1 rad past a stop rests 13 mrad past it (52 mrad at the joint stops' 0.02 s).
+    # The real stops are metal; their stiffness is not measured (modeled).
+    ankle_stop_solref: [0.008, 1.0]
     # Depth of the solid base under a heightfield's lowest point. Newton exports heightfields to MuJoCo with a
     # 0.1 mm base, through which a shape sinking into the lowest cells is pushed out downwards (a G1 foot sphere
     # landing on a rough tile falls through). Deeper than any shape sinks; nothing lies under the terrain.
@@ -63,3 +74,14 @@ physics:
     max_contacts_per_world: 128
 
 solver_gains: baseline        # constant per-episode PD = the description's baseline gains
+
+# The lab gantry a suspended session hangs from (runtime/host.py): one cable from the harness hook, the midpoint of
+# the shoulders on the harness body, to an anchor overhead, critically damped for the robot's mass. Overhead and
+# full-weight stretch are the test hypotheses of Controls' G1 gantry (ethrc_sim unitree_plant.py), not gantry
+# measurements. A swing on the wire dies away over several periods, as observed on the lab gantry; the swing damping
+# ratio is chosen to match that (a few percent of the amplitude left after ten swings), not measured.
+support:
+  harness: null               # {body, shoulders: [l, r]}; the robot's profile names it
+  overhead_m: 1.25
+  full_weight_stretch_m: 0.02
+  swing_damping_ratio: 0.05

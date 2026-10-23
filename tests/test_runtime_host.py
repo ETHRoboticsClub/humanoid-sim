@@ -4,6 +4,7 @@ On the CPU the host runs far below real time; the protocol does not depend on it
 """
 
 import json
+import math
 import subprocess
 import sys
 import time
@@ -11,12 +12,14 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import PARTS, PHYSICS_ROBOTS, built_usd, gravity_torque, urdf_mass_kg
+import torch
+from conftest import PARTS, PHYSICS_ROBOTS, built_usd, gravity_torque, joints_below, urdf_mass_kg
 
 from humanoid_sim.model.asset import asset_dir, load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.poses import pose_joint_positions, start_pose
 from humanoid_sim.runtime.abi import plant_abi as abi
+from humanoid_sim.sensors import rigs
 
 REPO = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.physics
@@ -37,6 +40,24 @@ def _wait(cond, timeout_s, what):
     raise AssertionError(f"timed out waiting for {what}")
 
 
+@pytest.mark.parametrize(
+    ("robot", "model"), [("ethrc_v1", "mti-610"), ("g1_29dof_with_hand_rev_1_0", "unitree-g1-imu")]
+)
+def test_the_descriptor_names_the_rigs_imu(robot, model):
+    """A client tells from the descriptor which device its IMU samples come from: the rig's model, where it
+    sits, and the sample period and delivery the rig gives it."""
+    from humanoid_sim.runtime.host import imu_descriptor
+
+    desc, rig_imu = Description.load(robot), rigs.rig(robot).imu
+    imu = json.loads(json.dumps(imu_descriptor(desc)))
+    assert imu["model"] == rig_imu.model == model
+    assert imu["parent"] == desc.imu_mount()[0] and imu["frame"] == rig_imu.frame
+    assert imu["product"]
+    assert imu["sample_period_ns"] == rig_imu.sample_period_ns
+    assert imu["burst_period_ns"] == list(rig_imu.burst_period_ns)
+    assert imu["in_burst_spacing_ns"] == rig_imu.in_burst_spacing_ns
+
+
 @pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
 def test_serve_round_trip(tmp_path, robot):
     pytest.importorskip("isaaclab_newton")
@@ -54,18 +75,24 @@ def test_serve_round_trip(tmp_path, robot):
         drives = desc["drives"]
         n = len(d.drives)
         assert len(drives) == seg.num_drives == n and desc["physics"]["engine"] == "isaaclab/mjwarp"
+        assert (desc["imu"]["model"], desc["imu"]["frame"]) == (rigs.rig(robot).imu.model, "imu_link")
 
         # Hold the pose it starts in at the baseline gains.
         hold = _feedback(seg)["drive"]["position_rad"][:n].copy()
         demand = abi.pd_demand(hold, [d.drives[x].baseline_stiffness for x in drives],
                                [d.drives[x].baseline_damping for x in drives])
-        # How far each joint sags at those gains, hanging: its gravity torque over its stiffness (cranks: 2 cm).
+        # How far each joint the harness body carries (arms, head) sags at those gains: its gravity torque over its
+        # stiffness, as with the base welded upright, since the gantry holds that body; the body's few degrees of
+        # tilt on the cable stay within the 1 cm slack. The waist and legs hang off it and are not checked here.
         joints = list(d.joints)
         start = pose_joint_positions(d, load_profile(robot), start_pose(load_profile(robot)))
         tau = gravity_torque(usd, joints, torch.tensor([start[j] for j in joints], dtype=torch.float64), 1.0)
-        sag = {x: (abs(tau[joints.index(d.drives[x].joints[0])]) / d.drives[x].baseline_stiffness
-                   if d.drives[x].crank is None else 0.02) for x in drives}
-        allowed = np.array([1.2 * sag[x] + 0.01 for x in drives])
+        carried = joints_below(robot, load_profile(robot)["support"]["harness"]["body"])
+        checked = np.array([d.drives[x].crank is None and d.drives[x].joints[0] in carried for x in drives])
+        assert checked.any()
+        sag = {x: abs(tau[joints.index(d.drives[x].joints[0])]) / d.drives[x].baseline_stiffness
+               for x, c in zip(drives, checked, strict=True) if c}
+        allowed = np.array([1.2 * sag[x] + 0.01 if x in sag else np.inf for x in drives])
         cycle = 0
 
         def send_demands():
@@ -114,8 +141,8 @@ def test_serve_round_trip(tmp_path, robot):
         serve_for(1.0)
         assert int(_feedback(seg)["step"]) == paused_step and int(_feedback(seg)["paused"]) == 1
         assert command(abi.CMD_RESUME, {})[0] == abi.ACK_OK
-        assert command(abi.CMD_SET_SUPPORT, {"support": "gantry", "tension_breakpoints_s_n": [[0, 100]]})[0] \
-            == abi.ACK_REJECTED  # the base is welded in a suspended session
+        assert command(abi.CMD_RESET, {"joint_pos": {}, "base_pose": [0, 0, 1, 0, 0, 0, 1]})[0] \
+            == abi.ACK_REJECTED  # a suspended session hangs at its gantry
         assert command(99, {})[0] == abi.ACK_UNKNOWN
         drive = drives[0]
         assert command(abi.CMD_INJECT_FAULT, {"fault": "encoder_dropout", "drive": drive})[0] == abi.ACK_REJECTED
@@ -422,5 +449,36 @@ def test_the_host_serves_the_g1(tmp_path):
         host.step()
         assert np.abs(_feedback(client)["drive"]["demanded_torque_nm"][:29]).max() == 0.0
         client.close()
+    finally:
+        host.close()
+
+
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+def test_a_suspended_robot_hangs_by_its_torso_with_the_drives_off(tmp_path, robot):
+    """The gantry holds the torso: with idle drives the legs hang off the waist and the torso stays as it was hung,
+    the cable carrying the weight. Held by the pelvis instead, the G1's torso folds about 30 deg onto its waist
+    stops (Controls' MuJoCo model of the G1, its pelvis welded, damped drives)."""
+    pytest.importorskip("isaaclab_newton")
+    from humanoid_sim.runtime.host import RuntimeHost
+    from humanoid_sim.world.supports import _quat_rotate
+
+    host = RuntimeHost(tmp_path / "plant", built_usd(robot), device="cpu", robot=robot, support="suspended",
+                       compile=False)
+    try:
+        host._reset({"pose": host.start_pose})  # no client: the drives stay off and nothing holds the pose
+        host.step()  # hangs the harness
+        torso = host.robot.body_names.index(load_profile(robot)["support"]["harness"]["body"])
+        hung = host.robot.data.body_link_pose_w.torch[0, torso, 3:].clone()
+        up = torch.tensor([0.0, 0.0, 1.0])
+        up_in_torso = _quat_rotate(torch.cat([-hung[:3], hung[3:]]), up)  # world up, in the hung torso's frame
+        tension = []
+        for i in range(500):  # 2 s
+            host.step()
+            if i >= 400:
+                tension.append(float(host.sim.gantry.tension_n[0]))
+        now = host.robot.data.body_link_pose_w.torch[0, torso, 3:]
+        tilt = math.degrees(math.acos(min(1.0, float(_quat_rotate(now, up_in_torso) @ up))))
+        assert tilt < 15.0
+        assert sum(tension) / len(tension) == pytest.approx(urdf_mass_kg(robot) * 9.81, rel=0.1)
     finally:
         host.close()

@@ -131,7 +131,6 @@ Each drive is a product, and `src/humanoid_sim/devices/models.py` has one class 
 | `family`, `product`, `interface` | The family key, the product, how the robot's controller drives it |
 | `drive_delay_ns` | The family's `drive_delay_s` in integer ns: from the controller staging a demand (its APPLIED acknowledgement) to the drive acting on it, which is the bus master's staging, the bus and the drive's interpolation. 0 when the description records none |
 | `delay_measured` | Whether the description records the delay; the runtime lists the families that do not in its fidelity gaps |
-| `delay_source` | The description's `drive_delay_source` |
 
 On the current V1 description every family has 5.0 ms, one whole-robot figure Controls identified over the 1:1 joints (`ethrc_ssot.command_latency`), until a per-family fit replaces it ([replay-and-sysid.md](replay-and-sysid.md#fitting-paces-actuator-model)). The G1's families record no delay.
 
@@ -272,6 +271,31 @@ Golden tests in `tests/test_ankle_transmission.py` check the torch transmission 
 
 They run without Isaac Lab: `uv run pytest tests/test_ankle_transmission.py` (needs the submodules).
 
+### The crank stops
+
+Each crank's stop interval (`position_limit` of `maxonHEJ50L_ANK1` and the other three in actuators.yaml, measured by hand sweep) is the ankle's only limit; every joint-space bound derives from it through the linkage. The hinges' joint ranges are the axis hull of that set (`ankle_model.bounds`), so a box corner can need a crank past its stop: driven there with the hinge stops alone, the cranks run 0.5 rad past.
+
+With `physics.mjwarp.ankle_stops: cranks` (the default) the solver enforces the crank stops themselves. A crank pressed on a stop holds its rod's crank-side ball at a fixed point on the shank, and the rigid rod keeps the foot-side ball at the rod's length from it. So "this crank is within this stop" is a one-sided limit on the distance between two points: a spatial tendon from a site at the stopped crank's tip (on the shank body) to a site at the rod's foot-side ball (on the foot body), limited to the rod length from the stop's inner side. There are four tendons per ankle, one per crank and stop. `src/humanoid_sim/physics/crank_stops.py` builds them from the description: the URDF chain from shank to foot, `ankle_model`'s geometry and frame signs, and the drives' stops.
+
+| Setting | What stops the ankle |
+|---|---|
+| `ankle_stops: cranks` | The four crank-stop tendons and the hinges' box |
+| `ankle_stops: hinges` | The hinges' box alone |
+
+The tendons are MuJoCo limit constraints, solved with the contacts and joint stops in the same step. Nothing writes the joint state between steps, so the feet stay on the ground. Their stiffness is `ankle_stop_solref` (time constant, damping ratio), at 8 ms the stiffest MuJoCo's solver keeps stable at the 4 ms period. A crank pushed by its baseline spring a radian past a stop rests about 13 mrad past it. The real stops' stiffness has not been measured.
+
+Kamino has no tendons and bounds the ankle by the hinges' box. Newton imports spatial tendons only from MJCF, so the sites and tendons are added to each world while Newton replicates the scene. A training environment must be built inside `robot_build` (see [training.md](training.md)); `RobotPlant` refuses a model whose crank stops do not match the profile. `SimCore` and the runtime build theirs that way already.
+
+Tests in `tests/test_crank_stops.py`:
+
+| Test | Oracle |
+|---|---|
+| `test_tendons_admit_exactly_the_poses_the_ankle_model_admits` | humanoid-urdf `ankle_model.feasible` on a 161 x 161 grid over the hinges' travel widened by 0.5 rad, tendon lengths from the URDF chain |
+| `test_a_crank_at_its_stop_puts_its_tendon_at_the_rod_length` | poses from the transmission's inverse with one crank at its stop |
+| `test_cranks_driven_past_their_stops_stop_at_them` (physics) | crank angles from the hinge state through the transmission: at rest within 20 mrad of the stop, never past it by more than that plus the crank's speed times the time constant |
+| `test_standing_feet_stay_on_the_ground_inside_their_stops` (physics) | sole box corners within 10 mm of the ground while up (20 mm on a foot rolled onto its edge) |
+| `test_a_robot_falling_onto_its_ankle_stops_gains_no_energy` (physics) | centre-of-mass energy never above its start plus 1 cm of the robot's weight; cranks at most 0.15 rad past a stop on landing with the drives off |
+
 ## Dynamic friction
 
 The solver's Coulomb friction (MJWarp frictionloss) holds a joint at rest up to the joint's static `friction`, and resists a sliding joint with the same torque. A joint whose `dynamic_friction` is lower gets the difference back while it moves: `PlantCore` adds the joint torque `friction_relief · tanh(q̇ / v_s)` before target shaping, with `friction_relief = friction − dynamic_friction` (`[E, J]`, Nm) and `v_s = SLIDING_VELOCITY_RAD_S` = 0.02 rad/s (`src/humanoid_sim/core.py`). At rest the tanh vanishes and the static friction holds; above a few `v_s` the net friction is the dynamic one. `v_s` is modeled: the drives' breakaway speed has not been measured.
@@ -319,8 +343,8 @@ The runtime publishes its known gaps in the segment descriptor (`fidelity_gaps` 
 
 - There are no drive current, thermal or backlash models. The applied torque is the envelope-clipped control law.
 - The passive joint parameters of the upper body (waist, shoulders, elbows) are the description's values and have not been identified from captures.
-- The ankle is two hinges, pitch and roll, driven through the crank transmission. There is no closed chain.
+- The ankle is two hinges, pitch and roll, driven through the crank transmission. There is no closed chain. The crank stops are soft constraints of unmeasured stiffness (see [The crank stops](#the-crank-stops)).
 - IMU errors are the rig's model's: white noise, a turn-on bias and a slow drift (`SET_FIDELITY` ideal turns them off). See [sensors.md](sensors.md#sampling-and-errors).
 - Each drive's delay is its family's fixed figure, with no per-cycle jitter. A family whose description records no delay (the G1's) has none, and the gap names it.
 
-For the drive model this means the applied torque follows the law within the step, with no current-loop dynamics, and a drive can hold its peak torque indefinitely. Gearbox losses are only the joints' Coulomb friction and viscous damping from actuators.yaml, plus the back-drive friction of an off drive in the runtime. There is no integral term. The crank position windows in actuators.yaml are not enforced by the plant; the ankle hinges have joint stops at their ±30° position limits.
+For the drive model this means the applied torque follows the law within the step, with no current-loop dynamics, and a drive can hold its peak torque indefinitely. Gearbox losses are only the joints' Coulomb friction and viscous damping from actuators.yaml, plus the back-drive friction of an off drive in the runtime. There is no integral term. The cranks' stops are enforced by the solver on MJWarp (see [The crank stops](#the-crank-stops)); the drive model itself does not clamp a crank's target to them.
