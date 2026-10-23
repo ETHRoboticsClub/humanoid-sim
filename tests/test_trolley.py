@@ -82,3 +82,24 @@ def test_the_crane_parts_move_from_where_they_were_scanned():
     assert off["trolley"].tolist() == pytest.approx([-0.25, 1.0, 0.0])
     assert off["hook"].tolist() == pytest.approx([-0.25, 1.0, -1.0])
     assert r.travel_outline_w()[:, 2].tolist() == [3.0] * 4
+
+
+def test_the_hangar_example_rig_loads_with_its_home_and_scan_position_in_reach():
+    from pathlib import Path
+
+    rig = GantryRig.load(Path(__file__).parents[1] / "examples" / "hangar_gantry.json")
+    assert rig.contains(rig.home_m) and rig.contains(rig.scan_m)
+
+
+def test_a_crane_over_a_hook_stretches_its_rope_by_the_given_length():
+    from pathlib import Path
+
+    rig = GantryRig.load(Path(__file__).parents[1] / "examples" / "hangar_gantry.json")
+    hook = rig.to_world((0.5, -0.2, 0.0))
+    hook[2] = 1.6  # to_world gives the rope's top over the point; the hook hangs below it
+    x, y, z = rig.over(hook, 0.02)
+    assert (x, y) == pytest.approx((0.5, -0.2), abs=1e-9)
+    assert z == pytest.approx(1.62)  # the rope anchor - z long, the hook anchor - 1.6 below its top: 2 cm stretched
+    outside = rig.to_world((rig.travel_x_m[1] + 0.5, 0.0, 0.0))
+    outside[2] = 1.6
+    assert rig.over(outside, 0.02) is None

@@ -115,6 +115,12 @@ class GantryRig:
         along_x, along_y = np.array([c * dx, s * dx, 0.0]), np.array([-s * dy, c * dy, 0.0])
         return {"bridge": along_x, "trolley": along_x + along_y, "hook": along_x + along_y + [0.0, 0.0, dz]}
 
+    def over(self, hook_w, stretch_m: float) -> Triple | None:
+        """The crane position that hangs a hook at world ``hook_w`` on a rope stretched ``stretch_m``: the trolley
+        over it, the hoist that much short of it. None when out of reach."""
+        xyz = self.from_world([float(hook_w[0]), float(hook_w[1]), float(hook_w[2]) + stretch_m])
+        return xyz if self.contains(xyz) else None
+
     def from_world(self, xyz_w) -> Triple:
         """A world point's rig ``(x, y)``, with its ``z`` as the hook height (host side)."""
         c, s = math.cos(self.yaw_rad), math.sin(self.yaw_rad)

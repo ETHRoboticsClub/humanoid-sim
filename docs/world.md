@@ -308,16 +308,18 @@ A hoist rope pulls like a slack cable with its top at the trolley and its length
 In training, mount the crane once and command it from your events or action term:
 
 ```python
-rig = GantryRig.load("hangar_gantry.json").placed(spawn_m)
+rig = GantryRig.load("examples/hangar_gantry.json").placed(spawn_m)
 trolley = plant.gantry.mount(rig, origin_w=env.scene.env_origins)
 hook_b = torch.tensor([0.0, 0.0, 0.25])  # the harness hook in the harness body's frame
 plant.gantry.hang_hoist(env_ids, point_b=hook_b, harness=True, stiffness_n_m=2.0e4, damping_n_s_m=500.0)
 trolley.set_command(env_ids, torch.tensor([0.0, 0.0, 1.9]))
 ```
 
-In the runtime, `serve --gantry PATH` (placed with `--spawn`) mounts one: `MOVE_GANTRY` commands it, `SET_SUPPORT` with `hoist` hangs the robot from its hook, the truth reports `gantry_position_m` and `gantry_command_m`, and the descriptor's `gantry` its geometry ([runtime.md](runtime.md#move_gantry-10)). `view-runtime` draws its travel, bridge, trolley and rope; `render-runtime` moves the splat's `bridge`, `trolley` and `hook` parts when the rig has `scan_m`.
+In the runtime, `serve --gantry PATH` (placed with `--spawn`) mounts one, and a `suspended` session then hangs its harness cable from the crane's hook: the trolley is placed over the harness hook and the hoist set `support.full_weight_stretch_m` short, so the robot hangs where it is, and a robot whose hook is out of the crane's reach is refused (spawn it under the crane). Without a crane, or for a free session's `{"support": "suspended"}` out of its reach, the cable hangs from a fixed anchor as above. The crane: `MOVE_GANTRY` commands it, `SET_SUPPORT` with `hoist` hangs the robot from its hook, the truth reports `gantry_position_m` and `gantry_command_m`, and the descriptor's `gantry` its geometry ([runtime.md](runtime.md#move_gantry-10)). `view-runtime` draws its travel, bridge, trolley and rope; `render-runtime` moves the splat's `bridge`, `trolley` and `hook` parts when the rig has `scan_m`.
 
-Controls' hangar has a gantry about 7 m from its spawn point. Its geometry is not in the hangar's files: the boxes stop at 2 m (furniture) or are walls, and the robot hanging in it when the room was scanned is box 157 of `hangar_proxy.npz`. It can be measured from the scan or the splat: crop the points above the furniture (z over 2.2 m) to find the runway frame, fit lines to its long edges for the yaw, take the posts from points between 1.3 and 2 m, and the bridge and hook from the splat (the scan mesh does not resolve the bridge).
+Controls' hangar has a gantry about 7 m from its spawn point. Its geometry is not in the hangar's files: the boxes stop at 2 m (furniture) or are walls, and the robot hanging in it when the room was scanned is box 157 of `hangar_proxy.npz`. `examples/hangar_gantry.json` is that gantry measured from the scan and the splat, to about 5 cm: the runway frame's posts and top (z ≈ 3.05 m), the bridge and the hook where it stood during the scan (`scan_m`). Its limits are modeled, not measured: travel about 0.25 m inside the posts, the hook from 0.8 to 2.6 m, 0.3 m/s along the runway and the bridge and 0.1 m/s on the hoist (an electric chain hoist's speed). `examples/hangar_crane_parts.json` is the crop boxes `splat-usd --parts` cuts the crane's Gaussians out with.
+
+To measure another gantry, crop the points above the furniture (z over 2.2 m) to find the runway frame, fit lines to its long edges for the yaw, take the posts from points between 1.3 and 2 m, and the bridge and hook from the splat (the scan mesh does not resolve the bridge).
 
 ### Prescribed pose (runtime)
 

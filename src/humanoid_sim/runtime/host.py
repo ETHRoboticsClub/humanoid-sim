@@ -325,6 +325,8 @@ class RuntimeHost:
             if i == 0 and self._support_cfg["harness"] is not None:
                 self._harness_cable(dry_run=False)
         self.sim.gantry.release(torch.tensor([0], device=self.device))
+        if self.trolley is not None:
+            self.trolley.place(torch.tensor([0], device=self.device), torch.tensor(self.rig.home_m))
         r.write_root_pose_to_sim_index(root_pose=root)
         r.write_root_velocity_to_sim_index(root_velocity=vel)
         self.sim.write_joint_state(q, qd)
@@ -448,27 +450,42 @@ class RuntimeHost:
         """The gantry cable at the harness hook, its unstretched length short of the overhead distance by the
         stretch that carries the robot's weight, so it holds the robot where it hangs: critically damped along the
         cable, and across it at ``support.swing_damping_ratio`` of the robot's swing as a pendulum from the anchor.
-        With ``level`` the robot is first turned about the hook to the attitude it comes to rest in."""
+        With ``level`` the robot is first turned about the hook to the attitude it comes to rest in. With a crane
+        (``--gantry``) whose travel reaches over the hook, the cable hangs from the crane's hook, the trolley placed
+        over it and the hoist that stretch short; a suspended robot out of its reach is refused."""
         cfg = self._support_cfg
         if cfg["harness"] is None:
             raise ValueError(f"{self.desc.robot}: its profile names no support.harness to suspend it by")
         mass = float(self._mass.sum())
         stiffness = mass * GRAVITY_M_S2 / cfg["full_weight_stretch_m"]
-        swing_damping = 0.0
+        env = torch.tensor([0], device=self.device)
+        swing_damping, overhead_m, crane = 0.0, cfg["overhead_m"], None
         if not dry_run:
             hook, com = self._hook_and_com()
-            reach_m = cfg["overhead_m"] + float((com - hook).norm())
+            if self.trolley is not None:
+                crane = self.rig.over(hook, cfg["full_weight_stretch_m"])
+                if crane is None and self.support == "suspended":
+                    raise ValueError(f"the harness hook at {[round(float(v), 2) for v in hook]} is outside the "
+                                     "gantry crane's travel: spawn the robot under it")
+                if crane is not None:
+                    overhead_m = self.rig.anchor_z_m - float(hook[2])
+            reach_m = overhead_m + float((com - hook).norm())
             # The hook moves overhead / reach as fast as the centre of mass swings, so the damper there needs
             # (reach / overhead)^2 more to give the swing its ratio.
             swing_damping = (2.0 * cfg["swing_damping_ratio"] * mass * math.sqrt(GRAVITY_M_S2 / reach_m)
-                             * (reach_m / cfg["overhead_m"]) ** 2)
+                             * (reach_m / overhead_m) ** 2)
             if level:
                 self._level_under(hook, com)
+        damping = 2.0 * math.sqrt(stiffness * mass)
+        if crane is not None:
+            self.trolley.place(env, torch.tensor(crane))
+            self.sim.gantry.hang_hoist(env, attachment_bodies=cfg["harness"]["shoulders"], stiffness_n_m=stiffness,
+                                       damping_n_s_m=damping, swing_damping_n_s_m=swing_damping)
+            return
         self.sim.gantry.hang_cable(
-            torch.tensor([0], device=self.device), self.sim.t_ns, attachment_bodies=cfg["harness"]["shoulders"],
+            env, self.sim.t_ns, attachment_bodies=cfg["harness"]["shoulders"],
             overhead_m=cfg["overhead_m"], length_breakpoints_s_m=[(0.0, cfg["overhead_m"] - cfg["full_weight_stretch_m"])],
-            stiffness_n_m=stiffness, damping_n_s_m=2.0 * math.sqrt(stiffness * mass),
-            swing_damping_n_s_m=swing_damping, dry_run=dry_run)
+            stiffness_n_m=stiffness, damping_n_s_m=damping, swing_damping_n_s_m=swing_damping, dry_run=dry_run)
 
     def _hook_and_com(self) -> tuple[torch.Tensor, torch.Tensor]:
         """The harness hook (midway between the shoulder links, whose origins are their joints) and the centre of

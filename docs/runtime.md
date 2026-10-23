@@ -63,7 +63,7 @@ A session starts in the support chosen at startup, reported in the descriptor's 
 
 | Support | Base | What `SET_SUPPORT` can do |
 |---|---|---|
-| `suspended` | Hanging from the lab gantry: one cable from the harness hook on the torso (the midpoint of the shoulders, the profile's `support.harness`) to an anchor overhead, carrying the robot's weight, the feet 0.3 m above the floor in the start pose, turned to rest under the hook; a swing dies away over several periods. A reset to a named pose puts the robot back there; every reset rehangs the cable where the robot then is. | Release the rope (`free`), rehang the harness where the robot is (`suspended`) or hang another rope (`gantry`). Any `base_pose` argument is rejected. |
+| `suspended` | Hanging from the lab gantry: one cable from the harness hook on the torso (the midpoint of the shoulders, the profile's `support.harness`) to an anchor overhead, carrying the robot's weight, the feet 0.3 m above the floor in the start pose, turned to rest under the hook; a swing dies away over several periods. With a crane (`--gantry`) the cable hangs from its hook, the trolley over the harness, and a robot out of the crane's reach is refused. A reset to a named pose puts the robot back there; every reset rehangs the cable where the robot then is. | Release the rope (`free`), rehang the harness where the robot is (`suspended`) or hang another rope (`gantry`). Any `base_pose` argument is rejected. |
 | `free` | Standing on the floor in the start pose, upright, at the origin | Hang a gantry rope (tension program or slack cable) or the harness (`suspended`), and release it with `{"support": "free"}` |
 
 The gantry and the floor are described in [world.md](world.md).
