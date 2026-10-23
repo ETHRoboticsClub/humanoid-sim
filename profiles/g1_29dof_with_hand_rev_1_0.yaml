@@ -21,5 +21,5 @@ physics:
   self_collision: false
 
 support:
-  # The lab's straps hold the torso at the shoulders (Controls g1_walk_scenario.py HARNESS_BODY, SHOULDER_LINKS).
+  # The lab's straps hold the torso at the shoulders (Controls ethrc_sim unitree_plant.py HARNESS_BODY, SHOULDER_LINKS).
   harness: {body: torso_link, shoulders: [left_shoulder_pitch_link, right_shoulder_pitch_link]}

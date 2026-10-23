@@ -24,7 +24,8 @@ hanging with idle drives between clients would sag to its rest pose first.
 
 A suspended session hangs the robot from the lab gantry, its soles ``SUSPENDED_LIFT_M`` above the ground: one cable
 from the harness hook on the torso (the profile's ``support``) to an anchor overhead, carrying the robot's weight at
-its full-weight stretch, so the waist carries the hanging legs as on the lab's gantry. A reset to a named pose puts
+its full-weight stretch, so the waist carries the hanging legs as on the lab's gantry. It is turned about the hook to
+rest with its centre of mass below it, and a swing dies away over several periods (``support.swing_damping_ratio``). A reset to a named pose puts
 the robot back at that height; every reset rehangs the cable where the robot then is. A rope requested after a pose
 write is checked at once and hung after the next step, since body poses update only in a step. The descriptor's
 ``support`` is the support the session started in.
@@ -59,7 +60,7 @@ from humanoid_sim.devices.demand import LAW_FREEZE, DriveDemand
 from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
-from humanoid_sim.world.supports import NONE, _quat_rotate
+from humanoid_sim.world.supports import NONE, _quat_rotate, level_under
 
 EXIT_DONE = 0  # max steps or a stop request
 EXIT_CLIENT_LOST = 3
@@ -283,7 +284,7 @@ class RuntimeHost:
         self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = self._named_pose(self.start_pose)
         self._write_pose(*self._prescribed)
         if self.support == "suspended":
-            self._hang_harness()
+            self._hang_harness(level=True)
         self._set_drives_off(np.ones(len(self.drives), dtype=bool))  # no client, no demands
         self._truth_due = True
         self._publish()
@@ -432,18 +433,51 @@ class RuntimeHost:
     def _lift_m(self) -> float:
         return SUSPENDED_LIFT_M if self.support == "suspended" else 0.0
 
-    def _harness_cable(self, *, dry_run: bool) -> None:
+    def _harness_cable(self, *, dry_run: bool, level: bool = False) -> None:
         """The gantry cable at the harness hook, its unstretched length short of the overhead distance by the
-        stretch that carries the robot's weight, so it holds the robot where it hangs."""
+        stretch that carries the robot's weight, so it holds the robot where it hangs: critically damped along the
+        cable, and across it at ``support.swing_damping_ratio`` of the robot's swing as a pendulum from the anchor.
+        With ``level`` the robot is first turned about the hook to the attitude it comes to rest in."""
         cfg = self._support_cfg
         if cfg["harness"] is None:
             raise ValueError(f"{self.desc.robot}: its profile names no support.harness to suspend it by")
         mass = float(self._mass.sum())
         stiffness = mass * GRAVITY_M_S2 / cfg["full_weight_stretch_m"]
+        swing_damping = 0.0
+        if not dry_run:
+            hook, com = self._hook_and_com()
+            reach_m = cfg["overhead_m"] + float((com - hook).norm())
+            # The hook moves overhead / reach as fast as the centre of mass swings, so the damper there needs
+            # (reach / overhead)^2 more to give the swing its ratio.
+            swing_damping = (2.0 * cfg["swing_damping_ratio"] * mass * math.sqrt(GRAVITY_M_S2 / reach_m)
+                             * (reach_m / cfg["overhead_m"]) ** 2)
+            if level:
+                self._level_under(hook, com)
         self.sim.gantry.hang_cable(
             torch.tensor([0], device=self.device), self.sim.t_ns, attachment_bodies=cfg["harness"]["shoulders"],
             overhead_m=cfg["overhead_m"], length_breakpoints_s_m=[(0.0, cfg["overhead_m"] - cfg["full_weight_stretch_m"])],
-            stiffness_n_m=stiffness, damping_n_s_m=2.0 * math.sqrt(stiffness * mass), dry_run=dry_run)
+            stiffness_n_m=stiffness, damping_n_s_m=2.0 * math.sqrt(stiffness * mass),
+            swing_damping_n_s_m=swing_damping, dry_run=dry_run)
+
+    def _hook_and_com(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """The harness hook (midway between the shoulder links, whose origins are their joints) and the centre of
+        mass, world frame."""
+        data, names = self.robot.data, self.robot.body_names
+        shoulders = [names.index(b) for b in self._support_cfg["harness"]["shoulders"]]
+        hook = data.body_link_pose_w.torch[0, shoulders, :3].mean(0)
+        com = (self._mass[:, None] * data.body_com_pos_w.torch[0]).sum(0) / self._mass.sum()
+        return hook, com
+
+    def _level_under(self, hook: torch.Tensor, com: torch.Tensor) -> None:
+        """Turns the robot about the hook until its centre of mass hangs straight below it, the attitude it comes to
+        rest in, so a hang starts without a swing. The hook, and so the cable's anchor above it, stays put; a pose
+        held until the client attaches is held turned."""
+        base = level_under(hook, com, self.robot.data.root_link_pose_w.torch[0]).unsqueeze(0)
+        self.robot.write_root_pose_to_sim_index(root_pose=base)
+        self.robot.write_root_velocity_to_sim_index(root_velocity=torch.zeros(1, 6, device=self.device))
+        self._poses_stale = True
+        if self._prescribed is not None and self._prescribed[1] is not None:
+            self._prescribed = (self._prescribed[0], base)
 
     def _hang(self, hang: Callable[..., None], *, harness: bool) -> None:
         """Hang a rope (``hang(dry_run=...)``): checked now, hung now while the body poses are current, else right
@@ -456,8 +490,10 @@ class RuntimeHost:
             self._rope_due = None
             hang(dry_run=False)
 
-    def _hang_harness(self) -> None:
-        self._hang(self._harness_cable, harness=True)
+    def _hang_harness(self, *, level: bool) -> None:
+        """The harness cable; ``level`` turns the robot to rest under the hook first, for a hang that places the
+        robot anyway (a session's start, a reset that moved the base), not one that hangs it where it is."""
+        self._hang(lambda *, dry_run: self._harness_cable(dry_run=dry_run, level=level), harness=True)
 
     def _release_rope(self) -> None:
         self.sim.gantry.release(torch.tensor([0], device=self.device))
@@ -484,7 +520,7 @@ class RuntimeHost:
         # reset moved the base away from it.
         if harness:
             self._release_rope()
-            self._hang_harness()
+            self._hang_harness(level=base is not None)
         elif roped and base is not None:
             self._release_rope()
         self.sim.plant.reset(env)
@@ -528,7 +564,7 @@ class RuntimeHost:
             self._release_rope()
             return "free"
         if kind == "suspended":
-            self._hang_harness()
+            self._hang_harness(level=False)
             return "suspended"
         if kind != "gantry":
             raise ValueError(f"unknown support {kind!r}")

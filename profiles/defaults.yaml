@@ -77,9 +77,11 @@ solver_gains: baseline        # constant per-episode PD = the description's base
 
 # The lab gantry a suspended session hangs from (runtime/host.py): one cable from the harness hook, the midpoint of
 # the shoulders on the harness body, to an anchor overhead, critically damped for the robot's mass. Overhead and
-# full-weight stretch are the test hypotheses of Controls' G1 gantry (ethrc_integration_tests g1_walk_scenario.py),
-# not gantry measurements.
+# full-weight stretch are the test hypotheses of Controls' G1 gantry (ethrc_sim unitree_plant.py), not gantry
+# measurements. A swing on the wire dies away over several periods, as observed on the lab gantry; the swing damping
+# ratio is chosen to match that (a few percent of the amplitude left after ten swings), not measured.
 support:
   harness: null               # {body, shoulders: [l, r]}; the robot's profile names it
   overhead_m: 1.25
   full_weight_stretch_m: 0.02
+  swing_damping_ratio: 0.05

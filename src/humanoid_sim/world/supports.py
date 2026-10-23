@@ -7,7 +7,8 @@ attachment bodies pull on the harness body (below):
   evenly over attachment points (one harness, or a rope per shoulder);
 * **slack cable**: one rope from a harness point to a world anchor ``overhead_m`` above where that point was
   when the cable was hung. It pulls along the rope only beyond its unstretched length (also a program in time):
-  ``T = max(0, k · extension + c · extension rate)``.
+  ``T = max(0, k · extension + c · extension rate)``; while taut, ``swing_damping`` resists the harness point's
+  motion across the rope (the wire's friction at its hook), so a swing dies away.
 
 A rope pulls on the body that carries it. Points given in the base frame hang on the base; points named by
 ``attachment_bodies`` (the shoulders) hang on the profile's harness body at those bodies' positions, as the lab's
@@ -25,6 +26,7 @@ carry its weight.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 import torch
@@ -56,6 +58,26 @@ def _quat_rotate_inverse(q_xyzw: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     return _quat_rotate(torch.cat([-q_xyzw[..., :3], q_xyzw[..., 3:]], dim=-1), v)
 
 
+def _quat_multiply(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Hamilton product ``a b`` of (x, y, z, w) quaternions."""
+    (ax, ay, az, aw), (bx, by, bz, bw) = a, b
+    return torch.stack([aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
+                        aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz])
+
+
+def level_under(hook: torch.Tensor, com: torch.Tensor, root: torch.Tensor) -> torch.Tensor:
+    """The root pose ``[x, y, z, qx, qy, qz, qw]`` that turns the rigid robot about ``hook`` until its centre of mass
+    ``com`` hangs straight below it: the attitude a robot on a cable from the hook comes to rest in."""
+    down = (com - hook) / (com - hook).norm()
+    axis = torch.linalg.cross(down, torch.tensor([0.0, 0.0, -1.0], dtype=down.dtype, device=down.device))
+    sine = float(axis.norm())
+    if sine == 0.0:
+        return root.clone()
+    half = math.atan2(sine, float(-down[2])) / 2
+    turn = torch.cat([axis / sine * math.sin(half), axis.new_tensor([math.cos(half)])])
+    return torch.cat([hook + _quat_rotate(turn, root[:3] - hook), _quat_multiply(turn, root[3:])])
+
+
 class Gantry:
     """Per-env gantry rope on the robot's base, or on ``harness`` (default the base) for named attachment bodies."""
 
@@ -74,6 +96,7 @@ class Gantry:
         self.anchor_w = torch.zeros(e, 3, device=dev)
         self.stiffness = torch.zeros(e, device=dev)
         self.damping = torch.zeros(e, device=dev)
+        self.swing_damping = torch.zeros(e, device=dev)
         # One program per env: tension (N) or unstretched cable length (m) over time.
         k = max_breakpoints
         self.program_ns = torch.arange(k, dtype=torch.int64, device=dev).expand(e, k).clone()
@@ -162,11 +185,11 @@ class Gantry:
     def hang_cable(self, env_ids: torch.Tensor, t_ns: int, *, overhead_m: float,
                    length_breakpoints_s_m: Sequence[tuple[float, float]], stiffness_n_m: float,
                    damping_n_s_m: float, attachment_b=None, attachment_bodies: Sequence[str] | None = None,
-                   dry_run: bool = False) -> None:
+                   swing_damping_n_s_m: float = 0.0, dry_run: bool = False) -> None:
         """One cable from a harness point (base-frame ``attachment_b``, or the midpoint of ``attachment_bodies``
         on the harness body: the hook of both shoulder straps) to an anchor ``overhead_m`` above where that point
         is now; unstretched length over time (s, m) from ``t_ns``."""
-        if overhead_m <= 0 or stiffness_n_m <= 0 or damping_n_s_m < 0:
+        if overhead_m <= 0 or stiffness_n_m <= 0 or damping_n_s_m < 0 or swing_damping_n_s_m < 0:
             raise ValueError("cable overhead distance and stiffness must be positive, damping non-negative")
         if any(float(length) <= 0 for _, length in length_breakpoints_s_m):
             raise ValueError("cable lengths must be positive")
@@ -185,6 +208,7 @@ class Gantry:
         self.anchor_w[env_ids] = point + torch.tensor([0.0, 0.0, overhead_m], device=self.device)
         self.stiffness[env_ids] = stiffness_n_m
         self.damping[env_ids] = damping_n_s_m
+        self.swing_damping[env_ids] = swing_damping_n_s_m
         self.mode[env_ids] = CABLE
         self.active = True
 
@@ -222,8 +246,11 @@ class Gantry:
         extension = dist - value
         rate = -(direction * v_point).sum(1)
         cable = (self.stiffness * extension + self.damping * rate).clamp(min=0.0)
-        cable = torch.where((self.mode == CABLE) & (extension > 0), cable, 0.0)
-        force[:, 0] += direction * cable[:, None]
+        taut = (self.mode == CABLE) & (extension > 0)
+        cable = torch.where(taut, cable, 0.0)
+        across = v_point - (direction * v_point).sum(1, keepdim=True) * direction
+        swing = torch.where(cable > 0, self.swing_damping, 0.0)  # a rope without tension pushes nothing
+        force[:, 0] += direction * cable[:, None] - swing[:, None] * across
 
         self.tension_n = torch.where(self.mode == CABLE, cable, share * self.num_points.to(value.dtype))
         self.distance_m = torch.where(self.mode == CABLE, dist, 0.0)

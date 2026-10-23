@@ -3,6 +3,7 @@
 import math
 import xml.etree.ElementTree as ET
 
+import numpy as np
 import pytest
 import torch
 from conftest import GRAVITY as G
@@ -54,6 +55,15 @@ class _Robot:
         self.num_instances, self.device = 1, "cpu"
         self.data = type("Data", (), {})()
         self.data.body_link_pose_w = type("Poses", (), {"torch": torch.tensor([poses], dtype=torch.float32)})()
+        self.data.body_link_vel_w = type("Vels", (), {"torch": torch.zeros(1, len(poses), 6)})()
+        self.forces = []  # (force [E, 1, 3], position [E, 1, 3], body ids) as apply() hands them over
+        robot = self
+
+        class Composer:
+            def add_forces_and_torques_index(self, *, forces, torques, positions, body_ids, env_ids, is_global):
+                robot.forces.append((forces.clone(), positions.clone(), body_ids.tolist()))
+
+        self.instantaneous_wrench_composer = Composer()
 
 
 def _fake_gantry():
@@ -77,6 +87,48 @@ def test_a_cable_on_the_shoulders_hooks_on_the_torso_between_them():
     # The hook, midway between the shoulders (0, 0, 1.3) in the world, is (0, 0, 0.3) in the turned torso's frame.
     assert g.points_b[0, 0].tolist() == pytest.approx([0.0, 0.0, 0.3], abs=1e-6)
     assert g.anchor_w[0].tolist() == pytest.approx([0.0, 0.0, 2.3], abs=1e-6)
+
+
+def _rotation(q):
+    x, y, z, w = (float(v) for v in q)
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                     [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                     [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
+
+
+def test_levelled_under_its_hook_the_centre_of_mass_hangs_straight_below_it():
+    from humanoid_sim.world.supports import level_under
+
+    s = math.sin(0.2)
+    root = torch.tensor([0.3, -0.1, 1.0, 0.0, s, 0.0, math.cos(0.2)])  # pitched 23 deg
+    hook, com = torch.tensor([0.35, -0.1, 1.4]), torch.tensor([0.2, 0.05, 0.9])
+    after = level_under(hook, com, root)
+    # The rigid motion from the old root pose to the new one, applied to two points of the robot.
+    turn = _rotation(after[3:]) @ _rotation(root[3:]).T
+    moved = lambda point: after[:3].numpy() + turn @ (point.numpy() - root[:3].numpy())  # noqa: E731
+    assert moved(hook) == pytest.approx(hook.numpy(), abs=1e-5), "the hook stays put"
+    below = moved(com)
+    assert below[:2] == pytest.approx(hook[:2].numpy(), abs=1e-5) and below[2] < float(hook[2])
+    assert np.linalg.norm(below - hook.numpy()) == pytest.approx(float((com - hook).norm()), abs=1e-5)
+    assert float(after[3:].norm()) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_a_taut_cable_damps_the_swing_across_it_not_along_it():
+    g = _fake_gantry()
+    g.hang_cable(torch.tensor([0]), 0, overhead_m=1.0, length_breakpoints_s_m=[(0.0, 0.98)], stiffness_n_m=1e4,
+                 damping_n_s_m=0.0, attachment_bodies=["shoulder_l", "shoulder_r"], swing_damping_n_s_m=50.0)
+    # The torso moving 0.1 m/s sideways (world x) at the stretched length: the rope is vertical, so all of it is across.
+    g.robot.data.body_link_vel_w.torch[0, 1, :3] = torch.tensor([0.1, 0.0, 0.0])
+    g.robot.forces.clear()
+    g.apply(0)
+    force = sum(f[0, 0] for f, _, _ in g.robot.forces)  # one call per rope point; the cable is point 0
+    assert force.tolist() == pytest.approx([-5.0, 0.0, 1e4 * 0.02], abs=1e-3)
+    g.release(torch.tensor([0]))
+    g.hang_cable(torch.tensor([0]), 0, overhead_m=1.0, length_breakpoints_s_m=[(0.0, 1.2)], stiffness_n_m=1e4,
+                 damping_n_s_m=0.0, attachment_bodies=["shoulder_l", "shoulder_r"], swing_damping_n_s_m=50.0)
+    g.robot.forces.clear()
+    g.apply(0)
+    assert all(float(f.abs().max()) == 0.0 for f, _, _ in g.robot.forces), "a slack cable damps nothing"
 
 
 def test_a_base_frame_rope_hangs_on_the_base():
