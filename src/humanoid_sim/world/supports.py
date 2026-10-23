@@ -159,8 +159,9 @@ class Gantry:
         return spec.expand(len(env_ids), -1, -1)
 
     def _commit(self, env_ids: torch.Tensor, body_id: int, program: tuple[torch.Tensor, torch.Tensor]) -> None:
-        self.body_id = body_id
-        self._body = torch.tensor([body_id], device=self.device)
+        if body_id != self.body_id:  # a host copy, so not at every reset
+            self.body_id = body_id
+            self._body = torch.tensor([body_id], device=self.device)
         self.program_ns[env_ids], self.program[env_ids] = program
 
     def hang_tension(self, env_ids: torch.Tensor, t_ns: int, breakpoints_s_n: Sequence[tuple[float, float]], *,
@@ -206,6 +207,33 @@ class Gantry:
         self.points_b[env_ids, 0] = a
         self.num_points[env_ids] = 1
         self.anchor_w[env_ids] = point + torch.tensor([0.0, 0.0, overhead_m], device=self.device)
+        self.stiffness[env_ids] = stiffness_n_m
+        self.damping[env_ids] = damping_n_s_m
+        self.swing_damping[env_ids] = swing_damping_n_s_m
+        self.mode[env_ids] = CABLE
+        self.active = True
+
+    def hang_cables(self, env_ids: torch.Tensor, t_ns: int, *, point_b: torch.Tensor, anchor_w: torch.Tensor,
+                    times_ns: torch.Tensor, lengths_m: torch.Tensor, stiffness_n_m: torch.Tensor,
+                    damping_n_s_m: torch.Tensor, swing_damping_n_s_m: torch.Tensor, harness: bool = False) -> None:
+        """One cable per env in ``env_ids`` ``[n]``, for resets: from ``point_b`` (``[3]`` or ``[n, 3]``, in the
+        harness body's frame with ``harness``, else the base's) to world anchors ``[n, 3]``, with unstretched length
+        programs ``times_ns`` (int64, from ``t_ns``, nondecreasing) and ``lengths_m`` ``[n, K]``, K up to
+        ``max_breakpoints``, and per-env stiffness and dampings ``[n]``. Nothing is checked on the host, so pass
+        positive lengths and stiffness; the anchors are given because body poses are stale right after a reset."""
+        k = self.program_ns.shape[1]
+        if times_ns.shape != lengths_m.shape or not 1 <= times_ns.shape[1] <= k:
+            raise ValueError(f"cable programs need matching [n, K] times and lengths, K from 1 to {k}")
+        body_id = self.harness_id if harness else 0
+        self._check_body(env_ids, body_id)
+        pad = k - times_ns.shape[1]  # hold the last length, 1 ns apart
+        steps = torch.arange(1, pad + 1, dtype=torch.int64, device=self.device)
+        self._commit(env_ids, body_id, (t_ns + torch.cat([times_ns, times_ns[:, -1:] + steps], dim=1),
+                                        torch.cat([lengths_m, lengths_m[:, -1:].expand(-1, pad)], dim=1)))
+        self.points_b[env_ids] = 0.0
+        self.points_b[env_ids, 0] = point_b
+        self.num_points[env_ids] = 1
+        self.anchor_w[env_ids] = anchor_w
         self.stiffness[env_ids] = stiffness_n_m
         self.damping[env_ids] = damping_n_s_m
         self.swing_damping[env_ids] = swing_damping_n_s_m

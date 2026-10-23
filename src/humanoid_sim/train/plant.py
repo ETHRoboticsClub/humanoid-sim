@@ -7,7 +7,9 @@ sits between demands and the solver:
   takes effect after the randomized ``latency`` before the drive (per env and drive) and then the drive's own
   delay (its model's ``drive_delay_ns``, :mod:`humanoid_sim.devices.models`);
 * :meth:`RobotPlant.pre_physics`, once before every physics step (an action term's ``apply_actions``): samples
-  the sensors at the step start, runs the drive bank over the step and writes the solver PD targets;
+  the sensors at the step start, runs the drive bank over the step, writes the solver PD targets and applies
+  :attr:`RobotPlant.gantry` (a :class:`~humanoid_sim.world.supports.Gantry`: no rope until a task hangs one, and
+  resets keep it);
 * :meth:`RobotPlant.measured` is what the robot's host would read: drive feedback as the drive reports it (its
   position offset included, in whole encoder counts with ±1 count of jitter, velocity per controller sample;
   :class:`~humanoid_sim.devices.reporting.DriveReporting`), a short per-step history of it, and the raw IMU
@@ -39,6 +41,7 @@ from humanoid_sim.randomization import PARAMS, ParamSpec, Randomizer, parse_spec
 from humanoid_sim.sensors import rigs
 from humanoid_sim.sensors.imu import ImuDelivery, ImuSamples
 from humanoid_sim.timing.clock import NS_PER_S
+from humanoid_sim.world.supports import Gantry
 
 
 @dataclass
@@ -97,6 +100,8 @@ class RobotPlant:
                                            device=self.device)
         self._targets = robot.data.default_joint_pos.torch.clone()
         self._physics_manager = physics_manager
+        harness = self.profile["support"]["harness"]
+        self.gantry = Gantry(robot, harness=None if harness is None else harness["body"])  # no rope until hung
         # Every env starts at the articulation's default joint state, the pose the scene chose (standing or flat
         # feet). (At spawn the joints sit at the URDF zero, the calibration pose.)
         robot.write_joint_state_to_sim_index(position=self._targets.clone(), velocity=torch.zeros_like(self._targets))
@@ -263,7 +268,8 @@ class RobotPlant:
         return data.joint_pos.torch[:, self.joint_ids], data.joint_vel.torch[:, self.joint_ids]
 
     def pre_physics(self) -> None:
-        """Before each physics step: sample sensors at the step start, run the drives, write the targets."""
+        """Before each physics step: sample sensors at the step start, run the drives, write the targets, apply
+        the gantry rope."""
         q, qd = self.joint_state()
         fb = self.core.feedback(q, qd)
         self._push_history(fb)
@@ -275,6 +281,7 @@ class RobotPlant:
         tc = self.robot.actuators.target_command
         tc.set_position_index(value=self._targets)
         tc.set_velocity_index(value=torch.zeros_like(self._targets))
+        self.gantry.apply(self.t_ns)
         self.t_ns += self.period_ns
 
     def _push_history(self, fb: DriveFeedback) -> None:

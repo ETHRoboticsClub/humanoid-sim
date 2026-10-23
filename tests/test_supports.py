@@ -131,6 +131,29 @@ def test_a_taut_cable_damps_the_swing_across_it_not_along_it():
     assert all(float(f.abs().max()) == 0.0 for f, _, _ in g.robot.forces), "a slack cable damps nothing"
 
 
+def test_cables_hung_in_one_call_follow_each_envs_own_anchor_program_and_stiffness():
+    from humanoid_sim.world.supports import Gantry
+
+    robot = _Robot([[0, 0, 0.8, 0, 0, 0, 1], [0, 0, 1.0, 0, 0, 0, 1], [-0.2, 0, 1.3, 0, 0, 0, 1],
+                    [0.2, 0, 1.3, 0, 0, 0, 1]])
+    for name in ("body_link_pose_w", "body_link_vel_w"):  # a second env, the same pose
+        t = getattr(robot.data, name).torch
+        getattr(robot.data, name).torch = t.expand(2, -1, -1).clone()
+    robot.num_instances = 2
+    g = Gantry(robot, harness="torso")
+    # The hook 0.3 m above the torso, anchors 1 m above it; env 1 pays out past taut from 2 s on.
+    g.hang_cables(torch.arange(2), 1000, point_b=torch.tensor([0.0, 0.0, 0.3]),
+                  anchor_w=torch.tensor([[0.0, 0.0, 2.3], [0.0, 0.0, 2.3]]),
+                  times_ns=torch.tensor([[0, 1], [0, 2_000_000_000]]),
+                  lengths_m=torch.tensor([[0.98, 0.98], [0.98, 1.5]]), stiffness_n_m=torch.tensor([1000.0, 2000.0]),
+                  damping_n_s_m=torch.zeros(2), swing_damping_n_s_m=torch.zeros(2), harness=True)
+    assert g.body_id == 1
+    g.apply(1000)  # 2 cm stretched in both envs
+    assert g.tension_n.tolist() == [pytest.approx(20.0, rel=1e-4), pytest.approx(40.0, rel=1e-4)]
+    g.apply(1000 + 2_000_000_000)
+    assert g.tension_n.tolist() == [pytest.approx(20.0, rel=1e-4), 0.0]
+
+
 def test_a_base_frame_rope_hangs_on_the_base():
     g = _fake_gantry()
     g.hang_tension(torch.tensor([0]), 0, [(0.0, 100.0)], attachment_b=[0.0, 0.0, 0.2])

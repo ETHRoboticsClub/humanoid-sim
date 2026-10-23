@@ -12,7 +12,7 @@ Around the robot, humanoid-sim has a ground (a flat plane, or in training a heig
 | Fixed base | none | `--base fixed` | none |
 | Lab gantry (harness cable on the torso) | none | none | `--support suspended` (default) |
 | Base orientation prescribed through base joints | none | `--base yaw` (default) or `--base orientation` | none |
-| Gantry rope | a `Gantry` your action term applies | none | `SET_SUPPORT` command |
+| Gantry rope | `plant.gantry`, hung by your task | none | `SET_SUPPORT` command |
 | Force pushes on a body | `ForcePush` | none | `APPLY_DISTURBANCE` body wrench |
 | Torque on a joint | `plant.core.external_torque` | none | `APPLY_DISTURBANCE` joint torque |
 
@@ -247,6 +247,7 @@ A slack cable (`hang_cable`) runs from one harness point (base-frame `attachment
 | `hang_tension(env_ids, t_ns, breakpoints_s_n, *, attachment_b=None, attachment_bodies=None)` | 1 to 8 breakpoints, tension ≥ 0 | Vertical tension program from `t_ns` |
 | `hang_cable(env_ids, t_ns, *, overhead_m, length_breakpoints_s_m, stiffness_n_m, damping_n_s_m, attachment_b=None, attachment_bodies=None)` | 1 to 8 breakpoints, lengths > 0 | Slack cable from `t_ns` |
 | `release(env_ids)` | `[n]` env ids | No rope for these envs |
+| `hang_cables(env_ids, t_ns, *, point_b, anchor_w, times_ns, lengths_m, stiffness_n_m, damping_n_s_m, swing_damping_n_s_m, harness=False)` | `[n, 3]` anchors, `[n, K]` programs (K ≤ 8), `[n]` gains | One slack cable per env from `t_ns`, for resets: no host-side checks, and anchors given since body poses are stale right after a reset |
 | `apply(t_ns)` | step start, plant time | Adds this step's rope forces |
 | `tension_n`, `distance_m` | `[E]` | Total rope force on the last step; cable length from harness point to anchor |
 
@@ -254,33 +255,24 @@ Program times are relative to the hang time and must be non-negative and increas
 
 In the runtime, any session hangs a rope with the `SET_SUPPORT` mailbox command (`{"support": "gantry", ...}` with a tension program or a cable, or `{"support": "suspended"}` for the harness cable) and drops it with `{"support": "free"}`; the truth region reports the rope tension. The argument names are in [runtime.md](runtime.md).
 
-In training nothing calls `apply` for you. A rope works when the action term applies it before the plant's step, while `plant.t_ns` is still the step start:
+In training the plant owns a `Gantry` (`plant.gantry`, on the profile's harness body) and applies it in every `pre_physics()`, at the step start; until a task hangs a rope it does nothing. Resets keep the rope, so a task hangs (or releases) it from its reset events, which run before the plant's own reset:
 
 ```python
-import torch
-
-from humanoid_sim.world.supports import Gantry
+from isaaclab.managers import EventTermCfg
 
 
-class HungPoseOffsets(PoseOffsets):  # PoseOffsets from training.md, "A minimal environment"
-    def __init__(self, cfg, env):
-        super().__init__(cfg, env)
-        self.gantry = Gantry(self._asset)
-        self.weight_n = float(self._asset.data.body_mass.torch[0].sum()) * 9.81  # once, at startup
+def hang_from_gantry(env, env_ids):
+    plant = env.action_manager.get_term("drives").plant
+    weight_n = plant.robot.data.body_mass.torch[0].sum().item() * 9.81  # once per reset: a host sync
+    # Carry the full weight for 1 s, then lower the tension to zero over 3 s.
+    plant.gantry.hang_tension(env_ids, plant.t_ns, [(0.0, weight_n), (1.0, weight_n), (4.0, 0.0)],
+                              attachment_b=[0.0, 0.0, 0.3])
 
-    def apply_actions(self):
-        self.gantry.apply(self.plant.t_ns)
-        super().apply_actions()
 
-    def reset(self, env_ids=None):
-        super().reset(env_ids)
-        if env_ids is None or isinstance(env_ids, slice):
-            env_ids = torch.arange(self.num_envs, device=self.device)
-        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
-        # Carry the full weight for 1 s, then lower the tension to zero over 3 s.
-        self.gantry.hang_tension(env_ids, self.plant.t_ns, [(0.0, self.weight_n), (1.0, self.weight_n), (4.0, 0.0)],
-                                 attachment_b=[0.0, 0.0, 0.3])
+hang = EventTermCfg(func=hang_from_gantry, mode="reset")  # after the event that writes the reset state
 ```
+
+Body poses are stale right after a reset writes the state, so a rope hung from a reset event should not take its geometry from them: `hang_cables` takes the anchors, computed from the reset state, for example from the hook's position at the start pose by host kinematics (`RobotKinematics`).
 
 The tests exercise the gantry through `SimCore` (`tests/test_supports.py`): a tension equal to the robot's weight holds its centre of mass in place, and a cable settles at its unstretched length plus weight over stiffness.
 
