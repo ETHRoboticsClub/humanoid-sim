@@ -189,11 +189,11 @@ class RuntimeView:
     def _gantry(self, t) -> None:
         """The rope while a cable hangs (coloured by what it carries, with its status), a "no gantry" label
         otherwise, and the crane where it is. The truth does not carry the cable's unstretched length, so the
-        rest length is not drawn."""
+        rest length is not drawn. A truth with no mass (the host fills it from its first step) draws no rope."""
         rr = self.rr
         top, harness = np.asarray(t["gantry_top_m"]), np.asarray(t["gantry_harness_m"])
         tension, base = float(t["gantry_tension_n"]), np.asarray(t["base_position_m"])
-        if (np.isfinite(top).all() and np.isfinite(harness).all()) or tension > 0.0:
+        if float(t["mass_kg"]) > 0.0 and ((np.isfinite(top).all() and np.isfinite(harness).all()) or tension > 0.0):
             gv.log_env(rr, "/world/gantry", "/sim/0/gantry", top=top, hook=harness, rest_m=float("nan"),
                        tension_n=tension, weight_n=float(t["mass_kg"]) * GRAVITY_M_S2, base_w=base)
         else:
