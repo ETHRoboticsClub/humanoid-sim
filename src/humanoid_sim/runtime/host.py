@@ -606,9 +606,15 @@ class RuntimeHost:
         kind = args["support"]
         env = torch.tensor([0], device=self.device)
         if kind == "free":
-            # A robot let down from a rope stands in the start pose where it hung, upright, keeping its heading.
+            in_place = args.get("in_place", False)
+            if not isinstance(in_place, bool):
+                raise ValueError("in_place: true or false")
+            # A robot let down from a rope stands in the start pose where it hung, upright, keeping its heading;
+            # one released in place is left as it is, as unhooking the rope leaves it.
             if self._rope_due is not None or bool(self.sim.gantry.mode[0] != NONE):
                 self._release_rope()
+                if in_place:
+                    return "free"
                 q, base = self._named_pose(self.start_pose, lift_m=0.0)
                 x, y, z, w = self.robot.data.root_link_pose_w.torch[0, 3:7].tolist()
                 yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))

@@ -381,6 +381,7 @@ The home pose is the one to use when a free robot should stand. Both poses are c
 | Arguments | Session | Effect and ack |
 |---|---|---|
 | `{"support": "free"}` | any | Release the gantry rope and stand the robot where it hung: the start pose, upright at standing height, its x, y and heading kept. A robot no rope holds is left as it is: `free` |
+| `{"support": "free", "in_place": true}` | any | Release the gantry rope and leave the robot as it is, moving or not, as unhooking the rope does (ABI 3.5): `free` |
 | `{"support": "suspended"}` | any | Back on the harness as a suspended session starts: any rope released, the start pose at the spawn with the soles 0.3 m up, turned to rest under the hook, the trolley over it: `suspended` |
 | `{"support": "gantry", "tension_breakpoints_s_n": [[t, N], ...], "attachment_local_m": [x, y, z]}` | any | A vertical tension program on one base-frame point, or on two with `[[x, y, z], [x, y, z]]`: `gantry` |
 | `{"support": "gantry", "tension_breakpoints_s_n": [[t, N], ...], "attachment_bodies": [name, ...]}` | any | The same, on one or two points of the harness body (the profile's `support.harness.body`) where the named bodies are now: `gantry` |

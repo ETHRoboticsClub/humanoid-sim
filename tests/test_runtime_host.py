@@ -578,6 +578,36 @@ def test_a_client_cable_hangs_from_the_harness_hook(tmp_path, robot):
 
 
 @pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+def test_free_in_place_unhooks_the_rope_without_moving_the_robot(tmp_path, robot):
+    """``in_place`` releases the harness and leaves the robot where and how it hangs; it then falls."""
+    pytest.importorskip("isaaclab_newton")
+    from humanoid_sim.runtime.host import RuntimeHost
+    from humanoid_sim.world.supports import NONE
+
+    host = RuntimeHost(tmp_path / "plant", built_usd(robot), device="cpu", robot=robot, support="suspended",
+                       compile=False)
+    try:
+        host.step()  # hangs the harness
+        host._prescribe({"release": True})
+        for _ in range(5):
+            host.step()
+        base = host.robot.data.root_link_pose_w.torch[0].clone()
+        q = host.sim.joint_state()[0].clone()
+        with pytest.raises(ValueError, match="in_place"):
+            host._set_support({"support": "free", "in_place": "yes"})
+        assert int(host.sim.gantry.mode[0]) != NONE
+        assert host._set_support({"support": "free", "in_place": True}) == "free"
+        assert int(host.sim.gantry.mode[0]) == NONE
+        assert torch.equal(host.robot.data.root_link_pose_w.torch[0], base)
+        assert torch.equal(host.sim.joint_state()[0], q)
+        for _ in range(25):  # 0.1 s
+            host.step()
+        assert float(host.robot.data.root_link_pose_w.torch[0, 2]) < float(base[2]) - 0.01
+    finally:
+        host.close()
+
+
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
 def test_set_support_sets_the_robot_down_and_back_on_the_harness(tmp_path, robot):
     """``free`` lets the robot down where it hangs: the start pose upright at standing height, its x, y and heading
     kept; a robot no rope holds stays as it is. ``suspended`` puts it back where a suspended session starts: the

@@ -63,7 +63,7 @@ from pathlib import Path
 import numpy as np
 
 ABI_MAJOR = 3
-ABI_MINOR = 4
+ABI_MINOR = 5
 MAGIC = b"HSIMPLNT"
 ALIGN = 64
 
