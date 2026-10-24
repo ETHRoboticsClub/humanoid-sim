@@ -441,13 +441,14 @@ class RuntimeHost:
             raise ValueError("base_pose is [x, y, z, qx, qy, qz, qw] with a unit quaternion")
         return p
 
-    def _named_pose(self, name: str) -> tuple[torch.Tensor, torch.Tensor | None]:
+    def _named_pose(self, name: str, lift_m: float | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """The pose upright at the spawn, its soles ``lift_m`` above the ground (the session's lift by default)."""
         from humanoid_sim.model.poses import STANDING_CLEARANCE_M
 
         q_desc, height = self._poses[name]
         names = list(self.desc.joints)
         q = torch.tensor([[float(q_desc[names.index(n)]) for n in self.joints]], device=self.device)
-        z = height + STANDING_CLEARANCE_M + self._lift_m()
+        z = height + STANDING_CLEARANCE_M + (self._lift_m() if lift_m is None else lift_m)
         return q, torch.tensor([[0.0, 0.0, z, 0.0, 0.0, 0.0, 1.0]], device=self.device)
 
     def _lift_m(self) -> float:
@@ -595,14 +596,31 @@ class RuntimeHost:
         self.paused = False
         return "resumed"
 
+    def _place(self, q: torch.Tensor, base: torch.Tensor) -> None:
+        """Writes the pose at rest; a held prescribed pose is held there instead."""
+        self._write_pose(q, base)
+        if self._prescribed is not None:
+            self._prescribed = (q, base)
+
     def _set_support(self, args: dict) -> str:
         kind = args["support"]
         env = torch.tensor([0], device=self.device)
         if kind == "free":
-            self._release_rope()
+            # A robot let down from a rope stands in the start pose where it hung, upright, keeping its heading.
+            if self._rope_due is not None or bool(self.sim.gantry.mode[0] != NONE):
+                self._release_rope()
+                q, base = self._named_pose(self.start_pose, lift_m=0.0)
+                x, y, z, w = self.robot.data.root_link_pose_w.torch[0, 3:7].tolist()
+                yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+                base[0, :2] = self.robot.data.root_link_pose_w.torch[0, :2]
+                base[0, 5:7] = torch.tensor([math.sin(yaw / 2), math.cos(yaw / 2)], device=self.device)
+                self._place(q, base)
             return "free"
         if kind == "suspended":
-            self._hang_harness(level=False)
+            # Back on the harness as a suspended session starts: the start pose at the spawn, under the hook.
+            self._release_rope()
+            self._place(*self._named_pose(self.start_pose, lift_m=SUSPENDED_LIFT_M))
+            self._hang_harness(level=True)
             return "suspended"
         if kind != "gantry":
             raise ValueError(f"unknown support {kind!r}")

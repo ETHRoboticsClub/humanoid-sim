@@ -568,3 +568,52 @@ def test_a_client_cable_hangs_from_the_harness_hook(tmp_path, robot):
         assert torch.allclose(point, hook, atol=0.005)
     finally:
         host.close()
+
+
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
+def test_set_support_sets_the_robot_down_and_back_on_the_harness(tmp_path, robot):
+    """``free`` lets the robot down where it hangs: the start pose upright at standing height, its x, y and heading
+    kept; a robot no rope holds stays as it is. ``suspended`` puts it back where a suspended session starts: the
+    start pose at the spawn, lifted, the harness carrying its weight."""
+    pytest.importorskip("isaaclab_newton")
+    from humanoid_sim.runtime.host import SUSPENDED_LIFT_M, RuntimeHost
+    from humanoid_sim.world.supports import NONE
+
+    host = RuntimeHost(tmp_path / "plant", built_usd(robot), device="cpu", robot=robot, support="suspended",
+                       compile=False)
+    try:
+        host.step()  # hangs the harness
+        host._prescribe({"release": True})  # no client: else the start pose is held where it was
+        yaw = 0.5
+        moved = torch.tensor([[0.4, -0.2, 0.0, 0.0, 0.0, math.sin(yaw / 2), math.cos(yaw / 2)]])
+        moved[0, 2] = host.robot.data.root_link_pose_w.torch[0, 2]
+        host.robot.write_root_pose_to_sim_index(root_pose=moved)
+        host.step()
+        standing = host._named_pose(host.start_pose, lift_m=0.0)[1][0, 2]
+        assert host._set_support({"support": "free"}) == "free"
+        assert int(host.sim.gantry.mode[0]) == NONE
+        host.step()
+        base = host.robot.data.root_link_pose_w.torch[0]
+        assert torch.allclose(base[:2], moved[0, :2], atol=0.01)
+        assert float(base[2]) == pytest.approx(float(standing), abs=0.01)
+        assert torch.allclose(base[3:].abs(), moved[0, 3:].abs(), atol=0.01)
+
+        for _ in range(5):
+            host.step()
+        before = host.robot.data.root_link_pose_w.torch[0, :3].clone()
+        assert host._set_support({"support": "free"}) == "free"  # no rope: not moved
+        assert torch.equal(host.robot.data.root_link_pose_w.torch[0, :3], before)
+
+        assert host._set_support({"support": "suspended"}) == "suspended"
+        host.step()  # the harness hangs after the step that follows the pose write
+        base = host.robot.data.root_link_pose_w.torch[0]
+        assert torch.allclose(base[:2], torch.zeros(2), atol=0.05)
+        assert float(base[2]) == pytest.approx(float(standing) + SUSPENDED_LIFT_M, abs=0.05)
+        tension = []
+        for i in range(500):  # 2 s
+            host.step()
+            if i >= 400:
+                tension.append(float(host.sim.gantry.tension_n[0]))
+        assert sum(tension) / len(tension) == pytest.approx(urdf_mass_kg(robot) * 9.81, rel=0.1)
+    finally:
+        host.close()

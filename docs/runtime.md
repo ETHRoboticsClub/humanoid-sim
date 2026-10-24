@@ -63,7 +63,7 @@ A session starts in the support chosen at startup, reported in the descriptor's 
 
 | Support | Base | What `SET_SUPPORT` can do |
 |---|---|---|
-| `suspended` | Hanging from the lab gantry: one cable from an anchor overhead to a spreader bar over the harness hook on the torso (the midpoint of the shoulders, the profile's `support.harness`), a strap from each end to a shoulder, carrying the robot's weight, the feet 0.3 m above the floor in the start pose, turned to rest under the hook; a swing dies away over several periods. With a crane (`--gantry`) the cable hangs from its hook, the trolley over the harness, and a robot out of the crane's reach is refused. A reset to a named pose puts the robot back there; every reset rehangs the cable where the robot then is. | Release the rope (`free`), rehang the harness where the robot is (`suspended`) or hang another rope (`gantry`). Any `base_pose` argument is rejected. |
+| `suspended` | Hanging from the lab gantry: one cable from an anchor overhead to a spreader bar over the harness hook on the torso (the midpoint of the shoulders, the profile's `support.harness`), a strap from each end to a shoulder, carrying the robot's weight, the feet 0.3 m above the floor in the start pose, turned to rest under the hook; a swing dies away over several periods. With a crane (`--gantry`) the cable hangs from its hook, the trolley over the harness, and a robot out of the crane's reach is refused. A reset to a named pose puts the robot back there; every reset rehangs the cable where the robot then is. | Let the robot down (`free`), put it back on the harness at the spawn (`suspended`) or hang another rope (`gantry`). Any `base_pose` argument is rejected. |
 | `free` | Standing on the floor in the start pose, upright, at the origin | Hang a gantry rope (tension program or slack cable) or the harness (`suspended`), and release it with `{"support": "free"}` |
 
 The gantry and the floor are described in [world.md](world.md).
@@ -379,8 +379,8 @@ The home pose is the one to use when a free robot should stand. Both poses are c
 
 | Arguments | Session | Effect and ack |
 |---|---|---|
-| `{"support": "free"}` | any | Release the gantry rope: `free` |
-| `{"support": "suspended"}` | any | The harness cable, hung where the robot is now (not turned under the hook): `suspended` |
+| `{"support": "free"}` | any | Release the gantry rope and stand the robot where it hung: the start pose, upright at standing height, its x, y and heading kept. A robot no rope holds is left as it is: `free` |
+| `{"support": "suspended"}` | any | Back on the harness as a suspended session starts: any rope released, the start pose at the spawn with the soles 0.3 m up, turned to rest under the hook, the trolley over it: `suspended` |
 | `{"support": "gantry", "tension_breakpoints_s_n": [[t, N], ...], "attachment_local_m": [x, y, z]}` | any | A vertical tension program on one base-frame point, or on two with `[[x, y, z], [x, y, z]]`: `gantry` |
 | `{"support": "gantry", "tension_breakpoints_s_n": [[t, N], ...], "attachment_bodies": [name, ...]}` | any | The same, on one or two points of the harness body (the profile's `support.harness.body`) where the named bodies are now: `gantry` |
 | `{"support": "gantry", "cable": {"overhead_distance_m": m, "length_breakpoints_s_m": [[t, m], ...], "stiffness_n_m": k, "damping_n_s_m": c}, "attachment_local_m": [x, y, z]}` | any | A slack cable from one base-frame point, from two (`[[x, y, z], [x, y, z]]`) by a strap each from a spreader bar, or, with `attachment_bodies`, from those bodies on the harness body the same way (the lab's harness on the shoulders): `gantry` |
