@@ -1,5 +1,5 @@
-"""The gantry in the viewers: the rope runs from the anchor to the harness hook, its colour class follows what it
-carries, and a robot with no gantry says so. The expected points and tensions are worked out by hand here, not read
+"""The gantry in the viewers: the straps run from the spreader bar to their points (one rope from the anchor to the
+harness hook without straps), its colour class follows what it carries, and a robot with no gantry says so. The expected points and tensions are worked out by hand here, not read
 back from the code under test; Rerun is replaced by a recorder of what is logged."""
 
 import math
@@ -144,6 +144,41 @@ def test_the_rope_joins_the_anchor_to_the_hook_in_the_colour_of_its_load(rest_m,
         assert rr.last(f"/world/gantry/{env}/anchor")[1] == pytest.approx(np.array([ANCHOR]), abs=1e-5)
 
 
+def test_two_straps_hang_from_the_ends_of_the_bar_to_their_points():
+    robot = Robot()
+    g = Gantry(robot)
+    # Points 0.2 m either side of the base, 0.3 m up; the bar's ends straight over them, the hook 2 m above.
+    points = torch.tensor([[[-0.2, 0.0, 0.3], [0.2, 0.0, 0.3]]]).expand(2, -1, -1)
+    ends = torch.tensor([[[-0.2, 0.0, 0.0], [0.2, 0.0, 0.0]]]).expand(2, -1, -1)
+    rest = 2.0 - 0.5 * WEIGHT_N / STIFFNESS
+    g.hang_cables(torch.arange(2), 0, point_b=points, anchor_w=torch.tensor([ANCHOR, ANCHOR]),
+                  times_ns=torch.zeros(2, 1, dtype=torch.int64), lengths_m=torch.full((2, 1), rest),
+                  stiffness_n_m=torch.full((2,), STIFFNESS), damping_n_s_m=torch.zeros(2),
+                  swing_damping_n_s_m=torch.zeros(2), top_offset_w=ends)
+    g.apply(0)
+    rec, rr = recorder(g, robot)
+    rec._gantry(0, BASES)
+    _, strips, colors, _ = rr.last("/world/gantry/0/rope")
+    assert len(strips) == 2 and colors == [gv.STATE_RGB[gv.TAUT]] * 2
+    assert strips[0] == pytest.approx(np.array([[-0.2, 0.0, 3.3], [-0.2, 0.0, HOOK_Z]]), abs=1e-5)
+    assert strips[1] == pytest.approx(np.array([[0.2, 0.0, 3.3], [0.2, 0.0, HOOK_Z]]), abs=1e-5)
+    assert rr.last("/world/gantry/0/bar")[1][0] == pytest.approx(np.array([[-0.2, 0.0, 3.3], [0.2, 0.0, 3.3]]))
+    assert rr.scalars("/sim/0/gantry/length_m")[-1] == pytest.approx(2.0)  # each strap's length
+    g.release(torch.tensor([0]))
+    rec._gantry(0, BASES)
+    assert rr.last("/world/gantry/0/rope") == ("clear",) and rr.last("/world/gantry/0/bar") == ("clear",)
+
+
+def test_without_strap_points_the_rope_is_one_line_from_the_anchor_to_the_hook():
+    rr = FakeRerun()
+    nan = [[math.nan] * 3] * 2
+    for straps in ({}, {"strap_tops": nan, "strap_bottoms": nan}):
+        gv.log_env(rr, "/w", "/s", top=ANCHOR, hook=[0.0, 0.0, HOOK_Z], rest_m=2.1, tension_n=0.0, weight_n=WEIGHT_N,
+                   **straps)
+        assert rr.last("/w/rope")[1] == [pytest.approx(np.array([ANCHOR, [0.0, 0.0, HOOK_Z]]))]
+        assert rr.last("/w/bar") == ("clear",)
+
+
 def test_a_rope_hung_from_the_wrong_anchor_is_slanted_and_red():
     """The training bug: the anchor above the default spawn, the robot elsewhere: the rope leans and over-stretches."""
     robot = Robot()
@@ -260,6 +295,9 @@ def test_a_real_recording_takes_the_rope(tmp_path):
     rr.save(str(tmp_path / "g.rrd"))
     gv.log_env(rr, "/world/gantry/0", "/sim/0/gantry", top=ANCHOR, hook=[0, 0, HOOK_Z], rest_m=1.9, tension_n=50.0,
                weight_n=WEIGHT_N)
+    gv.log_env(rr, "/world/gantry/2", "/sim/2/gantry", top=ANCHOR, hook=[0, 0, HOOK_Z], rest_m=1.9, tension_n=50.0,
+               weight_n=WEIGHT_N, strap_tops=[[-0.2, 0, 3.3], [0.2, 0, 3.3]],
+               strap_bottoms=[[-0.2, 0, HOOK_Z], [0.2, 0, HOOK_Z]])
     gv.log_no_gantry(rr, "/world/gantry/1", [0.0, 0.0, 1.0])
     rr.disconnect()
     assert (tmp_path / "g.rrd").stat().st_size > 0
@@ -272,14 +310,18 @@ def test_view_runtime_draws_the_rope_from_the_truth_and_says_no_gantry_without_o
     view.rr, view.rig = FakeRerun(), None
     truth = {"gantry_top_m": [0.0, 0.0, 3.3], "gantry_harness_m": [0.0, 0.0, 1.3], "gantry_tension_n": 0.88 * WEIGHT_N,
              "mass_kg": MASS_KG, "base_position_m": [0.0, 0.0, 1.0], "gantry_position_m": [math.nan] * 3,
-             "gantry_command_m": [math.nan] * 3}
+             "gantry_command_m": [math.nan] * 3, "gantry_strap_top_m": [[-0.2, 0.0, 3.3], [0.2, 0.0, 3.3]],
+             "gantry_strap_bottom_m": [[-0.2, 0.0, 1.3], [0.2, 0.0, 1.3]]}
     view._gantry(truth)
     rr = view.rr
-    assert rr.last("/world/gantry/rope")[1][0].tolist() == [[0.0, 0.0, 3.3], [0.0, 0.0, 1.3]]
-    assert rr.last("/world/gantry/rope")[2] == [gv.STATE_RGB[gv.TAUT]]
+    strips = rr.last("/world/gantry/rope")[1]
+    assert [s.tolist() for s in strips] == [[[-0.2, 0.0, 3.3], [-0.2, 0.0, 1.3]], [[0.2, 0.0, 3.3], [0.2, 0.0, 1.3]]]
+    assert rr.last("/world/gantry/rope")[2] == [gv.STATE_RGB[gv.TAUT]] * 2
+    assert rr.last("/world/gantry/bar")[1][0].tolist() == [[-0.2, 0.0, 3.3], [0.2, 0.0, 3.3]]
     assert rr.last("/world/gantry/status")[3] == ["gantry: taut 0.88 W"]
     assert rr.scalars("/sim/0/gantry/tension_share")[-1] == pytest.approx(0.88)
-    truth |= {"gantry_top_m": [math.nan] * 3, "gantry_harness_m": [math.nan] * 3, "gantry_tension_n": 0.0}
+    truth |= {"gantry_top_m": [math.nan] * 3, "gantry_harness_m": [math.nan] * 3, "gantry_tension_n": 0.0,
+              "gantry_strap_top_m": [[math.nan] * 3] * 2, "gantry_strap_bottom_m": [[math.nan] * 3] * 2}
     view._gantry(truth)
     assert rr.last("/world/gantry/status")[3] == ["no gantry"]
-    assert rr.last("/world/gantry/rope") == ("clear",)
+    assert rr.last("/world/gantry/rope") == ("clear",) and rr.last("/world/gantry/bar") == ("clear",)

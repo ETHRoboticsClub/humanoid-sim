@@ -16,10 +16,10 @@ extern "C" {
 #endif
 
 #define HSIM_PLANT_ABI_MAJOR 3
-#define HSIM_PLANT_ABI_MINOR 3
+#define HSIM_PLANT_ABI_MINOR 4
 #define HSIM_PLANT_MAGIC "HSIMPLNT"
-#define HSIM_PLANT_LAYOUT_HASH 0x31f7d253854e2509ULL
-#define HSIM_PLANT_SEGMENT_BYTES 56256
+#define HSIM_PLANT_LAYOUT_HASH 0xea3a9ede154d3cadULL
+#define HSIM_PLANT_SEGMENT_BYTES 56320
 
 #define HSIM_PLANT_MAX_DRIVES 64
 #define HSIM_PLANT_MAX_JOINTS 64
@@ -29,6 +29,7 @@ extern "C" {
 #define HSIM_PLANT_MAILBOX_BYTES 4096
 #define HSIM_PLANT_ACK_MESSAGE_BYTES 256
 #define HSIM_PLANT_SOLES 2
+#define HSIM_PLANT_MAX_STRAPS 2
 
 enum { HSIM_STATE_CREATING = 0, HSIM_STATE_READY = 1, HSIM_STATE_ENDED = 2 };
 
@@ -168,6 +169,10 @@ typedef struct {
   // Gantry rope's top and harness point (world, NaN without a cable); crane position and command (gantry axes,
   // NaN without a crane).
   double gantry_top_m[3], gantry_harness_m[3], gantry_position_m[3], gantry_command_m[3];
+  // Each harness strap's top (its end of the spreader bar) and bottom (its attachment point), world; NaN
+  // without a cable or for an unused strap.
+  double gantry_strap_top_m[HSIM_PLANT_MAX_STRAPS][3];
+  double gantry_strap_bottom_m[HSIM_PLANT_MAX_STRAPS][3];
 } HsimTruth;
 
 #undef HSIM_REGION_HEAD
@@ -184,13 +189,13 @@ static_assert(sizeof(HsimHeader) == 272, "header layout");
 static_assert(sizeof(HsimDemandRecord) == 3600, "demand record layout");
 static_assert(sizeof(HsimDemands) == 28848, "demands layout");
 static_assert(sizeof(HsimFeedback) == 4440, "feedback layout");
-static_assert(sizeof(HsimTruth) == 1632, "truth layout");
+static_assert(sizeof(HsimTruth) == 1728, "truth layout");
 #else
 _Static_assert(sizeof(HsimHeader) == 272, "header layout");
 _Static_assert(sizeof(HsimDemandRecord) == 3600, "demand record layout");
 _Static_assert(sizeof(HsimDemands) == 28848, "demands layout");
 _Static_assert(sizeof(HsimFeedback) == 4440, "feedback layout");
-_Static_assert(sizeof(HsimTruth) == 1632, "truth layout");
+_Static_assert(sizeof(HsimTruth) == 1728, "truth layout");
 #endif
 
 #ifdef __cplusplus

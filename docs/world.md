@@ -307,6 +307,7 @@ A crane moves the rope's top: its bridge runs along the runway rails (the crane'
 | `trolley.command`, `trolley.position`, `trolley.velocity` | `[E, 3]` |
 | `gantry.hang_hoist(env_ids, *, stiffness_n_m, damping_n_s_m, swing_damping_n_s_m=0.0, attachment_b=None, attachment_bodies=None, point_b=None, harness=False, dry_run=False)` | A slack cable from the harness to the hook: base-frame `attachment_b` or `attachment_bodies` on the harness body, a strap per point from a spreader bar (as `hang_cable`, with `spreader_width_m`), or, at resets where body poses are stale, `point_b` in the harness body's frame (`harness=True`) or the base's and `top_offset_w` (as `hang_cables`). Gains are floats (checked) or `[n]` tensors |
 | `gantry.top_w`, `gantry.harness_w` | `[E, 3]`: the cable's hook and the harness point (the midpoint of the straps' points) on the last step, NaN without a cable |
+| `gantry.strap_top_w`, `gantry.strap_bottom_w` | `[E, P, 3]`: each strap's top (its end of the spreader bar) and bottom (its point) on the last step, NaN without a cable and for an unused point |
 
 A hoist rope pulls like a slack cable with its top at the trolley and its length the hoist's. Its damping acts on the rope's stretch rate: the harness point's velocity along the rope relative to the moving top, less the hoist's pay-out rate. Swing damping acts on the harness point's velocity across the rope, relative to the top.
 

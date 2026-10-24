@@ -77,7 +77,7 @@ Here the client waves both arms (drive positions, top right) and pushes the left
 | `/sim/0/imu/{gyro,specific_force}/{x,y,z}` | The newest IMU sample of each feedback record |
 | `/sim/0/soles/<side>/normal_force` | Ground force on each sole (truth) |
 | `/sim/0/base/height` | Base height (truth) |
-| `/world/gantry/{rope,anchor,plumb,status}`, `/sim/0/gantry/{tension_n,tension_share,length_m}` | The gantry cable while one hangs, or the label `no gantry`; see [The gantry](#the-gantry) (truth) |
+| `/world/gantry/{rope,bar,anchor,plumb,status}`, `/sim/0/gantry/{tension_n,tension_share,length_m}` | The gantry cable while one hangs, or the label `no gantry`; see [The gantry](#the-gantry) (truth) |
 | `/world/gantry/{travel,bridge,trolley}`, `/sim/0/gantry/{position,command}/{x,y,z}` | With a crane (`serve --gantry`): its travel, bridge and trolley, and its actual and commanded position (truth) |
 | `/sim/0/host/{late_steps,keeping_up,session}` | Whether the host keeps up with real time; session changes |
 
@@ -133,13 +133,14 @@ Both views show whether a robot hangs from a gantry rope, and what the rope carr
 
 | Entity (under the env's gantry path) | Content |
 |---|---|
-| `rope` | A line from the anchor to the harness hook, coloured by the rope's load (below) |
+| `rope` | One line per harness strap, from its end of the spreader bar to the point it pulls on (one line from the anchor to the harness hook when no straps are known), coloured by the rope's load (below) |
+| `bar` | The spreader bar between the straps' tops, with two or more straps |
 | `anchor` | A marker at the rope's top: the fixed anchor, or a crane's hoist |
 | `plumb` | A line straight down from the anchor, as long as the rope's unstretched length, so a rope that leans or is stretched shows against it |
 | `status` | The label `gantry: taut 0.88 W` (tension over the robot's weight `W = m g`), `gantry: slack`, `gantry: over-stretched 1.35 W` or `gantry: caught 2.40 W`; `no gantry` for a robot without one, floating above its base |
 | `travel`, `bridge`, `trolley` | With a mounted crane: its reach, and its bridge and trolley where they are (the frame's posts are not in a `GantryRig`) |
 | `/sim/<env>/gantry/{tension_n,tension_share}` | The rope's tension, in N and as a share of `W` |
-| `/sim/<env>/gantry/{length_m,rest_length_m}` | Hook to anchor, and the cable's unstretched length (training scenes only: the runtime's truth does not carry it) |
+| `/sim/<env>/gantry/{length_m,rest_length_m}` | The straps' mean length (hook to anchor without straps), and the cable's unstretched length (training scenes only: the runtime's truth does not carry it) |
 
 The colour is the rope's class, from its tension against `W`:
 

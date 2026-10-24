@@ -323,6 +323,7 @@ The truth region is the oracle tests need. The host writes it at the start of a 
 | `sole` | `HsimSole[2]` | Left, then right |
 | `gantry_top_m`, `gantry_harness_m` | f64[3], f64[3] | The cable's top (its fixed anchor, or the crane's hoist), where the spreader bar hangs, and the harness point, the midpoint of the points its straps pull on, on the last step; NaN without a cable |
 | `gantry_position_m`, `gantry_command_m` | f64[3], f64[3] | The crane's actual and commanded position in the gantry's axes (x, y, hook height); NaN without a crane |
+| `gantry_strap_top_m`, `gantry_strap_bottom_m` | f64[2][3], f64[2][3] | Each harness strap's top (its end of the spreader bar) and bottom (the point it pulls on), on the last step; NaN without a cable and for an unused strap. ABI 3.4 added them |
 
 Each sole entry describes the sole plate, the contact box fitted to the bottom of each foot (see [robot-model.md](robot-model.md)):
 

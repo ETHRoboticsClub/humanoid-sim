@@ -1,4 +1,5 @@
-"""How the viewers draw a gantry: the rope from its anchor to the harness hook, coloured by how much it carries, the
+"""How the viewers draw a gantry: the harness straps from the spreader bar's ends to their attachment points (or one
+rope from the anchor to the harness point when no straps are given), coloured by how much they carry, the bar, the
 anchor, a plumb line under it, the crane's travel, bridge and trolley, a status label, and the tension as signals.
 ``SceneRecorder`` (``signals/scene.py``, training scenes) and ``view-runtime`` (``runtime/view.py``) both draw through :func:`log_env`, so a rope looks the same in either.
 
@@ -11,7 +12,8 @@ The rope is classed from its tension against the robot's weight ``W`` (``mass ·
   ``W / k``, which a hung robot only reaches when it was hung off its anchor, falls, or is pulled;
 * ``CAUGHT`` (red): the tension spiked over ``CAUGHT_SHARE`` times the weight, as when a falling robot is stopped.
 
-Entity paths, under the ``world`` and ``sim`` prefixes the caller gives: ``<world>/{rope,anchor,plumb,status}``,
+Entity paths, under the ``world`` and ``sim`` prefixes the caller gives: ``<world>/{rope,bar,anchor,plumb,status}``
+(``rope``: one line per strap; ``bar``: between the straps' tops, with two or more straps),
 ``<world>/{travel,bridge,trolley}`` with a crane, and ``<sim>/{tension_n,tension_share,length_m,rest_length_m}``
 (scalars; ``tension_share`` is the tension over ``W``).
 """
@@ -28,6 +30,8 @@ OVERLOAD_FACTOR = 1.5  # a rope may carry this many weights (stretch it this man
 CAUGHT_SHARE = 3.0  # tension over weight beyond which the rope has caught the robot: a fall stopped by the rope
 
 ROPE_RADIUS_M = 0.015
+BAR_RADIUS_M = 0.02
+BAR_RGB = (200, 200, 200)
 ANCHOR_RADIUS_M = 0.05
 ANCHOR_RGB = (240, 240, 240)
 PLUMB_RGB = (110, 110, 130)  # straight down from the anchor, as far as the rope is long
@@ -39,6 +43,7 @@ LABEL_RADIUS_M = 0.01
 LABEL_LIFT_M = 0.6  # a label with no rope floats this far above the robot's base
 NO_GANTRY = "no gantry"
 LABEL_RGB = (245, 245, 245)  # the label is drawn on a grey plate: the rope carries the state colour
+ROPE_PARTS = ("rope", "bar", "anchor", "plumb")  # cleared when no cable hangs
 
 
 def full_weight_stretch_m(weight_n, stiffness_n_m):
@@ -76,21 +81,30 @@ def log_label(rr, path: str, at, text: str, rgb) -> None:
 
 def log_no_gantry(rr, world: str, base_w) -> None:
     """The label of a robot with no gantry (and no stale rope drawn from a gantry it had)."""
-    for name in ("rope", "anchor", "plumb"):
+    for name in ROPE_PARTS:
         rr.log(f"{world}/{name}", rr.Clear(recursive=False))
     log_label(rr, f"{world}/status", np.asarray(base_w) + [0.0, 0.0, LABEL_LIFT_M], NO_GANTRY, LABEL_RGB)
 
 
 def log_env(rr, world: str, sim: str, *, top, hook, rest_m: float, tension_n: float, weight_n: float,
-            stretch_m: float | None = None, note: str = "", base_w=None) -> int:
+            stretch_m: float | None = None, note: str = "", base_w=None, strap_tops=None,
+            strap_bottoms=None) -> int:
     """One robot's rope. ``top`` and ``hook`` are the world points (NaN when no cable hangs, as with a tension
     program: then only the label, over ``base_w``), ``rest_m`` the unstretched length (NaN if unknown),
-    ``stretch_m`` the full-weight stretch if known. Returns the rope's class."""
+    ``stretch_m`` the full-weight stretch if known. ``strap_tops`` and ``strap_bottoms`` ``[P, 3]`` are the
+    straps' ends (NaN rows unused); without them the rope is one line from ``top`` to ``hook``. Returns the rope's
+    class."""
     if not weight_n > 0.0:
         raise ValueError(f"the robot's weight must be positive, got {weight_n}")
     top, hook = np.asarray(top, dtype=np.float64), np.asarray(hook, dtype=np.float64)
     roped = bool(np.isfinite(top).all() and np.isfinite(hook).all())
-    length = float(np.linalg.norm(top - hook)) if roped else float("nan")
+    lines = np.stack([top, hook])[None]  # [straps, 2, 3]
+    if strap_tops is not None and strap_bottoms is not None:
+        straps = np.stack([strap_tops, strap_bottoms], 1).astype(np.float64)
+        straps = straps[np.isfinite(straps).all(axis=(1, 2))]
+        if len(straps):
+            lines = straps
+    length = float(np.linalg.norm(lines[:, 0] - lines[:, 1], axis=1).mean()) if roped else float("nan")
     extension = length - rest_m if roped and np.isfinite(rest_m) else None
     state = int(rope_state(tension_n, weight_n, extension_m=extension, stretch_m=stretch_m))
     text = status_text(state, tension_n, weight_n, note)
@@ -98,7 +112,11 @@ def log_env(rr, world: str, sim: str, *, top, hook, rest_m: float, tension_n: fl
     rr.log(f"{sim}/tension_share", rr.Scalars(float(tension_n / weight_n)))
     if roped:
         rgb = STATE_RGB[state]
-        rr.log(f"{world}/rope", rr.LineStrips3D([[top, hook]], colors=[rgb], radii=ROPE_RADIUS_M))
+        rr.log(f"{world}/rope", rr.LineStrips3D(list(lines), colors=[rgb] * len(lines), radii=ROPE_RADIUS_M))
+        if len(lines) > 1:
+            rr.log(f"{world}/bar", rr.LineStrips3D([lines[:, 0]], colors=[BAR_RGB], radii=BAR_RADIUS_M))
+        else:
+            rr.log(f"{world}/bar", rr.Clear(recursive=False))
         rr.log(f"{world}/anchor", rr.Points3D([top], radii=ANCHOR_RADIUS_M, colors=[ANCHOR_RGB]))
         plumb = top - [0.0, 0.0, rest_m if np.isfinite(rest_m) else length]
         rr.log(f"{world}/plumb", rr.LineStrips3D([[top, plumb]], colors=[PLUMB_RGB]))
@@ -107,7 +125,7 @@ def log_env(rr, world: str, sim: str, *, top, hook, rest_m: float, tension_n: fl
             rr.log(f"{sim}/rest_length_m", rr.Scalars(float(rest_m)))
         log_label(rr, f"{world}/status", top, text, LABEL_RGB)
     else:
-        for name in ("rope", "anchor", "plumb"):
+        for name in ROPE_PARTS:
             rr.log(f"{world}/{name}", rr.Clear(recursive=False))
         log_label(rr, f"{world}/status", np.asarray(base_w) + [0.0, 0.0, LABEL_LIFT_M], text, LABEL_RGB)
     return state

@@ -56,6 +56,13 @@ def test_c_header_has_the_python_layout(tmp_path):
     assert {k: int(v) for k, v in got.items()} == want
 
 
+def test_the_gantry_straps_are_appended_to_the_truth():
+    """ABI 3.4 added the straps after the 3.3 fields, so a 3.3 reader's offsets still hold."""
+    assert abi.TRUTH.names[-3:] == ("gantry_command_m", "gantry_strap_top_m", "gantry_strap_bottom_m")
+    for name in ("gantry_strap_top_m", "gantry_strap_bottom_m"):
+        assert abi.TRUTH.fields[name][0].shape == (abi.MAX_STRAPS, 3)
+
+
 def test_open_checks_identity_and_layout(tmp_path):
     path = tmp_path / "plant"
     seg = _create(path)

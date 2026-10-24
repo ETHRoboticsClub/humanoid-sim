@@ -566,6 +566,13 @@ def test_a_client_cable_hangs_from_the_harness_hook(tmp_path, robot):
         top, point = host.sim.gantry.top_w[0].double(), host.sim.gantry.harness_w[0].double()
         assert torch.allclose(top, hook + torch.tensor([0.0, 0.0, overhead], dtype=torch.float64), atol=0.005)
         assert torch.allclose(point, hook, atol=0.005)
+        # The truth carries one strap per shoulder, from its end of the bar (straight over it at hang time) to it.
+        host._publish_truth()
+        _, truth = host.seg.regions["truth"].read()
+        shoulders = host.robot.data.body_link_pose_w.torch[0, ids, :3].double().numpy()
+        assert np.allclose(truth["gantry_strap_bottom_m"], shoulders, atol=0.005)
+        assert np.allclose(truth["gantry_strap_top_m"][:, :2], shoulders[:, :2], atol=0.005)
+        assert np.allclose(truth["gantry_strap_top_m"][:, 2], float(hook[2]) + overhead, atol=0.005)
     finally:
         host.close()
 

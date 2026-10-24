@@ -13,7 +13,7 @@ from humanoid_sim.runtime.abi import plant_abi as abi
 
 
 def _publish(seg: abi.Segment, desc: Description, stop: threading.Event) -> None:
-    """A stand-in host: a robot standing still and one drive swinging, 4 ms of plant time per record."""
+    """A stand-in host: a robot standing still on a gantry and one drive swinging, 4 ms of plant time per record."""
     joints, drives = list(desc.joints), list(desc.drives)
     q = np.array([desc.joints[j].standing_offset_rad for j in joints])
     t_ns = 0
@@ -23,6 +23,12 @@ def _publish(seg: abi.Segment, desc: Description, stop: threading.Event) -> None
         truth["sim_time_ns"], truth["num_joints"] = t_ns, len(joints)
         truth["base_position_m"], truth["base_quat_xyzw"] = [0.0, 0.0, 0.95], [0.0, 0.0, 0.0, 1.0]
         truth["joint_pos_rad"][: len(joints)] = q
+        # Hung from a spreader bar by two straps.
+        truth["mass_kg"], truth["gantry_tension_n"] = 50.0, 400.0
+        truth["gantry_top_m"], truth["gantry_harness_m"] = [0.0, 0.0, 2.5], [0.0, 0.0, 1.3]
+        truth["gantry_strap_top_m"] = [[0.0, 0.2, 2.5], [0.0, -0.2, 2.5]]
+        truth["gantry_strap_bottom_m"] = [[0.0, 0.2, 1.3], [0.0, -0.2, 1.3]]
+        truth["gantry_position_m"] = truth["gantry_command_m"] = np.nan
         seg.regions["truth"].write(truth)
         fb = np.zeros((), abi.FEEDBACK)
         fb["sim_time_ns"], fb["num_drives"], fb["keeping_up"] = t_ns, len(drives), 1

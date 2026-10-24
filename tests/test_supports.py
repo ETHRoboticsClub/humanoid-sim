@@ -94,6 +94,13 @@ def test_a_cable_on_the_shoulders_hangs_them_on_the_torso_from_a_spreader_bar_ov
     assert g.harness_w[0].tolist() == pytest.approx([0.0, 0.0, 1.3], abs=1e-6)
     assert g.top_w[0].tolist() == pytest.approx([0.0, 0.0, 2.3], abs=1e-6)
     assert float(g.distance_m[0]) == pytest.approx(1.0, abs=1e-6)
+    # Each strap from its end of the bar to its shoulder; none once released.
+    assert g.strap_top_w[0].tolist() == [pytest.approx([-0.2, 0.0, 2.3], abs=1e-6),
+                                         pytest.approx([0.2, 0.0, 2.3], abs=1e-6)]
+    assert g.strap_bottom_w[0].tolist() == [pytest.approx([-0.2, 0.0, 1.3], abs=1e-6),
+                                            pytest.approx([0.2, 0.0, 1.3], abs=1e-6)]
+    g.release(torch.tensor([0]))
+    assert g.strap_top_w.isnan().all() and g.strap_bottom_w.isnan().all()
 
 
 def test_a_spreader_bar_of_a_given_width_spaces_the_straps_along_the_shoulders():
@@ -271,6 +278,8 @@ def test_a_base_frame_rope_hangs_on_the_base():
     g = _fake_gantry()
     g.hang_tension(torch.tensor([0]), 0, [(0.0, 100.0)], attachment_b=[0.0, 0.0, 0.2])
     assert g.body_id == 0 and g.points_b[0, 0].tolist() == pytest.approx([0.0, 0.0, 0.2])
+    g.apply(0)
+    assert g.strap_top_w.isnan().all() and g.strap_bottom_w.isnan().all()  # a tension program has no straps
 
 
 @pytest.mark.parametrize("bad", [
@@ -366,6 +375,10 @@ def test_a_hoist_rope_hangs_from_the_moving_trolley():
                                                           2000.0 * stretch / 5 ** 0.5], rel=1e-3)
     assert gantry.top_w[1].tolist() == pytest.approx([1.0, 0.0, 3.3])
     assert gantry.harness_w[1].tolist() == pytest.approx([0.0, 0.0, 1.3])
+    # One point: one strap from the hook, the second unused.
+    assert gantry.strap_top_w[1, 0].tolist() == pytest.approx([1.0, 0.0, 3.3])
+    assert gantry.strap_bottom_w[1, 0].tolist() == pytest.approx([0.0, 0.0, 1.3])
+    assert gantry.strap_top_w[:, 1].isnan().all() and gantry.strap_bottom_w[:, 1].isnan().all()
 
 
 def test_the_hoist_lifts_and_lowers_the_robot():

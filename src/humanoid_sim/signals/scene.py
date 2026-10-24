@@ -247,10 +247,13 @@ class SceneRecorder:
         weight = self.robot.data.body_mass.torch.sum(dim=1) * GRAVITY_M_S2
         columns = [g.mode.double(), g.tension_n.double(), g.rest_length_m(t_ns).double(), g.stiffness.double(),
                    weight.double()]
-        columns = [torch.stack(columns, dim=1), g.top_w.double(), g.harness_w.double()]
+        p = g.strap_top_w.shape[1]
+        columns = [torch.stack(columns, dim=1), g.top_w.double(), g.harness_w.double(),
+                   g.strap_top_w.double().flatten(1), g.strap_bottom_w.double().flatten(1)]
         if g.trolley is not None:
             columns.append(g.trolley.position.double())
-        state = torch.cat(columns, dim=1)[self._ids].cpu().numpy()  # one copy: [N, 5 + 3 + 3 (+ 3 with a crane)]
+        state = torch.cat(columns, dim=1)[self._ids].cpu().numpy()  # one copy: [N, 5 + 3 + 3 + 6 P (+ 3: crane)]
+        straps = 11 + 6 * p
         for n, e in enumerate(self.envs):
             mode, tension, rest, stiffness, weight_n = state[n, :5]
             world = f"/world/gantry/{e}"
@@ -260,9 +263,11 @@ class SceneRecorder:
             stretch = float(gv.full_weight_stretch_m(weight_n, stiffness)) if stiffness > 0 else None
             gv.log_env(rr, world, f"/sim/{e}/gantry", top=state[n, 5:8], hook=state[n, 8:11], rest_m=float(rest),
                        tension_n=float(tension), weight_n=float(weight_n), stretch_m=stretch,
-                       note=self.notes.get(e, ""), base_w=base_w[n])
+                       note=self.notes.get(e, ""), base_w=base_w[n],
+                       strap_tops=state[n, 11:11 + 3 * p].reshape(p, 3),
+                       strap_bottoms=state[n, 11 + 3 * p:straps].reshape(p, 3))
             if g.trolley is not None:
-                gv.log_crane(rr, world, g.trolley.rig, state[n, 11:14], self._crane_offsets[e])
+                gv.log_crane(rr, world, g.trolley.rig, state[n, straps:straps + 3], self._crane_offsets[e])
 
     def close(self) -> None:
         self.rr.disconnect()

@@ -962,7 +962,8 @@ class RuntimeHost:
                  else torch.cat([self.trolley.position[0], self.trolley.command[0]]))
         return torch.cat([data.root_link_pose_w.torch[0], data.root_link_vel_w.torch[0], com, q[0], qd[0],
                           sim.gantry.tension_n[:1], mass.view(1), soles.reshape(-1), sim.gantry.top_w[0],
-                          sim.gantry.harness_w[0], crane]).to(torch.float64)
+                          sim.gantry.harness_w[0], crane, sim.gantry.strap_top_w[0].reshape(-1),
+                          sim.gantry.strap_bottom_w[0].reshape(-1)]).to(torch.float64)
 
     def _write_truth(self, flat: np.ndarray) -> None:
         sim, nj = self.sim, len(self.joints)
@@ -990,6 +991,10 @@ class RuntimeHost:
             t["sole"]["face_xy_m"][k] = s[13:21].reshape(4, 2)
         t["gantry_top_m"], t["gantry_harness_m"] = take(3), take(3)
         t["gantry_position_m"], t["gantry_command_m"] = take(3), take(3)
+        p = sim.gantry.strap_top_w.shape[1]
+        t["gantry_strap_top_m"], t["gantry_strap_bottom_m"] = float("nan"), float("nan")
+        t["gantry_strap_top_m"][:p] = take(3 * p).reshape(p, 3)
+        t["gantry_strap_bottom_m"][:p] = take(3 * p).reshape(p, 3)
         self.seg.regions["truth"].write(t)
 
     def _frozen_encoders(self):

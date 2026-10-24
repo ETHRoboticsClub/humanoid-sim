@@ -19,7 +19,7 @@ feedback    sim     sim time, physical drive feedback per drive, lateness, deman
 mailbox     client  one command at a time: sequence number, command code, JSON arguments
 ack         sim     the last command handled: its sequence number, a result code and a message
 truth       sim     the oracle tests need: base pose and twist, centre of mass, joint state, gantry tension,
-                    per-sole pose, lowest point and normal force
+                    rope and straps, per-sole pose, lowest point and normal force
 ==========  ======  ==========================================================================================
 
 Every region starts with ``seq`` (u64) and ``crc`` (u32). A writer makes ``seq`` odd, writes the payload, stores
@@ -63,7 +63,7 @@ from pathlib import Path
 import numpy as np
 
 ABI_MAJOR = 3
-ABI_MINOR = 3
+ABI_MINOR = 4
 MAGIC = b"HSIMPLNT"
 ALIGN = 64
 
@@ -76,6 +76,7 @@ DESCRIPTOR_BYTES = 16384
 MAILBOX_BYTES = 4096
 ACK_MESSAGE_BYTES = 256
 SOLES = 2  # left, right
+MAX_STRAPS = 2  # gantry harness straps, one per attachment point
 
 # Header state.
 STATE_CREATING, STATE_READY, STATE_ENDED = 0, 1, 2
@@ -276,6 +277,8 @@ TRUTH = _region(
     ("gantry_harness_m", "<f8", (3,)),
     ("gantry_position_m", "<f8", (3,)),
     ("gantry_command_m", "<f8", (3,)),
+    ("gantry_strap_top_m", "<f8", (MAX_STRAPS, 3)),
+    ("gantry_strap_bottom_m", "<f8", (MAX_STRAPS, 3)),
 )
 
 REGIONS = (

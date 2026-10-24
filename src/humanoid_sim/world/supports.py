@@ -113,10 +113,12 @@ class Gantry:
         self.program = torch.zeros(e, k, device=dev)
         self.tension_n = torch.zeros(e, device=dev)  # applied on the last step, total over the straps
         self.distance_m = torch.zeros(e, device=dev)  # cable: rope point to its top, mean over the straps
-        # On the last step: the hook and the harness point (the straps' points' mean) in the world; NaN without a
-        # cable.
+        # On the last step: the hook and the harness point (the straps' points' mean) in the world, and each
+        # strap's top (its bar end) and bottom (its point) [E, P, 3]; NaN without a cable or for an unused point.
         self.top_w = torch.full((e, 3), float("nan"), device=dev)
         self.harness_w = torch.full((e, 3), float("nan"), device=dev)
+        self.strap_top_w = torch.full((e, max_points, 3), float("nan"), device=dev)
+        self.strap_bottom_w = torch.full((e, max_points, 3), float("nan"), device=dev)
         self.trolley = None  # a crane to hang hoist ropes from (mount)
         self.active = False  # host-side; False only when no env has a rope, so apply() can skip the work
 
@@ -346,6 +348,8 @@ class Gantry:
         self.distance_m.index_fill_(0, env_ids, 0.0)
         self.top_w[env_ids] = float("nan")
         self.harness_w[env_ids] = float("nan")
+        self.strap_top_w[env_ids] = float("nan")
+        self.strap_bottom_w[env_ids] = float("nan")
         if len(env_ids) == self.num_envs:
             self.active = False
 
@@ -401,6 +405,9 @@ class Gantry:
         self.distance_m = torch.where(roped, (dist * used).sum(1) / n[:, 0], 0.0)
         self.top_w = torch.where(roped[:, None], top, float("nan"))
         self.harness_w = torch.where(roped[:, None], (pts_w * used[..., None]).sum(1) / n, float("nan"))
+        strap = (roped[:, None] & used)[..., None]
+        self.strap_top_w = torch.where(strap, top[:, None] + self.top_offset_w, float("nan"))
+        self.strap_bottom_w = torch.where(strap, pts_w, float("nan"))
         composer = self.robot.instantaneous_wrench_composer
         for i in range(p):
             composer.add_forces_and_torques_index(forces=force[:, i:i + 1], torques=torch.zeros_like(force[:, i:i + 1]),
