@@ -3,7 +3,7 @@ while Newton/MJWarp runs the physics. The Isaac RTX renderer copies every body's
 before it renders (Isaac Lab ``isaaclab_physx/renderers/fabric.py``), so the sensors see the robot where Newton put
 it. Needs the Isaac Sim image (``docker/Dockerfile.kit``); training and the kitless image never import this module.
 
-* :func:`start_kit` starts Kit headless with cameras enabled, before the simulation is built.
+* :func:`start_kit` starts Kit with cameras enabled, headless or with its window, before the simulation is built.
 * :func:`camera_entities` turns rig cameras' streams (``geometry.camera_spec``) into Isaac Lab cameras on the robot
   body each is mounted on (its rig frame, merged into that body), with the stream's lens: OpenCV's fisheye or
   pinhole model, which RTX renders natively (``omni:lensdistortion``).
@@ -39,8 +39,9 @@ HIDDEN_FROM_CAMERAS = "primvars:hideForCamera"
 SPLAT_PRIM = "/World/Splat"  # RTX: primary camera rays skip the prim; other rays still hit it
 
 
-def start_kit(device: str, *, physics_cfg=None) -> contextlib.ExitStack:
-    """Start Kit (headless, cameras on) for the rest of the process; returns the stack whose ``close`` ends it."""
+def start_kit(device: str, *, physics_cfg=None, window: bool = False) -> contextlib.ExitStack:
+    """Start Kit (cameras on; headless, or with its window on ``$DISPLAY``) for the rest of the process; returns the
+    stack whose ``close`` ends it."""
     import isaaclab.sim as sim_utils
     from isaaclab.app import launch_simulation
     from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
@@ -50,9 +51,11 @@ def start_kit(device: str, *, physics_cfg=None) -> contextlib.ExitStack:
     # Kit reads the process's command line as its own: a caller's arguments (pytest's, say) must not reach it.
     argv, sys.argv = sys.argv, sys.argv[:1]
     try:
+        # Isaac Lab opens Kit's window for its Kit visualizer, whatever ``headless`` says.
+        visualizer = {"visualizer": ["kit"]} if window else {}
         stack.enter_context(launch_simulation(sim_utils.SimulationCfg(device=device, physics=physics_cfg),
-                                              {"headless": True, "enable_cameras": True, "require_kit": True,
-                                               "device": device}))
+                                              {**visualizer, "headless": not window, "enable_cameras": True,
+                                               "require_kit": True, "device": device}))
     finally:
         sys.argv = argv
     return stack

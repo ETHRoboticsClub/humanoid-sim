@@ -156,15 +156,15 @@ class RuntimeRender:
 
 
 def render_runtime(segment: str | Path, cfg, *, seconds: float | None = None, wait_s: float = 60.0,
-                   summary: str | None = None) -> dict:
+                   summary: str | None = None, window: bool = False) -> dict:
     """Render ``segment``'s robot (waiting up to ``wait_s`` for it) until its host is gone or for ``seconds``,
-    following a ``serve --persist`` host's next session. The summary is printed (and written to ``summary``) before
-    Kit closes, which may end the process."""
+    following a ``serve --persist`` host's next session; with ``window`` Kit shows its viewport on ``$DISPLAY``. The
+    summary is printed (and written to ``summary``) before Kit closes, which may end the process."""
     import json
 
     from humanoid_sim.sensors.rtx import start_kit
 
-    kit = start_kit(cfg.device)
+    kit = start_kit(cfg.device, window=window)
     render = RuntimeRender(segment, cfg, wait_s=wait_s)
     start = time.monotonic()
     end = None if seconds is None else start + seconds

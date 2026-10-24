@@ -441,7 +441,8 @@ def cmd_render_runtime(args) -> int:
                      scan_mesh=args.scan_mesh, cameras=not args.no_cameras, lidar=not args.no_lidar,
                      feeds=args.feeds, lidar_domain=args.lidar_domain, rrd=args.rrd, images=args.images,
                      device=args.device, assets=args.assets)
-    render_runtime(args.segment, cfg, seconds=args.seconds, wait_s=args.wait, summary=args.summary)
+    render_runtime(args.segment, cfg, seconds=args.seconds, wait_s=args.wait, summary=args.summary,
+                   window=args.window)
     return 0
 
 
@@ -547,6 +548,8 @@ def main(argv: list[str] | None = None) -> int:
     rr_.add_argument("--device", default="cuda:0")
     rr_.add_argument("--seconds", type=float, default=None, help="stop after this long (default: until the server goes)")
     rr_.add_argument("--wait", type=float, default=60.0, help="seconds to wait for the segment to appear")
+    rr_.add_argument("--window", action="store_true",
+                     help="show Kit's window and viewport on $DISPLAY (e.g. a VNC display) instead of headless")
     rr_.set_defaults(func=cmd_render_runtime)
 
     be = sub.add_parser("bench")
