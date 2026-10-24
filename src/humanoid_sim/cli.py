@@ -537,7 +537,8 @@ def main(argv: list[str] | None = None) -> int:
     rr_.add_argument("--splat", default=None, help="the room's Gaussian splat as USD (`splat-usd`), for the cameras")
     rr_.add_argument("--splat-intensity", type=float, default=1.0, help="scale the splat's emission")
     rr_.add_argument("--scan-mesh", default=None,
-                     help="the room's scan (OBJ) for the lidar (default: the host's, when readable here)")
+                     help="the room's scan (OBJ) for the lidar (default: the host's, when readable here); added only "
+                          "with a lidar, so without --splat --no-lidar changes the cameras' depth")
     rr_.add_argument("--lights", default=None,
                      help="the room's ceiling lights (JSON, in the scan's frame; placed with the host's spawn)")
     rr_.add_argument("--no-cameras", action="store_true")

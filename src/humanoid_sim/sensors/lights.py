@@ -59,6 +59,13 @@ class CeilingLights:
         return [(f.position_m[0] - spawn_m[0], f.position_m[1] - spawn_m[1], f.position_m[2]) for f in self.fixtures]
 
 
+def dome_nits(session_nits: float, lights: CeilingLights | None) -> float | None:
+    """The dome light a session renders with (nits): the lights file's ``dome_intensity`` when it gives one, else the
+    session's; None for no dome."""
+    nits = session_nits if lights is None or lights.dome_intensity is None else lights.dome_intensity
+    return nits or None
+
+
 def _fixture(f: dict, where: str) -> Fixture:
     unknown = set(f) - {"position_m", "size_m", "radius_m", "intensity", "color"}
     if unknown:

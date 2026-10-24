@@ -1,10 +1,76 @@
 """Analytic answers the RTX sensor tests compare against: where a ray first meets a room of boxes and its floor, and
-where a point lands in a camera image. Plain numpy, written from the geometry, sharing nothing with the renderer or
-with ``sensors/rig.py`` beyond the lens parameters it is handed."""
+where a point lands in a camera image; and the G1 rig and test room those tests share. Plain numpy, written from the
+geometry and the datasheets; the sensors' mounts are read from the G1's URDF in humanoid-urdf (found as the
+simulation finds it, ``model/description.py``) and parsed here, sharing nothing with the renderer or with
+``sensors/geometry.py``'s mounts."""
 
 from __future__ import annotations
 
+import math
+import xml.etree.ElementTree as ET
+
 import numpy as np
+
+G1 = "g1_29dof_with_hand_rev_1_0"
+CAMERAS = "g1-cameras"  # sensors/rigs.py EXTRAS
+SETTLE_S = 1.0  # the welded robot's arms and waist settle on their hold within this; images and sweeps after it
+
+# The URDF joints that fix the sensors on torso_link.
+D435_JOINT, MID360_JOINT, ZED_JOINT = "d435_joint", "mid360_joint", "camera0_joint"
+# D435i, every stream as Controls' realsense adapter opens it: 640 x 480, the principal point at the image's centre.
+D435_WIDTH_PX, D435_HEIGHT_PX = 640, 480
+D435_CX_PX, D435_CY_PX = D435_WIDTH_PX / 2, D435_HEIGHT_PX / 2
+# D435i depth, D400 datasheet: 87 x 58 deg, depth reported out to 10 m.
+D435_DEPTH_F = (D435_CX_PX / math.tan(math.radians(87.0 / 2)), D435_CY_PX / math.tan(math.radians(58.0 / 2)))
+D435_DEPTH_MAX_M = 10.0
+
+# The test room: walls 0.2 m thick and 3 m tall around the robot (centre, half extents in m).
+WALLS = [((3.1, 0.0, 1.5), (0.1, 2.7, 1.5)), ((-3.1, 0.0, 1.5), (0.1, 2.7, 1.5)),
+         ((0.0, 2.6, 1.5), (3.2, 0.1, 1.5)), ((0.0, -2.6, 1.5), (3.2, 0.1, 1.5))]
+
+# Depth and range: the renderer's precision.
+DEPTH_TOL_M = 0.01
+RANGE_TOL_M = 0.01
+# A depth or range this much short of the analytic one met something nearer than the room (the robot's own body):
+# five times the tolerance, so a renderer error is never mistaken for it.
+NEARER_M = 0.05
+SELF_HIT_M = 1.0  # rays that meet the robot's own body first: shorter than this, the room is farther
+
+OPTICAL = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])  # optical axes in a device frame
+
+
+def rpy(r, p, y):
+    cr, sr, cp, sp, cy, sy = math.cos(r), math.sin(r), math.cos(p), math.sin(p), math.cos(y), math.sin(y)
+    return np.array([[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+                     [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+                     [-sp, cp * sr, cp * cr]])
+
+
+def quat_matrix_xyzw(q):
+    x, y, z, w = q
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def torso_mount(joint: str) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """The fixed ``joint``'s origin in the G1's URDF: position (m) and rpy (rad) in torso_link, its parent."""
+    from humanoid_sim.model.description import Description
+
+    urdf = Description.load(G1).urdf_path
+    found = [j for j in ET.parse(urdf).getroot().findall("joint") if j.get("name") == joint]
+    assert len(found) == 1, f"{urdf.name}: {len(found)} joints named {joint}"
+    j = found[0]
+    assert (j.get("type"), j.find("parent").get("link")) == ("fixed", "torso_link"), f"{joint} is not fixed on the torso"
+    origin = j.find("origin")
+    xyz, rpy_ = (tuple(float(v) for v in origin.get(k, "0 0 0").split()) for k in ("xyz", "rpy"))
+    return xyz, rpy_
+
+
+def device_pose(torso, mount):
+    """World pose (R, t) of a device frame on the torso."""
+    (R_t, t_t), (t_m, rpy_m) = torso, mount
+    return R_t @ rpy(*rpy_m), R_t @ np.asarray(t_m) + t_t
 
 
 def ray_box_distance(origin: np.ndarray, dirs: np.ndarray, center: np.ndarray, half: np.ndarray,
@@ -34,6 +100,14 @@ def ray_floor_distance(origin: np.ndarray, dirs: np.ndarray, floor_z: float = 0.
     with np.errstate(divide="ignore"):
         t = (floor_z - origin[2]) / dirs[:, 2]
     return np.where((dirs[:, 2] < 0) & (t > 0), t, np.inf)
+
+
+def d435_depth_rays() -> np.ndarray:
+    """``[H * W, 3]``: the ray through each D435i depth pixel's centre in its optical frame, row by row, scaled to
+    ``z = 1`` (a pixel's depth is the distance along its ray divided by the ray's norm)."""
+    fx, fy = D435_DEPTH_F
+    v, u = np.mgrid[0:D435_HEIGHT_PX, 0:D435_WIDTH_PX]
+    return np.stack([(u.ravel() - D435_CX_PX) / fx, (v.ravel() - D435_CY_PX) / fy, np.ones(u.size)], axis=1)
 
 
 def pinhole_pixel(fx: float, fy: float, cx: float, cy: float, p_optical: np.ndarray) -> np.ndarray:
@@ -97,3 +171,15 @@ def mask_centroid(mask: np.ndarray) -> tuple[float, float, float]:
     vs, us = np.mgrid[0:w.shape[0], 0:w.shape[1]]
     n = w.sum()
     return float((w * us).sum() / n), float((w * vs).sum() / n), float(n)
+
+
+def write_box_obj(path, center, half):
+    """A closed box as an OBJ of outward-wound triangles, every corner with a texture coordinate (``read_obj``)."""
+    signs = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], dtype=float)
+    v = np.asarray(center) + signs * np.asarray(half)
+    # Corner k has signs (x, y, z) = bits (k >> 2, k >> 1, k): each face's quad, wound outward.
+    quads = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
+    lines = [f"v {x} {y} {z}" for x, y, z in v] + ["vt 0 0"]
+    for a, b, c, d in quads:
+        lines += [f"f {a + 1}/1 {b + 1}/1 {c + 1}/1", f"f {a + 1}/1 {c + 1}/1 {d + 1}/1"]
+    path.write_text("\n".join(lines) + "\n")

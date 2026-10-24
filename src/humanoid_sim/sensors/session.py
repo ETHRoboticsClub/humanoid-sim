@@ -22,6 +22,7 @@ the plant is now (``clock_ns``) so stamps map onto the realtime clock (``runtime
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -31,7 +32,10 @@ import numpy as np
 import torch
 
 from humanoid_sim.sensors.models import RTX_KINDS
+from humanoid_sim.sensors.room_rays import RoomRays, room_rays
 from humanoid_sim.sensors.rtx import DOME_INTENSITY
+
+LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -67,7 +71,7 @@ class SensorSession:
         from humanoid_sim.model.poses import STANDING_CLEARANCE_M, initial_pose
         from humanoid_sim.sensors import rigs, rtx
         from humanoid_sim.sensors.geometry import Mount, camera_spec
-        from humanoid_sim.sensors.lights import CeilingLights, ceiling_light_prims
+        from humanoid_sim.sensors.lights import CeilingLights, ceiling_light_prims, dome_nits
         from humanoid_sim.sim import SimCore
         from humanoid_sim.world.boxes import StaticBoxes
 
@@ -87,9 +91,9 @@ class SensorSession:
         entities = rtx.camera_entities([(spec, self.mounts[s.name]) for spec, s in zip(self.camera_specs, cameras,
                                                                                      strict=True)], bodies)
         ceiling = CeilingLights.load(cfg.lights) if cfg.lights else None
-        dome = cfg.light if ceiling is None or ceiling.dome_intensity is None else ceiling.dome_intensity
-        if dome:
-            entities["dome_light"] = rtx.light_entity(dome)
+        self.dome_nits = dome_nits(cfg.light, ceiling)
+        if self.dome_nits:
+            entities["dome_light"] = rtx.light_entity(self.dome_nits)
         if cfg.splat:
             entities["splat"] = rtx.splat_entity(cfg.splat)
         self.boxes = StaticBoxes.load(cfg.scene, cfg.spawn_m) if cfg.scene else None
@@ -97,18 +101,9 @@ class SensorSession:
         self.sim = SimCore(self.usd, device=cfg.device, robot=cfg.robot, fixed_base=cfg.fixed_base and cfg.physics,
                            base_height_m=height + STANDING_CLEARANCE_M, scene=self.boxes, entities=entities,
                            render_each_step=False)
-        if cfg.scan_mesh and lidars:
-            from humanoid_sim.sensors.lidar import add_scan_surfaces
-
-            add_scan_surfaces(cfg.scan_mesh, cfg.spawn_m)
-        if cfg.splat and self.boxes is not None:
-            # The splat shows the room as it looks; its boxes approximate it for the physics and the lidar.
-            import isaaclab.sim as sim_utils
-
-            from humanoid_sim.world.boxes import STATIC_BOXES_PRIM
-
-            rtx.hide_from_cameras(sim_utils.get_current_stage(), STATIC_BOXES_PRIM)
-            rtx.hide_from_cameras(sim_utils.get_current_stage(), GROUND_PRIM)  # the splat has the floor
+        self.scan_mesh = cfg.scan_mesh if cfg.scan_mesh and lidars else None  # the lidar's surfaces, when loaded
+        # SimCore built the physics model above: what follows changes what rays see, never what collides.
+        self.room_rays = self._apply_room_rays(bool(cameras), bool(lidars))
         if cfg.splat and cfg.splat_intensity != 1.0:
             import isaaclab.sim as sim_utils
 
@@ -160,6 +155,36 @@ class SensorSession:
         self.clock_ns: int | None = None  # where the plant is now, when something else steps it
         self.render_ns = min([int(round(1e9 / s.rate_hz)) for c in self.camera_specs for s in c.streams]
                              or [lidar.period_ns for lidar in self.lidars] or [0])
+
+    def _apply_room_rays(self, cameras: bool, lidar: bool) -> RoomRays | None:
+        """Add the scan mesh for the lidar and hide each of the room's surfaces from the rays that do not see it
+        (``sensors/room_rays.py``)."""
+        if self.boxes is None and self.scan_mesh is None:
+            return None
+        import isaaclab.sim as sim_utils
+
+        from humanoid_sim.sensors import rtx
+        from humanoid_sim.world.boxes import box_prim_path
+
+        splat = bool(self.cfg.splat)
+        boxes = self.boxes
+        rays = room_rays(None if boxes is None else boxes.wall, 0 if boxes is None else len(boxes), cameras=cameras,
+                         splat=splat, lidar=lidar, scan=self.scan_mesh is not None)
+        if self.scan_mesh and not rays.walls_known:
+            LOG.warning("%s has no wall flags: every box is kept as a wall, so the lidar sees furniture boxes in "
+                        "front of the scan mesh %s", self.cfg.scene, self.scan_mesh)
+        if self.scan_mesh:
+            from humanoid_sim.sensors.lidar import add_scan_surfaces
+
+            add_scan_surfaces(self.scan_mesh, self.cfg.spawn_m, hidden_from_cameras=rays.scan_hidden_from_cameras)
+        stage = sim_utils.get_current_stage()
+        for i in rays.hidden:
+            rtx.hide_from_all_rays(stage, box_prim_path(i))
+        for i in rays.lidar_only:
+            rtx.hide_from_cameras(stage, box_prim_path(i))
+        if splat and boxes is not None:
+            rtx.hide_from_cameras(stage, GROUND_PRIM)  # the splat has the floor
+        return rays
 
     @property
     def now_ns(self) -> int:
@@ -290,6 +315,11 @@ class SensorSession:
         return {"robot": self.cfg.robot, "sim_s": sim_s, "wall_s": wall_s, "real_time_factor": sim_s / wall_s,
                 "cameras": {c.camera_id: [s.name for s in c.streams] for c in self.camera_specs},
                 "lidars": [lidar.sensor.name for lidar in self.lidars], "unsimulated": self.unsimulated,
+                "scene": {"boxes": self.cfg.scene, "spawn_m": list(self.cfg.spawn_m), "scan_mesh": self.scan_mesh,
+                          "splat": self.cfg.splat, "splat_intensity": self.cfg.splat_intensity,
+                          "lights": self.cfg.lights, "dome_light_nits": self.dome_nits,
+                          "rays": None if self.room_rays is None else self.room_rays.describe()},
+                "rtx_post": self.render.post_settings(),
                 "counts": self.counts, "ms": {k: stats(v) for k, v in self.ms.items()},
                 "camera_frame_rate_hz": self.counts["camera_frames"] / max(streams, 1) / wall_s,
                 "lidar_sweep_rate_hz": self.counts["lidar_sweeps"] / max(len(self.lidars), 1) / wall_s,

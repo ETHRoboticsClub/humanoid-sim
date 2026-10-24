@@ -60,6 +60,7 @@ def test_boxes_are_placed_where_controls_places_them(tmp_path):
     assert len(boxes) == 3
     assert boxes.describe()["spawn_m"] == list(SPAWN) and len(boxes.describe()["sha256"]) == 64
     np.testing.assert_allclose(boxes.rgb[1], (0.8, 0.78, 0.74))  # a wall
+    np.testing.assert_array_equal(boxes.wall, [False, True, False])
 
 
 def test_one_yaw_per_box_and_no_optional_arrays(tmp_path):
@@ -69,6 +70,7 @@ def test_one_yaw_per_box_and_no_optional_arrays(tmp_path):
     boxes = StaticBoxes.load(path)
     np.testing.assert_allclose(boxes.corners(), _mujoco_corners(path, (0.0, 0.0)), atol=1e-9)
     assert boxes.rgb.shape == (2, 3)
+    assert boxes.wall is None  # the file does not say which boxes are walls
 
 
 def test_clearance_of_the_spawn_point(tmp_path):
@@ -84,7 +86,8 @@ def test_clearance_of_the_spawn_point(tmp_path):
 def test_files_that_are_not_static_boxes_are_refused(tmp_path):
     good = dict(center=np.zeros((1, 3)), half=np.ones((1, 3)), yaw=0.0)
     for name, change in (("no_yaw", {"yaw": None}), ("flat", {"half": np.array([[1.0, 1.0, 0.0]])}),
-                         ("shape", {"half": np.ones((2, 3))}), ("nan", {"center": np.full((1, 3), np.nan)})):
+                         ("shape", {"half": np.ones((2, 3))}), ("nan", {"center": np.full((1, 3), np.nan)}),
+                         ("wall_not_bool", {"wall": np.array([1])}), ("wall_shape", {"wall": np.array([True, False])})):
         arrays = {k: v for k, v in (good | change).items() if v is not None}
         np.savez(tmp_path / f"{name}.npz", **arrays)
         with pytest.raises(ValueError):

@@ -114,7 +114,7 @@ An `.npz` in metres and radians, z up, with the floor at z = 0:
 | `half` | `[N, 3]` | Half extents along the box's own axes |
 | `yaw` | scalar or `[N]` | Rotation of each box about the vertical through its centre: one value for every box, or one per box |
 | `rgb` | `[N, 3]`, optional | Colour in [0, 1], for drawing |
-| `wall` | `[N]` bool, optional | Which boxes are walls; they are drawn light grey |
+| `wall` | `[N]` bool, optional | Which boxes are walls; they are drawn light grey, and the RTX lidar keeps seeing them over a scan mesh ([rtx-sensors.md](rtx-sensors.md#what-each-sensor-sees-of-a-scanned-room)) |
 
 Other arrays are ignored, such as Controls' `floor_corners`, the outline of its scan's floor. `StaticBoxes.load(path, spawn_m)` reads a file and refuses a git-lfs pointer, a box without a positive half extent in every axis, mismatched shapes or non-finite values.
 
