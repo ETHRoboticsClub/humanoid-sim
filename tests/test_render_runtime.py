@@ -18,7 +18,8 @@ def test_plant_time_now_follows_the_hosts_mapping():
 
 def test_the_hosts_scene_is_taken_only_when_readable_here(tmp_path: Path):
     assert host_scene(None) == (None, (0.0, 0.0), None)
-    assert host_scene({"file": str(tmp_path / "missing.npz"), "spawn_m": [1.0, 2.0]})[0] is None
+    # The boxes are not here; the spawn still places what the caller brings (lights, a scan).
+    assert host_scene({"file": str(tmp_path / "missing.npz"), "spawn_m": [1.0, 2.0]}) == (None, (1.0, 2.0), None)
     boxes, mesh = tmp_path / "boxes.npz", tmp_path / "scan.obj"
     boxes.write_bytes(b"x")
     record = {"file": str(boxes), "spawn_m": [-4.42, 3.48], "scan": {"mesh": {"file": str(mesh)}}}

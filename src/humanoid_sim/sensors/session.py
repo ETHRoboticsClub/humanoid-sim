@@ -51,6 +51,7 @@ class SessionCfg:
     images: str | None = None
     lidar_noise: bool = True  # the lidar model's range and angular errors; off for exact geometry
     light: float = DOME_INTENSITY  # the dome light (nits); 0 for none
+    lights: str | None = None  # ceiling lights (JSON, sensors/lights.py), placed with spawn_m; may set the dome
     keep_sweeps: int = 0  # the last sweeps to keep in ``SensorSession.sweeps``
     device: str = "cuda:0"
     assets: str = "outputs/assets"
@@ -66,6 +67,7 @@ class SensorSession:
         from humanoid_sim.model.poses import STANDING_CLEARANCE_M, initial_pose
         from humanoid_sim.sensors import rigs, rtx
         from humanoid_sim.sensors.geometry import Mount, camera_spec
+        from humanoid_sim.sensors.lights import CeilingLights, ceiling_light_prims
         from humanoid_sim.sim import SimCore
         from humanoid_sim.world.boxes import StaticBoxes
 
@@ -84,8 +86,10 @@ class SensorSession:
         bodies = rtx.body_paths(self.usd, {m.link for m in self.mounts.values()})
         entities = rtx.camera_entities([(spec, self.mounts[s.name]) for spec, s in zip(self.camera_specs, cameras,
                                                                                      strict=True)], bodies)
-        if cfg.light:
-            entities["dome_light"] = rtx.light_entity(cfg.light)
+        ceiling = CeilingLights.load(cfg.lights) if cfg.lights else None
+        dome = cfg.light if ceiling is None or ceiling.dome_intensity is None else ceiling.dome_intensity
+        if dome:
+            entities["dome_light"] = rtx.light_entity(dome)
         if cfg.splat:
             entities["splat"] = rtx.splat_entity(cfg.splat)
         self.boxes = StaticBoxes.load(cfg.scene, cfg.spawn_m) if cfg.scene else None
@@ -109,6 +113,10 @@ class SensorSession:
             import isaaclab.sim as sim_utils
 
             rtx.set_splat_intensity(sim_utils.get_current_stage(), cfg.splat_intensity)
+        if ceiling is not None:
+            import isaaclab.sim as sim_utils
+
+            ceiling_light_prims(sim_utils.get_current_stage(), ceiling, cfg.spawn_m)
         plant = self.sim.plant
         q = pose.to(device=plant.cfg.device, dtype=self.sim.joint_state()[0].dtype).unsqueeze(0)
         self.sim.write_joint_state(q, torch.zeros_like(q))

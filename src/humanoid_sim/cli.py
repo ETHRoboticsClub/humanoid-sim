@@ -438,8 +438,8 @@ def cmd_render_runtime(args) -> int:
     from humanoid_sim.sensors.session import SessionCfg
 
     cfg = SessionCfg(robot=args.robot, sensors=args.sensors, splat=args.splat, splat_intensity=args.splat_intensity,
-                     scan_mesh=args.scan_mesh, cameras=not args.no_cameras, lidar=not args.no_lidar,
-                     feeds=args.feeds, lidar_domain=args.lidar_domain, rrd=args.rrd, images=args.images,
+                     scan_mesh=args.scan_mesh, lights=args.lights, cameras=not args.no_cameras,
+                     lidar=not args.no_lidar, feeds=args.feeds, lidar_domain=args.lidar_domain, rrd=args.rrd, images=args.images,
                      device=args.device, assets=args.assets)
     render_runtime(args.segment, cfg, seconds=args.seconds, wait_s=args.wait, summary=args.summary,
                    window=args.window)
@@ -538,6 +538,8 @@ def main(argv: list[str] | None = None) -> int:
     rr_.add_argument("--splat-intensity", type=float, default=1.0, help="scale the splat's emission")
     rr_.add_argument("--scan-mesh", default=None,
                      help="the room's scan (OBJ) for the lidar (default: the host's, when readable here)")
+    rr_.add_argument("--lights", default=None,
+                     help="the room's ceiling lights (JSON, in the scan's frame; placed with the host's spawn)")
     rr_.add_argument("--no-cameras", action="store_true")
     rr_.add_argument("--no-lidar", action="store_true")
     rr_.add_argument("--feeds", default=None, help="camera feed root (ethrc-camera-sim-feed/v1)")

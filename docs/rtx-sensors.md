@@ -65,9 +65,21 @@ rsync -avz hsim-rtx:sky_workdir/outputs/rtx/ outputs/rtx/
 
 The robot is welded at the spawn point in its home pose, feet just above the floor (a G1 cannot stand on a fixed-gain hold). In a scanned room, the room's boxes collide and the lidar sees them and the scan's mesh (`--scan-mesh`); with its splat (`--splat`, made by `humanoid-sim splat-usd`, [world.md](world.md)) the cameras see the splat, the boxes, the mesh and the ground being hidden from camera rays. RTX shows the splat's baked colours darker than the scan's photographs; `--splat-intensity` scales its emission.
 
+### Lights
+
+The stage is lit by a white dome light (600 nits): the robot and the boxes are lit evenly and cast no shadows; the splat is emissive and ignores every light. A room's owner can add ceiling lights with `render-runtime --lights PATH` (`SessionCfg.lights`, `src/humanoid_sim/sensors/lights.py`): a JSON file of fixtures in the scan's frame, the frame the room's boxes file uses, placed in the world frame by the host's spawn point as the boxes and scan are. Each fixture is an area light facing straight down, a rectangle (`size_m`, USD `RectLight`) or a disk (`radius_m`, `DiskLight`), with its luminance in nits and an optional linear RGB colour; `dome_intensity` replaces the dome's, so the ceiling lights dominate and the dome is left as ambient fill:
+
+```json
+{"fixtures": [{"position_m": [0.0, 2.0, 7.5], "size_m": [0.6, 1.2], "intensity": 3000, "color": [1, 1, 1]},
+              {"position_m": [3.5, 2.0, 7.5], "radius_m": 0.4, "intensity": 3000}],
+ "dome_intensity": 100}
+```
+
+A Lambertian panel of area `A` and luminance `L` puts out `pi L A`; a grid with one panel per `s` by `s` of floor lights it at about `pi L A / s^2` (lux, with nits for `L`). Put fixtures below the room's boxes' tops: the boxes are hidden from cameras but still cast shadows.
+
 ## On a running runtime: `render-runtime`
 
-`humanoid-sim render-runtime <segment>` renders a running `serve`'s robot with the same sensors and outputs (`src/humanoid_sim/runtime/render.py`). It never steps physics and never writes to the segment: each render it takes the latest truth (base pose and joint positions), poses the robot there by forward kinematics (`SensorSession.pose`) and renders at that plant time (`SensorSession.render_at`). It renders as fast as Kit allows, at most once per camera period (the lidar's sweep period without cameras), and a render that falls behind skips to the latest truth; the host keeps real time on its own. Stamps map plant time onto the realtime clock through the host's own mapping (the feedback region's `written_mono_ns` at `sim_time_ns`). The scene is the host's: its boxes and scan from the descriptor when the files are readable here with the same digests, plus `--splat` for the cameras. It follows a `--persist` host's next session.
+`humanoid-sim render-runtime <segment>` renders a running `serve`'s robot with the same sensors and outputs (`src/humanoid_sim/runtime/render.py`). It never steps physics and never writes to the segment: each render it takes the latest truth (base pose and joint positions), poses the robot there by forward kinematics (`SensorSession.pose`) and renders at that plant time (`SensorSession.render_at`). It renders as fast as Kit allows, at most once per camera period (the lidar's sweep period without cameras), and a render that falls behind skips to the latest truth; the host keeps real time on its own. Stamps map plant time onto the realtime clock through the host's own mapping (the feedback region's `written_mono_ns` at `sim_time_ns`). The scene is the host's: its boxes and scan from the descriptor when the files are readable here with the same digests, plus `--splat` for the cameras and `--lights` ([Lights](#lights)). It follows a `--persist` host's next session.
 
 ```bash
 humanoid-sim serve --segment /run/hsim/plant --truth-every 1 --scene $H/hangar_proxy.npz --spawn -4.42 3.48 \

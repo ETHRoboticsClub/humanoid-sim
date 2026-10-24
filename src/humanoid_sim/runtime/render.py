@@ -35,11 +35,14 @@ def plant_now_ns(feedback, mono_now_ns: int) -> int:
 
 
 def host_scene(record: dict | None) -> tuple[str | None, tuple[float, float], str | None]:
-    """The host's boxes file, spawn point and scan mesh, as far as they are readable here."""
-    if not record or not Path(record["file"]).is_file():
+    """The host's spawn point, and its boxes file and scan mesh as far as they are readable here."""
+    if not record:
         return None, (0.0, 0.0), None
+    spawn = tuple(record["spawn_m"])
+    if not Path(record["file"]).is_file():
+        return None, spawn, None
     mesh = ((record.get("scan") or {}).get("mesh") or {}).get("file")
-    return record["file"], tuple(record["spawn_m"]), mesh if mesh and Path(mesh).is_file() else None
+    return record["file"], spawn, mesh if mesh and Path(mesh).is_file() else None
 
 
 class RuntimeRender:
