@@ -141,7 +141,7 @@ src/humanoid_sim/
   runtime/         front end: real-time host, the segment ABI, view-runtime
   replay/, sysid/  front end: captures, replays, fits
   signals/         Rerun logging
-third_party/       humanoid-urdf (robot facts) and ankle_kinematics, at the commits Controls pins
+third_party/       humanoid-urdf (robot facts), at the commit Controls pins
 profiles/          modeling choices that are not robot facts
 ```
 

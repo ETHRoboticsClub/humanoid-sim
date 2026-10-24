@@ -1,11 +1,5 @@
-"""Golden tests: the torch ankle transmission against both numpy references.
-
-* ``ankle_kinematics`` @ Controls' pin: ``joint_to_motor`` and ``joint_to_motor_jacobian`` (kinematic frame,
-  geometry in ``geometry.py``).
-* humanoid-urdf ``ankle_model``: the description geometry and frame signs this package reads.
-"""
-
-import sys
+"""Golden tests: the torch ankle transmission against humanoid-urdf ``ankle_model``, the description geometry
+and frame signs this package reads."""
 
 import numpy as np
 import pytest
@@ -13,9 +7,6 @@ import torch
 
 from humanoid_sim.model.description import Description
 from humanoid_sim.transmissions.ankle import AnkleTransmission
-
-sys.path.insert(0, str(Description.default_root().parent / "ankle_kinematics"))
-ak = pytest.importorskip("ankle_kinematics")
 
 RNG = np.random.default_rng(0)
 # Offsets from the linkage neutral, |pitch|, |roll| <= 0.35 around the standing pose (0.33 rad of pitch from it).
@@ -27,33 +18,10 @@ def desc():
     return Description.load("ethrc_v1")
 
 
-def _ak_leg(side):
-    return ak.LEFT_LEG if side == "l" else ak.RIGHT_LEG
-
-
 @pytest.mark.parametrize("side", ["l", "r"])
-def test_cranks_match_ankle_kinematics(desc, side):
-    tr = desc.ankle_transmission(side, dtype=torch.float64)
-    q = torch.as_tensor(OFFSETS + desc.ankle_neutral(side))
-    got = tr.cranks(q).numpy()
-    sign = np.asarray(desc.ankle_kinematic_sign(side))
-    for (p, r), g in zip(OFFSETS, got, strict=True):
-        ref = ak.joint_to_motor(_ak_leg(side), p * sign[0], r * sign[1])
-        # ankle_kinematics' theta is absolute; ours is relative to the neutral solution (|theta0| ~ 1e-5).
-        assert np.allclose(g, ref, atol=1e-4), (side, p, r, g, ref)
-
-
-@pytest.mark.parametrize("side", ["l", "r"])
-def test_jacobian_matches_reference_and_finite_difference(desc, side):
+def test_jacobian_matches_finite_difference(desc, side):
     tr = desc.ankle_transmission(side, dtype=torch.float64)
     q = torch.as_tensor(OFFSETS[:32] + desc.ankle_neutral(side))
-    jac = tr.jacobian(q).numpy()
-    sign = np.asarray(desc.ankle_kinematic_sign(side))
-    for qi, ji in zip(OFFSETS[:32], jac, strict=True):
-        qk = qi * sign
-        motors = ak.joint_to_motor(_ak_leg(side), *qk)
-        ref = ak.mapping.joint_to_motor_jacobian(_ak_leg(side), *qk, motors) * sign
-        assert np.allclose(ji, ref, rtol=1e-6, atol=1e-8)
     eps = 1e-6
     fd = torch.stack([(tr.cranks(q + eps * e) - tr.cranks(q - eps * e)) / (2 * eps)
                       for e in torch.eye(2, dtype=torch.float64)], dim=-1)

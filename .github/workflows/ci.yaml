@@ -38,7 +38,7 @@ jobs:
           docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci \
             pytest -m physics
   controls-pins:
-    # humanoid-urdf and ankle_kinematics must be at the commits Controls pins on CONTROLS_REF (a repository
+    # humanoid-urdf must be at the commit Controls pins on CONTROLS_REF (a repository
     # variable; default master).
     runs-on: ubuntu-24.04
     steps:
@@ -60,5 +60,4 @@ jobs:
             fi
           }
           check third_party/humanoid-urdf ros2_ws/src/description/humanoid-urdf
-          check third_party/ankle_kinematics ros2_ws/src/drivers/ankle_kinematics
           exit $fail

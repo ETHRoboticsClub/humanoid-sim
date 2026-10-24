@@ -39,14 +39,13 @@ If you cloned without `--recurse-submodules`, or pulled a change that moves a su
 git submodule update --init --recursive
 ```
 
-The two submodules live in `third_party/`:
+The submodule lives in `third_party/`:
 
 | Submodule | Contents | Used for |
 |---|---|---|
 | `humanoid-urdf` | The robot description: URDF, meshes and `actuators.yaml` (drives, signs, gains, envelopes, ankle geometry) | Every model build and the drive inventory |
-| `ankle_kinematics` | Controls' reference kinematics for the ankle cranks | Golden tests of the ankle transmission |
 
-Both must stay at the commits Controls pins. CI checks this ([testing-and-gpu.md](testing-and-gpu.md#controls-pins)).
+It must stay at the commit Controls pins. CI checks this ([testing-and-gpu.md](testing-and-gpu.md#controls-pins)).
 
 Replays, fits and the `data` tests read excitation captures recorded on the robot: directories named `exc-*`. They are not part of the repository. Put them in `datasets/humanoid-v1/` next to the checkout, which is where the tests look by default and where the SkyPilot tasks upload them from:
 

@@ -259,12 +259,11 @@ The geometry comes from `ankle_model` in actuators.yaml: measured points and rod
 
 The ankle drives' rotor inertia reaches the hinges as reflected inertia. actuators.yaml provides it as `armature_joint`, the diagonal of `Jᵀ diag(a, a) J` at the neutral with `a` = 0.0056 kg·m² per HEJ50, and the plant uses it as the ankle hinges' armature: 0.0104 kg·m² in pitch and 0.0126 kg·m² in roll. It is constant (taken at the neutral) and diagonal only.
 
-Golden tests in `tests/test_ankle_transmission.py` check the torch transmission on 256 random poses (pitch 0 to 0.7 rad, roll -0.35 to 0.35 rad) against both numpy references:
+Golden tests in `tests/test_ankle_transmission.py` check the torch transmission on 256 random poses (pitch 0 to 0.7 rad, roll -0.35 to 0.35 rad) against humanoid-urdf's numpy reference:
 
 | Test | Reference | Tolerance |
 |---|---|---|
-| `test_cranks_match_ankle_kinematics` | `ankle_kinematics.joint_to_motor` (`third_party/ankle_kinematics`) | 1e-4 rad (the reference's angle is absolute, about 1e-5 rad from the neutral) |
-| `test_jacobian_matches_reference_and_finite_difference` | `joint_to_motor_jacobian`, and central differences of `cranks` | rtol 1e-6; 1e-7 |
+| `test_jacobian_matches_finite_difference` | central differences of `cranks` | 1e-7 |
 | `test_cranks_match_humanoid_urdf_ankle_model` | humanoid-urdf `ankle_model` | 1e-12 rad |
 | `test_float32_batched_and_power_consistent` | power through the transmission | 1e-4 W |
 | `test_joints_from_cranks_inverts` | round trip through `cranks` | 1e-10 rad |

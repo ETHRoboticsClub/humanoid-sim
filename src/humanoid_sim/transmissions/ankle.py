@@ -5,7 +5,7 @@ drives move the foot through rods. This module maps between the hinge state and 
 
 * ``cranks(q)``: hinge angles → crank angles (analytic circle-sphere IK on the branch connected to the
   linkage neutral, as in humanoid-urdf ``ankle_model``);
-* ``jacobian(q)``: ``dθ/dq`` from the rod constraints (as in ``ankle_kinematics.joint_to_motor_jacobian``);
+* ``jacobian(q)``: ``dθ/dq`` from the rod constraints;
 * crank torque → hinge torque is ``Jᵀ τ``; hinge velocity → crank velocity is ``J q̇``.
 
 Geometry, axes, frame signs and the linkage neutral come from the description (``actuators.yaml``
@@ -14,7 +14,7 @@ neutral, where both cranks read zero (the drives' calibration zero), sits at ``s
 linkage is solved on the offset from it, which ``semantic_to_kinematic_sign`` maps to the linkage frame.
 Crank angles are relative to the linkage neutral.
 
-It is golden-tested against ``ankle_kinematics`` (numpy reference) and humanoid-urdf ``ankle_model``.
+It is golden-tested against humanoid-urdf ``ankle_model``.
 """
 
 from __future__ import annotations

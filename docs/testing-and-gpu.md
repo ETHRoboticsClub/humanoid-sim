@@ -8,7 +8,7 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 
 | File | What it checks | Markers |
 |---|---|---|
-| `test_ankle_transmission.py` | The torch ankle transmission (cranks, Jacobian, inverse) against `ankle_kinematics` at Controls' pin and against humanoid-urdf's ankle model | |
+| `test_ankle_transmission.py` | The torch ankle transmission (cranks, Jacobian, inverse) against humanoid-urdf's ankle model | |
 | `test_arrival.py` | The arrival queue: a demand acts from its arrival time, time-weighted inside a step, in order, with overflow counted | |
 | `test_base_motion.py` | Base motion from an IMU trace: Euler angles and rates, burst sample times | |
 | `test_delay.py` | Demand-delay scan: drive regions, and a replay with each env's demands shifted by its own delay | 1 test `physics` and `data` |
@@ -98,18 +98,17 @@ uv run ruff check src tests spikes examples docs
 |---|---|---|
 | `cpu-contracts` | `ubuntu-24.04` (x86) and `ubuntu-24.04-arm`, each its own job | Check out with submodules, install uv 0.13.1, `uv sync --python 3.12 --extra dev --extra newton`, `uv run ruff check src tests spikes examples docs`, `uv run pytest -m "not physics and not data"` |
 | `isaaclab-image` | `ubuntu-24.04` (x86) | Check out with submodules, `docker build -f docker/Dockerfile -t humanoid-sim:ci .` (amd64), build the V1's two assets and both G1s', run `pytest -m physics` in the image on Warp's CPU device |
-| `controls-pins` | `ubuntu-24.04` | Compare the submodule commits with the ones Controls pins |
+| `controls-pins` | `ubuntu-24.04` | Compare the humanoid-urdf commit with the one Controls pins |
 
 No CI runner has a GPU or the captures. The `data` tests run wherever the captures are (natively, in the image or in the `e2e` task), and the CUDA tests only on a GPU node, through the `e2e` task.
 
 ### Controls pins
 
-humanoid-urdf and ankle_kinematics must be at the same commits as in Controls. The `controls-pins` job compares the commit each submodule points to here with the commit that Controls' repository (`ETHRoboticsClub/ETHRC-Humanoid-Controls`) pins for the same repository, and fails if they differ:
+humanoid-urdf must be at the same commit as in Controls. The `controls-pins` job compares the commit the submodule points to here with the commit that Controls' repository (`ETHRoboticsClub/ETHRC-Humanoid-Controls`) pins for it, and fails if they differ:
 
 | Submodule here | Path in Controls |
 |---|---|
 | `third_party/humanoid-urdf` | `ros2_ws/src/description/humanoid-urdf` |
-| `third_party/ankle_kinematics` | `ros2_ws/src/drivers/ankle_kinematics` |
 
 Two repository settings control the job:
 
@@ -126,12 +125,11 @@ gh variable set CONTROLS_REF --body master
 To compare the pins yourself:
 
 ```bash
-git ls-tree HEAD third_party/humanoid-urdf third_party/ankle_kinematics
+git ls-tree HEAD third_party/humanoid-urdf
 gh api "repos/ETHRoboticsClub/ETHRC-Humanoid-Controls/contents/ros2_ws/src/description/humanoid-urdf?ref=master" --jq .sha
-gh api "repos/ETHRoboticsClub/ETHRC-Humanoid-Controls/contents/ros2_ws/src/drivers/ankle_kinematics?ref=master" --jq .sha
 ```
 
-To move a submodule to Controls' pin, check out that commit inside it and commit the new pointer:
+To move the submodule to Controls' pin, check out that commit inside it and commit the new pointer:
 
 ```bash
 git -C third_party/humanoid-urdf fetch

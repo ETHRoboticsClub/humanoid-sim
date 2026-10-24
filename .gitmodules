@@ -1,6 +1,3 @@
 [submodule "third_party/humanoid-urdf"]
 	path = third_party/humanoid-urdf
 	url = git@github.com:ETHRoboticsClub/humanoid-urdf.git
-[submodule "third_party/ankle_kinematics"]
-	path = third_party/ankle_kinematics
-	url = git@github.com:ETHRoboticsClub/ankle_kinematics.git
