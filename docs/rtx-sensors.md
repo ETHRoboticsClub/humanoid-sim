@@ -58,16 +58,16 @@ sky exec hsim-rtx --env CMD="humanoid-sim --robot g1_29dof_with_hand_rev_1_0 bui
   humanoid-sim splat-usd $H/hangar_splat.ply outputs/rtx/hangar_splat.usdc --spawn -4.42 3.48 --half" sky/rtx.sky.yaml
 sky exec hsim-rtx --env CMD="python examples/rtx_sensors.py --sensors g1-cameras \
   --scene $H/hangar_proxy.npz --spawn -4.42 3.48 --scan-mesh $H/hangar_visual.obj \
-  --splat outputs/rtx/hangar_splat.usdc --splat-intensity 3 --seconds 4 \
+  --splat outputs/rtx/hangar_splat.usdc --seconds 4 \
   --rrd outputs/rtx/g1_hangar_sensors.rrd --images outputs/rtx/frames" sky/rtx.sky.yaml
 rsync -avz hsim-rtx:sky_workdir/outputs/rtx/ outputs/rtx/
 ```
 
-The robot is welded at the spawn point in its home pose, feet just above the floor (a G1 cannot stand on a fixed-gain hold). In a scanned room, the room's boxes collide and the lidar sees them and the scan's mesh (`--scan-mesh`); with its splat (`--splat`, made by `humanoid-sim splat-usd`, [world.md](world.md)) the cameras see the splat, the boxes, the mesh and the ground being hidden from camera rays. RTX shows the splat's baked colours darker than the scan's photographs; `--splat-intensity` scales its emission.
+The robot is welded at the spawn point in its home pose, feet just above the floor (a G1 cannot stand on a fixed-gain hold). In a scanned room, the room's boxes collide and the lidar sees them and the scan's mesh (`--scan-mesh`); with its splat (`--splat`, made by `humanoid-sim splat-usd`, [world.md](world.md)) the cameras see the splat, the boxes, the mesh and the ground being hidden from camera rays and casting no shadows: RTX dims the splat by the share of the stage's lights that geometry hides from it, whatever their intensity, so stand-ins that cast shadows would darken the room. `--splat-intensity` scales its emission.
 
 ### Lights
 
-The stage is lit by a white dome light (600 nits): the robot and the boxes are lit evenly and cast no shadows; the splat is emissive and ignores every light. A room's owner can add ceiling lights with `render-runtime --lights PATH` (`SessionCfg.lights`, `src/humanoid_sim/sensors/lights.py`): a JSON file of fixtures in the scan's frame, the frame the room's boxes file uses, placed in the world frame by the host's spawn point as the boxes and scan are. Each fixture is an area light facing straight down, a rectangle (`size_m`, USD `RectLight`) or a disk (`radius_m`, `DiskLight`), with its luminance in nits and an optional linear RGB colour; `dome_intensity` replaces the dome's, so the ceiling lights dominate and the dome is left as ambient fill:
+The stage is lit by a white dome light (600 nits): the robot and the boxes are lit evenly and cast no shadows; the splat is emissive, and a light never brightens it. A room's owner can add ceiling lights with `render-runtime --lights PATH` (`SessionCfg.lights`, `src/humanoid_sim/sensors/lights.py`): a JSON file of fixtures in the scan's frame, the frame the room's boxes file uses, placed in the world frame by the host's spawn point as the boxes and scan are. Each fixture is an area light facing straight down, a rectangle (`size_m`, USD `RectLight`) or a disk (`radius_m`, `DiskLight`), with its luminance in nits and an optional linear RGB colour; `dome_intensity` replaces the dome's, so the ceiling lights dominate and the dome is left as ambient fill:
 
 ```json
 {"fixtures": [{"position_m": [0.0, 2.0, 7.5], "size_m": [0.6, 1.2], "intensity": 3000, "color": [1, 1, 1]},
@@ -75,7 +75,7 @@ The stage is lit by a white dome light (600 nits): the robot and the boxes are l
  "dome_intensity": 100}
 ```
 
-A Lambertian panel of area `A` and luminance `L` puts out `pi L A`; a grid with one panel per `s` by `s` of floor lights it at about `pi L A / s^2` (lux, with nits for `L`). Put fixtures below the room's boxes' tops: the boxes are hidden from cameras but still cast shadows.
+A Lambertian panel of area `A` and luminance `L` puts out `pi L A`; a grid with one panel per `s` by `s` of floor lights it at about `pi L A / s^2` (lux, with nits for `L`).
 
 ## On a running runtime: `render-runtime`
 
@@ -84,7 +84,7 @@ A Lambertian panel of area `A` and luminance `L` puts out `pi L A`; a grid with 
 ```bash
 humanoid-sim serve --segment /run/hsim/plant --truth-every 1 --scene $H/hangar_proxy.npz --spawn -4.42 3.48 \
   --scan-mesh $H/hangar_visual.obj --scan-texture $H/hangar_visual.png --scan-floor-texture $H/hangar_floor.png &
-humanoid-sim render-runtime /run/hsim/plant --splat outputs/rtx/hangar_splat.usdc --splat-intensity 3 \
+humanoid-sim render-runtime /run/hsim/plant --splat outputs/rtx/hangar_splat.usdc \
   --feeds /run/ethrc-camera-feed --lidar-domain 7 --summary outputs/rtx/render.json
 ```
 

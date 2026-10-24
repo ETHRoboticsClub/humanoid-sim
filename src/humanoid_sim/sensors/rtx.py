@@ -36,6 +36,7 @@ DISABLE_COLOR_RENDER = "/rtx/sdg/force/disableColorRender"
 RTX_PIXEL_CENTRE_PX = 0.5
 LUMA_BT601 = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 HIDDEN_FROM_CAMERAS = "primvars:hideForCamera"
+CASTS_NO_SHADOWS = "primvars:doNotCastShadows"
 SPLAT_PRIM = "/World/Splat"  # RTX: primary camera rays skip the prim; other rays still hit it
 
 
@@ -145,14 +146,17 @@ def set_splat_intensity(stage, intensity: float, prim_path: str = SPLAT_PRIM) ->
 
 
 def hide_from_cameras(stage, prim_path: str) -> int:
-    """Hide every geometry prim under ``prim_path`` from camera rays (RTX's ``primvars:hideForCamera``), leaving it to
-    the physics and to other rays; returns how many."""
+    """Hide every geometry prim under ``prim_path`` from camera rays (RTX's ``primvars:hideForCamera``) and from
+    shadow rays (``primvars:doNotCastShadows``), leaving it to the physics and to the lidar; returns how many."""
     from pxr import Sdf, Usd, UsdGeom
 
     n = 0
     for prim in Usd.PrimRange(stage.GetPrimAtPath(prim_path)):
         if prim.IsA(UsdGeom.Gprim):
             prim.CreateAttribute(HIDDEN_FROM_CAMERAS, Sdf.ValueTypeNames.Bool).Set(True)
+            # RTX dims a splat by the share of the stage's lights it cannot see, whatever their intensity: hidden walls
+            # and the ground under the splat's floor would darken the room, more so with every light added.
+            prim.CreateAttribute(CASTS_NO_SHADOWS, Sdf.ValueTypeNames.Bool).Set(True)
             n += 1
     return n
 
