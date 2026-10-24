@@ -1,6 +1,6 @@
 """The G1's RTX sensors against geometry worked out independently: a room of boxes with targets, the robot welded at
 the origin, its rig's Mid-360 and the cameras the ``g1-cameras`` extra rig adds. Each camera's image of a target is
-the set of pixels whose rays, cast through the mount (the G1 URDF's numbers) and the
+the set of pixels whose rays, cast through the mount (read from the G1's URDF) and the
 lens (the ZED Mini's factory calibration, the D435i's datasheet fields of view), meet it; the D435i's depth is the
 analytic distance to the room; every lidar return lies at the range where its ray meets the room, fired at its
 pattern's time.
@@ -26,32 +26,49 @@ pytest.importorskip("isaacsim", reason="RTX sensors need the Isaac Sim image (do
 if shutil.which("nvidia-smi") is None:
     pytest.skip("RTX sensors need an NVIDIA GPU with RT cores", allow_module_level=True)
 
-from rtx_oracles import box_coverage, box_mask, mask_centroid, ray_box_distance, ray_floor_distance  # noqa: E402
+from rtx_oracles import (  # noqa: E402
+    CAMERAS,
+    D435_CX_PX,
+    D435_CY_PX,
+    D435_DEPTH_MAX_M,
+    D435_HEIGHT_PX,
+    D435_JOINT,
+    D435_WIDTH_PX,
+    DEPTH_TOL_M,
+    G1,
+    MID360_JOINT,
+    NEARER_M,
+    OPTICAL,
+    RANGE_TOL_M,
+    SELF_HIT_M,
+    SETTLE_S,
+    WALLS,
+    ZED_JOINT,
+    box_coverage,
+    box_mask,
+    d435_depth_rays,
+    device_pose,
+    mask_centroid,
+    quat_matrix_xyzw,
+    ray_box_distance,
+    ray_floor_distance,
+    torso_mount,
+)
 
 pytestmark = pytest.mark.rtx
 
-G1 = "g1_29dof_with_hand_rev_1_0"
-CAMERAS = "g1-cameras"  # sensors/rigs.py EXTRAS
-SETTLE_S = 1.0  # the welded robot's arms and waist settle on their hold within this; images and sweeps after it
 
-# Mounts in torso_link, as the G1 URDF places them: position (m) and URDF rpy (rad).
-ZED_MOUNT = ((0.1068, 0.0406, 0.457), (0.0, 0.0, 0.0))
-D435_MOUNT = ((0.0576235, 0.01753, 0.42987), (0.0, 0.8307767239493009, 0.0))
-MID360_MOUNT = ((0.0002835, 0.00003, 0.428434), (math.pi, 0.0836, 0.0))
 # ZED Mini SN19945568 at HD720, the factory file as Controls' test_zed_backend.py carries it.
 ZED_LEFT = (771.4, 771.14, 629.115, 353.0685, (-0.0358597, 0.0185157, -0.00496448, 0.00194007))
 ZED_RIGHT = (772.01, 771.55, 641.75, 346.6085, (-0.0368591, 0.0234426, -0.0128113, 0.00625172))
 ZED_RIGHT_EYE = (0.000233734, -0.0628272, 0.000181381)  # device frame: TZ, -Baseline, -TY
-# D435i, D400 datasheet: colour 69 deg across 640 px, depth 87 x 58 deg at 640 x 480; colour 15 mm right of depth.
-D435_COLOR_F = 320.0 / math.tan(math.radians(69.0 / 2))
-D435_DEPTH_F = (320.0 / math.tan(math.radians(87.0 / 2)), 240.0 / math.tan(math.radians(58.0 / 2)))
+# D435i, D400 datasheet: colour 69 deg across the image; colour 15 mm right of depth.
+D435_COLOR_F = D435_CX_PX / math.tan(math.radians(69.0 / 2))
 D435_COLOR_AT = (0.0, -0.015, 0.0)
 
-# The room: walls 0.2 m thick and 3 m tall around the robot, and targets (centre, half extents, colour): plates 2 mm
-# thick, so a camera sees one face of each and nothing of their sides. The ZED Mini's eyes are grey: its target is a
-# white plate on a black one behind it; the D435i's colour stream sees a green plate on the floor.
-WALLS = [((3.1, 0.0, 1.5), (0.1, 2.7, 1.5)), ((-3.1, 0.0, 1.5), (0.1, 2.7, 1.5)),
-         ((0.0, 2.6, 1.5), (3.2, 0.1, 1.5)), ((0.0, -2.6, 1.5), (3.2, 0.1, 1.5))]
+# The room (rtx_oracles.WALLS) and its targets (centre, half extents, colour): plates 2 mm thick, so a camera sees one
+# face of each and nothing of their sides. The ZED Mini's eyes are grey: its target is a white plate on a black one
+# behind it; the D435i's colour stream sees a green plate on the floor.
 WHITE, BLACK, GREEN = (1.0, 1.0, 1.0), (0.0, 0.0, 0.0), (0.0, 1.0, 0.0)
 TARGETS = [((1.6, 0.05, 1.3), (0.001, 0.06, 0.06), WHITE),     # upright ahead, facing the ZED Mini
            ((1.65, 0.05, 1.3), (0.001, 0.2, 0.2), BLACK),      # behind it
@@ -59,37 +76,10 @@ TARGETS = [((1.6, 0.05, 1.3), (0.001, 0.06, 0.06), WHITE),     # upright ahead, 
 
 # Tolerances. A target's image is weighed against the share of each pixel whose rays meet it, so the two agree to the
 # renderer's anti-aliasing and lens resampling: a fraction of a pixel in the centroid, a few percent in the area.
-# Depth and range: the renderer's precision.
 PIXEL_TOL = 0.3
 COUNT_TOL = 0.05
 SURROUND_MARGIN_PX = 3
 CONTRAST_FLOOR = 0.1
-DEPTH_TOL_M = 0.01
-RANGE_TOL_M = 0.01
-SELF_HIT_M = 1.0  # rays that meet the robot's own body first: shorter than this, the room is farther
-
-
-def rpy(r, p, y):
-    cr, sr, cp, sp, cy, sy = math.cos(r), math.sin(r), math.cos(p), math.sin(p), math.cos(y), math.sin(y)
-    return np.array([[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
-                     [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
-                     [-sp, cp * sr, cp * cr]])
-
-
-def quat_matrix_xyzw(q):
-    x, y, z, w = q
-    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
-
-
-OPTICAL = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])  # optical axes in a device frame
-
-
-def device_pose(torso, mount):
-    """World pose (R, t) of a device frame on the torso."""
-    (R_t, t_t), (t_m, rpy_m) = torso, mount
-    return R_t @ rpy(*rpy_m), R_t @ np.asarray(t_m) + t_t
 
 
 def to_optical(device, offset, points_w):
@@ -165,34 +155,32 @@ def camera_sees(seen, expected):
 def test_the_zed_mini_sees_the_target_where_its_lens_projects_it(run, eye, lens, offset):
     image = run["images"][("sim-zed", eye)]
     assert image.shape == (720, 1280) and image.dtype == np.uint8  # grey, as Controls' zed backend publishes
-    camera_sees(*target_weights(image, lens, device_pose(run["torso"], ZED_MOUNT), offset, TARGETS[0], TARGETS[1]))
+    zed = device_pose(run["torso"], torso_mount(ZED_JOINT))
+    camera_sees(*target_weights(image, lens, zed, offset, TARGETS[0], TARGETS[1]))
 
 
 def test_the_d435i_colour_sees_the_target_where_its_lens_projects_it(run):
     image = run["images"][("sim-d435", "rgb")]
-    assert image.shape == (480, 640, 3)
-    lens = (D435_COLOR_F, D435_COLOR_F, 320.0, 240.0, None)
+    assert image.shape == (D435_HEIGHT_PX, D435_WIDTH_PX, 3)
+    lens = (D435_COLOR_F, D435_COLOR_F, D435_CX_PX, D435_CY_PX, None)
     surround = (TARGETS[2][0], tuple(np.multiply(TARGETS[2][1], (2.0, 2.0, 1.0))))  # the floor around the plate
-    camera_sees(*target_weights(image, lens, device_pose(run["torso"], D435_MOUNT), D435_COLOR_AT, TARGETS[2],
-                                surround))
+    d435 = device_pose(run["torso"], torso_mount(D435_JOINT))
+    camera_sees(*target_weights(image, lens, d435, D435_COLOR_AT, TARGETS[2], surround))
 
 
 def test_the_d435i_depth_is_the_distance_to_the_room(run):
     depth = run["images"][("sim-d435", "depth")]
-    assert depth.shape == (480, 640)
-    R, t = device_pose(run["torso"], D435_MOUNT)
-    fx, fy = D435_DEPTH_F
-    v, u = np.mgrid[0:480, 0:640]
-    rays_o = np.stack([(u.ravel() - 320.0) / fx, (v.ravel() - 240.0) / fy, np.ones(u.size)], axis=1)  # z = 1
-    rays_w = rays_o @ (R @ OPTICAL).T
+    assert depth.shape == (D435_HEIGHT_PX, D435_WIDTH_PX)
+    R, t = device_pose(run["torso"], torso_mount(D435_JOINT))
+    rays_w = d435_depth_rays() @ (R @ OPTICAL).T
     norm = np.linalg.norm(rays_w, axis=1)
     unit = rays_w / norm[:, None]
     centre, half = run["room"]
     dist = np.minimum(ray_floor_distance(t, unit), ray_box_distance(t, unit, centre, half, np.zeros(len(centre))))
-    expected = (dist / norm).reshape(480, 640)  # along the optical axis: the ray's z is 1 per unit of norm
+    expected = (dist / norm).reshape(D435_HEIGHT_PX, D435_WIDTH_PX)  # along the optical axis: the ray's z is 1 per unit of norm
     measured = np.nan_to_num(depth, nan=np.inf, posinf=np.inf)
-    seen = np.isfinite(expected) & (expected < 10.0)
-    occluded = measured < expected - 0.05  # the robot's own body in front of the room
+    seen = np.isfinite(expected) & (expected < D435_DEPTH_MAX_M)
+    occluded = measured < expected - NEARER_M  # the robot's own body in front of the room
     room = seen & ~occluded
     assert room.sum() > 0.5 * seen.sum()
     err = np.abs(measured[room] - expected[room])
@@ -205,7 +193,7 @@ def test_every_lidar_return_lies_where_its_ray_meets_the_room(run):
     assert len(sweeps) >= 2
     centre, half = run["room"]
     for sweep in sweeps:
-        R, t = device_pose(run["torso"], MID360_MOUNT)
+        R, t = device_pose(run["torso"], torso_mount(MID360_JOINT))
         np.testing.assert_allclose(sweep.origin_w, t, atol=1e-3)
         np.testing.assert_allclose(sweep.rotation_w, R, atol=1e-3)
         dirs_s = sweep.points_m / np.maximum(np.linalg.norm(sweep.points_m, axis=1, keepdims=True), 1e-9)
@@ -214,7 +202,7 @@ def test_every_lidar_return_lies_where_its_ray_meets_the_room(run):
         expected = np.minimum(ray_floor_distance(t, unit), ray_box_distance(t, unit, centre, half,
                                                                             np.zeros(len(centre))))
         measured = np.linalg.norm(sweep.points_m[hit], axis=1)
-        self_hit = (measured < SELF_HIT_M) & (measured < expected - 0.05)
+        self_hit = (measured < SELF_HIT_M) & (measured < expected - NEARER_M)
         room = ~self_hit
         err = np.abs(measured[room] - expected[room])
         assert hit.mean() > 0.5, f"only {hit.mean():.0%} of rays returned"

@@ -8,7 +8,7 @@ import math
 
 import pytest
 
-from humanoid_sim.sensors.lights import CeilingLights, ceiling_light_prims
+from humanoid_sim.sensors.lights import CeilingLights, ceiling_light_prims, dome_nits
 
 SPAWN = (-4.42, 3.48)
 FILE = {"fixtures": [{"position_m": [1.0, 2.0, 7.5], "size_m": [0.6, 1.2], "intensity": 2500.0,
@@ -26,6 +26,21 @@ def test_a_file_is_read_with_its_fixtures_and_dome(tmp_path):
     assert (rect.size_m, rect.radius_m, rect.intensity, rect.color) == ((0.6, 1.2), None, 2500.0, (1.0, 0.9, 0.8))
     assert (disk.size_m, disk.radius_m, disk.color) == (None, 0.3, (1.0, 1.0, 1.0))  # white by default
     assert CeilingLights.parse({"fixtures": FILE["fixtures"]}).dome_intensity is None  # the session's dome stays
+
+
+@pytest.mark.parametrize("file_dome,session,used", [
+    (50.0, 600.0, 50.0),  # the file's dome replaces the session's
+    (None, 600.0, 600.0),  # a file without one keeps the session's
+    (0.0, 600.0, None),  # the file turns the dome off
+    (None, 0.0, None),  # no dome in the session, none in the file
+])
+def test_the_dome_a_file_leaves_in_the_session(file_dome, session, used):
+    data = {"fixtures": FILE["fixtures"]} | ({} if file_dome is None else {"dome_intensity": file_dome})
+    assert dome_nits(session, CeilingLights.parse(data)) == used
+
+
+def test_without_a_file_the_session_dome_stays():
+    assert (dome_nits(600.0, None), dome_nits(0.0, None)) == (600.0, None)
 
 
 def test_fixtures_are_placed_like_the_rooms_boxes():

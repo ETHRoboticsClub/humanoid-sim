@@ -37,7 +37,9 @@ def main() -> None:
     p.add_argument("--splat", default=None, help="the room's Gaussian splat as USD (humanoid-sim splat-usd)")
     p.add_argument("--splat-intensity", type=float, default=1.0,
                    help="scale the splat's emission (RTX shows it darker than the scan's photographs)")
-    p.add_argument("--scan-mesh", default=None, help="the room's scan (OBJ): the lidar's surfaces with the boxes")
+    p.add_argument("--scan-mesh", default=None,
+                   help="the room's scan (OBJ): the lidar's surfaces with the boxes; added only with a lidar, so "
+                        "without --splat --no-lidar changes the cameras' depth")
     p.add_argument("--seconds", type=float, default=5.0)
     p.add_argument("--no-cameras", action="store_true")
     p.add_argument("--no-lidar", action="store_true")

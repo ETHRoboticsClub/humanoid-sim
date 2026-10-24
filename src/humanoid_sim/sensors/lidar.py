@@ -7,8 +7,8 @@
   an emitter firing at its time in the sweep, and one emitter state per sweep for ``PATTERN_SWEEPS`` sweeps, after
   which the pattern repeats.
 * :func:`scan_mesh_prim` writes a room's scan (the OBJ ``world/scan.py`` reads) as a USD mesh in the world frame
-  (moved by ``-spawn`` like the room's boxes), for the lidar to hit. The cameras see the room's splat instead, so
-  the mesh is hidden from camera rays (``rtx.hide_from_cameras``).
+  (moved by ``-spawn`` like the room's boxes), for the lidar to hit. With a splat the cameras see it instead and
+  the mesh is hidden from camera rays (``rtx.hide_from_cameras``, ``sensors/room_rays.py``).
 
 The lidar fires on Kit's timeline, which :class:`~humanoid_sim.sensors.rtx.KitRender` advances by the plant time
 between renders. The RTX sensor clock runs at the timeline's rate from its own origin, and its sweeps start on whole
@@ -209,8 +209,8 @@ def scan_mesh_prim(stage, obj_path: str | Path, spawn_m: tuple[float, float], pr
     return mesh.GetPrim()
 
 
-def add_scan_surfaces(obj_path: str | Path, spawn_m: tuple[float, float]):
+def add_scan_surfaces(obj_path: str | Path, spawn_m: tuple[float, float], *, hidden_from_cameras: bool):
     """:func:`scan_mesh_prim` on the running simulation's stage."""
     import isaaclab.sim as sim_utils
 
-    return scan_mesh_prim(sim_utils.get_current_stage(), obj_path, spawn_m)
+    return scan_mesh_prim(sim_utils.get_current_stage(), obj_path, spawn_m, hidden_from_cameras=hidden_from_cameras)
