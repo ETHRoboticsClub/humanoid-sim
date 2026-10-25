@@ -84,6 +84,14 @@ def test_the_crane_parts_move_from_where_they_were_scanned():
     assert r.travel_outline_w()[:, 2].tolist() == [3.0] * 4
 
 
+def test_the_front_view_faces_the_crane_s_long_side_from_minus_y():
+    r = rig(center_m=(1.0, 2.0), yaw_rad=math.pi / 2)
+    eye, target = r.front_view(distance_m=4.0, height_m=2.0)
+    # Rig x is world y, rig y world -x: the eye stands 4 m out on world +x, looking back at the centre.
+    assert target.tolist() == pytest.approx([1.0, 2.0, 0.9])
+    assert eye.tolist() == pytest.approx([5.0, 2.0, 2.0])
+
+
 def test_the_hangar_example_rig_loads_with_its_home_and_scan_position_in_reach():
     from pathlib import Path
 

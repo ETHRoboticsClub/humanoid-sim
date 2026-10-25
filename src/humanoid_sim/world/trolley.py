@@ -105,6 +105,14 @@ class GantryRig:
         (x0, x1), (y0, y1) = self.travel_x_m, self.travel_y_m
         return np.stack([self.to_world((x, y, 0.0)) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))])
 
+    def front_view(self, distance_m: float = 5.0, height_m: float = 2.2) -> tuple[np.ndarray, np.ndarray]:
+        """An eye and target for viewing the crane's long side (along the runway, ``x``) from ``-y``, aimed at
+        its middle at hip height (host side)."""
+        target = self.to_world((0.0, 0.0, 0.0))
+        target[2] = 0.9
+        c, s = math.cos(self.yaw_rad), math.sin(self.yaw_rad)
+        return target + np.array([s * distance_m, -c * distance_m, height_m - target[2]]), target
+
     def part_offsets(self, xyz) -> dict[str, np.ndarray]:
         """How far the crane's parts have moved from where they were scanned (``scan_m``), in the world: the bridge
         with x, the trolley with x and y, the hook with x, y and z. For moving them in a splat (host side)."""
