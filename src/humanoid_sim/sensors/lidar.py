@@ -13,6 +13,9 @@
 The lidar fires on Kit's timeline, which :class:`~humanoid_sim.sensors.rtx.KitRender` advances by the plant time
 between renders. The RTX sensor clock runs at the timeline's rate from its own origin, and its sweeps start on whole
 multiples of the sweep period of that clock; :meth:`RtxLidar.read` maps them to plant time by the render's own time.
+A render reports the rays fired in at most one sweep period after the previous render, so when renders fall further
+apart than that, :meth:`RtxLidar.render_time` advances the timeline by one period only: the rays stay contiguous and
+the sweeps whole, and the plant time skipped is a gap between sweeps.
 
 Every ray that meets a surface within the model's range returns: the scene's surfaces carry no lidar reflectance
 (RTX non-visual materials), so a real sensor's reflectivity-dependent reach (the Mid-360's 70 m is at 80 %) and its
@@ -125,11 +128,22 @@ class RtxLidar:
         self.runtime = rtx.LidarSensor(self.lidar, annotators=["generic-model-output"])
         self._open: dict[int, list[tuple[np.ndarray, ...]]] = {}  # sweep start (sensor ns): rays so far
         self._first_ns: int | None = None  # the sensor clock at the first render
+        self._last: tuple[int, int] | None = None  # the last render's plant and timeline times
         self.dropped = 0  # sweeps begun before the first render, which the sensor reports in part or out of time
         self.reads = {"renders": 0, "outputs": 0, "rays": 0}
 
-    def read(self, now_ns: int) -> list[Sweep]:
-        """The sweeps completed by the render at plant time ``now_ns``, oldest first."""
+    def render_time(self, now_ns: int) -> int:
+        """The timeline time to render plant time ``now_ns`` at: the last render's, advanced by the plant time since
+        it, at most one sweep period."""
+        if self._last is None:
+            return now_ns
+        plant_ns, timeline_ns = self._last
+        return timeline_ns + min(now_ns - plant_ns, self.period_ns)
+
+    def read(self, now_ns: int, timeline_ns: int | None = None) -> list[Sweep]:
+        """The sweeps completed by the render at plant time ``now_ns`` (on the timeline at ``timeline_ns``, by
+        default ``now_ns``), oldest first."""
+        self._last = (now_ns, now_ns if timeline_ns is None else timeline_ns)
         self.reads["renders"] += 1
         data, _ = self.runtime.get_data("generic-model-output")
         if data is None or getattr(data, "size", 0) == 0:

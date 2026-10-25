@@ -213,9 +213,9 @@ def light_entity(intensity: float = DOME_INTENSITY, prim_path: str = "/World/Dom
 
 
 class KitRender:
-    """Renders the stage at plant times. Kit's timeline stops advancing on its own and is set to each render's plant
-    time, so a lidar's sweeps and firing times are plant times. Every camera renders at the one fixed exposure
-    :data:`EXPOSURE`.
+    """Renders the stage at plant times. Kit's timeline stops advancing on its own and is set to each render's time:
+    its plant time, or behind it where a lidar holds it back (``RtxLidar.render_time``). Every camera renders at the
+    one fixed exposure :data:`EXPOSURE`.
 
     With ``color``, colour rendering is kept on: Isaac Lab's RTX renderer turns it off for the whole app
     (``/rtx/sdg/force/disableColorRender``) when it sets up a camera without a colour output, such as a depth stream,

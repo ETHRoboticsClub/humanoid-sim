@@ -225,7 +225,8 @@ class SensorSession:
         """Render the stage at plant time ``now_ns``, ``dt_ns`` after the previous render, and hand every camera's
         frames and every completed lidar sweep to the outputs."""
         t = time.perf_counter()
-        self.render(now_ns)
+        timeline_ns = self.lidars[0].render_time(now_ns) if self.lidars else now_ns
+        self.render(timeline_ns)
         if self.cameras:
             self.cameras.update(dt_ns / 1e9)
         self.ms["render"].append(1e3 * (time.perf_counter() - t))
@@ -236,7 +237,7 @@ class SensorSession:
             self._cameras(now_ns)
         for lidar in self.lidars:
             t = time.perf_counter()
-            sweeps = lidar.read(now_ns)
+            sweeps = lidar.read(now_ns, timeline_ns)
             self.ms["lidar_read"].append(1e3 * (time.perf_counter() - t))
             for sweep in sweeps:
                 self._lidar(now_ns, lidar, sweep)
