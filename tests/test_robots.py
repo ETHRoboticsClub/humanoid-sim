@@ -128,9 +128,9 @@ def test_the_runtime_start_pose_lies_inside_every_drive_window(robot):
             assert lo < at[name] < hi, name
 
 
-def test_the_v1_starts_a_session_standing_and_the_g1_at_home():
-    assert start_pose(load_profile("ethrc_v1")) == "standing"
-    assert start_pose(load_profile("g1_29dof_rev_1_0")) == "home"
+def test_the_v1_and_the_g1_start_a_session_standing():
+    for robot in ("ethrc_v1", "g1_29dof_rev_1_0", "g1_29dof_with_hand_rev_1_0"):
+        assert start_pose(load_profile(robot)) == "standing"
     with pytest.raises(ValueError, match="poses.start"):
         start_pose({"poses": {"start": "crouch"}})
 

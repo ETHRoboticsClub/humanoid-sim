@@ -14,6 +14,8 @@ model:
 
 poses:
   home: {preset: standing-init-v1}
+  # Runtime sessions start in Unitree's zero pose: the standing pose, every joint at 0 on the G1.
+  start: standing
 
 physics:
   # Self-collision off, as Isaac Lab's own G1 articulations have it (isaaclab_assets robots/unitree.py,
