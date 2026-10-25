@@ -121,6 +121,16 @@ class Gantry:
         self.strap_bottom_w = torch.full((e, max_points, 3), float("nan"), device=dev)
         self.trolley = None  # a crane to hang hoist ropes from (mount)
         self.active = False  # host-side; False only when no env has a rope, so apply() can skip the work
+        # A step's rope (_rope) reads the rope body's pose, velocity and the step time from these and leaves each
+        # strap's force and point here, all in place, so it can replay as a CUDA graph (``cuda_graph``).
+        self._root = torch.zeros(e, 7, device=dev)
+        self._vel = torch.zeros(e, 6, device=dev)
+        self._t = torch.zeros((), dtype=torch.int64, device=dev)
+        self.force_w = torch.zeros(e, max_points, 3, device=dev)
+        self.points_w = torch.zeros(e, max_points, 3, device=dev)
+        self._no_torque = torch.zeros(e, 1, 3, device=dev)
+        self.cuda_graph = False
+        self._graph = None
 
     def mount(self, rig, origin_w: torch.Tensor | None = None):
         """Put a crane (:class:`~humanoid_sim.world.trolley.GantryRig`, in world coordinates) over every env,
@@ -129,6 +139,8 @@ class Gantry:
         from humanoid_sim.world.trolley import Trolley
 
         self.trolley = Trolley(rig, self.num_envs, self.device, origin_w)
+        self.trolley.cuda_graph = self.cuda_graph
+        self._graph = None  # captured without the crane
         return self.trolley
 
     # -- configuration (host side, at reset or on request) ----------------------------------------
@@ -362,12 +374,40 @@ class Gantry:
             self.trolley.advance(t_ns)
         if not self.active:
             return
-        root = self.robot.data.body_link_pose_w.torch[:, self.body_id]
-        vel = self.robot.data.body_link_vel_w.torch[:, self.body_id]
+        self._root.copy_(self.robot.data.body_link_pose_w.torch[:, self.body_id])
+        self._vel.copy_(self.robot.data.body_link_vel_w.torch[:, self.body_id])
+        self._t.fill_(t_ns)
+        if self.cuda_graph:
+            if self._graph is None:
+                self._graph = self._capture()
+            self._graph.replay()
+        else:
+            self._rope()
+        composer = self.robot.instantaneous_wrench_composer
+        for i in range(self.points_b.shape[1]):
+            composer.add_forces_and_torques_index(forces=self.force_w[:, i:i + 1], torques=self._no_torque,
+                                                  positions=self.points_w[:, i:i + 1], body_ids=self._body,
+                                                  env_ids=self._all, is_global=True)
+
+    def _capture(self) -> torch.cuda.CUDAGraph:
+        """:meth:`_rope` as a CUDA graph, after a few warm-up runs on a side stream."""
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(3):
+                self._rope()
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            self._rope()
+        return graph
+
+    def _rope(self) -> None:
+        """This step's force on every strap point, from the rope body's pose and velocity at the step time."""
+        root, vel = self._root, self._vel
         e, p = self.points_b.shape[:2]
         pts_w = root[:, None, :3] + _quat_rotate(root[:, None, 3:].expand(-1, p, -1), self.points_b)
-        value = interp_program(torch.full((e,), t_ns, dtype=torch.int64, device=self.device), self.program_ns,
-                               self.program)
+        value = interp_program(self._t.expand(e), self.program_ns, self.program)
 
         # Tension program: vertical, split evenly over the env's points.
         share = torch.where(self.mode == TENSION, value, 0.0) / self.num_points.to(value.dtype)
@@ -401,15 +441,12 @@ class Gantry:
         swing = torch.where(cable > 0, self.swing_damping[:, None] / n, 0.0)  # a strap without tension pushes nothing
         force += direction * cable[..., None] - swing[..., None] * across
 
-        self.tension_n = torch.where(roped, cable.sum(1), share * self.num_points.to(value.dtype))
-        self.distance_m = torch.where(roped, (dist * used).sum(1) / n[:, 0], 0.0)
-        self.top_w = torch.where(roped[:, None], top, float("nan"))
-        self.harness_w = torch.where(roped[:, None], (pts_w * used[..., None]).sum(1) / n, float("nan"))
+        self.tension_n.copy_(torch.where(roped, cable.sum(1), share * self.num_points.to(value.dtype)))
+        self.distance_m.copy_(torch.where(roped, (dist * used).sum(1) / n[:, 0], 0.0))
+        self.top_w.copy_(torch.where(roped[:, None], top, float("nan")))
+        self.harness_w.copy_(torch.where(roped[:, None], (pts_w * used[..., None]).sum(1) / n, float("nan")))
         strap = (roped[:, None] & used)[..., None]
-        self.strap_top_w = torch.where(strap, top[:, None] + self.top_offset_w, float("nan"))
-        self.strap_bottom_w = torch.where(strap, pts_w, float("nan"))
-        composer = self.robot.instantaneous_wrench_composer
-        for i in range(p):
-            composer.add_forces_and_torques_index(forces=force[:, i:i + 1], torques=torch.zeros_like(force[:, i:i + 1]),
-                                                  positions=pts_w[:, i:i + 1], body_ids=self._body, env_ids=self._all,
-                                                  is_global=True)
+        self.strap_top_w.copy_(torch.where(strap, top[:, None] + self.top_offset_w, float("nan")))
+        self.strap_bottom_w.copy_(torch.where(strap, pts_w, float("nan")))
+        self.force_w.copy_(force)
+        self.points_w.copy_(pts_w)
