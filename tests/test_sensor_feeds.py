@@ -38,6 +38,7 @@ def test_controls_reads_the_device(tmp_path, sim_feed, spec):
             sent[(s.name, n)] = image
     d = sim_feed.read_descriptor(tmp_path / spec.camera_id)
     assert (d.identity.camera_id, d.identity.product, d.session) == (spec.camera_id, spec.product, feed.session)
+    assert {fs.spec.name: fs.spec.shutter for fs in d.streams} == {s.name: s.shutter for s in spec.streams}
     for s in spec.streams:
         cal = d.calibration.intrinsics[s.name]
         assert (cal.width_px, cal.height_px, cal.fx_px, cal.cy_px) == (s.lens.width_px, s.lens.height_px,

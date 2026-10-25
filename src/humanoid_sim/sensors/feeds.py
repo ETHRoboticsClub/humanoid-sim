@@ -112,7 +112,7 @@ def descriptor(spec: CameraSpec, session: str) -> dict:
     streams = []
     for s in spec.streams:
         entry = {"name": s.name, "kind": s.kind, "width_px": s.lens.width_px, "height_px": s.lens.height_px,
-                 "rate_hz": float(s.rate_hz), "shutter": "global", "sync_group": s.sync_group,
+                 "rate_hz": float(s.rate_hz), "shutter": s.shutter, "sync_group": s.sync_group,
                  "depth_source": s.depth_source, "encoding": s.encoding}
         streams.append(entry)
     return {"schema": DESCRIPTOR_SCHEMA, "camera_id": spec.camera_id, "product": spec.product, "session": session,

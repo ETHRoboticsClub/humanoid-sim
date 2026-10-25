@@ -67,8 +67,8 @@ def test_the_zed_minis_streams_are_its_rig_calibration(rig):
     spec = geometry.camera_spec(rig.sensors["zed"])
     assert (spec.camera_id, spec.product, spec.sensor_link) == ("sim-zed", "Stereolabs ZED Mini", "camera0_camera")
     # Grey eyes at HD720 and 30 Hz, a stereo pair, as Controls' zed backend publishes them.
-    assert [(s.name, s.kind, s.encoding, s.sync_group) for s in spec.streams] == [
-        ("left", "mono", "mono8", "stereo"), ("right", "mono", "mono8", "stereo")]
+    assert [(s.name, s.kind, s.encoding, s.sync_group, s.shutter) for s in spec.streams] == [
+        ("left", "mono", "mono8", "stereo", "rolling"), ("right", "mono", "mono8", "stereo", "rolling")]
     left, right = spec.streams
     assert (left.lens.width_px, left.lens.height_px, left.rate_hz) == (1280, 720, pytest.approx(30.0))
     # The unit's [STEREO] calibration places the right eye, not the model's nominal 63 mm.
@@ -93,6 +93,9 @@ def test_the_d435is_streams_are_its_models(rig):
     np.testing.assert_allclose(s["mono_right"].translation_m, (0.0, -0.050, 0.0))
     np.testing.assert_allclose(s["rgb"].translation_m, (0.0, -0.015, 0.0))
     assert s["depth"].range_m == (0.28, 10.0) and s["rgb"].range_m == (0.0, math.inf)
+    # Controls' realsense backend: the infrared pair is global shutter, the colour imager rolling.
+    assert {n: st.shutter for n, st in s.items()} == {"rgb": "rolling", "mono_left": "global",
+                                                       "mono_right": "global", "depth": "global"}
     # The datasheet's colour field, 69 deg across 640 px: a point 34.5 deg right lands on the image's edge.
     (u, _), = s["rgb"].lens.project([[math.tan(math.radians(34.5)), 0.0, 1.0]])
     assert u == pytest.approx(640.0, abs=1e-3)

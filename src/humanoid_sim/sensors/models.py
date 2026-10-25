@@ -141,7 +141,8 @@ class Camera(Sensor):
     """A camera product. Its frame is its reference imager's optical centre (x forward, y left, z up, as Controls'
     camera calibration has it); ``nominal_offsets_m`` places every stream's optical centre in it (a unit's
     calibration replaces them). ``stream_kinds`` gives each stream as Controls' backend publishes it: ``color``,
-    ``mono`` (grey) or ``depth`` (metres along the optical axis, within ``depth_range_m``)."""
+    ``mono`` (grey) or ``depth`` (metres along the optical axis, within ``depth_range_m``). ``rolling_shutter`` names
+    the streams whose imager has a rolling shutter, as Controls' backend declares them; the others are global."""
 
     kind = "camera"
     streams: ClassVar[tuple[str, ...]]
@@ -149,6 +150,7 @@ class Camera(Sensor):
     stream_kinds: ClassVar[Mapping[str, str]] = MappingProxyType({})
     nominal_offsets_m: ClassVar[Mapping[str, tuple[float, float, float]]] = MappingProxyType({})
     depth_range_m: ClassVar[tuple[float, float] | None] = None
+    rolling_shutter: ClassVar[frozenset[str]] = frozenset()
 
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
@@ -161,6 +163,8 @@ class Camera(Sensor):
         if set(cls.stream_kinds) - set(cls.streams) or not set(cls.stream_kinds.values()) <= set(STREAM_KINDS):
             raise ValueError(f"{where}: stream_kinds {cls.stream_kinds}: expected streams it has, each one of "
                              f"{STREAM_KINDS}")
+        if not cls.rolling_shutter <= set(cls.streams):
+            raise ValueError(f"{where}: rolling_shutter {set(cls.rolling_shutter)}: expected streams it has")
         if cls.depth_range_m is not None and not 0 <= cls.depth_range_m[0] < cls.depth_range_m[1]:
             raise ValueError(f"{where}: depth_range_m {cls.depth_range_m}: expected (min, max)")
 
@@ -221,6 +225,7 @@ class OakDW(Camera):
     nominal_offsets_m = {"rgb": (0.0, -0.0375, 0.0), "mono_left": (0.0, 0.0, 0.0), "mono_right": (0.0, -0.075, 0.0),
                          "depth": (0.0, 0.0, 0.0)}
     depth_range_m = (0.7, 12.0)  # the vendor's ideal range
+    rolling_shutter = frozenset({"rgb"})  # the IMX378 variant
 
 
 class RealSenseD435i(Camera):
@@ -238,6 +243,7 @@ class RealSenseD435i(Camera):
     nominal_offsets_m = {"rgb": (0.0, -0.015, 0.0), "mono_left": (0.0, 0.0, 0.0), "mono_right": (0.0, -0.050, 0.0),
                          "depth": (0.0, 0.0, 0.0)}
     depth_range_m = (0.28, 10.0)
+    rolling_shutter = frozenset({"rgb"})  # the infrared pair is global shutter, as realsense_backend.py declares
 
 
 class ZedMini(Camera):
@@ -251,6 +257,7 @@ class ZedMini(Camera):
     stereo_baseline_m = 0.063
     stream_kinds = {"left": "mono", "right": "mono"}
     nominal_offsets_m = {"left": (0.0, 0.0, 0.0), "right": (0.0, -0.063, 0.0)}
+    rolling_shutter = frozenset({"left", "right"})  # as zed_backend.py declares
 
 
 class Lidar(Sensor):
