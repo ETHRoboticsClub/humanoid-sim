@@ -63,6 +63,8 @@ def test_the_g1_carries_its_body_imu_and_a_mid360(robot):
 def test_an_extra_rig_adds_sensors_and_unknown_or_clashing_ones_are_refused():
     desc = Description.load("g1_29dof_with_hand_rev_1_0")
     rig = rigs.load(desc.robot, desc, "g1-cameras")
+    assert {n: type(s) for n, s in rig.sensors.items()} == {"imu": UnitreeG1Imu, "mid360": LivoxMid360, "zed": ZedMini}
+    rig = rigs.load(desc.robot, desc, "g1-cameras-d435")
     assert {n: type(s) for n, s in rig.sensors.items()} == {
         "imu": UnitreeG1Imu, "mid360": LivoxMid360, "zed": ZedMini, "d435": RealSenseD435i}
     with pytest.raises(ValueError, match="g1-cameras"):

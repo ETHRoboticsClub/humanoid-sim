@@ -13,7 +13,7 @@ Drive feedback and IMU samples are measured signals, the ones the real robot has
 | `Mti610` | `imu` | Xsens (Movella) MTi-610 | V1 |
 | `UnitreeG1Imu` | `imu` | Unitree G1 body IMU (figures unmeasured: an ideal sensor) | G1 |
 | `OakDW` | `camera` | Luxonis OAK-D-W | V1 |
-| `RealSenseD435i` | `camera` | Intel RealSense D435i | the `g1-cameras` extra rig |
+| `RealSenseD435i` | `camera` | Intel RealSense D435i | the `g1-cameras-d435` extra rig (the lab G1's camera service finds no D435) |
 | `ZedMini` | `camera` | Stereolabs ZED Mini | the `g1-cameras` extra rig |
 | `LivoxMid360` | `lidar` | Livox Mid-360 | G1 |
 

@@ -325,10 +325,10 @@ def test_ropes_of_all_envs_pull_on_one_body():
 class _Bases:
     """Two envs' bases at rest 1 m up, or moving at ``velocity``; keeps the force on rope point 0 of each step."""
 
-    def __init__(self, velocity=(0.0, 0.0, 0.0)):
-        self.num_instances, self.device, self.body_names = 2, "cpu", ["base"]
-        pose = torch.tensor([[0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]]).expand(2, 1, 7)
-        vel = torch.tensor([[*velocity, 0.0, 0.0, 0.0]]).expand(2, 1, 6)
+    def __init__(self, velocity=(0.0, 0.0, 0.0), device="cpu"):
+        self.num_instances, self.device, self.body_names = 2, device, ["base"]
+        pose = torch.tensor([[0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]], device=device).expand(2, 1, 7)
+        vel = torch.tensor([[*velocity, 0.0, 0.0, 0.0]], device=device).expand(2, 1, 6)
         self.data = type("Data", (), {"body_link_pose_w": type("T", (), {"torch": pose})(),
                                       "body_link_vel_w": type("T", (), {"torch": vel})()})()
         self.forces = []  # [E, 3] per rope point, two per step
@@ -398,6 +398,21 @@ def test_hoist_damping_acts_on_motion_relative_to_the_trolley():
     gantry.apply(0)
     assert robot.point0[-1][0].tolist() == pytest.approx([0.0, 0.0, 20.0], abs=1e-4)
     assert robot.point0[-1][1].tolist() == pytest.approx([-5.0, 0.0, 20.0], abs=1e-4)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a CUDA device")
+def test_a_captured_rope_pulls_as_the_eager_one():
+    runs = []
+    for graphed in (False, True):
+        robot = _Bases(velocity=(0.3, 0.0, 0.1), device="cuda")
+        gantry, trolley = _hoist(robot, swing=10.0, damping=50.0)
+        gantry.cuda_graph = trolley.cuda_graph = graphed
+        trolley.set_command(torch.arange(2), torch.tensor([[1.0, 0.5, 1.2], [-1.0, 0.0, 1.5]]))
+        for k in range(200):  # the crane moving under the ropes
+            gantry.apply(k * 4_000_000)
+        runs.append([torch.stack(robot.point0), gantry.tension_n, gantry.strap_top_w, trolley.position])
+    for eager, captured in zip(*runs, strict=True):
+        torch.testing.assert_close(captured, eager, equal_nan=True)
 
 
 def test_hanging_from_a_hoist_needs_a_crane_and_sane_gains():

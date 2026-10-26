@@ -11,7 +11,7 @@ The sensors are the robot's rig ([sensors.md](sensors.md#sensor-models-and-the-r
 | Instance | Model | Streams, as Controls' backend publishes them | Lens or pattern |
 |---|---|---|---|
 | `zed` (`g1-cameras`) | `ZedMini` | `left`, `right`: grey (mono8), 1280 x 720, 30 Hz, a stereo pair | OpenCV fisheye, the unit's factory calibration; the right eye at the calibration's baseline |
-| `d435` (`g1-cameras`) | `RealSenseD435i` | `rgb` (bgr8), `mono_left`, `mono_right` (mono8, stereo pair), `depth` (16UC1 mm, 0.28 to 10 m), 640 x 480, 30 Hz | Pinholes with the datasheet's fields of view (colour 69 deg, infrared 87 x 58 deg) |
+| `d435` (`g1-cameras-d435`) | `RealSenseD435i` | `rgb` (bgr8), `mono_left`, `mono_right` (mono8, stereo pair), `depth` (16UC1 mm, 0.28 to 10 m), 640 x 480, 30 Hz | Pinholes with the datasheet's fields of view (colour 69 deg, infrared 87 x 58 deg) |
 | `mid360` (G1 rig) | `LivoxMid360` | 20,000 rays per 100 ms sweep, each with its firing time | -7 to +52 deg over 360 deg, 0.1 to 70 m, 2 cm and 0.15 deg noise (1 sigma) |
 
 Each sensor sits at its rig frame, composed through the URDF's fixed joints onto the body the physics keeps (`geometry.Mount`), and moves with that body: the renderer copies Newton's body poses into Fabric before every render.
@@ -63,7 +63,21 @@ sky exec hsim-rtx --env CMD="python examples/rtx_sensors.py --sensors g1-cameras
 rsync -avz hsim-rtx:sky_workdir/outputs/rtx/ outputs/rtx/
 ```
 
-The robot is welded at the spawn point in its home pose, feet just above the floor (a G1 cannot stand on a fixed-gain hold). In a scanned room, the room's boxes collide and the lidar sees them and the scan's mesh (`--scan-mesh`); with its splat (`--splat`, made by `humanoid-sim splat-usd`, [world.md](world.md)) the cameras see the splat, the boxes, the mesh and the ground being hidden from camera rays and casting no shadows: RTX dims the splat by the share of the stage's lights that geometry hides from it, whatever their intensity, so stand-ins that cast shadows would darken the room. `--splat-intensity` scales its emission.
+The robot is welded at the spawn point in its home pose, feet just above the floor (a G1 cannot stand on a fixed-gain hold). `--splat-intensity` scales the splat's emission.
+
+### What each sensor sees of a scanned room
+
+A scanned room has up to three surfaces: its boxes (`--scene`), its scan's mesh (`--scan-mesh`, added only when a lidar is simulated) and its splat (`--splat`, made by `humanoid-sim splat-usd`, [world.md](world.md)). The physics collides with every box whatever the sensors see. Each sensor sees the most faithful surface it has (`sensors/room_rays.py`, applied by `SensorSession`):
+
+| Surface | Lidar | Cameras with a splat | Cameras without a splat |
+|---|---|---|---|
+| Splat | no | yes | |
+| Scan mesh | yes | no | yes |
+| Wall boxes (the file's `wall` flags) | yes | no | yes |
+| Furniture boxes | only without a scan mesh | no | only without a scan mesh |
+| Ground | yes | no | yes |
+
+The furniture boxes enclose the scanned furniture by up to tens of centimetres and would shadow it; the wall boxes stay for the lidar because the scan has holes at windows and doors, and the walls keep every return inside the room. Without a splat the cameras see what the lidar sees, so the depth stream and the lidar agree. The scan mesh is added only when a lidar is simulated, so without a splat `--no-lidar` changes the cameras' depth: they see every box, the furniture boxes included, and no mesh. A boxes file without `wall` flags does not say which boxes bound the room: every box is then kept as a wall. A box no sensor sees is made invisible; one only the lidar sees, and the scan mesh under a splat, are hidden from camera rays (`primvars:hideForCamera`) and cast no shadows (`primvars:doNotCastShadows`, `rtx.hide_from_cameras`), as is the ground under a splat: RTX dims the splat by the share of the stage's lights that geometry hides from it, whatever their intensity, so stand-ins that cast shadows would darken the room. The summary's `scene.rays` records the outcome.
 
 ### Lights
 
@@ -74,6 +88,8 @@ The stage is lit by a white dome light (600 nits): the robot and the boxes are l
               {"position_m": [3.5, 2.0, 7.5], "radius_m": 0.4, "intensity": 3000}],
  "dome_intensity": 100}
 ```
+
+The summary's `scene.lights` names the file and `scene.dome_light_nits` the dome the stage was lit by (null without one).
 
 A Lambertian panel of area `A` and luminance `L` puts out `pi L A`; a grid with one panel per `s` by `s` of floor lights it at about `pi L A / s^2` (lux, with nits for `L`).
 
@@ -92,7 +108,7 @@ The summary adds `render_rate_hz`, `lag_ms` (the host's plant time when a render
 
 ## Checks
 
-`tests/test_rtx_sensors.py` (marker `rtx`, in the Isaac Sim image on an RTX GPU, in a process of its own: `pytest -m rtx tests/test_rtx_sensors.py`) puts the G1 in a box room with targets and compares what each sensor reports with geometry worked out without the renderer (`tests/rtx_oracles.py`), using the mounts humanoid-urdf's `PROVENANCE.md` records and the lens figures:
+`tests/test_rtx_sensors.py` (marker `rtx`, in the Isaac Sim image on an RTX GPU, in a process of its own: `pytest -m rtx tests/test_rtx_sensors.py`) puts the G1 in a box room with targets and compares what each sensor reports with geometry worked out without the renderer (`tests/rtx_oracles.py`), using the mounts the G1's URDF in humanoid-urdf gives (read when the tests run) and the lens figures:
 
 | Sensor | Check | Agreement on an L40S |
 |---|---|---|
@@ -119,7 +135,7 @@ A render serves every sensor due; the cameras render every 33 ms of plant time, 
 
 ## What is not modeled
 
-- Camera exposure, noise, motion blur and rolling shutter: every frame is a global-shutter render at the frame's plant time. The D435i's infrared imagers see visible light, without the projector's pattern; its depth is the exact distance, without stereo matching.
+- Camera exposure, noise, motion blur and rolling shutter: every frame is a global-shutter render at the frame's plant time, every camera at one fixed exposure: RTX's auto exposure off and its tone mapping set by `rtx.EXPOSURE` (ACES, ISO 100, 1/50 s at f/5: Isaac Sim 6.2's defaults, pinned so a Kit upgrade cannot change how bright a room renders); the summary's `rtx_post` records the values Kit ran with. The D435i's infrared imagers see visible light, without the projector's pattern; its depth is the exact distance, without stereo matching.
 - With the ZED Mini's fisheye calibration, RTX leaves the corners of the image, beyond about 46 deg off axis, empty (light grey).
 - The Mid-360's real rosette, its reflectivity-dependent reach and intensities. Within one render the lidar sees the scene as it is at that render (Kit's motion BVH is off), so a moving robot's sweep is built from three renders.
 - The D435i on the G1 has no `<mount>_camera` link in the description, so Controls places it at a default mount; the ZED Mini mount's pitch is assumed level (the G1 URDF's `camera0_camera`).

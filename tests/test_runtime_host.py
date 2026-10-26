@@ -289,7 +289,7 @@ def test_the_crane_lifts_and_carries_a_hoisted_robot(tmp_path, robot):
         weight = float(t0["mass_kg"]) * 9.81
         # Hook 10 cm above the harness: the robot comes up by that less the rope's stretch under its weight.
         host._move_gantry({"position_m": [0.0, 0.0, harness_z + 0.1]})
-        for _ in range(250):
+        for _ in range(750):  # 3 s: time for the hook to climb from home to any start pose's harness
             host.step()
         t1 = truth()
         assert t1["gantry_command_m"].tolist() == pytest.approx([0.0, 0.0, harness_z + 0.1], abs=1e-6)

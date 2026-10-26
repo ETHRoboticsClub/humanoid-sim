@@ -30,6 +30,30 @@ ROBOT_PRIM = "{ENV_REGEX_NS}/Robot"
 ROBOT_ROOT = "/World/envs/env_0/Robot"
 DOME_INTENSITY = 600.0  # nits
 DISABLE_COLOR_RENDER = "/rtx/sdg/force/disableColorRender"
+# Camera exposure is not modeled (docs/rtx-sensors.md): every camera renders at one fixed exposure. RTX's auto
+# exposure, which would meter each render product on its own image, is off, and the tone mapping that turns the
+# splat's emission into 8-bit pixels is set here, not left to Kit's defaults, so a Kit upgrade cannot change how
+# bright a room renders. The values are Isaac Sim 6.2's defaults, at which the splat intensities were chosen.
+TONEMAP_ACES = 6  # /rtx/post/tonemap/op: Clamp, Linear, Reinhard, Modified Reinhard, HejlHableAlu, HableUc2, ACES, Iray
+FILM_ISO = 100.0
+EXPOSURE_TIME_S = 0.02  # 1/50 s
+F_NUMBER = 5.0  # with ISO 100 and 1/50 s: EV100 = log2(F^2 / t) = 10.3
+RESPONSIVITY = 1.1026709079742432  # Kit's sensor responsivity, dimensionless
+CM2_FACTOR = 1.0  # Kit's scale of the scene's radiance before tone mapping, dimensionless
+WHITE_POINT = [1.0, 1.0, 1.0]  # linear RGB mapped to white
+SRGB_LINEAR = 0  # /rtx/post/tonemap/colorMode: sRGB linear, ACEScg
+AUTO_EXPOSURE = "/rtx/post/histogram/enabled"
+EXPOSURE = {AUTO_EXPOSURE: False,
+            "/rtx/post/tonemap/op": TONEMAP_ACES,
+            "/rtx/post/tonemap/filmIso": FILM_ISO,
+            "/rtx/post/tonemap/exposureTime": EXPOSURE_TIME_S,
+            "/rtx/post/tonemap/cameraShutter": 1.0 / EXPOSURE_TIME_S,  # the same time as Kit's older 1/s setting
+            "/rtx/post/tonemap/fNumber": F_NUMBER,
+            "/rtx/post/tonemap/responsivity": RESPONSIVITY,
+            "/rtx/post/tonemap/cm2Factor": CM2_FACTOR,
+            "/rtx/post/tonemap/whitepoint": WHITE_POINT,
+            "/rtx/post/tonemap/colorMode": SRGB_LINEAR,
+            "/rtx/post/tonemap/enableSrgbToGamma": True}
 # RTX's OpenCV lens models put pixel (u, v)'s centre at (u + 0.5, v + 0.5), OpenCV's calibration at (u, v): the
 # principal point given to RTX is moved by half a pixel so the images match the calibration Controls publishes
 # (measured against ray-cast masks in tests/test_rtx_sensors.py: half a pixel in both axes, both models).
@@ -161,6 +185,17 @@ def hide_from_cameras(stage, prim_path: str) -> int:
     return n
 
 
+def hide_from_all_rays(stage, prim_path: str) -> None:
+    """Make the prim at ``prim_path`` invisible to every ray, cameras' and lidars'; the physics keeps colliding
+    with it once its model is built."""
+    from pxr import UsdGeom
+
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim.IsValid():
+        raise ValueError(f"no prim at {prim_path}")
+    UsdGeom.Imageable(prim).MakeInvisible()
+
+
 def splat_entity(usd_path: str, prim_path: str = SPLAT_PRIM):
     """A room's Gaussian splat (``humanoid-sim splat-usd``), already placed in the world frame."""
     import isaaclab.sim as sim_utils
@@ -178,8 +213,9 @@ def light_entity(intensity: float = DOME_INTENSITY, prim_path: str = "/World/Dom
 
 
 class KitRender:
-    """Renders the stage at plant times. Kit's timeline stops advancing on its own and is set to each render's plant
-    time, so a lidar's sweeps and firing times are plant times.
+    """Renders the stage at plant times. Kit's timeline stops advancing on its own and is set to each render's time:
+    its plant time, or behind it where a lidar holds it back (``RtxLidar.render_time``). Every camera renders at the
+    one fixed exposure :data:`EXPOSURE`.
 
     With ``color``, colour rendering is kept on: Isaac Lab's RTX renderer turns it off for the whole app
     (``/rtx/sdg/force/disableColorRender``) when it sets up a camera without a colour output, such as a depth stream,
@@ -192,6 +228,11 @@ class KitRender:
         self.color = color
         self.timeline = omni.timeline.get_timeline_interface()
         self.timeline.set_auto_update(False)
+        from isaaclab.app.settings_manager import get_settings_manager
+
+        settings = get_settings_manager()
+        for name, value in EXPOSURE.items():
+            settings.set(name, value)
         if not self.timeline.is_playing():
             self.timeline.play()
         self.timeline.commit()
@@ -206,6 +247,14 @@ class KitRender:
         self.timeline.commit()
         self.sim.render()
         ensure_isaac_rtx_render_update(force=True)
+
+    @staticmethod
+    def post_settings() -> dict[str, object]:
+        """The active value of each of :data:`EXPOSURE`'s settings, as Kit's settings return it."""
+        from isaaclab.app.settings_manager import get_settings_manager
+
+        settings = get_settings_manager()
+        return {name: settings.get(name) for name in EXPOSURE}
 
 
 class RtxCameras:

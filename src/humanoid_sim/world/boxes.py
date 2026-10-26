@@ -10,7 +10,8 @@ The file is an ``.npz``, in metres and radians, z up, the floor at z = 0:
 * ``half`` ``[N, 3]``: half extents along the box axes;
 * ``yaw``: rotation of each box about its centre's vertical axis, one value for every box or ``[N]``;
 * ``rgb`` ``[N, 3]`` (optional): colours in [0, 1], for drawing;
-* ``wall`` ``[N]`` (optional): which boxes are walls, for drawing;
+* ``wall`` ``[N]`` bool (optional): which boxes are walls, drawn light grey and kept for the lidar over a scan mesh
+  (``sensors/room_rays.py``);
 * ``floor_corners`` ``[4, 2]`` (optional): the outline of a scan's floor, where its floor texture is drawn
   (``world/scan.py``).
 
@@ -54,6 +55,7 @@ class StaticBoxes:
     file: str
     sha256: str
     spawn_m: tuple[float, float]
+    wall: np.ndarray | None = None  # [N] bool, which boxes are walls; None when the file does not say
     floor_corners: np.ndarray | None = None  # [4, 2] the file's floor outline, in the file's frame
     scan: ScanFiles | None = None  # the room's textured scan, for drawing
 
@@ -78,8 +80,11 @@ class StaticBoxes:
             yaw = np.broadcast_to(np.asarray(data["yaw"], dtype=np.float64), (n,)).copy()
             rgb = (np.asarray(data["rgb"], dtype=np.float64) if "rgb" in data.files
                    else np.tile(DEFAULT_RGB, (n, 1)))
-            if "wall" in data.files:
-                rgb = np.where(np.asarray(data["wall"], dtype=bool)[:, None], WALL_RGB, rgb)
+            wall = np.asarray(data["wall"]) if "wall" in data.files else None
+            if wall is not None:
+                if wall.dtype != bool or wall.shape != (n,):
+                    raise ValueError(f"{path}: wall must be [N] bool (N = {n}), got {wall.dtype} {wall.shape}")
+                rgb = np.where(wall[:, None], WALL_RGB, rgb)
             floor = np.asarray(data["floor_corners"], dtype=np.float64) if "floor_corners" in data.files else None
         if center.shape != (n, 3) or half.shape != (n, 3) or rgb.shape != (n, 3):
             raise ValueError(f"{path}: center, half and rgb must be [N, 3] (N = {n})")
@@ -90,7 +95,7 @@ class StaticBoxes:
         offset = np.array([float(spawn_m[0]), float(spawn_m[1]), 0.0])
         return cls(center=center - offset, half=half, yaw=yaw, rgb=np.clip(rgb, 0.0, 1.0), file=str(path),
                    sha256=hashlib.sha256(raw).hexdigest(), spawn_m=(float(spawn_m[0]), float(spawn_m[1])),
-                   floor_corners=floor, scan=scan)
+                   wall=wall, floor_corners=floor, scan=scan)
 
     def __len__(self) -> int:
         return len(self.center)
@@ -147,6 +152,11 @@ def box_mesh(corners: np.ndarray, rgb: np.ndarray) -> tuple[np.ndarray, ...]:
     return verts.reshape(-1, 3), tris, normals.reshape(-1, 3), colors
 
 
+def box_prim_path(index: int, root: str = STATIC_BOXES_PRIM) -> str:
+    """The ``Cube`` prim of the file's box ``index``."""
+    return f"{root}/box_{index:04d}"
+
+
 def spawn_static_boxes(prim_path: str, cfg, translation=None, orientation=None, **kwargs):
     """Isaac Lab spawner of :class:`StaticBoxesCfg`: an Xform at ``prim_path`` holding one physics material (the
     ground's friction, no restitution) and one ``Cube`` prim per box with the collision API, its display colour
@@ -166,7 +176,7 @@ def spawn_static_boxes(prim_path: str, cfg, translation=None, orientation=None, 
         static_friction=cfg.friction, dynamic_friction=cfg.friction, restitution=0.0))
     quat = boxes.quat_xyzw()
     for i in range(len(boxes)):
-        cube = UsdGeom.Cube.Define(stage, f"{prim_path}/box_{i:04d}")
+        cube = UsdGeom.Cube.Define(stage, box_prim_path(i, prim_path))
         cube.CreateSizeAttr(2.0)  # unit half extents, scaled to the box's
         cube.AddTranslateOp().Set(Gf.Vec3d(*boxes.center[i]))
         cube.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Quatd(float(quat[i, 3]), *map(float, quat[i, :3])))

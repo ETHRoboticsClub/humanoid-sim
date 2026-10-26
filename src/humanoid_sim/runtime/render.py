@@ -26,6 +26,7 @@ import numpy as np
 from humanoid_sim.runtime.abi import plant_abi as abi
 
 FOLLOW_S = 10.0  # how long to wait for the next session of a `serve --persist` host
+EDITOR_PANELS = ("Stage", "Layer", "Render Settings", "Property", "Content", "Console")  # hidden in the window
 
 
 def plant_now_ns(feedback, mono_now_ns: int) -> int:
@@ -63,6 +64,7 @@ class RuntimeRender:
                                   scan_mesh=cfg.scan_mesh or scan_mesh)
         self.session = SensorSession(cfg)
         self._crane = self._crane_parts(record.get("gantry")) if cfg.splat else {}
+        self.gantry = record.get("gantry")
         joints = record["joints"]
         self._order = [joints.index(n) for n in desc.joints]  # the description's order, from the host's
         self.session_id = self.seg.session_id
@@ -158,6 +160,22 @@ class RuntimeRender:
             self.seg.close()
 
 
+def _viewport_only(gantry: dict | None) -> None:
+    """Kit's window as the viewport alone, opening on the crane's long side when there is one; the view is the
+    user's from then on, across sessions."""
+    import omni.ui
+
+    for title in EDITOR_PANELS:
+        omni.ui.Workspace.show_window(title, False)
+    if gantry:
+        import isaaclab.sim as sim_utils
+
+        from humanoid_sim.world.trolley import GantryRig
+
+        eye, target = GantryRig.from_dict(gantry).front_view()
+        sim_utils.SimulationContext.instance().set_camera_view(tuple(map(float, eye)), tuple(map(float, target)))
+
+
 def render_runtime(segment: str | Path, cfg, *, seconds: float | None = None, wait_s: float = 60.0,
                    summary: str | None = None, window: bool = False) -> dict:
     """Render ``segment``'s robot (waiting up to ``wait_s`` for it) until its host is gone or for ``seconds``,
@@ -169,6 +187,8 @@ def render_runtime(segment: str | Path, cfg, *, seconds: float | None = None, wa
 
     kit = start_kit(cfg.device, window=window)
     render = RuntimeRender(segment, cfg, wait_s=wait_s)
+    if window:
+        _viewport_only(render.gantry)
     start = time.monotonic()
     end = None if seconds is None else start + seconds
     try:

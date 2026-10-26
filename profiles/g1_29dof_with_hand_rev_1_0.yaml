@@ -22,6 +22,8 @@ model:
 
 poses:
   home: {preset: standing-init-v1}
+  # Runtime sessions start in Unitree's zero pose: the standing pose, every joint at 0 on the G1.
+  start: standing
 
 support:
   # The lab's straps hold the torso at the shoulders (Controls ethrc_sim unitree_plant.py HARNESS_BODY, SHOULDER_LINKS).

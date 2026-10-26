@@ -167,6 +167,7 @@ class Stream:
     sync_group: str = ""
     depth_source: str = ""
     range_m: tuple[float, float] = (0.0, math.inf)  # depth: what the sensor reports, else 0
+    shutter: str = "global"  # or "rolling"
 
     def optical_in_device(self) -> np.ndarray:
         """4x4 pose of the optical frame in the device frame."""
@@ -214,7 +215,8 @@ def camera_spec(camera) -> CameraSpec:
                               tuple(c.stream_offsets_m[name]),
                               sync_group="stereo" if stereo and kind == "mono" else "",
                               depth_source="stereo" if stereo and kind == "depth" else "",
-                              range_m=tuple(c.depth_range_m) if kind == "depth" else (0.0, math.inf)))
+                              range_m=tuple(c.depth_range_m) if kind == "depth" else (0.0, math.inf),
+                              shutter="rolling" if name in c.rolling_shutter else "global"))
     return CameraSpec(f"sim-{c.name}", c.product, c.frame, tuple(streams),
                       f"{c.name}-{c.model}-{c.width}x{c.height}")
 

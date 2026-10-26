@@ -105,6 +105,14 @@ class GantryRig:
         (x0, x1), (y0, y1) = self.travel_x_m, self.travel_y_m
         return np.stack([self.to_world((x, y, 0.0)) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))])
 
+    def front_view(self, distance_m: float = 5.0, height_m: float = 2.2) -> tuple[np.ndarray, np.ndarray]:
+        """An eye and target for viewing the crane's long side (along the runway, ``x``) from ``-y``, aimed at
+        its middle at hip height (host side)."""
+        target = self.to_world((0.0, 0.0, 0.0))
+        target[2] = 0.9
+        c, s = math.cos(self.yaw_rad), math.sin(self.yaw_rad)
+        return target + np.array([s * distance_m, -c * distance_m, height_m - target[2]]), target
+
     def part_offsets(self, xyz) -> dict[str, np.ndarray]:
         """How far the crane's parts have moved from where they were scanned (``scan_m``), in the world: the bridge
         with x, the trolley with x and y, the hook with x, y and z. For moving them in a splat (host side)."""
@@ -150,6 +158,9 @@ class Trolley:
         self.position = home.clone()
         self.velocity = torch.zeros(num_envs, 3, device=dev)
         self.t_ns: int | None = None  # plant time of `position`; set by the first advance
+        self._dt = torch.zeros((), device=dev)  # the step advance moves by (s)
+        self.cuda_graph = False  # advance's motion replays as a captured CUDA graph
+        self._graph = None
 
     def set_command(self, env_ids: torch.Tensor, xyz: torch.Tensor) -> None:
         """Command ``xyz`` ``[n, 3]`` (or ``[3]``) for ``env_ids``, clamped to the travel."""
@@ -168,8 +179,33 @@ class Trolley:
         if self.t_ns is None or t_ns <= self.t_ns:
             self.t_ns = t_ns if self.t_ns is None else max(self.t_ns, t_ns)
             return
-        dt = (t_ns - self.t_ns) / NS_PER_S
+        self._dt.fill_((t_ns - self.t_ns) / NS_PER_S)
         self.t_ns = t_ns
+        if not self.cuda_graph:
+            self._move()
+            return
+        if self._graph is None:
+            self._graph = self._capture()
+        self._graph.replay()
+
+    def _capture(self) -> torch.cuda.CUDAGraph:
+        """:meth:`_move` as a CUDA graph, after a warm-up run on a side stream that is undone."""
+        saved = self.position.clone(), self.velocity.clone()
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            self._move()
+        torch.cuda.current_stream().wait_stream(side)
+        self.position.copy_(saved[0])
+        self.velocity.copy_(saved[1])
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            self._move()
+        return graph
+
+    def _move(self) -> None:
+        """One advance by ``_dt`` (s, positive), in place."""
+        dt = self._dt
         a_dt = self.a_max * dt
         err = self.command - self.position
         # The fastest speed from which the axis still stops on the command, braking a_dt per step.
@@ -183,8 +219,8 @@ class Trolley:
         v = torch.where(land, 0.0, v)
         # End stops.
         stopped = (p < self.lo) | (p > self.hi)
-        self.position = torch.clamp(p, self.lo, self.hi)
-        self.velocity = torch.where(stopped, 0.0, v)
+        self.position.copy_(torch.clamp(p, self.lo, self.hi))
+        self.velocity.copy_(torch.where(stopped, 0.0, v))
 
     @property
     def anchor_w(self) -> torch.Tensor:

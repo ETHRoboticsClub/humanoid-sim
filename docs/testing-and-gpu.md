@@ -22,6 +22,8 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 | `test_plant_log.py` | `RobotPlant.log` writing signals at plant time | |
 | `test_randomization.py` | Randomization specs: parsing, selection (bodies, drives, an IMU axis), composition, scopes, levels, reproducibility | |
 | `test_reporting.py` | Drive reporting in encoder counts, velocity and torque, against values Controls' fake drive tests pin | |
+| `test_room_rays.py` | Which of a scanned room's surfaces (boxes, scan mesh, splat) each RTX ray class sees, for walls and furniture, with and without a splat or a scan; refused inputs; the wall flags read from a boxes file | |
+| `test_rtx_room_rays.py` | In Kit: the lidar and the depth camera see the walls and the scan, not the furniture box, which still collides | `rtx` |
 | `test_runtime_abi.py` | The runtime segment: C header against the Python layout (needs a C compiler), identity checks, torn-record rejection, mailbox and demand records, concurrent reads | |
 | `test_runtime_host.py` | `humanoid-sim serve` end to end with the test as client, for every robot: round trip, prescribed pose, detach and next session, demand intake, joint disturbance, back-driven disabled drive; the G1's motor slots and soles | `physics` |
 | `test_runtime_view.py` | `view-runtime` recording frames from a segment that a stand-in host writes through the ABI, for every robot (no physics; needs Newton, Rerun and the built assets) | |

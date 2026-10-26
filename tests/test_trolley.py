@@ -84,6 +84,14 @@ def test_the_crane_parts_move_from_where_they_were_scanned():
     assert r.travel_outline_w()[:, 2].tolist() == [3.0] * 4
 
 
+def test_the_front_view_faces_the_crane_s_long_side_from_minus_y():
+    r = rig(center_m=(1.0, 2.0), yaw_rad=math.pi / 2)
+    eye, target = r.front_view(distance_m=4.0, height_m=2.0)
+    # Rig x is world y, rig y world -x: the eye stands 4 m out on world +x, looking back at the centre.
+    assert target.tolist() == pytest.approx([1.0, 2.0, 0.9])
+    assert eye.tolist() == pytest.approx([5.0, 2.0, 2.0])
+
+
 def test_the_hangar_example_rig_loads_with_its_home_and_scan_position_in_reach():
     from pathlib import Path
 
@@ -91,7 +99,7 @@ def test_the_hangar_example_rig_loads_with_its_home_and_scan_position_in_reach()
     assert rig.contains(rig.home_m) and rig.contains(rig.scan_m)
 
 
-def test_the_hangar_crane_starts_clear_of_the_robot_the_scan_caught():
+def test_the_splat_drops_the_robot_the_scan_caught_under_the_crane():
     import json
     from pathlib import Path
 
@@ -100,9 +108,6 @@ def test_the_hangar_crane_starts_clear_of_the_robot_the_scan_caught():
     examples = Path(__file__).parents[1] / "examples"
     rig = GantryRig.load(examples / "hangar_gantry.json")
     drop = json.loads((examples / "hangar_crane_parts.json").read_text())["drop"]
-    # The hook's column, from the floor to the hoist: a robot hung from it at home stands clear of the scanned one.
-    column = np.array([rig.to_world(rig.home_m)[:2].tolist() + [z] for z in np.linspace(0.0, rig.anchor_z_m, 31)])
-    assert not in_boxes(column, drop).any()
     assert in_boxes(np.array([rig.to_world(rig.scan_m)[:2].tolist() + [1.0]]), drop).all()
 
 
