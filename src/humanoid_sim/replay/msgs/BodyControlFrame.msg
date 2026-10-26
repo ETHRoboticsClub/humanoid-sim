@@ -1,7 +1,13 @@
-# Ordered authority and command frame consumed first by the body router, then
-# forwarded to the final controller for independent enforcement. One authority
-# publisher emits every lifecycle and command frame for its runtime.
+# Ordered authority and command frame consumed by the joint controller. One
+# authority publisher emits every lifecycle and command frame for its runtime.
 std_msgs/Header header
+
+# Every receiver refuses a frame other than a stop whose header.stamp is unset, ahead of
+# its clock, or older than this when it takes the frame: the frame no longer states the
+# authority's current intent. A receiver that takes plant time on its own /clock
+# subscription admits the lead ethrc_body_bridge.feedback.PLANT_STAMP_LEAD_S allows.
+# The robot API streams at 50 Hz, far inside the bound.
+uint64 MAX_STAMP_AGE_NS=500000000
 
 # A receiver holds one grant. A GRANT naming the active one (same runtime,
 # session, grant and source, newer sequence) reinstalls it at the final
@@ -65,10 +71,10 @@ float64[] positions_rad
 # COMMAND only: the final receiver refuses the complete frame if any safety
 # projection would substitute a different endpoint. It never bypasses a gate.
 bool require_exact_positions
-# COMMAND only, set by the router: the subset of joint_ids it added to keep
-# uncommanded drives at their reference. The final receiver drops a hold joint
+# COMMAND only: the subset of joint_ids carried at their existing reference to
+# keep uncommanded drives steady. The receiver drops a hold joint
 # whose drive (or mechanism partner) is tripped or latched and refuses the frame
-# only when a requested joint touches such a drive. Empty from the authority.
+# only when a requested joint touches such a drive.
 string[] hold_joint_ids
 
 # Present on REVOKE and STOP. The receiver implements HOLD locally; other profiles

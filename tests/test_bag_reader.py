@@ -6,7 +6,6 @@ import pytest
 pytest.importorskip("rosbags")
 
 from humanoid_sim.replay.bag import (  # noqa: E402
-    COMMAND_TOPIC,
     FEEDBACK_TOPIC,
     GAINS_TOPIC,
     IMU_TOPIC,
@@ -47,7 +46,7 @@ def _write(path, *, plugin="SQLITE3", gains=((320.0, 12.0), (480.0, 9.0)), chang
         fb = w.add_connection(FEEDBACK_TOPIC, "msg_ethrc/msg/DriveFeedback", typestore=store, **bare)
         g = w.add_connection(GAINS_TOPIC, "msg_ethrc/msg/DriveGains", typestore=store, **bare)
         imu = w.add_connection(IMU_TOPIC, "sensor_msgs/msg/Imu", typestore=store)
-        cmd = w.add_connection(COMMAND_TOPIC, "msg_ethrc/msg/BodyControlFrame", typestore=store, **bare)
+        cmd = w.add_connection("/rt/body_control", "msg_ethrc/msg/BodyControlFrame", typestore=store, **bare)
 
         def frame(t, kind, joints, q):
             return T["msg_ethrc/msg/BodyControlFrame"](

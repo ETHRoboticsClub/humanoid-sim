@@ -4,15 +4,14 @@
 # a retransmission or a sample held behind a repair; the excitation capture
 # subscribes reliable and has lost samples repaired from that history. A
 # keep-last writer never blocks on a slow reader (Cyclone pins its WHC
-# watermarks for keep-last). This is
-# the input of high-rate Python consumers (rt_hardware_bridge), where
-# deserializing a nested DriveStatus[] (a Header and a Time per drive) costs
-# more than the consumer's own work. One object per publish, plain sequences.
+# watermarks for keep-last). High-rate telemetry and excitation capture use this
+# flat message because deserializing a nested DriveStatus[] (a Header and a Time
+# per drive) costs more. One object per publish, plain sequences.
 # DriveStatusArray keeps every drive's full MotorStatusMessage for diagnostics
 # and telemetry. Drives whose PDO reading is stale are withheld here exactly as
 # there. Entry i of every sequence belongs to device[i].
 # The authoritative topic name; the EtherCAT master, the simulator and the
-# bridge reference this constant rather than their own literal.
+# consumers reference this constant rather than their own literal.
 string TOPIC="/ethrc/drive_feedback"
 # Writer history: 200 ms at 200 Hz, longer than a NACK round trip under load.
 uint16 REPAIR_DEPTH=40
