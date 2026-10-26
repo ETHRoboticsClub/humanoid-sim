@@ -80,6 +80,7 @@ class SimCore:
         self._base = (torch.tensor([self.backend.joint_names.index(n) for n, _ in BASE_JOINTS],
                                    device=self.plant.cfg.device) if base_joints else None)
         self._base_target: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._base_acceleration: torch.Tensor | None = None
         from humanoid_sim.world.supports import Gantry
 
         harness = self.profile["support"]["harness"]
@@ -130,6 +131,30 @@ class SimCore:
             self.backend.write_state(bq, bqd)
             self._state_written = True
 
+    def base_state(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Actual base-joint angles/rates, for prescribed-motion diagnostics."""
+        if self._base is None:
+            raise ValueError("base_state requires base-joint asset")
+        q, v = self.backend.joint_state()
+        return q[:, self._base], v[:, self._base]
+
+    def set_base_acceleration(self, acceleration_w: torch.Tensor | None) -> None:
+        """Equivalent translational inertial loading, not root motion.
+
+        Finite input must be validated before stepping, as rotational targets are.
+        This setter checks layout without synchronizing CUDA for every sample.
+        None disables the correction. Values persist until replaced or cleared.
+        """
+        if acceleration_w is not None:
+            if not (self.backend.cfg.fixed_base or self.backend.cfg.base_joints):
+                raise ValueError("equivalent base acceleration requires fixed translation")
+            if (acceleration_w.shape != (self.plant.num_envs, 3)
+                    or acceleration_w.device != torch.device(self.plant.cfg.device)):
+                raise ValueError("base acceleration must be [envs, 3] on the plant device")
+            if self.gantry.active:
+                raise ValueError("base acceleration replay cannot use an active gantry")
+        self._base_acceleration = acceleration_w
+
     def step(self) -> DriveFeedback:
         q, qd = self.joint_state()
         if self._graphs is not None:
@@ -151,6 +176,8 @@ class SimCore:
         else:
             self.backend.set_targets(bt)
         self.gantry.apply(self.t_ns)
+        if self._base_acceleration is not None:
+            self.backend.apply_base_acceleration(self._base_acceleration)
         self.backend.step()
         self.t_ns += self.period_ns
         q, qd = self.joint_state()

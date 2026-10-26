@@ -28,7 +28,7 @@ The SkyPilot tasks and the examples below use these three captures:
 | `acks.csv` | The receivers' acknowledgements of each command frame | No |
 | `pdo_feedback.csv` | Per drive at about 200 Hz: measured position `native_position_rad`, `velocity_rad_s`, `torque_nm`, `current_a`, `motor_position_rad`, `status_word`, the drive's position demand `position_demand_rad` and its current demand `current_demand_a` | Position demand as the input; measured position, velocity and torque for scoring |
 | `joints.csv` | Joint-space positions and velocities from Controls' `/rt/joint_states` | No |
-| `imu.csv` | Controls' `/rt/imu`: orientation from the Madgwick filter, angular velocity and specific force, already rotated into the `base_link` frame, and the relay's sample counter `source_seq` | Orientation, angular velocity and `source_seq`, for the moving-base modes |
+| `imu.csv` | Controls' `/rt/imu`: orientation from the Madgwick filter, angular velocity and specific force, already rotated into the `base_link` frame, and the relay's sample counter `source_seq` | Orientation, angular velocity and `source_seq`; specific force for opt-in acceleration loading |
 | `drives.csv` | Controls' drive status diagnostic aggregate, including winding temperature | No |
 | `gains.json` | The gains in force on each drive at the start and at the end of the capture, as SI values and as raw drive counts | Raw P and D gains |
 
@@ -46,7 +46,38 @@ Each drive is fed its own position demand, object 0x6062 of the drive's CiA 402 
 
 ### What the replay ignores
 
-The ordinary PDO-demand replay does not use `commands.csv` or `acks.csv`; learning reads those streams to resolve inputs for command replay. Neither path uses `joints.csv` or `drives.csv`. From `pdo_feedback.csv`, `current_a`, `current_demand_a` and `motor_position_rad` are loaded but not used, and `status_word` and the publish and receipt stamps are not read. The IMU's specific force is not used, so the base's linear motion is not replayed. The reader does not verify the manifest's digests, and nothing compares the capture's identity and calibration revisions with the robot description in `third_party/humanoid-urdf`.
+The ordinary PDO-demand replay does not use `commands.csv` or `acks.csv`; learning reads those streams to resolve inputs for command replay. Neither path uses `joints.csv` or `drives.csv`. From `pdo_feedback.csv`, `current_a`, `current_demand_a` and `motor_position_rad` are loaded but not used, and `status_word` and the publish and receipt stamps are not read. With acceleration off, IMU specific force is unused. Opt-in acceleration loading is described below; it does not reconstruct base translation. The reader does not verify the manifest's digests, and nothing compares the capture's identity and calibration revisions with the robot description in `third_party/humanoid-urdf`.
+
+### Equivalent translational loading
+
+Add `--base orientation --base-acceleration imu --imu-window-ms "$WINDOW_MS"`
+to `humanoid-sim replay`. A smoothing duration is required explicitly; choose it
+from signal inspection, not fit/holdout error. Zero is for ideal synthetic data.
+Legacy modes and CLI defaults remain unchanged when acceleration is off.
+
+`replay/inertial.py` reads base-axis specific force at the IMU mounting point.
+It subtracts `alpha × r + omega × (omega × r)`, rotates into the same initially
+yaw-aligned world as the base targets and adds the running context's gravity.
+The resulting base-origin acceleration is averaged over each physics interval.
+`SimCore.set_base_acceleration` applies the equivalent `-m*a` field to physical
+robot bodies through the backend's additive wrench composer, at their centres of
+mass. Synthetic support links are excluded; real gravity and angular dynamics
+are not added again. No position integration or new gantry dynamics are involved.
+
+The first version accepts full-orientation replay only, with a base-rigid mount,
+z-up gravity, contact monitoring and no active gantry. Nonfinite data, invalid
+quaternions, sequence gaps or uncovered intervals are refused. Filter edges are
+trimmed; `--imu-max-gap-ms` defaults to 50 ms. Contact above 1 mN rejects the run.
+This includes self-contact conservatively and does not prove that all external
+support forces in a real recording are modeled. Unknown torso/harness loads and
+attitude-estimation errors remain limitations.
+
+Acceleration output is separated into an `accel-imu-w<ns>-g<ns>` subdirectory,
+refusing existing output. `trace.npz` includes namespaced `motion_*` input,
+acceleration, force and actual base-state diagnostics; `summary.json` includes
+settings, source/capture fingerprints and valid coverage. Body forces are cleared
+after each physics write, and replay clears its persistent acceleration setting
+in `finally`. Discard a simulation context after a backend physics exception.
 
 ## Recording a capture for the sim
 

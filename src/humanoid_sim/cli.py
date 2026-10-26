@@ -57,24 +57,31 @@ def cmd_replay(args) -> int:
     import numpy as np
 
     from humanoid_sim.replay.exc import ExcitationCapture
+    from humanoid_sim.replay.inertial import acceleration_config
     from humanoid_sim.replay.replay import replay
     from humanoid_sim.sim import SimCore
 
+    cfg = acceleration_config(args)
     cap = ExcitationCapture(Path(args.capture))
     period_ns = int(round(args.period_ms * 1e6))
     moving = args.base != "fixed"
     sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, period_ns=period_ns,
-                  fixed_base=not moving, base_joints=moving, solver=args.solver, integrator=args.integrator)
+                  fixed_base=not moving, base_joints=moving, contacts=cfg is not None, solver=args.solver, integrator=args.integrator)
     t = time.time()
     res = replay(cap, sim, duration_s=args.duration, base_motion=args.base if moving else None,
-                 demand_delay_ns=int(round(args.demand_delay_ms * 1e6)))
+                 demand_delay_ns=int(round(args.demand_delay_ms * 1e6)), base_acceleration=cfg)
     wall = time.time() - t
     integrator = sim.integrator
     delay = f"_demand{args.demand_delay_ms:+g}ms" if args.demand_delay_ms else ""
     out = Path(args.out) / f"{cap.dataset_id}_{sim.solver}_{integrator}_{period_ns // 1000}us_base-{args.base}{delay}"
+    if cfg is not None:
+        out = out / f"accel-imu-w{cfg.window_ns}-g{cfg.max_gap_ns}"
+        if out.exists():
+            raise ValueError(f"acceleration output already exists: {out}")
     out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out / "trace.npz", t_ns=res.t_ns, demand=res.demand,
-                        **{f"sim_{k}": v for k, v in res.sim.items()}, **{f"real_{k}": v for k, v in res.real.items()})
+                        **{f"sim_{k}": v for k, v in res.sim.items()}, **{f"real_{k}": v for k, v in res.real.items()},
+                        **{f"motion_{k}": v for k, v in res.motion.items()})
     summary = {"dataset_id": cap.dataset_id, "name": cap.name, "period_ns": period_ns,
                "physics": f"isaaclab/{sim.solver}", "device": args.device, "integrator": integrator, "base": args.base,
                "wall_s": wall,
@@ -242,6 +249,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--demand-delay-ms", type=float, default=0.0,
                    help="apply each recorded demand this much after its stamp (negative: before); fit delays with humanoid_learning.sysid")
     r.add_argument("--out", default="outputs/replay")
+    from humanoid_sim.replay.inertial import add_acceleration_args
+
+    add_acceleration_args(r)
     r.set_defaults(func=cmd_replay)
 
     v = sub.add_parser("view-replay", help="Rerun recording of a replay: sim and real robot, all drive signals")
