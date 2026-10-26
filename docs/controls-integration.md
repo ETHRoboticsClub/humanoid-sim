@@ -2,7 +2,7 @@
 
 Controls runs humanoid-sim behind two lanes: the ETHRC V1's fake-coe lane, below, and the Unitree G1's lane ([The G1 lane](#the-g1-lane)). Each converts its robot's native device commands into the segment's SI drive demands at its own boundary, so one segment serves both.
 
-Controls' fake-coe lane runs the production EtherCAT master, the `standalone` binary of `ethercat_device_configurator` with `--transport fake-coe`, against a bank of simulated EPOS4 drives (`Epos4Slave` in Controls' `ethrc_fake_ethercat` package). The master speaks CANopen over EtherCAT (CoE) to them as it would to the robot. A separate plant host process owns that bank: each bus cycle it reads every drive's demand from the bank and gives each drive its feedback. By default the plant host steps a MuJoCo plant itself. With `--physics humanoid-sim` it converts each demand to an SI drive demand on humanoid-sim's runtime segment and hands the sim's feedback back to the bank. Everything above the drives (master, safety monitor, router, policies, robot API) is the stack that runs on the robot.
+Controls' fake-coe lane runs the production EtherCAT master, the `standalone` binary of `ethercat_device_configurator` with `--transport fake-coe`, against a bank of simulated EPOS4 drives (`Epos4Slave` in Controls' `ethrc_fake_ethercat` package). The master speaks CANopen over EtherCAT (CoE) to them as it would to the robot. A separate plant host process owns that bank: each bus cycle it reads every drive's demand from the bank and gives each drive its feedback. By default the plant host steps a MuJoCo plant itself. With `--physics humanoid-sim` it converts each demand to an SI drive demand on humanoid-sim's runtime segment and hands the sim's feedback back to the bank. Everything above the drives (master, safety monitor, Joint Host, policies, robot API) is the stack that runs on the robot.
 
 This page covers the Controls side. [runtime.md](runtime.md) describes `humanoid-sim serve`, the segment and the commands.
 
@@ -49,7 +49,7 @@ Every status period (100 ms):
 
 On exit, `SegmentPlant.close` sends `DETACH` while the session is still ready, so a `--persist` sim opens the next session at once instead of waiting out its client timeout.
 
-The plant host uses the commands `SET_FIDELITY`, `APPLY_DISTURBANCE` (joint torques), `PRESCRIBE_POSE`, `SET_SUPPORT` and `DETACH`. It does not send `RESET`, `PAUSE`, `RESUME` or `INJECT_FAULT`; bus, protocol and drive faults come from Controls' own fake bank.
+The plant host normally uses `SET_FIDELITY`, `APPLY_DISTURBANCE` (joint torques), `PRESCRIBE_POSE`, `SET_SUPPORT` and `DETACH`. It also applies `/sim/pause` as `PAUSE` or `RESUME` and confirms the result from fresh feedback. For guarded `/sim/reset`, the launcher first stops only Joint Host, authorizes the still-running adapter's sole segment client to pause and reset to the named `home` pose, waits for fresh paused feedback and the exact reset request ID/count, then starts a cold Joint Host. RuntimeHost and the device adapter remain live. Controls does not send `INJECT_FAULT`; bus, protocol and drive faults come from its fake bank.
 
 `test_sim_segment_live.py` checks the adapter against a running sim. In the humanoid-sim image, with a Controls checkout mounted at `/controls` and its Python packages on `PYTHONPATH`:
 
@@ -82,7 +82,7 @@ python3 scripts/sim/launch.py --headless --hands none --clock wall --bus fake-co
 | `--plant mujoco\|humanoid-sim` | `mujoco` | `humanoid-sim` needs `--bus fake-coe` (or `unitree`, [The G1 lane](#the-g1-lane)) and `--sim-segment`; launch.py refuses it otherwise |
 | `--sim-segment PATH` | none | The file `humanoid-sim serve --segment` publishes |
 | `--sim-wait S` | `180` | How long the plant host waits for the segment to become ready. The launcher waits that long plus 30 s for the plant host to report ready. |
-| `--profile suspended\|free` | `free` | Must match the sim's `--support`. Nothing compares the two, and `serve` defaults to `suspended`. The two `suspended` differ: Controls' MuJoCo plant welds the pelvis, humanoid-sim hangs the robot from a harness cable on the torso (see below). |
+| `--profile suspended\|free` | `free` | Selects the expected startup support (`serve` defaults to `suspended`). After startup, `SET_SUPPORT` switches humanoid-sim live. The two `suspended` modes differ: Controls' MuJoCo plant welds the pelvis, while humanoid-sim hangs the robot from a harness cable on the torso (see below). |
 | `--clock plant\|wall` | `plant` with `--hands none`, otherwise `wall` | The fake-coe lane runs on the wall clock: pass `--clock wall` with `--hands none`, since launch.py refuses `plant` with `--bus fake-coe` |
 
 `--fidelity` and `--imu-mount-rpy` shape the MuJoCo plant's IMU chip; launch.py refuses them on humanoid-sim, whose IMU is its own sensor model at the description's mount. The lane needs Linux with the `vcan` kernel module and the right to create the interface (`NET_ADMIN`); Docker Desktop's kernel has no vcan.
@@ -183,7 +183,7 @@ The G1's motor driver runs each motor's PD itself, and so does humanoid-sim, so 
 
 `LowState` reads what the sim's motors measure. Its IMU gyroscope and accelerometer are the newest sample of the sim's IMU model; its quaternion, on the robot the board's own estimate, is the true orientation: the truth region's base orientation through the URDF's `imu_joint`, as the MuJoCo plant reports its site's. The plant host refuses a truth more than one physics step behind the feedback, hence `--truth-every 1`. The sim welds the Dex3 fingers, so each declared hand is a kinematic `FakeDex3` stepped with the loop, outside the body's physics. Both are in the status's `fidelity_gaps`.
 
-The sim's support is fixed when it starts: the plant host exits if `--profile` differs from it and refuses `/sim/profile` requests. `/sim/reset` sends `RESET` to the home pose and, in a free session, `SET_SUPPORT` free.
+At startup the G1 plant host checks that `--profile` matches the support in humanoid-sim's descriptor. After startup, `/sim/profile` applies `SET_SUPPORT` to the running simulation and the plant projection reports the resulting support. Guarded `/sim/reset` stops only Joint Host, pauses and resets humanoid-sim to its named `home` pose through the still-running adapter, waits for the exact request ID/count and fresh paused feedback, then starts a cold Joint Host. RuntimeHost and the device adapter remain live.
 
 ### The test gantry and the plant's truth
 

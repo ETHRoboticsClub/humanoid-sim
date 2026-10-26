@@ -289,10 +289,10 @@ A fit is worth keeping when `holdout.objective_fit` is clearly below `holdout.ob
 |---|---|---|
 | `/ethrc/drive_feedback` | `msg_ethrc/DriveFeedback` | Per drive: `source_stamp_ns`, measured position, velocity and torque, and the 0x6062 position demand (the `pdo_feedback.csv` columns) |
 | `/drive_gains/state` | `msg_ethrc/DriveGains` | The gains in force: the latest state at or before the feedback starts and every state during it, all applied, none ramping or failed, all equal |
-| `/rt/body_control/device` | `msg_ethrc/BodyControlFrame` | The router's COMMAND frames to the EtherCAT master, stamped when the loop host sent them (the `commands.csv` rows) |
+| `/rt/body_control` | `msg_ethrc/BodyControlFrame` | COMMAND frames to the Joint Host, stamped when the loop host sent them (the `commands.csv` rows) |
 | `/rt/imu` | `sensor_msgs/Imu` | The base motion for the moving-base modes |
 
-Every time comes from the messages' own stamps, never from the bag's receipt times. Humble's sqlite3 bags carry no message definitions, so the reader uses the copies in `src/humanoid_sim/replay/msgs/`, taken from Controls' `msg_ethrc`, unless the bag holds its own. A bag has no `complete` flag and no record of the gantry: that the robot hung on the gantry and ran an excitation is for whoever passes the bag to know. `sensor_msgs/Imu` has no sample counter, so a dropped IMU sample goes unnoticed. The capture id is `bag-` and 16 hex digits of the sha256 over the bag's files.
+Every time comes from the messages' own stamps, never from the bag's receipt times. Humble's sqlite3 bags carry no message definitions, so the reader uses the copies in `src/humanoid_sim/replay/msgs/`, kept byte-identical to Controls' `ros2_ws/src/contracts/msg_ethrc/msg`, unless the bag holds its own. A bag has no `complete` flag and no record of the gantry: that the robot hung on the gantry and ran an excitation is for whoever passes the bag to know. `sensor_msgs/Imu` has no sample counter, so a dropped IMU sample goes unnoticed. The capture id is `bag-` and 16 hex digits of the sha256 over the bag's files.
 
 ## Fitting PACE's actuator model
 
