@@ -67,7 +67,7 @@ flowchart TB
     phys --> sensors["sensors/<br/>encoders, IMU delivery"]
     sensors --> train["train/<br/>Train-Time API"]
     sensors --> runtime["runtime/<br/>real-time host and shared-memory segment"]
-    sensors --> replay["replay/ and sysid/<br/>captures from the real robot"]
+    sensors --> replay["replay/<br/>captures from the real robot"]
 ```
 
 1. Robot facts come from the `third_party/humanoid-urdf` submodule: the URDF (`URDF_6.urdf`), `actuators.yaml` with the drive inventory, signs, standing offsets, limits, gains and ankle geometry, and the home pose the robot spawns in. No robot constant is typed into this repo. [robot-model.md](robot-model.md) explains the files and how the USD asset is built from them.

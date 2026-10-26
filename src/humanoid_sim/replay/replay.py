@@ -4,8 +4,7 @@ Each drive is fed, at the recorded gains, PD law, no feed-forward or target velo
 
 * ``source="drive"``: its recorded position demand (0x6062, linearly interpolated from the ~200 Hz PDO samples,
   arriving without added latency: it is already what the drive used);
-* ``source="command"``: the targets the EtherCAT master sent it, rebuilt from the joint-space command frames
-  (:func:`drive_targets`), each frame submitted at its stamp and taking effect one latency later, as the plant
+* ``source="command"``: the targets resolved by the caller from its recorded controller commands, each frame submitted at its stamp and taking effect one latency later, as the plant
   applies demands in training (``latency_ns``, per env).
 
 The sim's drive-frame position, velocity and applied torque are scored against the drive's own measurements at
@@ -26,9 +25,35 @@ import torch
 from humanoid_sim.core import PlantCore
 from humanoid_sim.devices.demand import DriveDemand
 from humanoid_sim.replay.base import BaseMotion
-from humanoid_sim.replay.exc import CommandTrace, ExcitationCapture, sample_hold, sample_linear
+from humanoid_sim.replay.exc import ExcitationCapture, sample_linear
 from humanoid_sim.sim import SimCore
 from humanoid_sim.timing.clock import NS_PER_S
+
+
+@dataclass(frozen=True)
+class DriveCommands:
+    """Resolved drive-frame position targets [frames, drives], at int64 source-clock ns.
+
+    Controller conversion and choosing APPLIED versus frame stamps belong to the
+    caller. Replay only schedules the supplied stream with the supplied latency.
+    """
+
+    drives: tuple[str, ...]
+    t_ns: np.ndarray
+    position_rad: np.ndarray
+    reference: str
+
+    def __post_init__(self):
+        if self.reference not in ("frame", "applied"):
+            raise ValueError("command reference must be frame or applied")
+        if len(set(self.drives)) != len(self.drives):
+            raise ValueError("command drives must be unique")
+        if self.t_ns.dtype != np.int64 or self.t_ns.ndim != 1 or not len(self.t_ns):
+            raise ValueError("command stamps must be a nonempty int64 ns vector")
+        if (np.diff(self.t_ns) <= 0).any():
+            raise ValueError("command stamps must strictly increase")
+        if self.position_rad.shape != (len(self.t_ns),len(self.drives)) or not np.isfinite(self.position_rad).all():
+            raise ValueError("command positions must be finite [frames, drives]")
 
 
 @dataclass
@@ -81,69 +106,6 @@ def initial_joint_state(plant: PlantCore, native: np.ndarray | torch.Tensor) -> 
     return q.to(plant.cfg.dtype)
 
 
-def drive_targets(plant: PlantCore, commands: CommandTrace) -> tuple[np.ndarray, np.ndarray]:
-    """The drive-frame targets ``[F, D]`` the master sends for each command frame from the first that names every
-    joint, and their stamps ``[F]``. As Controls' master (``standalone.cpp`` ``bodyDriveTargets``): a 1:1 drive gets
-    ``sign · (q + standing_offset)``, an ankle's cranks the inverse kinematics of its hinges. The master's velocity
-    slew is not modeled: it stages a target unchanged when one step reaches it (check with
-    :func:`command_demand_rms`)."""
-    joints = plant.map.joint_names
-    missing = sorted(set(joints) - set(commands.joints))
-    if missing:
-        raise ValueError(f"the command frames never name joints {missing}")
-    cols = [commands.joints.index(j) for j in joints]
-    q = commands.positions_rad[:, cols]
-    full = np.isfinite(q).all(axis=1)
-    if not full.any():
-        raise ValueError("no command frame names every joint")
-    first = int(np.argmax(full))
-    offsets = np.array([plant.desc.joints[j].standing_offset_rad for j in joints])
-    from humanoid_sim.transmissions.drive_map import DriveJointMap
-
-    exact = DriveJointMap(plant.desc, joints, plant.map.drive_names, dtype=torch.float64)
-    qt = torch.as_tensor(q[first:] + offsets, dtype=torch.float64)
-    qdrv, _, _ = exact.drive_state(qt, torch.zeros_like(qt))
-    return qdrv.numpy(), commands.t_ns[first:]
-
-
-def fit_commands(capture):
-    """The command frames a command replay applies and what their stamps are: ``(frames, "applied")``, stamped when
-    the controller applied each, when the capture has those acknowledgements, so a delay after them is the drives'
-    own (``drive_delay_s``); else ``(frames, "frame")``, stamped when they left the loop host, so the delay also
-    holds the software path."""
-    applied = capture.applied_commands()
-    return (applied, "applied") if applied is not None else (capture.commands(), "frame")
-
-
-def command_demand_rms(capture, plant: PlantCore, shifts_ns: np.ndarray) -> dict:
-    """How well the rebuilt targets explain the drives' own demands: per shift ``s`` and drive, the RMS of 0x6062
-    minus the target sent ``s`` earlier (zero-order hold), and the mean at the best shift. Near zero at some shift
-    when the rebuild matches the master, up to the drive's interpolation and any slew. A drive without 0x6062 is
-    compared with its measured position instead, which adds its tracking error (``against``); a large mean there
-    still shows a zero or sign that differs from the description's."""
-    targets, t_cmd = drive_targets(plant, fit_commands(capture)[0])
-    pdo = capture.pdo()
-    drives = plant.map.drive_names
-    rms = np.full((len(shifts_ns), len(drives)), np.nan)
-    mean = np.full_like(rms, np.nan)
-    against = {}
-    for i, d in enumerate(drives):
-        field = "position_demand_rad" if np.isfinite(pdo[d]["position_demand_rad"]).any() else "native_position_rad"
-        against[d] = field
-        t, ref = pdo[d].t_ns, pdo[d][field]
-        keep = (t >= t_cmd[0] + int(max(shifts_ns))) & np.isfinite(ref)
-        for k, s in enumerate(shifts_ns):
-            err = ref[keep] - sample_hold(t_cmd, targets[:, i], t[keep] - int(s))
-            if err.size:
-                rms[k, i], mean[k, i] = float(np.sqrt(np.mean(err ** 2))), float(np.mean(err))
-    if np.isnan(rms).all():
-        raise ValueError("no feedback after the first command frame to check the rebuilt targets against")
-    best = int(np.nanargmin(np.nanmean(rms, axis=1)))
-    return {"shifts_ns": [int(s) for s in shifts_ns], "drives": drives, "against": against, "rms_rad": rms.tolist(),
-            "best_shift_ns": int(shifts_ns[best]), "rms_at_best_rad": dict(zip(drives, rms[best].tolist(), strict=True)),
-            "mean_at_best_rad": dict(zip(drives, mean[best].tolist(), strict=True))}
-
-
 @dataclass
 class _Run:
     t_grid: np.ndarray
@@ -156,9 +118,10 @@ class _Run:
 
 
 def _prepare(capture: ExcitationCapture, sim: SimCore, duration_s: float | None, base_motion: str | None,
-             delays_ns: np.ndarray | None = None, source: str = "drive", latency_ns=None) -> _Run:
+             delays_ns: np.ndarray | None = None, source: str = "drive", latency_ns=None,
+             commands: DriveCommands | None = None) -> _Run:
     """``delays_ns`` ``[E]``: env ``e`` applies the demand recorded at ``t`` at ``t + delay`` (negative: earlier).
-    ``source="command"``: the targets the master sent (:func:`fit_commands`), taking effect ``latency_ns`` ``[E]`` or
+    ``source="command"``: the caller-resolved drive targets, taking effect ``latency_ns`` ``[E]`` or
     ``[E, D]`` (per drive) after their stamp."""
     if source not in ("drive", "command"):
         raise ValueError(f"replay source {source!r}: drive or command")
@@ -167,7 +130,9 @@ def _prepare(capture: ExcitationCapture, sim: SimCore, duration_s: float | None,
     pdo = capture.pdo()
     t_start, t_end = capture.time_span_ns()
     if source == "command":
-        targets, t_cmd = drive_targets(plant, fit_commands(capture)[0])
+        if commands is None or tuple(drives) != commands.drives:
+            raise ValueError("command replay needs a resolved DriveCommands stream in plant drive order")
+        targets, t_cmd = commands.position_rad, commands.t_ns
         t_start = max(t_start, int(t_cmd[0]))  # from the first frame naming every joint
     if duration_s is not None:
         t_end = min(t_end, t_start + int(duration_s * NS_PER_S))
@@ -245,14 +210,14 @@ def _run(capture: ExcitationCapture, sim: SimCore, run: _Run, on_step) -> None:
 
 def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None = None,
            base_motion: str | None = None, demand_delay_ns: int = 0, source: str = "drive",
-           latency_ns: int = 0) -> ReplayResult:
+           latency_ns: int = 0, commands: DriveCommands | None = None) -> ReplayResult:
     """Replay on env 0. ``base_motion``: None (fixed base) or a :data:`~humanoid_sim.replay.base.BASE_MODES`
     mode. ``demand_delay_ns`` (``source="drive"``): apply the demand recorded at ``t`` at ``t + delay``;
     ``latency_ns`` (``source="command"``): from a frame's stamp to its targets taking effect."""
     plant = sim.plant
     delays = np.full(plant.num_envs, demand_delay_ns) if demand_delay_ns else None
     lat = np.full(plant.num_envs, latency_ns) if source == "command" else None
-    run = _prepare(capture, sim, duration_s, base_motion, delays, source, lat)
+    run = _prepare(capture, sim, duration_s, base_motion, delays, source, lat, commands)
     keys = ("position_rad", "velocity_rad_s", "applied_torque_nm", "demanded_torque_nm")
     acc = {k: torch.zeros(len(run.t_grid), plant.map.num_drives, device=plant.cfg.device) for k in keys}
     acc_q = torch.zeros(len(run.t_grid), len(plant.map.joint_names), device=plant.cfg.device)
@@ -284,12 +249,13 @@ def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None
 def replay_position_rms(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None = None,
                         base_motion: str | None = None, skip_s: float = 1.0,
                         delays_ns: np.ndarray | None = None, source: str = "drive",
-                        latency_ns: np.ndarray | None = None) -> torch.Tensor:
+                        latency_ns: np.ndarray | None = None,
+                        commands: DriveCommands | None = None) -> torch.Tensor:
     """Every env replays the capture (with its own demand delay if ``delays_ns`` ``[E]`` is given, or, from the
     commands, its own ``latency_ns`` ``[E]``); position RMS (sim − measured) per env and drive ``[E, D]``, after
     ``skip_s``. Accumulated on the device: nothing leaves it until the end."""
     plant = sim.plant
-    run = _prepare(capture, sim, duration_s, base_motion, delays_ns, source, latency_ns)
+    run = _prepare(capture, sim, duration_s, base_motion, delays_ns, source, latency_ns, commands)
     real = torch.as_tensor(run.real["position"], dtype=torch.float32, device=plant.cfg.device)
     first = int(np.searchsorted(run.t_meas, run.t_meas[0] + int(skip_s * NS_PER_S)))
     sq = torch.zeros(plant.num_envs, plant.map.num_drives, device=plant.cfg.device)

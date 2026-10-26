@@ -10,7 +10,7 @@ and :class:`BagCapture` serves it through the same interface as :class:`~humanoi
 * ``/rt/body_control/device`` (``msg_ethrc/msg/BodyControlFrame``, 50 Hz while commanding): the router's
   COMMAND frames to the EtherCAT master, every drive's joint reference in semantic radians, stamped by the loop
   host when it sent them. No topic carries the per-drive targets the master writes to the bus; the replay rebuilds
-  them from these frames as the master does (:func:`humanoid_sim.replay.replay.drive_targets`).
+  them from these frames in its Controls model and supplies a resolved drive stream to replay.
 
 Times are the messages' own stamps (``source_stamp_ns``, ``header.stamp``: ROS time, integer ns), never the bag's
 receipt times. Message definitions come from the bag when it carries them (MCAP, and sqlite3 from ROS Iron on);

@@ -4,6 +4,10 @@ The test suite has three tiers. Contract tests run natively on any machine. Phys
 
 ## Test layout
 
+Fitting and its tests live in humanoid-learning. The independent replay check can
+run on the local GPU in the existing image with
+`pytest tests/test_replay_physics.py --replay-device cuda:0`.
+
 Every test lives in `tests/`. The last column lists the markers in each file; files without one run natively.
 
 | File | What it checks | Markers |
@@ -11,7 +15,6 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 | `test_ankle_transmission.py` | The torch ankle transmission (cranks, Jacobian, inverse) against humanoid-urdf's ankle model | |
 | `test_arrival.py` | The arrival queue: a demand acts from its arrival time, time-weighted inside a step, in order, with overflow counted | |
 | `test_base_motion.py` | Base motion from an IMU trace: Euler angles and rates, burst sample times | |
-| `test_delay.py` | Demand-delay scan: drive regions, and a replay with each env's demands shifted by its own delay | 1 test `physics` and `data` |
 | `test_devices.py` | The drive bank: the PD law against Controls' plant, envelope clipping, freeze (the held position latched when the freeze demand arrives), a disabled drive, target shaping, arrival | |
 | `test_envelope.py` | Torque-speed envelope interpolation in all four quadrants | |
 | `test_exc_reader.py` | The capture reader: sampling helpers, captures that match the description, the bursty base-frame IMU stream | 2 tests `data` |
@@ -29,7 +32,9 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 | `test_scan.py` | A scan's look: each face corner's position and the texel it shows, and the floor quad with its texture, against a MuJoCo world built as Controls builds its `hangar_scan`; the floor on the boxes' ground; the live detail's merged vertices and colours; the descriptor's digests; refused files | |
 | `test_static_boxes.py` | Static boxes: the file read and placed where Controls' MuJoCo hangar places them (corner by corner against MuJoCo's kinematics, which needs the `kinematics-check` extra), spawn clearance, refused files, the drawn mesh; in the solver, one shared set of box shapes at the same corners, robots in every env standing on a box, and the runtime host standing the robot among boxes | 3 tests `physics` |
 | `test_supports.py` | Gantry programs, and rope tension and cable length on every robot | the rope tests `physics` |
-| `test_sysid.py` | The passive-fit search space and CMA-ES | |
+| `test_replay_commands.py` | Resolved drive-frame inputs, ordering, timestamps and per-env replay delay | |
+| `test_replay_parameters.py` | Named physical parameter application and validation before writes | |
+| `test_replay_physics.py` | Four-env fixed-base replay round-trip with per-env damping | `physics` |
 | `test_train_env.py` | The Train-Time API in a manager-based Isaac Lab environment with two robots, for every robot | `physics` |
 | `test_world.py` | For every robot: landing on a bumpy heightfield and staying on top, force pushes, and holding the home pose on flat ground, which stands only when the ankles are stiffer than the body's toppling stiffness (the V1 stands, the G1 tips over) | `physics` |
 
@@ -176,11 +181,10 @@ The node's copy of the checkout is updated by `sky launch` and `sky exec`. Local
 |---|---|---|---|---|
 | `sky/bench.sky.yaml` | L40S | `hsim-bench` | Builds both assets. Runs the physics benchmark at 1, 4096, 8192 and 16384 envs with self-collision and at 4096 and 16384 without, the training benchmark at 1, 4096 and 16384 envs, all at 500 steps, and one replay. | `outputs/bench/` |
 | `sky/replay.sky.yaml` | L40S | `hsim-bench` | Builds both assets. Replays three captures at 4 ms with `implicitfast`, 4 ms with `euler` and 1 ms with `implicitfast`, one process per capture in parallel. | `outputs/replay-mjwarp/` |
-| `sky/sysid.sky.yaml` | L40S | `hsim-bench` | Builds the `--base-joints` asset. Runs `fit-passive` with 512 envs and 20 generations on the low-band capture and scores the fit on the two high-band ones, then fits on a high-band capture and scores on the low-band one. | `outputs/sysid/fit-on-low/`, `outputs/sysid/fit-on-high/` |
 | `sky/rtx.sky.yaml` | L40S, A10G or L4 | `hsim-rtx` | Builds the kitless image and the Isaac Sim image on top of it, with Controls' hangar mounted at `/data/hangar`. Runs `$CMD` in the Isaac Sim image. See [rtx-sensors.md](rtx-sensors.md#running-it). | `outputs/rtx/` |
 | `sky/e2e.sky.yaml` | A10G or L4, whichever has capacity | `hsim-e2e` | Builds the V1's two assets and both G1s'. Runs the whole test suite with the captures, the runtime benchmark for 2000 steps and the training benchmark at 4096 envs for the V1 and the G1, replays every capture, and runs the examples. See [The end-to-end check](#the-end-to-end-check-skye2eskyyaml). | `outputs/e2e/` (cleared at the start of each run) |
 
-Each task's `envs` block holds its settings, for example `STEPS`, `ENV_COUNTS` and `REPLAY` in the bench task, `RUNS` in the replay task, and `NUM_ENVS`, `GENERATIONS`, `DURATION` and `BOUND` in the sysid task. Override one at launch with `--env`, for example `--env STEPS=1000`. The bench task's `SPIKE=1` also runs the closed-chain ankle spike in `spikes/closed_chain/`.
+Each task's `envs` block holds its settings, for example `STEPS`, `ENV_COUNTS` and `REPLAY` in the bench task, and `RUNS` in the replay task. Override one at launch with `--env`, for example `--env STEPS=1000`. The bench task's `SPIKE=1` also runs the closed-chain ankle spike in `spikes/closed_chain/`.
 
 The launch commands are in a comment at the top of each task file:
 
@@ -195,10 +199,6 @@ sky exec hsim-bench sky/bench.sky.yaml
 # replays
 sky launch -y -c hsim-bench -i 10 sky/replay.sky.yaml
 rsync -avz hsim-bench:sky_workdir/outputs/replay-mjwarp/ outputs/replay-mjwarp/
-
-# passive-parameter fits
-sky launch -y -c hsim-bench -i 10 sky/sysid.sky.yaml
-rsync -avz hsim-bench:sky_workdir/outputs/sysid/ outputs/sysid/
 
 # end-to-end check, detached
 sky launch -y -d -c hsim-e2e -i 10 sky/e2e.sky.yaml
@@ -247,3 +247,5 @@ A replay fetched this way can be viewed locally with `humanoid-sim view-replay` 
 ### GPU types
 
 Use one A10G, L4 or L40S. The `e2e` task asks for an A10G or an L4; the other tasks ask for an L40S. To choose the GPU at launch, pass `--gpus`, for example `sky launch --gpus A10G:1 ...`. Anything larger, such as an A100 or H100, or more than one GPU, needs sign-off before you launch it.
+
+Parameter-fitting jobs moved to [humanoid-learning](https://github.com/ETHRoboticsClub/humanoid-learning/blob/master/docs/sysid.md); they use its setup and tests.

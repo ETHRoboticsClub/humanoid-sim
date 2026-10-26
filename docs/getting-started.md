@@ -154,7 +154,7 @@ This runs on the CPU and needs no GPU. Each command prints the path of the USD i
 | Variant | Used by |
 |---|---|
 | Plain (`build-asset`) | Training, benchmarks, the runtime, most physics tests, `view-replay`, `view-runtime` |
-| `--base-joints` | `replay`, `fit-passive` and `fit-delay` with a moving base (the default, `--base yaw`) |
+| `--base-joints` | `replay` and learning's fitting experiments with a moving base (the default, `--base yaw`) |
 
 The `--base-joints` variant adds yaw, pitch and roll joints above the base so a replay can turn the robot the way the capture's IMU says it turned. [robot-model.md](robot-model.md) explains the build.
 
@@ -184,7 +184,7 @@ uv run humanoid-sim view-replay \
 uv run rerun replay.rrd
 ```
 
-The recording shows the simulated robot with the real one as a ghost, and every drive signal. [visualization.md](visualization.md) covers the viewer; [replay-and-sysid.md](replay-and-sysid.md) covers replay options, demand delays and the fits. Full-length replays of every capture run on a GPU through the `replay` SkyPilot task.
+The recording shows the simulated robot with the real one as a ghost, and every drive signal. [visualization.md](visualization.md) covers the viewer; [replay-and-sysid.md](replay-and-sysid.md) covers replay options and demand delays; fitting is documented in humanoid-learning. Full-length replays of every capture run on a GPU through the `replay` SkyPilot task.
 
 ## A first training environment
 

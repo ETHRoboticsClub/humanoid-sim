@@ -28,7 +28,7 @@ Start with [overview.md](overview.md) for how the parts fit together, then pick 
 | [world.md](world.md) | Ground and terrain, pushes and joint disturbances, the gantry |
 | [runtime.md](runtime.md) | `serve`, the shared-memory segment, sessions, commands, `view-runtime` |
 | [controls-integration.md](controls-integration.md) | How Controls' plant host attaches and what it expects |
-| [replay-and-sysid.md](replay-and-sysid.md) | Replaying captures, scoring, fitting delays and passive joint parameters |
+| [replay-and-sysid.md](replay-and-sysid.md) | Capture readers, physical replay and parameter-application mechanisms |
 | [visualization.md](visualization.md) | Rerun recordings of replays, live sessions and training scenes, with screenshots |
 | [testing-and-gpu.md](testing-and-gpu.md) | Test markers, CI, the Docker image, SkyPilot GPU tasks |
 | [benchmarks.md](benchmarks.md) | Measured speed of the runtime and of training, and how to measure it |

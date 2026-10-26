@@ -14,6 +14,10 @@ from humanoid_sim.model.description import Description
 ASSETS = Path(__file__).resolve().parents[1] / "outputs" / "assets"
 GRAVITY = 9.81
 
+
+def pytest_addoption(parser):
+    parser.addoption("--replay-device", default="cpu", help="Device for the replay mechanism physics check")
+
 # The robots the physics, world, training and runtime tests step: the ETHRC V1 and both G1 variants (the one with
 # hands is the G1 Controls launches).
 PHYSICS_ROBOTS = ("ethrc_v1", "g1_29dof_rev_1_0", "g1_29dof_with_hand_rev_1_0")

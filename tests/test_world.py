@@ -86,7 +86,6 @@ def _deepest_terrain_contact_m():
     inside), over all worlds; 0 when there is none. Self-contacts are left out: convex hulls of neighbouring links
     overlap by construction."""
     import mujoco_warp
-    import numpy as np
     from isaaclab_newton.physics import NewtonManager
 
     solver = NewtonManager._solver
