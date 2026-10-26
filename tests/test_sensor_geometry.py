@@ -16,7 +16,7 @@ from humanoid_sim.sensors import geometry, rigs
 from humanoid_sim.sensors.models import LivoxMid360, OakDW
 
 G1 = "g1_29dof_with_hand_rev_1_0"
-CAMERAS = "g1-cameras"  # sensors/rigs.py EXTRAS
+CAMERAS = "g1-cameras-d435"  # sensors/rigs.py EXTRAS
 
 
 @pytest.fixture(scope="module")

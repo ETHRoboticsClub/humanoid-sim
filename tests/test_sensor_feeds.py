@@ -14,7 +14,7 @@ from humanoid_sim.sensors import feeds, rigs
 from humanoid_sim.sensors.geometry import camera_spec
 
 G1 = "g1_29dof_with_hand_rev_1_0"
-CAMERAS = "g1-cameras"  # sensors/rigs.py EXTRAS
+CAMERAS = "g1-cameras-d435"  # sensors/rigs.py EXTRAS
 SPECS = [camera_spec(s) for s in rigs.load(G1, Description.load(G1), CAMERAS).sensors.values()
          if s.kind == "camera"]
 
