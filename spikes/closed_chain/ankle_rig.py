@@ -33,17 +33,20 @@ import warp as wp
 
 from humanoid_sim.model.description import Description
 
+KAMINO_FK = False
 EQ_SOLIMP = (0.99, 0.999, 0.0005, 0.5, 2.0)
 MODELED = {"crank_mass_kg": 0.06, "rod_mass_kg": 0.04, "foot_mass_kg": 0.9, "cross_mass_kg": 0.12}
 
 
-def rig(desc: Description, *, closed: bool, kp: float, kd: float, device: str, eq_solref=None):
+def rig(desc: Description, *, closed: bool, kp: float, kd: float, device: str, eq_solref=None, solver="mjwarp"):
     import newton
 
     geom = desc.ankle_geometry("r")
     tr = desc.ankle_transmission("r", dtype=torch.float64)
     b = newton.ModelBuilder()
     newton.solvers.SolverMuJoCo.register_custom_attributes(b)
+    if solver == "kamino":
+        newton.solvers.SolverKamino.register_custom_attributes(b)
     b.default_shape_cfg.density = 0.0
     eye = wp.quat_identity()
 
@@ -88,6 +91,11 @@ def rig(desc: Description, *, closed: bool, kp: float, kd: float, device: str, e
         b.add_joint_ball(foot, rod, parent_xform=wp.transform(wp.vec3(*p_anchor0), eye),
                          child_xform=wp.transform(wp.vec3(*rod_vec), eye), label=f"loop_{name}")
     model = b.finalize(device=device)
+    if solver == "kamino":
+        # Kamino: maximal coordinates, the loop balls are ordinary bilateral joints (hard constraints, no solref).
+        cfg = newton.solvers.SolverKamino.Config()
+        cfg.use_fk_solver = KAMINO_FK
+        return model, newton.solvers.SolverKamino(model, config=cfg), tr, hinge_dofs, crank_dofs
     solver = newton.solvers.SolverMuJoCo(model, use_mujoco_cpu=False, integrator="implicitfast",
                                          iterations=100, ls_iterations=50)
     if closed and eq_solref is not None:
@@ -109,7 +117,10 @@ def run(args):
     dt = 0.004
     for gains, eq_solref in (((480.0, 8.0), None), ((480.0, 8.0), (0.008, 1.0)), ((100.0, 3.5), (0.008, 1.0))):
         kp, kd = gains
-        model, solver, tr, hd, cd = rig(desc, closed=True, kp=kp, kd=kd, device=args.device, eq_solref=eq_solref)
+        if args.solver == "kamino" and eq_solref is None:
+            continue  # Kamino's loop joints are hard: no solref variants
+        model, solver, tr, hd, cd = rig(desc, closed=True, kp=kp, kd=kd, device=args.device, eq_solref=eq_solref,
+                                        solver=args.solver)
         s0, s1, ctl = model.state(), model.state(), model.control()
         newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
         res = {}
@@ -175,7 +186,7 @@ def run(args):
         res["diverged"] = bool(not np.isfinite(q_loaded).all() or np.abs(q_loaded).max() > 10.0)
         out[f"gains_{int(kp)}_{kd}_eqsolref_{eq_solref}"] = res
     # 5: hinge-only rig cost (same solver, no cranks/rods/loops).
-    model, solver, *_ = rig(desc, closed=False, kp=480, kd=8, device=args.device)
+    model, solver, *_ = rig(desc, closed=False, kp=480, kd=8, device=args.device, solver=args.solver)
     s0, s1, ctl = model.state(), model.state(), model.control()
     t0 = time.perf_counter()
     for _ in range(500):
@@ -189,4 +200,5 @@ def run(args):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--solver", default="mjwarp", choices=("mjwarp", "kamino"))
     run(ap.parse_args())
