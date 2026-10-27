@@ -18,6 +18,7 @@ each render moves those parts to where the truth has the crane. Needs the Isaac 
 from __future__ import annotations
 
 import dataclasses
+import signal
 import time
 from pathlib import Path
 
@@ -191,28 +192,40 @@ def render_runtime(segment: str | Path, cfg, *, seconds: float | None = None, wa
     from humanoid_sim.sensors.rtx import start_kit
 
     with start_kit(cfg.device, window=window):
-        render = RuntimeRender(segment, cfg, wait_s=wait_s)
-        start = time.monotonic()
-        end = None if seconds is None else start + seconds
+        stopped = False
+
+        def stop(_signum, _frame):
+            nonlocal stopped
+            stopped = True  # Kit may swallow KeyboardInterrupt inside its callbacks.
+            raise KeyboardInterrupt
+
+        previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM)}
         try:
-            if window:
-                _viewport_only(render.gantry)
-            while end is None or time.monotonic() < end:
-                if not render.frame():
-                    try:
-                        render.reopen(FOLLOW_S)
-                    except (abi.AbiError, FileNotFoundError):
-                        break  # the host is gone
-                time.sleep(0.001)
-        except KeyboardInterrupt:
-            pass
+            render = RuntimeRender(segment, cfg, wait_s=wait_s)
+            start = time.monotonic()
+            end = None if seconds is None else start + seconds
+            try:
+                if window:
+                    _viewport_only(render.gantry)
+                while not stopped and (end is None or time.monotonic() < end):
+                    if not render.frame():
+                        try:
+                            render.reopen(FOLLOW_S)
+                        except (abi.AbiError, FileNotFoundError):
+                            break  # the host is gone
+                    time.sleep(0.001)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                out = render.summary(time.monotonic() - start)
+                text = json.dumps(out, indent=1)
+                if summary:
+                    Path(summary).write_text(text)
+                print(text, flush=True)
+                render.close()
         finally:
-            out = render.summary(time.monotonic() - start)
-            text = json.dumps(out, indent=1)
-            if summary:
-                Path(summary).write_text(text)
-            print(text, flush=True)
-            render.close()
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
 
     return out
 
