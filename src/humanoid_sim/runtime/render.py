@@ -56,7 +56,8 @@ class RuntimeRender:
         self.path = Path(segment)
         desc = Description.load(cfg.robot)
         self._identity = {"robot_id": desc.robot, "description_digest": desc.digest}
-        self.seg = abi.Segment.open(self.path, wait_s=wait_s, **self._identity)
+        self.seg = abi.Segment.open(self.path, wait_s=wait_s,
+                                    max_heartbeat_age_ns=abi.HEARTBEAT_TIMEOUT_NS, **self._identity)
         record = self.seg.descriptor()
         scene, spawn, scan_mesh = host_scene(record.get("scene"))
         cfg = dataclasses.replace(cfg, physics=False, scene=cfg.scene or scene,
@@ -114,7 +115,9 @@ class RuntimeRender:
         """Render the latest truth if a render is due; False once the session has ended."""
         import torch
 
-        if self.seg.state == abi.STATE_ENDED or self.seg.session_id != self.session_id:
+        age = self.seg.heartbeat_age_ns()
+        if (self.seg.state != abi.STATE_READY or self.seg.session_id != self.session_id
+                or not 0 <= age <= abi.HEARTBEAT_TIMEOUT_NS):
             return False
         truth, fb = self._read("truth"), self._read("feedback")
         if truth is None or fb is None:
@@ -139,8 +142,10 @@ class RuntimeRender:
 
     def reopen(self, wait_s: float) -> None:
         """Follow the next session at the same path (``serve --persist``)."""
-        self.seg.close()
-        self.seg = abi.Segment.open(self.path, wait_s=wait_s, **self._identity)
+        if self.seg.buf is not None:
+            self.seg.close()
+        self.seg = abi.Segment.open(self.path, wait_s=wait_s,
+                                    max_heartbeat_age_ns=abi.HEARTBEAT_TIMEOUT_NS, **self._identity)
         self.session_id = self.seg.session_id
         self._last_t = None
 
@@ -186,7 +191,11 @@ def render_runtime(segment: str | Path, cfg, *, seconds: float | None = None, wa
     from humanoid_sim.sensors.rtx import start_kit
 
     kit = start_kit(cfg.device, window=window)
-    render = RuntimeRender(segment, cfg, wait_s=wait_s)
+    try:
+        render = RuntimeRender(segment, cfg, wait_s=wait_s)
+    except BaseException:
+        kit.close()
+        raise
     if window:
         _viewport_only(render.gantry)
     start = time.monotonic()
