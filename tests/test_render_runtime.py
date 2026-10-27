@@ -1,7 +1,8 @@
 """The render runtime's clock and scene, without Kit: plant time now from the host's feedback, the host's scene
 from its descriptor."""
 
-from contextlib import ExitStack, contextmanager
+import signal
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -189,3 +190,35 @@ def test_render_latency_does_not_move_camera_or_lidar_capture_timestamps(runtime
     assert renderer.frame()
     assert camera_stamps == [100.0, 100.0]
     assert clouds[0].stamp_ns == 99_900_000_000
+
+
+def test_ctrl_c_stops_even_when_a_kit_callback_swallows_the_interrupt(monkeypatch):
+    from humanoid_sim.runtime import render as module
+    from humanoid_sim.sensors import rtx
+
+    frames, closed = [], []
+
+    class Renderer:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def frame(self):
+            frames.append(True)
+            try:
+                signal.raise_signal(signal.SIGINT)
+            except KeyboardInterrupt:
+                pass  # Kit's async callback can consume the interrupt.
+            return True
+
+        def summary(self, _elapsed):
+            return {"frames": len(frames)}
+
+        def close(self):
+            closed.append(True)
+
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    monkeypatch.setattr(rtx, "start_kit", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(module, "RuntimeRender", Renderer)
+    assert render_runtime("unused", SimpleNamespace(device="cpu"), seconds=0.02) == {"frames": 1}
+    assert closed == [True]
+    assert {sig: signal.getsignal(sig) for sig in previous} == previous
