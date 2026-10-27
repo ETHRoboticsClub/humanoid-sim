@@ -9,6 +9,7 @@ import pytest
 
 from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.runtime.render import RuntimeRender, host_scene, plant_now_ns, render_runtime
+from humanoid_sim.sensors.session import SensorSession
 
 
 def test_plant_time_now_follows_the_hosts_mapping():
@@ -122,3 +123,50 @@ def test_kit_is_closed_when_startup_refuses_a_dead_host(runtime, monkeypatch):
     with pytest.raises(abi.AbiError, match="stale heartbeat"):
         render_runtime(host.path, cfg, wait_s=0)
     assert closed == [True]
+
+
+def test_render_latency_does_not_move_camera_or_lidar_capture_timestamps(runtime, monkeypatch):
+    from humanoid_sim.sensors import feeds, unitree_lidar
+    from humanoid_sim.sensors.lidar import Sweep
+
+    _, renderer, clock, _, _ = runtime
+    monkeypatch.setattr(feeds.time, "monotonic_ns", lambda: clock[0])
+    monkeypatch.setattr(feeds.time, "time", lambda: 90.0 + clock[0] / 1e9)
+    camera_stamps, clouds = [], []
+
+    class DelayedSensors(SensorSession):
+        def __init__(self):
+            self.render_ns = 33_333_333
+            self.sim = SimpleNamespace(t_ns=1_000_000_000,
+                                       plant=SimpleNamespace(cfg=SimpleNamespace(device="cpu")))
+            self.cfg = SimpleNamespace(images=None)
+            self.recorder = None
+            self.camera_specs = [SimpleNamespace(camera_id="stereo", streams=[
+                SimpleNamespace(name=name, kind="mono") for name in ("left", "right")])]
+            self.cameras = SimpleNamespace(update=lambda _dt: None,
+                                           image=lambda *_args: np.zeros((2, 2), dtype=np.uint8))
+            self.feeds = {"stereo": SimpleNamespace(publish=lambda _name, stamp, _image:
+                                                    camera_stamps.append(stamp))}
+            sweep = Sweep(start_ns=900_000_000, points_m=np.ones((1, 3)), hit=np.array([True]),
+                          time_s=np.array([0.0]), origin_w=np.zeros(3), rotation_w=np.eye(3))
+            self.lidars = [SimpleNamespace(sensor=SimpleNamespace(name="lidar", model=unitree_lidar.UNITREE_MODEL),
+                                           render_time=lambda now: now, read=lambda *_args: [sweep])]
+            self.publisher = SimpleNamespace(publish=clouds.append)
+            self.counts = {key: 0 for key in ("renders", "camera_frames", "lidar_sweeps", "lidar_points")}
+            self.ms = {key: [] for key in ("render", "camera_read", "lidar_read", "publish")}
+            self.last_images, self._last_sweep, self._saved = {}, {}, {}
+            self.sweeps = None
+
+        def pose(self, *_args):
+            pass
+
+        def render(self, _timeline_ns):
+            clock[0] += 2_000_000_000
+
+        def close(self):
+            pass
+
+    renderer.session = DelayedSensors()
+    assert renderer.frame()
+    assert camera_stamps == [100.0, 100.0]
+    assert clouds[0].stamp_ns == 99_900_000_000

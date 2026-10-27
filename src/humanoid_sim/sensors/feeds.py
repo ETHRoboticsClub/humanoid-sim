@@ -46,6 +46,17 @@ BYTES_PER_PIXEL = {"bgr8": 3, "rgb8": 3, "mono8": 1, "16UC1": 2}
 DEFAULT_CAPACITY = 8
 
 
+@dataclass(frozen=True)
+class ClockMapping:
+    """One plant timestamp and its simultaneous host monotonic timestamp, in nanoseconds."""
+
+    plant_ns: int
+    mono_ns: int
+
+    def plant_at(self, mono_ns: int) -> int:
+        return self.plant_ns + mono_ns - self.mono_ns
+
+
 def _round_up(value: int, multiple: int) -> int:
     return -(-value // multiple) * multiple
 

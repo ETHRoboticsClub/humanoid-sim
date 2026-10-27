@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 
 from humanoid_sim.runtime.abi import plant_abi as abi
+from humanoid_sim.sensors.feeds import ClockMapping
 
 FOLLOW_S = 10.0  # how long to wait for the next session of a `serve --persist` host
 EDITOR_PANELS = ("Stage", "Layer", "Render Settings", "Property", "Content", "Console")  # hidden in the window
@@ -32,7 +33,7 @@ EDITOR_PANELS = ("Stage", "Layer", "Render Settings", "Property", "Content", "Co
 def plant_now_ns(feedback, mono_now_ns: int) -> int:
     """Where the host's plant is now, from its last feedback write (``plant_abi``: plant time ``t`` is at
     ``written_mono_ns - (sim_time_ns - t)``)."""
-    return int(feedback["sim_time_ns"]) + (mono_now_ns - int(feedback["written_mono_ns"]))
+    return ClockMapping(int(feedback["sim_time_ns"]), int(feedback["written_mono_ns"])).plant_at(mono_now_ns)
 
 
 def host_scene(record: dict | None) -> tuple[str | None, tuple[float, float], str | None]:
@@ -132,7 +133,7 @@ class RuntimeRender:
         base = np.concatenate([tr["base_position_m"], tr["base_quat_xyzw"]])
         session.pose(t_ns, torch.as_tensor(q, device=device)[None], torch.as_tensor(base, device=device)[None])
         self._move_crane(tr)
-        session.clock_ns = plant_now_ns(fb[1], abi.mono_ns())
+        session.clock = ClockMapping(int(fb[1]["sim_time_ns"]), int(fb[1]["written_mono_ns"]))
         dt = session.render_ns if self._last_t is None else t_ns - self._last_t
         session.render_at(t_ns, dt)
         self._last_t = t_ns
