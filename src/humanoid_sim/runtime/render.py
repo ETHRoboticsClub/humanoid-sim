@@ -191,34 +191,30 @@ def render_runtime(segment: str | Path, cfg, *, seconds: float | None = None, wa
 
     from humanoid_sim.sensors.rtx import start_kit
 
-    kit = start_kit(cfg.device, window=window)
-    try:
+    with start_kit(cfg.device, window=window):
         render = RuntimeRender(segment, cfg, wait_s=wait_s)
-    except BaseException:
-        kit.close()
-        raise
-    if window:
-        _viewport_only(render.gantry)
-    start = time.monotonic()
-    end = None if seconds is None else start + seconds
-    try:
-        while end is None or time.monotonic() < end:
-            if not render.frame():
-                try:
-                    render.reopen(FOLLOW_S)
-                except (abi.AbiError, FileNotFoundError):
-                    break  # the host is gone
-            time.sleep(0.001)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        out = render.summary(time.monotonic() - start)
-        text = json.dumps(out, indent=1)
-        if summary:
-            Path(summary).write_text(text)
-        print(text, flush=True)
-        render.close()
-        kit.close()
+        start = time.monotonic()
+        end = None if seconds is None else start + seconds
+        try:
+            if window:
+                _viewport_only(render.gantry)
+            while end is None or time.monotonic() < end:
+                if not render.frame():
+                    try:
+                        render.reopen(FOLLOW_S)
+                    except (abi.AbiError, FileNotFoundError):
+                        break  # the host is gone
+                time.sleep(0.001)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            out = render.summary(time.monotonic() - start)
+            text = json.dumps(out, indent=1)
+            if summary:
+                Path(summary).write_text(text)
+            print(text, flush=True)
+            render.close()
+
     return out
 
 

@@ -1,6 +1,7 @@
 """The render runtime's clock and scene, without Kit: plant time now from the host's feedback, the host's scene
 from its descriptor."""
 
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -117,12 +118,30 @@ def test_kit_is_closed_when_startup_refuses_a_dead_host(runtime, monkeypatch):
     from humanoid_sim.sensors import rtx
 
     host, _, clock, _, cfg = runtime
-    closed = []
-    monkeypatch.setattr(rtx, "start_kit", lambda *_args, **_kwargs: SimpleNamespace(close=lambda: closed.append(True)))
+    exits = []
+
+    @contextmanager
+    def kit_runtime():
+        # Isaac Lab chooses the process exit status from the exception passed into
+        # its context. ExitStack.close() would hide it and exit successfully.
+        try:
+            yield
+        except BaseException as exc:
+            exits.append(type(exc))
+            raise
+        else:
+            exits.append(None)
+
+    def start_kit(*_args, **_kwargs):
+        stack = ExitStack()
+        stack.enter_context(kit_runtime())
+        return stack
+
+    monkeypatch.setattr(rtx, "start_kit", start_kit)
     clock[0] += 500_000_001
     with pytest.raises(abi.AbiError, match="stale heartbeat"):
         render_runtime(host.path, cfg, wait_s=0)
-    assert closed == [True]
+    assert exits == [abi.AbiError]
 
 
 def test_render_latency_does_not_move_camera_or_lidar_capture_timestamps(runtime, monkeypatch):
