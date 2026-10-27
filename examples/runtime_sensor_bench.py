@@ -40,9 +40,13 @@ def main() -> None:
     parser.add_argument("--wait", type=float, default=600.0)
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--ready-file")
+    parser.add_argument("--start-file")
     args = parser.parse_args()
     if args.seconds <= 0 or args.warmup < 0:
         parser.error("seconds must be positive and warmup nonnegative")
+    if bool(args.ready_file) != bool(args.start_file):
+        parser.error("ready-file and start-file must be provided together")
 
     from humanoid_sim.runtime.render import RuntimeRender
     from humanoid_sim.sensors.rtx import start_kit
@@ -59,9 +63,16 @@ def main() -> None:
         session = renderer.session
         started = time.monotonic()
         print("BENCH_READY", flush=True)
-        while time.monotonic() - started < args.warmup:
+        ready = False
+        while True:
             if not renderer.frame():
                 raise RuntimeError("plant session ended during warmup")
+            if time.monotonic() - started >= args.warmup:
+                if args.ready_file and not ready:
+                    Path(args.ready_file).touch()
+                    ready = True
+                if not args.start_file or Path(args.start_file).exists():
+                    break
             time.sleep(0.001)
 
         before = dict(session.counts)
