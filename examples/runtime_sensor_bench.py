@@ -23,6 +23,13 @@ def stats(values) -> dict | None:
             "p95": float(np.percentile(values, 95)), "max": float(np.max(values))}
 
 
+def feedback_state(renderer) -> dict[str, int]:
+    record = renderer.seg.regions["feedback"].read()
+    if record is None:
+        raise RuntimeError("host has not published feedback")
+    return {name: int(record[1][name]) for name in ("sim_time_ns", "written_mono_ns", "step", "late_steps")}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("segment")
@@ -81,6 +88,7 @@ def main() -> None:
         last_sweep = max((s.start_ns for s in session.sweeps or []), default=-1)
         sweeps = []
         render_wall_ms = []
+        feedback_before = feedback_state(renderer)
         started = time.monotonic()
         while time.monotonic() - started < args.seconds:
             count = session.counts["renders"]
@@ -97,6 +105,7 @@ def main() -> None:
                     last_sweep = sweep.start_ns
             time.sleep(0.001)
         wall_s = time.monotonic() - started
+        feedback_after = feedback_state(renderer)
         counts = {name: total - before[name] for name, total in session.counts.items()}
         if len(sweeps) != counts["lidar_sweeps"]:
             raise RuntimeError("benchmark missed a sweep: increase keep_sweeps")
@@ -114,6 +123,9 @@ def main() -> None:
             "lidar_observed_gap_ms": stats(np.diff([s["received_mono_ns"] for s in sweeps]) / 1e6),
             "lag_ms": stats(renderer.lag_ms[lag_index:]),
             "host_keeping_up": sum(keeping_up) / len(keeping_up) if keeping_up else None,
+            "feedback_before": feedback_before, "feedback_after": feedback_after,
+            "plant_real_time_factor": ((feedback_after["sim_time_ns"] - feedback_before["sim_time_ns"])
+                                       / (feedback_after["written_mono_ns"] - feedback_before["written_mono_ns"])),
             "camera_mean": {"/".join(key): float(image.mean()) for key, image in session.last_images.items()},
             "sweeps": sweeps,
             "session_summary": renderer.summary(wall_s + args.warmup),
