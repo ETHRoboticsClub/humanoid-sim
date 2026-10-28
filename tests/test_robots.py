@@ -121,7 +121,7 @@ def test_the_runtime_start_pose_lies_inside_every_drive_window(robot):
     for name, d in desc.drives.items():
         if d.crank is None:
             entry = desc.table["joints"][d.joints[0]]
-            lo, hi = (float(b) + float(entry["standing_offset_rad"]) for b in entry["position_limit"])
+            lo, hi = (float(b) + float(entry.get("standing_offset_rad", 0.0)) for b in entry["position_limit"])
             assert lo < pose[d.joints[0]] < hi, name
         else:
             lo, hi = d.position_limit_device
