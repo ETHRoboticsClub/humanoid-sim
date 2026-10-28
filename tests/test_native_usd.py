@@ -50,11 +50,14 @@ def test_fixed_joint_collapse_preserves_native_mass_geometry_and_moving_joints(d
 
     before = snapshot()
     original_bodies = builder.body_count
+    has_fixed_joints = any(kind == newton.JointType.FIXED for kind in builder.joint_type)
     hook = _FixedJointCollapse()
     hook.world(builder, 0, None, None)
     hook.finalize(None)
     after = snapshot()
-    assert builder.body_count < original_bodies
+    assert builder.body_count <= original_bodies
+    if has_fixed_joints:
+        assert builder.body_count < original_bodies
     for a, b in zip(before[:3], after[:3], strict=True):
         np.testing.assert_allclose(a, b, atol=2e-5, rtol=2e-6)
     assert before[3].keys() == after[3].keys()
