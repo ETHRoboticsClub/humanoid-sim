@@ -113,7 +113,7 @@ class Drives(PlantAction):
 
 cfg.scene = robot_scene_cfg(4096, usd, terrain=terrain)  # spawns in the home pose; terrain: the task's
 cfg.sim = robot_sim_cfg(device="cuda:0")
-cfg.decimation = 5  # 4 ms physics, 20 ms policy period
+cfg.decimation = 20_000_000 // round(cfg.sim.dt * 1_000_000_000)  # 20 ms policy period
 cfg.actions.drives = PlantActionCfg(class_type=Drives, action_dim=22, plant=TrainPlantCfg(randomization=[
     {"param": "latency", "dist": "uniform", "range": [0.010, 0.020], "op": "set", "per_target": False},
     {"param": "friction", "dist": "uniform", "range": [0.3, 1.0], "op": "set"},

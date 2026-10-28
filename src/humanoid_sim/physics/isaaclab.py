@@ -117,6 +117,40 @@ def apply_joint_limits(physics: dict) -> None:
     NewtonManager.add_model_change(ModelFlags.JOINT_DOF_PROPERTIES)
 
 
+def apply_loop_closure(physics: dict) -> None:
+    """Set MJWarp's response time and damping for joint-synthesized loop constraints.
+
+    Newton synthesizes USD ball/hinge closures with MuJoCo's default 20 ms
+    response time. This numerical compliance is independent of actuator gains.
+    Only synthesized loop rows are changed; other equalities retain their values.
+    Call after solver construction, before stepping.
+    """
+    if running_solver() != "mjwarp":
+        return
+    solref = physics["mjwarp"].get("loop_closure_solref")
+    solimp = physics["mjwarp"].get("loop_closure_solimp")
+    if solref is None and solimp is None:
+        return
+    if solref is not None and (len(solref) != 2 or not all(math.isfinite(v) and v > 0 for v in solref)):
+        raise ValueError("loop_closure_solref requires positive finite time constant and damping ratio")
+    if solimp is not None and (len(solimp) != 5 or not all(math.isfinite(v) for v in solimp)
+                              or not 0 < solimp[0] <= solimp[1] < 1 or solimp[2] <= 0
+                              or not 0 < solimp[3] < 1 or solimp[4] < 1):
+        raise ValueError("invalid loop_closure_solimp impedance parameters")
+    from isaaclab_newton.physics import NewtonManager
+
+    solver = NewtonManager._solver
+    if solver is None or getattr(solver, "mjw_model", None) is None:
+        raise RuntimeError("apply loop closure settings after the simulation is reset")
+    rows = (solver.mjc_eq_to_newton_jnt.numpy() >= 0).any(axis=0)
+    for name, setting in (("eq_solref", solref), ("eq_solimp", solimp)):
+        if setting is not None:
+            target = getattr(solver.mjw_model, name)
+            values = target.numpy()
+            values[:, rows] = setting
+            target.assign(values)
+
+
 def apply_heightfield_base(physics: dict) -> None:
     """Give every heightfield of the running MJWarp model a solid base ``heightfield_base_m`` deep below its lowest
     point (the block's setting). Newton exports a heightfield to MuJoCo with a 0.1 mm base, and MuJoCo pushes a
@@ -244,16 +278,35 @@ def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None):
                                njmax=settings["njmax"], nconmax=settings["nconmax"],
                                use_mujoco_contacts=contacts == "mujoco")
     if solver == "kamino":
-        from isaaclab_newton.physics import KaminoMaterialsCfg, KaminoPADMMCfg, KaminoPADMMSolverCfg
+        from isaaclab_newton.physics import (
+            KaminoDVICfg,
+            KaminoDVISolverCfg,
+            KaminoDynamicsCfg,
+            KaminoMaterialsCfg,
+            KaminoPADMMCfg,
+            KaminoPADMMSolverCfg,
+        )
 
         if integrator != "euler":
             # Newton would fall back to euler: moreau needs Kamino's own collision detector, not used here.
             raise ValueError(f"Kamino integrator {integrator!r}: euler (contacts come from Newton's pipeline)")
 
-        return KaminoPADMMSolverCfg(integrator=integrator,
-                                    dynamics_solver_cfg=KaminoPADMMCfg(max_iterations=settings["iterations"]),
-                                    max_contacts_per_world=settings["max_contacts_per_world"],
-                                    materials=KaminoMaterialsCfg(friction_mix_mode="max"))
+        common = dict(integrator=integrator, use_fk_solver=settings.get("use_fk_solver"),
+                      sparse_jacobian=settings.get("sparse_jacobian"),
+                      sparse_dynamics=settings.get("sparse_dynamics", False),
+                      max_contacts_per_world=settings["max_contacts_per_world"],
+                      materials=KaminoMaterialsCfg(friction_mix_mode="max"))
+        method = settings.get("dynamics_solver", "padmm")
+        if method == "dvi":
+            return KaminoDVISolverCfg(**common, dynamics_solver_cfg=KaminoDVICfg(
+                max_alternating_iterations=settings["iterations"], **settings.get("dvi", {})))
+        if method != "padmm":
+            raise ValueError(f"Kamino dynamics solver {method!r}: padmm or dvi")
+        return KaminoPADMMSolverCfg(**common, dynamics_solver_cfg=KaminoPADMMCfg(
+            max_iterations=settings["iterations"],
+            use_graph_conditionals=settings.get("use_graph_conditionals", False), **settings.get("padmm", {})),
+            dynamics=KaminoDynamicsCfg(linear_solver_type=settings.get("linear_solver", "LLTB"),
+                                      linear_solver_kwargs=dict(settings.get("linear_solver_kwargs", {}))))
     raise ValueError(f"physics solver {solver!r}: one of {', '.join(SOLVERS)}")
 
 
@@ -318,6 +371,7 @@ class IsaacLabRobot:
             self.sim.reset()
         check_crank_stops(desc.robot, physics)
         apply_joint_limits(physics)
+        apply_loop_closure(physics)
         self.robot = self.scene["robot"]
         self.imu = self.scene["imu"] if cfg.imu else None
         self.contacts = self.scene["contacts"] if cfg.contacts else None

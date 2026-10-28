@@ -146,13 +146,19 @@ class RobotPlant:
                                       "shape": [f"shape_{i}" for i in range(nominal.get("shape_friction", torch.empty(e, 0)).shape[1])]},
                                      num_envs=e, device=self.device, seed=cfg.seed, level=cfg.level)
         from humanoid_sim.physics.crank_stops import check_crank_stops
-        from humanoid_sim.physics.isaaclab import apply_heightfield_base, apply_joint_limits, running_solver
+        from humanoid_sim.physics.isaaclab import (
+            apply_heightfield_base,
+            apply_joint_limits,
+            apply_loop_closure,
+            running_solver,
+        )
 
         if used & {"friction", "shape_friction"} and physics_manager is None:
             raise ValueError("randomizing friction needs the physics manager (env.sim.physics_manager)")
         self._solver = running_solver()
         check_crank_stops(cfg.robot, self.profile["physics"])
         apply_joint_limits(self.profile["physics"])
+        apply_loop_closure(self.profile["physics"])
         apply_heightfield_base(self.profile["physics"])
         self._write_physics()
         self._write_device(torch.arange(e, device=self.device))

@@ -17,6 +17,20 @@ model:
   # Preserve the delivered crank/rod loops; only uncommanded hand joints are welded.
   ankle_representation: native
   collision_hulls: per_mesh
+  # Hand joints are welded above: shapes within each resulting rigid assembly
+  # must not generate self-contacts between its non-adjacent component bodies.
+  exclude_fixed_cluster_contacts: true
+  # Convex hulls fill the interlocking housings across these compound joints.
+  # Exclude their internal assembly contacts, retaining contacts with other bodies.
+  contact_excludes:
+    # Waist axial rotation + lateral bending.
+    - [base_link, hej90_hip_abduction_1]
+    # Ankle universal joints (the delivered CAD body names are not side labels).
+    - [bottom_universal_joint_l_1, universal_joint_connector_l_1]
+    - [WB71803_Kugelzapfen_WB71802_C16_ST_1, universal_joint_connector_l_Mirror_1]
+    # Hip flexion + abduction housings.
+    - [hej90_hip_abduction_1, hej90_leg_abduction_l_1]
+    - [hej90_hip_abduction_1, hej90_leg_abduction_r_1]
   sole:
     joints: {l: ankle_inversion_l, r: ankle_inversion_r}
     box_thickness_m: 0.005
@@ -33,6 +47,36 @@ devices:
     HEJ50-48-30: {counts_per_revolution: 16384}
 
 solver_gains: baseline        # constant per-episode PD = humanoid-urdf baseline_position_gains (native ankle shafts use crank gains)
+
+physics:
+  # Resolve the light native rods and their closed-loop constraints at 1 kHz.
+  # Policy/control periods are configured independently by the caller.
+  period_ns: 1000000
+  mjwarp:
+    # Contact can spin a rod about its long axis. RK4 resolves that rotational
+    # motion without the energy growth of the single-step integrators.
+    integrator: rk4
+    # Numerical loop compliance, separate from the measured actuator gains.
+    loop_closure_solref: [0.002, 1.0]
+    loop_closure_solimp: [0.99, 0.999, 0.001, 0.5, 2.0]
+    # Allow headroom for native per-mesh contacts when environments fall;
+    # the legacy per-body hull budget is too small for this geometry.
+    # Reserve 512 contacts/world on average and four pyramidal friction rows per
+    # contact, plus 256 rows for native loops, joint limits and uneven contact load.
+    nconmax: 512
+    njmax: 2304
+  kamino:
+    # NativeState supplies every crank and ball coordinate consistently. Preserve
+    # that state through tree FK rather than re-solving it with regularized FK.
+    use_fk_solver: false
+    max_contacts_per_world: 512
+    # Dense contact Jacobians exceed int32 indexing at 4096 native worlds.
+    sparse_jacobian: true
+    sparse_dynamics: true
+    linear_solver: CR
+    # Keep nested PADMM/CR iterations as CUDA graph loops instead of unrolling
+    # every iteration into a graph too large for the native 4096-world batch.
+    use_graph_conditionals: true
 
 support:
   harness: {body: base_link, shoulders: [shoulder_connector_l_1, shoulder_connector_r_1]}

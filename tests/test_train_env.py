@@ -9,7 +9,7 @@ from humanoid_sim.model.description import Description
 pytestmark = pytest.mark.physics
 
 
-def _env(robot, num_envs=2):
+def _env(robot, num_envs=2, *, device="cpu", solver=None):
     pytest.importorskip("isaaclab_newton")
     import isaaclab.envs.mdp as mdp
     from isaaclab.envs import ManagerBasedRLEnv, ManagerBasedRLEnvCfg
@@ -84,13 +84,17 @@ def _env(robot, num_envs=2):
 
     cfg = EnvCfg()
     cfg.scene = robot_scene_cfg(num_envs, built_usd(robot), robot=robot, ground_friction=0.0)
-    cfg.sim = robot_sim_cfg(robot, device="cpu")
+    cfg.sim = robot_sim_cfg(robot, device=device, solver=solver)
+    control_period_ns = 20_000_000
+    physics_period_ns = round(cfg.sim.dt * 1_000_000_000)
+    assert control_period_ns % physics_period_ns == 0
+    cfg.decimation = control_period_ns // physics_period_ns
     cfg.actions.drives.plant = TrainPlantCfg(robot=robot, randomization=[
         {"param": "friction", "dist": "uniform", "range": [0.5, 1.0], "op": "set"},
         {"param": "latency", "dist": "uniform", "range": [0.010, 0.020], "op": "set", "per_target": False},
         {"param": "body_inertia", "dist": "uniform", "range": [0.8, 1.2], "op": "scale"},
     ])
-    with robot_build(robot):
+    with robot_build(robot, solver=solver):
         return ManagerBasedRLEnv(cfg)
 
 
@@ -99,6 +103,39 @@ def _rotation(q_xyzw):
     return torch.stack([torch.stack([1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)], -1),
                         torch.stack([2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)], -1),
                         torch.stack([2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)], -1)], -2)
+
+
+@pytest.mark.parametrize("solver", ("mjwarp", "kamino"))
+def test_native_partial_reset_closes_usd_loops_without_moving_other_worlds(solver):
+    if not torch.cuda.is_available():
+        pytest.skip("native solver reset regression requires CUDA")
+    env = _env("ethrc_v1", num_envs=4, device="cuda:0", solver=solver)
+    try:
+        env.reset()
+        plant = env.action_manager.get_term("drives").plant
+        robot, source = plant.robot, plant.desc.usd_model
+        before = robot.data.body_link_pose_w.torch.clone()
+        q, qd = plant.joint_state()
+        q = q[1:2].clone()
+        for linkage in plant.desc.linkages:
+            cols = [plant.joints.index(name) for name in linkage.joints]
+            candidate = q[:, cols] + q.new_tensor([-.1, .03])
+            q[:, cols] = plant.desc.ankle_model.project_torch(candidate, linkage.side)
+        plant.write_joint_state(torch.tensor([1], device=plant.device), q, torch.zeros_like(qd[1:2]))
+        poses = robot.data.body_link_pose_w.torch
+        torch.testing.assert_close(poses[[0, 2, 3]], before[[0, 2, 3]], atol=1e-7, rtol=0)
+        for name, joint in source.joints.items():
+            if not joint.GetExcludeFromArticulationAttr().Get():
+                continue
+            anchors = []
+            for body, frame in zip(source.joint_bodies(name), source.joint_frames(name), strict=True):
+                pose = poses[:, robot.body_names.index(body)]
+                local = pose.new_tensor(frame[:3, 3])
+                anchors.append(pose[:, :3] + (_rotation(pose[:, 3:]) @ local))
+            # Numerical closure tolerance, independent of delivered dimensions.
+            torch.testing.assert_close(*anchors, atol=2e-5, rtol=0)
+    finally:
+        env.close()
 
 
 @pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
@@ -118,7 +155,7 @@ def test_manager_based_env_steps_the_plant(robot):
         for _ in range(450):
             obs, _, _, truncated, _ = env.step(torch.zeros(2, drives))
             assert not truncated.any()
-        assert plant.t_ns - t0 == 450 * 5 * plant.period_ns
+        assert plant.t_ns - t0 == 9_000_000_000
         assert torch.isfinite(obs["policy"]).all()
         # IMU frame: at rest the sensor reads gravity's reaction in the chip frame of the description's mount.
         _, _, rpy = plant.desc.imu_mount()

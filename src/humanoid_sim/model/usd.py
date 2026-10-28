@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -150,6 +151,23 @@ class UsdDescription:
         return result
 
 
+def fixed_body_excludes(edges: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """No internal contacts within a rigid assembly, including non-adjacent welded bodies."""
+    parents = {name: name for pair in edges for name in pair}
+
+    def root(name):
+        while parents[name] != name:
+            name = parents[name]
+        return name
+
+    for a, b in edges:
+        parents[root(b)] = root(a)
+    groups = {}
+    for name in sorted(parents):
+        groups.setdefault(root(name), []).append(name)
+    return sorted(pair for names in groups.values() for pair in combinations(names, 2))
+
+
 def asset_key(desc, profile: dict, *, base_joints: bool = False) -> str:
     if base_joints:
         raise ValueError("prescribed base joints are not supported for a native USD articulation")
@@ -222,6 +240,20 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
         revolute.CreateLowerLimitAttr(math.degrees(bounds[0]))
         revolute.CreateUpperLimitAttr(math.degrees(bounds[1]))
 
+    excluded = []
+    fixed_pairs = []
+    if profile["model"].get("exclude_fixed_cluster_contacts", False):
+        fixed = [source.joint_bodies(name) for name, joint in source.joints.items()
+                 if name in welded or joint.GetPrim().IsA(UsdPhysics.FixedJoint)]
+        fixed_pairs = fixed_body_excludes(fixed)
+    contact_excludes = profile["model"].get("contact_excludes", [])
+    for a, b in sorted({tuple(sorted(pair)) for pair in [*fixed_pairs, *contact_excludes]}):
+        if a not in source.bodies or b not in source.bodies:
+            raise ValueError(f"unknown native collision-exclusion bodies: {a}, {b}")
+        pa, pb = mapped(source.bodies[a]), mapped(source.bodies[b])
+        UsdPhysics.FilteredPairsAPI.Apply(stage.GetPrimAtPath(pa)).CreateFilteredPairsRel().AddTarget(pb)
+        excluded.append((str(pa), str(pb)))
+
     # Keep each delivered mesh separate. Convex hulls are an explicit simulation
     # choice, avoiding an import-time decomposition with optional external tools.
     if profile["model"].get("collision_hulls") == "per_mesh":
@@ -247,6 +279,6 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     meta = {"schema": ASSET_SCHEMA, "key": key, "usd": path.name, **desc.identity(),
             "source_usd_sha256": source.digest(), "ankle_representation": "native", "base_joints": [],
             "welded_joints": welded, "sole_boxes": soles, "merged_collision_bodies": [],
-            "contact_excludes": [], "self_collision_sets": None, "self_collision_excludes": []}
+            "contact_excludes": contact_excludes, "self_collision_sets": None, "self_collision_excludes": excluded}
     meta_path.write_text(json.dumps(meta, indent=1))
     return path

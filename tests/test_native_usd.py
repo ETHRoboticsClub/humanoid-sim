@@ -11,6 +11,13 @@ from humanoid_sim.physics.joint_properties import joint_properties
 from humanoid_sim.transmissions.drive_map import native_joint_names
 
 
+def test_fixed_body_contacts_are_excluded_transitively_without_excluding_movable_neighbors():
+    from humanoid_sim.model.usd import fixed_body_excludes
+
+    assert fixed_body_excludes([('palm', 'finger'), ('finger', 'tip'), ('wrist', 'bracket')]) == [
+        ('bracket', 'wrist'), ('finger', 'palm'), ('finger', 'tip'), ('palm', 'tip')]
+
+
 @pytest.fixture(scope="module")
 def desc():
     return Description.load("ethrc_v1")
@@ -64,13 +71,19 @@ def test_native_asset_preserves_closures_and_authors_shaft_limits(desc, tmp_path
     from pxr import Usd, UsdPhysics
 
     source_hash = desc.usd_model.digest()
-    path = build_asset(desc, load_profile(desc.robot), tmp_path)
+    profile = load_profile(desc.robot)
+    path = build_asset(desc, profile, tmp_path)
     stage = Usd.Stage.Open(str(path))
     source = desc.usd_model
     source_closures = {n for n, j in source.joints.items() if j.GetExcludeFromArticulationAttr().Get()}
     closures = {p.GetName() for p in stage.Traverse() if p.IsA(UsdPhysics.Joint)
                 and UsdPhysics.Joint(p).GetExcludeFromArticulationAttr().Get()}
     assert closures == source_closures and closures
+    bodies = {p.GetName(): p for p in stage.Traverse() if p.HasAPI(UsdPhysics.RigidBodyAPI)}
+    for pair in profile["model"].get("contact_excludes", []):
+        a, b = sorted(pair)
+        targets = UsdPhysics.FilteredPairsAPI(bodies[a]).GetFilteredPairsRel().GetTargets()
+        assert bodies[b].GetPath() in targets
     for spec in desc.ankle_model.payload["sides"].values():
         for role, drive in zip(("upper", "lower"), spec["motor_names"], strict=True):
             name = spec["usd_joints"][role]
