@@ -29,7 +29,6 @@ class VelocityPush:
         self.robot, self.interval_ns, self.velocity_range = robot, interval_ns, velocity_range_m_s
         self.next_ns = torch.full((robot.num_instances,), interval_ns, device=robot.device, dtype=torch.long)
         self.generator = torch.Generator(device=robot.device).manual_seed(seed)
-        self.ids = torch.arange(robot.num_instances, device=robot.device)
 
     def reset(self, ids: torch.Tensor, t_ns: int) -> None:
         self.next_ns[ids] = t_ns + self.interval_ns
@@ -40,7 +39,9 @@ class VelocityPush:
         lo, hi = self.velocity_range
         drawn = lo + (hi - lo) * torch.rand(velocity.shape[0], 2, device=velocity.device, generator=self.generator)
         velocity[:, :2] = torch.where(active[:, None], drawn, velocity[:, :2])
-        self.robot.write_root_velocity_to_sim_index(root_velocity=velocity, env_ids=self.ids)
+        # A state write clears body accelerations and invalidates solver caches.
+        # Preserve both for environments with no push due this tick.
+        self.robot.write_root_velocity_to_sim_mask(root_velocity=velocity, env_mask=active)
         self.next_ns = torch.where(active, t_ns + self.interval_ns, self.next_ns)
 
 

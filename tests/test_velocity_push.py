@@ -11,18 +11,26 @@ def test_velocity_push_sets_only_xy_when_due_and_respects_individual_resets():
         device = 'cpu'
         def __init__(self):
             self.value = torch.tensor([[1., 2., 3., 4., 5., 6.], [7., 8., 9., 10., 11., 12.]])
+            self.acceleration = torch.ones(2, 3)
             self.data = SimpleNamespace(root_com_vel_w=SimpleNamespace(torch=self.value))
         def write_root_velocity_to_sim_index(self, root_velocity, env_ids):
             self.value[env_ids] = root_velocity
+            self.acceleration[env_ids] = 0
+        def write_root_velocity_to_sim_mask(self, root_velocity, env_mask):
+            self.value[env_mask] = root_velocity[env_mask]
+            self.acceleration[env_mask] = 0
     robot = Robot()
     initial = robot.value.clone()
     push = VelocityPush(robot, interval_ns=500, velocity_range_m_s=(-.5, .5), seed=4)
     push.step(499)
     torch.testing.assert_close(robot.value, initial)
+    assert (robot.acceleration == 1).all()
     push.reset(torch.tensor([1]), 250)
     push.step(500)
     assert (robot.value[0, :2].abs() <= .5).all()
     torch.testing.assert_close(robot.value[1], initial[1])
+    assert (robot.acceleration[0] == 0).all()
+    assert (robot.acceleration[1] == 1).all()
     torch.testing.assert_close(robot.value[:, 2:], initial[:, 2:])
     before = robot.value.clone()
     push.step(750)

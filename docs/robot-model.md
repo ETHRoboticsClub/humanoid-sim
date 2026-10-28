@@ -367,18 +367,23 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `poses.start` | `start_pose`, `RuntimeHost` | The pose every runtime session starts in: `home` (the default) or `standing`. `serve --pose` overrides it. |
 | `model.ground_friction` | `SimCore`, `robot_scene_cfg` | Friction of the flat ground (1.0) unless the caller overrides it or passes a terrain. See [world.md](world.md). |
 | `devices.encoders.<family>.counts_per_revolution` | `DriveReporting` | Output encoder resolution in counts per revolution: the integer units the drive reports position in. The training plant quantizes measured feedback with it; in the runtime, Controls' fake drive does that. |
-| `physics.period_ns` | `SimCore`, `RobotPlant`, `robot_sim_cfg` | Physics step, 4000000 ns (4 ms, 250 Hz). `replay --period-ms` sets it for replays. |
+| `physics.period_ns` | `SimCore`, `RobotPlant`, `robot_sim_cfg` | Physics step: 1000000 ns for native V1, 4000000 ns for G1. `replay --period-ms` sets it for replays. |
 | `physics.solver` | `solver_settings` | The Newton solver that steps the robot: `mjwarp` (the default) or `kamino` (beta). The global option `--solver` and `robot_sim_cfg(solver=...)` override it; the solver needs its own block below. |
 | `physics.self_collision` | `SimCore`, `robot_scene_cfg` | Self-collision on the spawned articulation. |
-| `physics.mjwarp.integrator` | `solver_cfg` | MJWarp integrator, `implicitfast`. `replay --integrator` overrides it. |
+| `physics.mjwarp.integrator` | `solver_cfg` | MJWarp integrator: native V1 uses `rk4` for rapidly spinning slender rods; the general default is `implicitfast`. `replay --integrator` overrides it. |
 | `physics.mjwarp.cone` | `solver_cfg` | Friction cone model, `pyramidal`. |
 | `physics.mjwarp.iterations`, `.ls_iterations` | `solver_cfg` | Solver and line-search iteration limits. |
 | `physics.mjwarp.njmax`, `.nconmax` | `solver_cfg` | MJWarp buffers: constraint rows per world (a maximum) and contacts per world (an average; the pool is shared by all worlds). |
 | `physics.mjwarp.joint_limits` | `apply_joint_limits` | `mujoco`: MuJoCo's own joint-limit constraint, as Controls' MJCF has it. `newton`: Newton's force-space default, softer for the legs. |
 | `physics.mjwarp.heightfield_base_m` | `apply_heightfield_base` | Depth of the solid base under a heightfield's lowest point, 1.0 m (see [world.md](world.md#the-heightfields-base)). |
 | `physics.kamino.integrator` | `solver_cfg` | `euler`, the only one allowed: `moreau` needs Kamino's own collision detector, which is not used here. |
-| `physics.kamino.iterations` | `solver_cfg` | Iteration limit of Kamino's P-ADMM dynamics solver. |
-| `physics.kamino.max_contacts_per_world` | `solver_cfg` | Contact buffer per world (128, an estimate); Newton drops contacts beyond it. |
+| `physics.kamino.dynamics_solver`, `.iterations` | `solver_cfg` | `padmm` (default) or `dvi`, and its outer iteration limit. |
+| `physics.kamino.max_contacts_per_world` | `solver_cfg` | Contact buffer per world (512 for native V1); Newton drops contacts beyond it. |
+| `physics.mjwarp.loop_closure_solref`, `.loop_closure_solimp` | `apply_loop_closure` | Numerical response time/damping and impedance of joint-synthesized native loop constraints; actuator gains are independent. |
+| `physics.kamino.use_fk_solver` | `solver_cfg` | Native V1 uses `false`: resets supply all crank and ball coordinates, so tree FK preserves that closed state without a regularized kinematics solve. |
+| `physics.kamino.sparse_jacobian`, `.sparse_dynamics` | `solver_cfg` | Sparse storage for the constraint Jacobian and dynamics operator; dense storage exceeds indexing or memory limits at large native batches. |
+| `physics.kamino.linear_solver`, `.linear_solver_kwargs`, `.padmm` | `solver_cfg` | P-ADMM linear solver and convergence options. DVI uses Newton's backend defaults and optional `.dvi` options. |
+| `physics.kamino.use_graph_conditionals` | `solver_cfg` | Capture P-ADMM loops as conditional CUDA graph nodes instead of unrolling every iteration. |
 | `solver_gains` | nothing | Records that the solver PD is the description's baseline gains. |
 
 Only the `model` block is part of the asset key. The `physics` block is described in more detail in [world.md](world.md) and [testing-and-gpu.md](testing-and-gpu.md).
