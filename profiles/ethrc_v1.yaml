@@ -69,12 +69,17 @@ physics:
     # NativeState supplies every crank and ball coordinate consistently. Preserve
     # that state through tree FK rather than re-solving it with regularized FK.
     use_fk_solver: false
-    max_contacts_per_world: 512
-    # Dense contact Jacobians exceed int32 indexing at 4096 native worlds.
+    collapse_fixed_joints: true
+    # Keep the direct operator within int32 indexing at 4096 worlds. The plant
+    # checks actual contacts on device and stops rather than silently dropping any.
+    max_contacts_per_world: 144
     sparse_jacobian: true
-    sparse_dynamics: true
-    linear_solver: CR
-    # Keep nested PADMM/CR iterations as CUDA graph loops instead of unrolling
+    sparse_dynamics: false
+    dynamics_solver: padmm
+    linear_solver: LLTB
+    linear_solver_kwargs: {}
+    padmm: {rho_0: 0.05}
+    # Keep PADMM iterations as CUDA graph loops instead of unrolling
     # every iteration into a graph too large for the native 4096-world batch.
     use_graph_conditionals: true
 
