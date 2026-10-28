@@ -37,11 +37,35 @@ class RobotKinematics:
         e = np.arange(num_envs)[:, None]
         self._qcols = torch.as_tensor(e * per_q + np.asarray([qstart[labels.index(n)] for n in joint_names])[None])
         self._newton, self._wp = newton, wp
+        self._native = None
+        self._native_columns = {}
+        from humanoid_sim.model.asset import asset_meta
+
+        try:
+            meta = asset_meta(usd_path)
+        except FileNotFoundError:
+            meta = {}
+        if meta.get("ankle_representation") == "native":
+            from humanoid_sim.model.description import Description
+            from humanoid_sim.model.native_state import NativeState
+
+            self._native = NativeState(Description.load(meta["robot"]))
+            for i, name in enumerate(labels):
+                width = 4 if robot.joint_type[i] == newton.JointType.BALL else 1
+                self._native_columns[name] = torch.as_tensor(
+                    np.arange(num_envs)[:, None] * per_q + qstart[i] + np.arange(width)[None])
 
     def body_poses(self, q: torch.Tensor) -> np.ndarray:
         """World poses ``[E * B, 7]`` (position, quaternion xyzw) for joint positions ``q`` ``[E, J]``."""
         jq = self._wp.to_torch(self.model.joint_q).clone()
         jq[self._qcols] = q.to(jq.dtype)
+        if self._native is not None:
+            ordered = q[:, [self.joint_names.index(n) for n in self._native.names]]
+            values, balls = self._native.coordinates(ordered)
+            for name, value in values.items():
+                jq[self._native_columns[name]] = value[:, None].to(jq.dtype)
+            for name, value in balls.items():
+                jq[self._native_columns[name]] = value.to(jq.dtype)
         joint_q = self._wp.from_torch(jq)
         self._newton.eval_fk(self.model, joint_q, self.model.joint_qd, self.state)
         return self.state.body_q.numpy().copy()

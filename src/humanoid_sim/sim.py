@@ -60,11 +60,20 @@ class SimCore:
         self.solver, settings = solver_settings(phys, solver)
         self.integrator = integrator or settings["integrator"]
         joints = list(self.desc.joints)
+        self.native_state = None
+        physical = joints
+        if self.desc.usd_path is not None:
+            from humanoid_sim.model.native_state import NativeState
+            from humanoid_sim.transmissions.drive_map import native_joint_names
+
+            self.native_state = NativeState(self.desc, device=device)
+            physical = native_joint_names(self.desc)
         # Description joint order for the plant; the articulation's order is mapped through names.
         self.plant = PlantCore(self.desc, joints, num_envs,
                                PlantCfg(robot=robot, physics_period_ns=self.period_ns, device=device,
-                                        **({} if queue_capacity is None else {"queue_capacity": queue_capacity})))
-        props = joint_properties(self.plant, joints)
+                                        **({} if queue_capacity is None else {"queue_capacity": queue_capacity})),
+                               solver_joint_names=physical if self.native_state is not None else None)
+        props = joint_properties(self.plant, physical)
         period_s = self.period_ns / NS_PER_S
         self.backend = IsaacLabRobot(self.desc, usd_path, IsaacLabCfg(
             num_envs=num_envs, device=device, period_s=period_s, solver=self.solver, settings=settings,
@@ -77,6 +86,9 @@ class SimCore:
         self.scene = scene
         order = [self.backend.joint_names.index(n) for n in joints]
         self._to_plant = torch.tensor(order, device=self.plant.cfg.device)
+        self._to_solver = torch.tensor([self.backend.joint_names.index(n) for n in physical], device=device)
+        if self.native_state is not None:
+            self.write_joint_state(*self.joint_state())
         self._base = (torch.tensor([self.backend.joint_names.index(n) for n, _ in BASE_JOINTS],
                                    device=self.plant.cfg.device) if base_joints else None)
         self._base_target: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -106,11 +118,20 @@ class SimCore:
         q, qd = self.backend.joint_state()
         return q[:, self._to_plant].to(self.plant.cfg.dtype), qd[:, self._to_plant].to(self.plant.cfg.dtype)
 
+    def solver_state(self) -> tuple[torch.Tensor, torch.Tensor]:
+        q, qd = self.backend.joint_state()
+        return q[:, self._to_solver].to(self.plant.cfg.dtype), qd[:, self._to_solver].to(self.plant.cfg.dtype)
+
     def write_joint_state(self, q: torch.Tensor, qd: torch.Tensor) -> None:
         bq, bqd = self.backend.joint_state()
         bq, bqd = bq.clone(), bqd.clone()
         bq[:, self._to_plant] = q.to(bq.dtype)
         bqd[:, self._to_plant] = qd.to(bqd.dtype)
+        if self.native_state is not None:
+            values, rates = self.native_state.dofs(q, qd)
+            for name in values:
+                i = self.backend.joint_names.index(name)
+                bq[:, i], bqd[:, i] = values[name].to(bq.dtype), rates[name].to(bqd.dtype)
         self.backend.write_state(bq, bqd)
         self._state_written = True
 
@@ -132,7 +153,7 @@ class SimCore:
             self._state_written = True
 
     def step(self) -> DriveFeedback:
-        q, qd = self.joint_state()
+        q, qd = self.solver_state()
         if self._graphs is not None:
             target = self._graphs.pre(q, qd, refresh=self._state_written)
         else:
@@ -143,18 +164,20 @@ class SimCore:
             target = self.plant.pre_physics(self.t_ns, q, qd, state)
         bt, _ = self.backend.joint_state()
         bt = bt.clone()
-        bt[:, self._to_plant] = target.to(bt.dtype)
+        bt[:, self._to_solver] = target.to(bt.dtype)
+        effort = torch.zeros_like(bt)
+        effort[:, self._to_solver] = self.plant.passive_effort.to(effort.dtype)
         if self._base_target is not None:
             bv = torch.zeros_like(bt)
             bt[:, self._base] = self._base_target[0].to(bt.dtype)
             bv[:, self._base] = self._base_target[1].to(bt.dtype)
-            self.backend.set_targets(bt, bv)
+            self.backend.set_targets(bt, bv, effort=effort)
         else:
-            self.backend.set_targets(bt)
+            self.backend.set_targets(bt, effort=effort)
         self.gantry.apply(self.t_ns)
         self.backend.step()
         self.t_ns += self.period_ns
-        q, qd = self.joint_state()
+        q, qd = self.solver_state()
         self.feedback = self._graphs.post(q, qd) if self._graphs is not None else self.plant.feedback(q, qd)
         self._state_written = False
         return self.feedback
@@ -172,7 +195,7 @@ class _StepGraphs:
             self._post = torch.compile(self._post, dynamic=False)
             self._pre = torch.compile(self._pre, dynamic=False)
         p = sim.plant
-        q, qd = sim.joint_state()
+        q, qd = sim.solver_state()
         self.q, self.qd = q.clone(), qd.clone()
         self.t = torch.zeros((), dtype=torch.int64, device=q.device)
         e = q.shape[0]

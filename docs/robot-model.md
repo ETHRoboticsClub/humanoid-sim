@@ -2,6 +2,20 @@
 
 humanoid-sim does not define the robot. Geometry, masses, joints, drives and their constants come from the humanoid-urdf description in `third_party/humanoid-urdf`, read in place. This page follows that description from its files to the simulated articulation: how it is loaded and identified, how `humanoid-sim build-asset` turns it into the USD file the physics loads, which per-joint values are written to the solver, the host-side kinematics, the two poses the robot can stand in, the left/right mirror map, and the profile (`profiles/<robot>.yaml`) that holds this repository's modeling choices. The examples are the ETHRC V1's; [Robots](#robots) lists what changes for the Unitree G1 and how to add a robot. The last section is the workflow for getting a measured value into the simulation.
 
+## Native USD V1
+
+V1's profile names `usd/humanoid_V1.usda`. `UsdDescription` reads its rigid bodies, joint frames, limits, masses, sensor transforms and composed mesh layers. The build copies the source layers unchanged and references them under `/Robot/Geometry`; simulator overrides live in `robot.usda`. The cache key includes every composed source layer and the actuator table. `asset.json` records `source_usd_sha256`.
+
+The delivered ankle crank shafts and spherical rod closures remain physical joints. Each crank receives its drive's torque and rotor armature. The passive ankle hinges carry their described friction and damping, with zero reflected rotor armature and zero drive stiffness. The solver transmits shaft torque through the rods. `PlantCore.map` converts semantic policy targets to motor targets, while `solver_map` reads physical shaft feedback and applies torque to those shafts. Unactuated hinge disturbances and dynamic-friction relief use effort feedforward.
+
+`NativeState` completes semantic reset poses with the crank positions, rod ball orientations and their rates. Both Train-Time API and runtime resets use it; host Newton kinematics uses the same coordinates. During stepping the solver owns the linkage state. Sensor mounts and the mirror map come from USD. `home` is the delivered zero pose; it is not guaranteed to be a balanced or level-foot standing pose. Training chooses and validates its own stance.
+
+The native path supports normal floating/fixed-base training and runtime sessions. Prescribed Euler base-joint assets (`--base-joints`) and legacy PACE fits of reflected hinge armature are rejected explicitly. These require a native formulation before use. Older policies and captures also need the matching semantic frame and description revision. The Controls ABI description digest remains the URDF/actuator digest; the asset records its additional USD digest independently.
+
+## URDF build path
+
+The converter path below remains available for profiles that name `model.urdf`, including the Unitree robots. V1's native USD path bypasses `PreparedUrdf` and the URDF converter. The detailed URDF_6 examples below describe the former V1 plant; its joint names, forward axis, standing pose and reflected ankle properties do not apply to the native USD plant described above.
+
 ```
 third_party/humanoid-urdf/ethrc_v1/            profiles/ethrc_v1.yaml
   actuators.yaml                                 model:    build choices (asset)

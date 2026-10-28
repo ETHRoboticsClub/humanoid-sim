@@ -1,6 +1,7 @@
 """Robot asset: description + profile → USD, the model the physics and host kinematics load.
 
-Isaac Lab spawns robots only from USD, so the canonical sim model is a USD built here:
+Native USD profiles compose the delivered articulation through :mod:`humanoid_sim.model.usd`.
+URDF profiles use the following conversion path:
 
 1. :class:`~humanoid_sim.model.urdf.PreparedUrdf` (welds, sole boxes, collision meshes, absolute mesh paths);
 2. Isaac Lab's URDF converter (``isaacsim-asset-isolated``, kitless): fixed joints merged, convex-hull
@@ -58,6 +59,10 @@ def asset_key(desc: Description, profile: dict, prepared: PreparedUrdf) -> str:
 
 def asset_dir(desc: Description, profile: dict, out_root: Path, *, base_joints: bool = False) -> Path:
     """Directory of the asset for this description and profile (exists only once built)."""
+    if profile["model"].get("usd"):
+        from humanoid_sim.model.usd import asset_key as usd_key
+
+        return Path(out_root) / desc.robot / usd_key(desc, profile, base_joints=base_joints)
     prepared = PreparedUrdf(desc, profile).build(base_joints=base_joints)
     return Path(out_root) / desc.robot / asset_key(desc, profile, prepared)
 
@@ -113,6 +118,10 @@ def check_asset_robot(usd_path: Path, robot: str) -> None:
 def build_asset(desc: Description, profile: dict, out_root: Path, *, force: bool = False,
                 base_joints: bool = False) -> Path:
     """Build (or reuse) the robot USD; returns its path. Writes ``asset.json`` with the provenance."""
+    if profile["model"].get("usd"):
+        from humanoid_sim.model.usd import build_asset as build_usd
+
+        return build_usd(desc, profile, out_root, force=force, base_joints=base_joints)
     prepared = PreparedUrdf(desc, profile).build(base_joints=base_joints)
     key = asset_key(desc, profile, prepared)
     out = Path(out_root) / desc.robot / key

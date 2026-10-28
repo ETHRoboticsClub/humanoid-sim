@@ -861,7 +861,10 @@ class RuntimeHost:
         value = np.zeros(len(self.joints))
         for j, (torque, frequency, _) in self._joint_torques.items():
             value[j] = torque * math.sin(2 * math.pi * frequency * t / NS_PER_S) if frequency else torque
-        self.sim.plant.external_torque[0].copy_(torch.from_numpy(value))
+        physical = self.sim.plant.solver_map.joint_names
+        cols = [physical.index(n) for n in self.joints]
+        self.sim.plant.external_torque[0, cols] = torch.as_tensor(value, device=self.device,
+                                                                dtype=self.sim.plant.cfg.dtype)
         self._joint_torque_active = bool(self._joint_torques)
 
     def step(self) -> None:

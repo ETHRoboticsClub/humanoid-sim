@@ -80,6 +80,13 @@ class Mount:
         return T
 
     @classmethod
+    def from_description(cls, desc, sensor_link: str) -> Mount:
+        if desc.usd_model is None:
+            return cls.from_urdf(desc.urdf_path, sensor_link)
+        body, xyz, rpy = desc.usd_model.frame_mount(sensor_link)
+        return cls(sensor_link, body, xyz, tuple(tuple(row) for row in rpy_matrix(*rpy)))
+
+    @classmethod
     def from_urdf(cls, urdf: str | Path, sensor_link: str, kept_links: set[str] | None = None) -> Mount:
         """The pose of ``sensor_link`` in the nearest ancestor reached through a non-fixed joint (or the root), or in
         the nearest ancestor in ``kept_links``."""
