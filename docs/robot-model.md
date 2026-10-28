@@ -378,12 +378,13 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `physics.mjwarp.heightfield_base_m` | `apply_heightfield_base` | Depth of the solid base under a heightfield's lowest point, 1.0 m (see [world.md](world.md#the-heightfields-base)). |
 | `physics.kamino.integrator` | `solver_cfg` | `euler`, the only one allowed: `moreau` needs Kamino's own collision detector, which is not used here. |
 | `physics.kamino.dynamics_solver`, `.iterations` | `solver_cfg` | `padmm` (default) or `dvi`, and its outer iteration limit. |
-| `physics.kamino.max_contacts_per_world` | `solver_cfg` | Contact buffer per world (512 for native V1); Newton drops contacts beyond it. |
+| `physics.kamino.max_contacts_per_world` | `solver_cfg`, `ContactCapacityGuard` | Contact buffer per world (512 for native V1). Training and runtime check Newton's collision pool on device and stop if a world exceeds Kamino's capacity. |
 | `physics.mjwarp.loop_closure_solref`, `.loop_closure_solimp` | `apply_loop_closure` | Numerical response time/damping and impedance of joint-synthesized native loop constraints; actuator gains are independent. |
 | `physics.kamino.use_fk_solver` | `solver_cfg` | Native V1 uses `false`: resets supply all crank and ball coordinates, so tree FK preserves that closed state without a regularized kinematics solve. |
 | `physics.kamino.sparse_jacobian`, `.sparse_dynamics` | `solver_cfg` | Sparse storage for the constraint Jacobian and dynamics operator; dense storage exceeds indexing or memory limits at large native batches. |
 | `physics.kamino.linear_solver`, `.linear_solver_kwargs`, `.padmm` | `solver_cfg` | P-ADMM linear solver and convergence options. DVI uses Newton's backend defaults and optional `.dvi` options. |
 | `physics.kamino.use_graph_conditionals` | `solver_cfg` | Capture P-ADMM loops as conditional CUDA graph nodes instead of unrolling every iteration. |
+| `physics.<solver>.collapse_fixed_joints` | `model_build` | Optional Newton fixed-joint collapse, shared by training and runtime. Accumulates rigid-assembly mass and inertia and retains collision shapes and moving joints. Body selectors and randomization address surviving assemblies; removed fixed-link names are unavailable. Unsupported with surrogate crank tendons. |
 | `solver_gains` | nothing | Records that the solver PD is the description's baseline gains. |
 
 Only the `model` block is part of the asset key. The `physics` block is described in more detail in [world.md](world.md) and [testing-and-gpu.md](testing-and-gpu.md).
