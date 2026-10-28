@@ -181,6 +181,8 @@ The summary adds `render_rate_hz`, `lag_ms` (the host's plant time when a render
 
 Camera stamps and lidar sweep-start stamps use the host's plant-to-monotonic mapping. The mapping advances through rendering and readout, so a slow render delays delivery without moving the recorded capture time. The two eyes of a stereo frame share one exposure stamp.
 
+While the host is paused, `--window` refreshes the viewport on wall time so a reset pose and camera interaction remain visible. It uses the sensor render period, or 30 Hz without sensors. These display refreshes do not step physics, advance plant time, publish sensor frames or enter the sensor-render summary. Headless rendering waits for the host to resume.
+
 ## Checks
 
 `tests/test_rtx_sensors.py` (marker `rtx`, in the Isaac Sim image on an RTX GPU, in a process of its own: `pytest -m rtx tests/test_rtx_sensors.py`) puts the G1 in a box room with targets and compares what each sensor reports with geometry worked out without the renderer (`tests/rtx_oracles.py`), using the mounts the G1's URDF in humanoid-urdf gives (read when the tests run) and the lens figures:
