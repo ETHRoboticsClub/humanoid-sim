@@ -915,7 +915,7 @@ class RuntimeHost:
     def _feedback_flat(self) -> torch.Tensor:
         """The feedback's fields as one float64 vector on the device; the integer fields travel bit-for-bit."""
         sim = self.sim
-        fb = sim.feedback if sim.feedback is not None else sim.plant.feedback(*sim.joint_state())
+        fb = sim.feedback if sim.feedback is not None else sim.plant.feedback(*sim.solver_state())
         imu = sim.imu.samples
         ints = torch.cat([imu.seq[0], imu.sample_ns[0], imu.stamp_ns[0], imu.count[:1]]).view(torch.float64)
         flat = torch.cat([fb.position_rad[0], fb.velocity_rad_s[0], fb.applied_torque_nm[0],
@@ -1062,4 +1062,3 @@ class RuntimeHost:
     def status(self) -> dict:
         return {"session_id": self.session_id, "steps": self.step_count, "late_steps": self.late_steps,
                 "sim_time_s": self.sim.t_ns / NS_PER_S, "attached": self.attached}
-
