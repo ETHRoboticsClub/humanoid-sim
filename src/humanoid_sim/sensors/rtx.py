@@ -66,7 +66,8 @@ SPLAT_PRIM = "/World/Splat"  # RTX: primary camera rays skip the prim; other ray
 
 def start_kit(device: str, *, physics_cfg=None, window: bool = False) -> contextlib.ExitStack:
     """Start Kit (cameras on; headless, or with its window on ``$DISPLAY``) for the rest of the process; returns the
-    stack whose ``close`` ends it."""
+    stack that ends it. Use it in a ``with``: leaving it with an exception hands the exception to Isaac Lab's launch
+    context, while ``close()`` leaves it cleanly, whatever failed (and Kit's close may end the process)."""
     import isaaclab.sim as sim_utils
     from isaaclab.app import launch_simulation
     from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg

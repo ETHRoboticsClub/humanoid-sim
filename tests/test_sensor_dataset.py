@@ -134,3 +134,28 @@ def test_a_second_pass_adds_its_sensors_to_the_dataset_of_the_same_run(tmp_path)
     assert manifest["counts"] == {"cam/left": 1, "mid360": 1}
     with pytest.raises(ValueError, match="another run"):
         DatasetWriter(tmp_path / "d", {**run, "trajectory": "other.traj"})
+
+
+def test_a_pass_is_complete_only_when_it_finished_and_a_rerender_leaves_no_stale_frames(tmp_path):
+    run = {"robot": "r", "description_digest": "d", "trajectory": "run.traj", "start_ns": 0, "end_ns": 100}
+    w = DatasetWriter(tmp_path / "d", run)
+    w.begin_pass({"sensors": ["cam/left"], "render_period_ns": 33})
+    for i in range(3):
+        w.camera_frame("cam", "left", i, np.zeros((2, 2), dtype=np.uint8))
+    w.close()  # the render failed here
+    assert json.loads((tmp_path / "d/manifest.json").read_text())["passes"][0]["complete"] is False
+    w = DatasetWriter(tmp_path / "d", run)  # the retry, shorter
+    w.begin_pass({"sensors": ["cam/left"], "render_period_ns": 33})
+    w.camera_frame("cam", "left", 0, np.zeros((2, 2), dtype=np.uint8))
+    w.finish_pass({"renders": 1})
+    w.close()
+    manifest = json.loads((tmp_path / "d/manifest.json").read_text())
+    assert [p["complete"] for p in manifest["passes"]] == [False, True] and manifest["passes"][1]["summary"] == {"renders": 1}
+    assert sorted(p.name for p in (tmp_path / "d/cameras/cam/left").glob("*.png")) == ["000000.png"]
+
+
+def test_a_lidar_with_a_splat_and_an_unreadable_recorded_scene_are_refused(tmp_path):
+    from humanoid_sim.runtime import offline
+
+    session = fake_session()
+    assert offline.expected_sensors(session) == ["sim-zed/left", "mid360"]

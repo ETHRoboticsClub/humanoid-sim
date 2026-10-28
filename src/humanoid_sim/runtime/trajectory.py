@@ -12,12 +12,14 @@ Base: the floating root link of the description (``Trajectory.base_frame``), pos
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
 
 SCHEMA = "ethrc-humanoid-sim-trajectory/v1"
 IMU_SCHEMA = "ethrc-humanoid-sim-imu/v1"
+LOG = logging.getLogger(__name__)
 FLUSH_RECORDS = 250  # about a second of records at 4 ms steps
 
 
@@ -102,6 +104,9 @@ class ImuWriter:
         new = samples[samples["seq"] > self._last_seq][::-1]
         if not len(new):
             return 0
+        if self._last_seq and int(new["seq"][0]) != self._last_seq + 1:
+            LOG.warning("IMU file: samples %d..%d were not in the feedback window and are missing from %s",
+                        self._last_seq + 1, int(new["seq"][0]) - 1, self.path)
         rec = np.zeros(len(new), IMU_RECORD)
         for name in IMU_RECORD.names:
             rec[name] = new[name]

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from humanoid_sim.model.description import Description, robots
-from humanoid_sim.model.frames import FrameTree, frame_poses, write_tum
+from humanoid_sim.model.frames import FrameTree, frame_poses, quat_matrix, write_tum
 from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.runtime.trajectory import Trajectory, TrajectoryWriter
 from humanoid_sim.sensors import rigs
@@ -103,8 +103,9 @@ def test_a_joint_on_the_path_that_is_not_given_is_refused(tmp_path):
 def test_every_rig_frame_has_a_ground_truth_pose_on_the_real_description(robot, tmp_path):
     desc = Description.load(robot)
     path = tmp_path / "run.traj"
+    root = FrameTree(desc.urdf_path, list(desc.joints)).root
     w = TrajectoryWriter(path, robot=robot, description_digest=desc.digest, joints=list(desc.joints),
-                         period_ns=4_000_000, base_frame="base")
+                         period_ns=4_000_000, base_frame=root)
     for i in range(3):
         t = np.zeros((), abi.TRUTH)
         t["sim_time_ns"], t["base_quat_xyzw"] = i * 4_000_000, (0.0, 0.0, 0.0, 1.0)
@@ -141,3 +142,68 @@ def test_the_imu_file_holds_each_delivered_sample_once_oldest_first(tmp_path):
     assert header["robot"] == "r" and header["imu"] == {"frame": "imu_link"}
     assert list(rec["seq"]) == [1, 2, 3, 4] and list(rec["sample_ns"]) == [1000, 2000, 3000, 4000]
     assert rec["specific_force_m_s2"][0, 2] == pytest.approx(9.81)
+
+
+def test_interpolation_takes_the_short_way_between_opposite_signs_of_a_quaternion(tmp_path):
+    path = tmp_path / "run.traj"
+    a, b = truth(0, yaw=0.2), truth(10_000_000, yaw=0.2)
+    b["base_quat_xyzw"] = -b["base_quat_xyzw"]  # the same rotation, the other sign
+    write(path, [a, b])
+    q = Trajectory.load(path).at(5_000_000)["base_quat_xyzw"][0]
+    assert abs(2 * np.arctan2(q[2], q[3])) == pytest.approx(0.2) and np.linalg.norm(q) == pytest.approx(1.0)
+
+
+ROTATED = """<robot name="r">
+  <link name="base"/><link name="mount"/><link name="sensor"/>
+  <joint name="a_joint" type="revolute"><parent link="base"/><child link="mount"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/><axis xyz="1 0 0"/><limit lower="-3" upper="3" effort="1" velocity="1"/></joint>
+  <joint name="b_joint" type="fixed"><parent link="mount"/><child link="sensor"/>
+    <origin xyz="0 1 0" rpy="0 0 1.5707963267948966"/></joint>
+</robot>"""
+
+
+def test_an_origin_rotation_composes_after_the_joints_above_it(tmp_path):
+    urdf = tmp_path / "r.urdf"
+    urdf.write_text(ROTATED)
+    tree = FrameTree(urdf, ["a_joint"])
+    # a_joint turns 90 deg about x, which takes the mount's y axis to z; the sensor sits 1 m along it, and its own
+    # origin yaw turns its x axis to the mount's y, which that turn has taken to the world's z.
+    pos, quat = tree.world_poses("sensor", [[0.0, 0.0, 0.0]], [[0.0, 0.0, 0.0, 1.0]], [[math.pi / 2]])
+    np.testing.assert_allclose(pos[0], [0.0, 0.0, 1.0], atol=1e-12)
+    np.testing.assert_allclose(quat_matrix(np.array(quat))[0] @ [1.0, 0.0, 0.0], [0.0, 0.0, 1.0], atol=1e-12)
+
+
+def test_tum_has_seconds_and_a_quaternion_that_does_not_flip_sign(tmp_path):
+    t = np.array([0, 2_000_000_000, 4_000_000_000])
+    poses = {"sim_time_ns": t, "position_m": np.arange(9.0).reshape(3, 3),
+             "quat_xyzw": np.array([[0, 0, 0.6, 0.8], [0, 0, 0.8, 0.6], [0, 0, 0.9, 0.1]])}
+    write_tum(poses, tmp_path / "a.tum")
+    rows = np.loadtxt(tmp_path / "a.tum")
+    np.testing.assert_allclose(rows[:, 0], [0.0, 2.0, 4.0])
+    np.testing.assert_allclose(rows[1, 1:4], [3.0, 4.0, 5.0])
+
+
+def test_frame_poses_keep_the_quaternion_sign_continuous_and_refuse_another_base(tmp_path):
+    urdf = tmp_path / "r.urdf"
+    urdf.write_text(URDF)
+    path = tmp_path / "run.traj"
+    # The base turns through 2 pi: its quaternion crosses w = 0, where a w >= 0 convention flips the sign.
+    write(path, [truth(i * 4_000_000, yaw=i * math.pi / 2) for i in range(5)])
+    traj = Trajectory.load(path)
+    traj.base_frame = "base"
+    q = frame_poses(traj, urdf, "base")["quat_xyzw"]
+    assert (np.sum(q[1:] * q[:-1], axis=1) > 0).all()
+    traj.base_frame = "pelvis"
+    with pytest.raises(ValueError, match="root link"):
+        frame_poses(traj, urdf, "base")
+
+
+def test_a_gap_in_the_delivered_imu_samples_is_logged(tmp_path, caplog):
+    from humanoid_sim.runtime.trajectory import ImuWriter
+
+    w = ImuWriter(tmp_path / "run.traj.imu", {}, {})
+    w.append(imu_samples([2, 1]))
+    with caplog.at_level("WARNING"):
+        w.append(imu_samples([9, 8]))  # 3..7 left the feedback window unwritten
+    assert "3..7" in caplog.text
+    w.close()

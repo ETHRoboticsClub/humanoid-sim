@@ -4,7 +4,9 @@ stamp the run's plant time (integer ns, the clock of the trajectory, the runtime
 Layout under the dataset directory (``humanoid-sim-sensor-dataset/v1``):
 
 * ``manifest.json``: the robot and description digest, the trajectory the sensors were rendered from, and per sensor
-  its streams with their encoding, nominal rate, calibration (the camera feed descriptor's ``calibration``) and mount.
+  its streams with their encoding, nominal rate, calibration (the camera feed descriptor's ``calibration``), mount and
+  ``stage`` (what its rays could hit besides the room). ``passes`` lists each render that wrote to the directory: its
+  sensors, render period and summary, ``complete`` only if it finished.
 * ``cameras/<camera_id>/<stream>/index.csv`` and ``<seq>.png``: ``seq,stamp_ns,file``. Mono is 8-bit grey, colour
   8-bit RGB, depth 16-bit millimetres (0: no depth).
 * ``lidars/<name>/index.csv`` and ``<seq>.npz``: one sweep each: ``points_m`` ``[N, 3]`` in the sensor frame in firing
@@ -53,6 +55,8 @@ def png_bytes(image: np.ndarray) -> bytes:
 class _Index:
     def __init__(self, directory: Path):
         directory.mkdir(parents=True, exist_ok=True)
+        for stale in directory.glob("[0-9]*.*"):  # frames of an earlier, longer render of this stream
+            stale.unlink()
         self.dir = directory
         self._file = open(directory / "index.csv", "w", newline="")
         self._csv = csv.writer(self._file)
@@ -78,7 +82,7 @@ class DatasetWriter:
     def __init__(self, root: str | Path, manifest: dict):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self.manifest = {"schema": SCHEMA, **manifest, "cameras": {}, "lidars": {}}
+        self.manifest = {"schema": SCHEMA, **manifest, "cameras": {}, "lidars": {}, "passes": []}
         self._previous_counts: dict[str, int] = {}
         path = self.root / "manifest.json"
         if path.exists():
@@ -88,6 +92,7 @@ class DatasetWriter:
             if differing:
                 raise ValueError(f"{path} is a dataset of another run (differs in {differing}): use a new directory")
             self.manifest["cameras"], self.manifest["lidars"] = old["cameras"], old["lidars"]
+            self.manifest["passes"] = old.get("passes", [])
             self._previous_counts = old.get("counts", {})
         self._indexes: dict[tuple[str, str, str], _Index] = {}
 
@@ -96,6 +101,14 @@ class DatasetWriter:
         if key not in self._indexes:
             self._indexes[key] = _Index(self.root.joinpath(kind, *parts))
         return self._indexes[key]
+
+    def begin_pass(self, record: dict) -> None:
+        """Start this render's entry in the manifest's ``passes``: the sensors it renders, its render period and what it
+        did not simulate. It stays ``complete: false``, with whatever was written, unless :meth:`finish_pass` runs."""
+        self.manifest["passes"].append({**record, "complete": False})
+
+    def finish_pass(self, summary: dict) -> None:
+        self.manifest["passes"][-1].update(complete=True, summary=summary)
 
     def describe_camera(self, camera_id: str, record: dict) -> None:
         self.manifest["cameras"][camera_id] = record

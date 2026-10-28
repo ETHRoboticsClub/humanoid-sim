@@ -89,10 +89,16 @@ class FrameTree:
 
 def frame_poses(trajectory, urdf: str | Path, frame: str, t_ns=None) -> dict:
     """``frame``'s world poses along ``trajectory`` (:class:`~humanoid_sim.runtime.trajectory.Trajectory`): at its
-    own record times, or at ``t_ns``."""
+    own record times, or at ``t_ns``. The trajectory's base must be the description's root link."""
+    tree = FrameTree(urdf, trajectory.joints)
+    if trajectory.base_frame != tree.root:
+        raise ValueError(f"the trajectory's base pose is of {trajectory.base_frame!r}, but the description's root "
+                         f"link is {tree.root!r}")
     truth = trajectory.at(trajectory.records["sim_time_ns"] if t_ns is None else t_ns)
-    pos, quat = FrameTree(urdf, trajectory.joints).world_poses(
-        frame, truth["base_position_m"], truth["base_quat_xyzw"], truth["joint_pos_rad"])
+    pos, quat = tree.world_poses(frame, truth["base_position_m"], truth["base_quat_xyzw"], truth["joint_pos_rad"])
+    # q and -q are one rotation: keep the sign continuous so a reader does not see a flip every time w crosses 0.
+    flips = np.cumsum(np.r_[0, np.sum(quat[1:] * quat[:-1], axis=1) < 0]) % 2 == 1
+    quat = np.where(flips[:, None], -quat, quat)
     return {"sim_time_ns": truth["sim_time_ns"], "position_m": pos, "quat_xyzw": quat}
 
 
