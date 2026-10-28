@@ -261,6 +261,9 @@ def crank_stop_hook(robot: str, physics: dict, solver: str | None = None):
     (``PHYSICS_READY``, ahead of the assets' order) their owner is cleared."""
     solver = solver or physics["solver"]
     desc = Description.load(robot)
+    if desc.usd_path is not None:
+        yield None  # native crank joints carry their own stops in the built USD
+        return
     if ankle_stops_setting(physics, solver) != "cranks" or not desc.linkages:
         yield None
         return
@@ -310,6 +313,8 @@ def check_crank_stops(robot: str, physics: dict) -> int:
 
     solver = running_solver()
     desc = Description.load(robot)
+    if desc.usd_path is not None:
+        return 0  # the native USD builder authors shaft limits, not surrogate tendons
     expected = 4 * len(desc.linkages) if ankle_stops_setting(physics, solver) == "cranks" else 0
     found = 0
     if solver == "mjwarp":

@@ -107,6 +107,25 @@ class Description:
         self.package_dir = packages[0]
         self.urdf_path = self.package_dir / rel
 
+    @cached_property
+    def usd_path(self) -> Path | None:
+        """Delivered USD selected explicitly by this robot's model profile, if any."""
+        from humanoid_sim.model.asset import load_profile
+
+        relative = load_profile(self.robot)["model"].get("usd")
+        if relative is None:
+            return None
+        path = self.package_dir / relative
+        if not path.is_file():
+            raise ValueError(f"profile selects missing USD description {path}")
+        return path
+
+    @cached_property
+    def usd_model(self):
+        from humanoid_sim.model.usd import UsdDescription
+
+        return None if self.usd_path is None else UsdDescription(self.usd_path)
+
     @staticmethod
     def default_root() -> Path:
         env = os.environ.get("HUMANOID_SIM_DESCRIPTION_ROOT")
@@ -234,7 +253,8 @@ class Description:
         """The crank linkages, one per pair of hinges: the ETHRC ankles (left first); empty for a robot without."""
         out = []
         for side in ("l", "r"):
-            joints = (f"foot_pitch_{side}", f"foot_roll_{side}")
+            joints = (tuple(self.ankle_model.payload["sides"][side]["joint_names"]) if self.usd_path else
+                      (f"foot_pitch_{side}", f"foot_roll_{side}"))
             by_crank = {d.crank: d.name for d in self.drives.values() if d.crank and set(d.joints) == set(joints)}
             if by_crank:
                 if set(by_crank) != {"upper", "lower"}:
@@ -290,6 +310,9 @@ class Description:
     def link_names(self) -> set[str]:
         import xml.etree.ElementTree as ET
 
+        if self.usd_model is not None:
+            return set(self.usd_model.bodies) | {p.GetName() for p in self.usd_model.stage.Traverse()
+                                                if p.GetCustomDataByKey("fusion2usd:sensor")}
         return {link.get("name") for link in ET.parse(self.urdf_path).getroot().findall("link")}
 
     def _imu_joint(self):
@@ -303,6 +326,8 @@ class Description:
 
     def imu_link(self) -> str:
         """The IMU's own link: the child of the URDF's ``imu_joint``."""
+        if self.usd_model is not None:
+            return self.usd_model.imu_frame()
         child = self._imu_joint().find("child")
         if child is None:
             raise ValueError(f"{self.urdf_path.name}: imu_joint has no child")
@@ -310,6 +335,8 @@ class Description:
 
     def imu_mount(self) -> tuple[str, tuple[float, ...], tuple[float, ...]]:
         """The IMU's parent link and its pose there (xyz in m, URDF rpy in rad): the URDF's ``imu_joint``."""
+        if self.usd_model is not None:
+            return self.usd_model.imu_mount()
         joint = self._imu_joint()
         origin = joint.find("origin")
         xyz = tuple(float(v) for v in origin.get("xyz", "0 0 0").split())
@@ -325,21 +352,30 @@ class Description:
     # -- ankle ------------------------------------------------------------------------------------
 
     def ankle_geometry(self, side: str) -> dict:
+        if self.usd_path is not None:
+            return {**self.ankle_model.payload["sides"][side]["geometry"],
+                    "pitch_axis": [0, 1, 0], "roll_axis": [1, 0, 0]}
         right = self.table["ankle_model"]["right_geometry"]
         return right if side == "r" else mirror_right(right)
 
     def ankle_kinematic_sign(self, side: str) -> list[int]:
+        if self.usd_path is not None:
+            return [1, 1]
         return [int(s) for s in self.table["ankle_model"]["semantic_to_kinematic_sign"][side]]
 
     def ankle_neutral(self, side: str) -> list[float]:
         """Joint angles (pitch, roll) of the linkage neutral, where both cranks read zero."""
+        if self.usd_path is not None:
+            return self.ankle_model.neutral(side).tolist()
         return [float(v) for v in self.table["ankle_model"]["semantic_neutral_rad"][side]]
 
     def ankle_transmission(self, side: str, *, device="cpu", dtype=None) -> AnkleTransmission:
         import torch
 
-        return AnkleTransmission(self.ankle_geometry(side), self.ankle_kinematic_sign(side), self.ankle_neutral(side),
-                                 device=device, dtype=dtype or torch.float32)
+        native = self.usd_path is not None
+        return AnkleTransmission(self.ankle_geometry(side), self.ankle_kinematic_sign(side),
+                                 (0.0, 0.0) if native else self.ankle_neutral(side),
+                                 native_angles=native, device=device, dtype=dtype or torch.float32)
 
     def ankle_cranks(self, side: str) -> tuple[str, str]:
         """(upper, lower) crank drive names of one side."""
@@ -357,6 +393,8 @@ class Description:
     @cached_property
     def ankle_model(self):
         """humanoid-urdf's ``AnkleModel`` for this description: the cranks' stops and what they allow."""
+        if self.usd_path is not None:
+            return self.ankle_model_module().load(self.actuators_path, self.usd_path)
         return self.ankle_model_module().load(self.actuators_path)
 
     def ankle_model_module(self):

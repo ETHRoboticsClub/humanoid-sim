@@ -74,7 +74,8 @@ def mirror_right(right: dict) -> dict:
 class AnkleTransmission:
     """One ankle side, batched over leading dims. ``q``: ``[..., 2]`` (pitch, roll), URDF coordinates."""
 
-    def __init__(self, geometry: dict, kinematic_sign, neutral=(0.0, 0.0), *, device="cpu", dtype=torch.float32):
+    def __init__(self, geometry: dict, kinematic_sign, neutral=(0.0, 0.0), *, native_angles=False,
+                 device="cpu", dtype=torch.float32):
         for name, axis in (("pitch_axis", [0, 1, 0]), ("roll_axis", [1, 0, 0])):
             if not np.allclose(geometry[name], axis):
                 raise ValueError(f"ankle transmission requires {name}={axis}")
@@ -86,6 +87,7 @@ class AnkleTransmission:
         if neutral.shape != (2,) or not np.isfinite(neutral).all():
             raise ValueError("invalid semantic_neutral_rad")
         self._neutral_np = neutral
+        self.native_angles = native_angles
         self.to(device, dtype, sign=sign)
 
     def to(self, device, dtype, *, sign=None):
@@ -105,7 +107,7 @@ class AnkleTransmission:
         self._v = t(np.stack([c.v_hat for c in g]))
         self._r = t([c.radius for c in g])
         self._len = t([c.length for c in g])
-        self._theta0 = t([c.theta0 for c in g])
+        self._theta0 = t([0.0 if self.native_angles else c.theta0 for c in g])
         self._branch = t([float(c.branch) for c in g])
         return self
 

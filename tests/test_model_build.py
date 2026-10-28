@@ -14,7 +14,7 @@ from humanoid_sim.model.urdf import PreparedUrdf, fit_sole_plate
 @pytest.fixture(scope="module")
 def built():
     desc = Description.load("ethrc_v1")
-    return desc, PreparedUrdf(desc, load_profile("ethrc_v1")).build()
+    return desc, PreparedUrdf(desc, _profile()).build()
 
 
 def test_inventory(built):
@@ -27,7 +27,7 @@ def test_inventory(built):
 
 def test_unlisted_joints_welded_and_actuated_joints_limited(built):
     desc, p = built
-    source = ET.parse(desc.package_dir / load_profile("ethrc_v1")["model"]["urdf"]).getroot()
+    source = ET.parse(desc.urdf_path).getroot()
     unlisted = {j.get("name") for j in source.findall("joint") if j.get("type") != "fixed"} - set(desc.joints)
     assert set(p.welded) == unlisted  # URDF_6.urdf ships the ORCA hands fixed already
     movable = {j.get("name"): j for j in p.root.findall("joint") if j.get("type") != "fixed"}
@@ -36,7 +36,7 @@ def test_unlisted_joints_welded_and_actuated_joints_limited(built):
         lim = j.find("limit")
         assert (float(lim.get("lower")), float(lim.get("upper"))) == pytest.approx(desc.calibration_travel(name))
     # An ankle hinge's travel is the hull of its cranks' stops (ankle_model.bounds), with no limit of its own.
-    assert desc.calibration_travel("foot_pitch_l") == pytest.approx(desc.ankle_model.bounds("l")[0])
+    assert desc.calibration_travel(desc.linkages[0].joints[0]) == pytest.approx(desc.ankle_model.bounds("l")[0])
 
 
 def test_sole_plate_fit_recovers_a_plate():
@@ -67,14 +67,19 @@ def test_sole_boxes_on_the_profiles_feet(built):
 
 def test_digest_is_machine_independent(built):
     desc, p = built
-    again = PreparedUrdf(desc, load_profile("ethrc_v1")).build()
+    again = PreparedUrdf(desc, _profile()).build()
     assert p.digest() == again.digest()
     assert "package://" not in p.text()  # meshes resolved for the converter
 
 
 def _profile(**model):
     profile = load_profile("ethrc_v1")
-    profile["model"] = {**profile["model"], **model}
+    desc = Description.load("ethrc_v1")
+    profile["model"] = {"urdf": str(desc.urdf_path), "weld_unlisted_joints": True,
+                        "collision_hulls": "per_body", "sole": profile["model"]["sole"],
+                        "self_collision": {"sets": {"leg_l": "hip_flexion_l", "leg_r": "hip_flexion_r",
+                                                    "arm_l": "shoulder_flexion_l", "arm_r": "shoulder_flexion_r"},
+                                           "rest": "trunk", "pairs": "all"}, **model}
     return profile
 
 
@@ -177,7 +182,7 @@ def test_base_joints_chain_world_to_root(built):
 
     desc, p = built
     root = p.root_link()
-    g = PreparedUrdf(desc, load_profile("ethrc_v1")).build(base_joints=True)
+    g = PreparedUrdf(desc, _profile()).build(base_joints=True)
     assert g.root_link() == BASE_ROOT
     chain = {j.get("name"): j for j in g.root.findall("joint") if j.get("name") in dict(BASE_JOINTS)}
     assert [chain[n].find("axis").get("xyz") for n, _ in BASE_JOINTS] == ["0 0 1", "0 1 0", "1 0 0"]

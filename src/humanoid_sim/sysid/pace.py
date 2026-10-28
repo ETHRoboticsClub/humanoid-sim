@@ -170,6 +170,8 @@ def write(sim, space: PaceSpace, values: dict[str, np.ndarray]) -> None:
     """Write every env's candidate (``decode`` output, ``[E, ...]``) to the solver and the plant. The delay is the
     replay's to apply (:func:`humanoid_sim.replay.replay.replay_position_rms` ``latency_ns``)."""
     robot, plant = sim.backend.robot, sim.plant
+    if plant.solver_map is not plant.map:
+        raise ValueError("legacy PACE hinge-armature fits cannot be applied to native USD crank shafts")
     if list(plant.map.joint_names) != space.joints or list(plant.map.drive_names) != space.drives:
         raise ValueError("the space's joints and drives are not the plant's")
     dev = robot.device

@@ -340,10 +340,12 @@ class IsaacLabRobot:
         self.robot.write_joint_position_to_sim_index(position=q, env_ids=env_ids)
         self.robot.write_joint_velocity_to_sim_index(velocity=qd, env_ids=env_ids)
 
-    def set_targets(self, target: torch.Tensor, velocity: torch.Tensor | None = None) -> None:
+    def set_targets(self, target: torch.Tensor, velocity: torch.Tensor | None = None,
+                    effort: torch.Tensor | None = None) -> None:
         tc = self.robot.actuators.target_command
         tc.set_position_index(value=target)
         tc.set_velocity_index(value=torch.zeros_like(target) if velocity is None else velocity)
+        tc.set_effort_index(value=torch.zeros_like(target) if effort is None else effort)
 
     def step(self) -> None:
         self.scene.write_data_to_sim()

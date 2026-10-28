@@ -15,6 +15,14 @@ import torch
 from humanoid_sim.model.description import Description
 
 
+def native_joint_names(desc: Description) -> list[str]:
+    """Semantic body joints followed by the delivered crank joints (all scalar DOFs)."""
+    names = list(desc.joints)
+    for spec in desc.ankle_model.payload["sides"].values():
+        names.extend(spec["usd_joints"][role] for role in ("upper", "lower"))
+    return names
+
+
 class DriveJointMap:
     def __init__(self, desc: Description, joint_names: list[str], drive_names: list[str] | None = None, *,
                  device="cpu", dtype=torch.float32):
@@ -100,3 +108,24 @@ class DriveJointMap:
             k0[j_idx] = torch.diagonal(jac.T @ torch.diag(stiffness[d_idx]) @ jac)
             d0[j_idx] = torch.diagonal(jac.T @ torch.diag(damping[d_idx]) @ jac)
         return k0, d0
+
+
+class NativeDriveJointMap(DriveJointMap):
+    """Drive torques act on the USD's actual shaft joints; the solver closes the rods.
+
+    The logical DriveJointMap remains available for converting policy hinge targets
+    to crank targets. This map is only the physical state/force boundary.
+    """
+
+    def __init__(self, desc: Description, joint_names: list[str], *, device="cpu", dtype=torch.float32):
+        self.drive_names, self.joint_names = list(desc.drives), list(joint_names)
+        self.device, self.dtype = torch.device(device), dtype
+        shafts = {}
+        for spec in desc.ankle_model.payload["sides"].values():
+            shafts.update(zip(spec["motor_names"], [spec["usd_joints"][r] for r in ("upper", "lower")], strict=True))
+        names = [shafts[d.name] if d.crank else d.joints[0] for d in desc.drives.values()]
+        self._lin_d = torch.arange(len(names), device=device)
+        self._lin_j = torch.tensor([self.joint_names.index(n) for n in names], device=device)
+        self._lin_s = torch.tensor([d.sign for d in desc.drives.values()], device=device, dtype=dtype)
+        self.ankles = []
+        self.actuated_joints = self._lin_j.sort().values

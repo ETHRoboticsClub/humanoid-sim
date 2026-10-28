@@ -53,7 +53,26 @@ def plant_joint_properties(robot: str = "ethrc_v1") -> JointProperties:
 
     desc = Description.load(robot)
     joints = list(desc.joints)
+    if load_profile(robot)["model"].get("ankle_representation") == "native":
+        from humanoid_sim.transmissions.drive_map import native_joint_names
+
+        physical = native_joint_names(desc)
+        return joint_properties(PlantCore(desc, joints, 1, PlantCfg(robot=robot), solver_joint_names=physical),
+                                physical)
     return joint_properties(PlantCore(desc, joints, 1, PlantCfg(robot=robot)), joints)
+
+
+def initial_joint_positions(desc, pose: dict[str, float]) -> dict[str, float]:
+    """Complete semantic defaults with native crank and ball DOFs, if present."""
+    if desc.usd_path is None:
+        return dict(pose)
+    import torch
+
+    from humanoid_sim.model.native_state import NativeState
+
+    q = torch.tensor([[pose[n] for n in desc.joints]], dtype=torch.float64)
+    values, _ = NativeState(desc).dofs(q, torch.zeros_like(q))
+    return {name: float(value[0]) for name, value in values.items()}
 
 
 def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_spacing: float | None = None,
@@ -79,6 +98,7 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
     q, height = initial_pose(usd, robot, pose)
     props = plant_joint_properties(robot)
     names = list(Description.load(robot).joints)
+    initial = initial_joint_positions(Description.load(robot), {name: float(q[i]) for i, name in enumerate(names)})
 
     @configclass
     class RobotSceneCfg(InteractiveSceneCfg):
@@ -88,7 +108,8 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
     cfg.robot = articulation_cfg(
         usd, props, base_height_m=height + STANDING_CLEARANCE_M, contact_sensors=contacts,
         self_collision=profile["physics"]["self_collision"] if self_collision is None else self_collision,
-        joint_pos=[float(q[names.index(n)]) for n in props.names])
+        joint_pos=[initial[n] for n in props.names])
+    cfg.robot.init_state.joint_pos = {f"^{name}$": value for name, value in initial.items()}
     friction = profile["model"]["ground_friction"] if ground_friction is None else ground_friction
     if terrain is not None:
         cfg.terrain = terrain

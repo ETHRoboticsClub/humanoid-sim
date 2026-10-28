@@ -31,10 +31,12 @@ def test_jacobian_matches_finite_difference(desc, side):
 @pytest.mark.parametrize("side", ["l", "r"])
 def test_cranks_match_humanoid_urdf_ankle_model(desc, side):
     module = desc.ankle_model_module()
-    model = module.load(desc.actuators_path)
+    model = desc.ankle_model
     tr = desc.ankle_transmission(side, dtype=torch.float64)
     sign = np.asarray(desc.ankle_kinematic_sign(side))
-    ref, _ = module._motor_angles_numpy(OFFSETS * sign, model.geometries[side])
+    q = OFFSETS + model.neutral(side)
+    origin = np.asarray(tr.neutral)
+    ref, _ = module._motor_angles_numpy((q - origin) * sign, model.geometries[side])
     assert np.allclose(tr.cranks(torch.as_tensor(OFFSETS + model.neutral(side))).numpy(), ref, atol=1e-12)
     # Both cranks read zero at the description's linkage neutral.
     assert np.allclose(tr.cranks(torch.as_tensor(model.neutral(side))).numpy(), 0.0, atol=1e-12)

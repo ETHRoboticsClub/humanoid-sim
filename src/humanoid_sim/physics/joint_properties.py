@@ -31,6 +31,8 @@ class JointProperties:
 
 def joint_properties(plant: PlantCore, names: list[str]) -> JointProperties:
     desc = plant.desc
+    if plant.solver_map is not plant.map:
+        return native_joint_properties(plant, names)
     pj = plant.map.joint_names
     idx = [pj.index(n) for n in names]
     k0 = plant.k0[0, idx].tolist()
@@ -52,4 +54,27 @@ def joint_properties(plant: PlantCore, names: list[str]) -> JointProperties:
         passive_damping=[desc.joints[n].damping for n in names],
         effort_limit=[effort[n] for n in names],
         standing=[desc.joints[n].standing_offset_rad for n in names],
+    )
+
+
+def native_joint_properties(plant: PlantCore, names: list[str]) -> JointProperties:
+    """Native crank rotor inertia is on its shaft, not reflected onto both ankle hinges."""
+    desc = plant.desc
+    physical = plant.solver_map.joint_names
+    indices = [physical.index(n) for n in names]
+    cranks = {}
+    hinges = {j for lk in desc.linkages for j in lk.joints}
+    for spec in desc.ankle_model.payload["sides"].values():
+        armatures = {float(desc.table["joints"][n]["armature"]) for n in spec["joint_names"]}
+        if len(armatures) != 1:
+            raise ValueError("native crank armature is ambiguous in the description")
+        for role, drive in zip(("upper", "lower"), spec["motor_names"], strict=True):
+            cranks[spec["usd_joints"][role]] = (desc.drives[drive], next(iter(armatures)))
+    return JointProperties(
+        names=list(names), stiffness=plant.k0[0, indices].tolist(), damping=plant.d0[0, indices].tolist(),
+        armature=[cranks[n][1] if n in cranks else 0.0 if n in hinges else desc.joints[n].armature for n in names],
+        friction=[0.0 if n in cranks else desc.joints[n].friction for n in names],
+        passive_damping=[0.0 if n in cranks else desc.joints[n].damping for n in names],
+        effort_limit=[cranks[n][0].effort_peak if n in cranks else desc.joints[n].effort_peak for n in names],
+        standing=[0.0 if n in cranks else desc.joints[n].standing_offset_rad for n in names],
     )
