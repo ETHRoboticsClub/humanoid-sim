@@ -519,3 +519,23 @@ The plant's steady-state work (`submit`, `pre_physics`, `measured`, `truth`, `re
 - Keep the articulation's actuators implicit, as `robot_scene_cfg` builds them. If explicit actuator configs are added, Isaac Lab's Newton backend can run the whole decimation loop in one physics call, and `apply_actions` (the plant) would run once per policy step instead of once per physics step.
 - Drives are off after a reset until a demand arrives; see [Resets](#resets).
 - Training keeps each joint's Coulomb friction at its enabled-drive value from the description while a drive is off. The runtime host switches the joints of disabled 1:1 drives to the family's [back-drive](glossary.md#back-drive) torque (`src/humanoid_sim/runtime/host.py`), which is larger: 1.5 Nm on an HEJ 90 joint where the knee's enabled friction is 0.31 Nm. An unpowered robot in training therefore folds more easily than the same robot in the runtime. The ankle joints keep their friction in both.
+
+For a discrete delay distribution, use `dist: discrete_uniform`, an inclusive
+`range` in seconds, and a positive `quantum` in seconds; the range width must be
+an integer multiple of the quantum. `per_target: false` shares one draw across
+an environment's selected drives. As with continuous draws, a curriculum level
+interpolates the realized value toward the operation's identity.
+
+`shape_friction` randomizes each robot collision shape's Coulomb coefficient;
+`friction` assigns one coefficient to every shape in an environment. Choose one
+of these parameters per configuration. Shape names are the articulation view's
+local `shape_0`, `shape_1`, ... order. A physics spec's optional positive integer
+`buckets` draws a shared table and independently assigns one table entry to each
+selected environment/target. MJWarp exposes one contact friction coefficient,
+not independent PhysX static and dynamic coefficients.
+
+`world.disturbances.VelocityPush` sets root horizontal velocity periodically while
+preserving vertical and angular velocity. Call `reset(ids, t_ns)` at episode
+reset and `step(t_ns)` at the desired cadence. The caller supplies the interval
+in integer nanoseconds and the velocity range in m/s. Unlike `ForcePush`, this
+is an instantaneous state perturbation, not a force integrated over a duration.

@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-DISTRIBUTIONS = ("uniform", "log_uniform", "normal")
+DISTRIBUTIONS = ("uniform", "log_uniform", "normal", "discrete_uniform")
 OPS = ("scale", "add", "set")
 SCOPES = ("startup", "reset")
 
@@ -48,6 +48,7 @@ PARAMS: dict[str, Param] = {
     "joint_damping": Param("physics", "joint", unit="N m s/rad", doc="passive viscous damping"),
     "joint_friction_ratio": Param("device", "joint", doc="dynamic over static Coulomb joint friction, in [0, 1]"),
     "friction": Param("physics", "env", doc="friction coefficient of every robot shape"),
+    "shape_friction": Param("physics", "shape", doc="Coulomb friction coefficient per robot collision shape"),
     "drive_stiffness": Param("device", "drive", doc="drive's realized P gain over the demanded one"),
     "drive_damping": Param("device", "drive", doc="drive's realized D gain over the demanded one"),
     "torque_limit": Param("device", "drive", doc="scale of the torque-speed envelope and torque cap"),
@@ -58,7 +59,7 @@ PARAMS: dict[str, Param] = {
     "imu_misalignment": Param("device", "axis", unit="rad", doc="sensor rotation from its mount, rotation vector"),
 }
 
-_SELECTORS = {"body": "bodies", "joint": "joints", "drive": "drives"}
+_SELECTORS = {"body": "bodies", "joint": "joints", "drive": "drives", "shape": "shapes"}
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,8 @@ class ParamSpec:
     scope: str | None = None  # None: by kind (physics at startup, device at reset); "startup" for device ones
     levels: bool = True
     per_target: bool = True  # one draw per selected target, or one shared by all of an env's targets
+    quantum: float | None = None  # SI spacing for discrete_uniform, inclusive endpoints
+    buckets: int | None = None  # sample a shared material table, then assign a bucket per target
 
     def __post_init__(self):
         if self.param not in PARAMS:
@@ -86,6 +89,19 @@ class ParamSpec:
         if len(self.range) != 2:
             raise ValueError(f"{self.param}: range needs two numbers")
         lo, hi = self.range
+        if self.buckets is not None and (self.kind != "physics" or isinstance(self.buckets, bool)
+                                        or not isinstance(self.buckets, int) or self.buckets < 1):
+            raise ValueError(f"{self.param}: buckets must be a positive integer for a physics parameter")
+        if self.dist == "discrete_uniform":
+            import math
+
+            if self.quantum is None or not math.isfinite(self.quantum) or self.quantum <= 0:
+                raise ValueError(f"{self.param}: discrete_uniform needs a positive quantum")
+            count = (hi - lo) / self.quantum
+            if not math.isfinite(count) or not math.isclose(count, round(count), abs_tol=1e-9):
+                raise ValueError(f"{self.param}: range must contain a whole number of quanta")
+        elif self.quantum is not None:
+            raise ValueError(f"{self.param}: quantum only applies to discrete_uniform")
         if self.dist != "normal" and lo > hi:
             raise ValueError(f"{self.param}: range low {lo} > high {hi}")
         if self.dist == "log_uniform" and lo <= 0:
