@@ -109,3 +109,25 @@ def test_native_runtime_steps_and_reads_physical_shafts(desc, tmp_path, cuda_gra
         assert sim.t_ns == 8 * sim.period_ns
     finally:
         sim.close()
+
+
+@pytest.mark.physics
+def test_native_host_publishes_feedback_before_the_first_step(desc, tmp_path):
+    pytest.importorskip("isaaclab_newton")
+    if not torch.cuda.is_available():
+        pytest.skip("native runtime smoke requires CUDA")
+    from humanoid_sim.runtime.host import RuntimeHost
+
+    path = build_asset(desc, load_profile(desc.robot), tmp_path / "asset")
+    host = RuntimeHost(tmp_path / "plant", path, device="cuda:0", support="free", compile=False)
+    try:
+        host.sim.feedback = None
+        host._publish()
+        record = host.seg.regions["feedback"].read()
+        assert record is not None
+        physical, velocity = host.sim.solver_state()
+        expected, _, _ = host.sim.plant.solver_map.drive_state(physical, velocity)
+        np.testing.assert_allclose(
+            record[1]["drive"]["position_rad"][:len(host.drives)], expected[0].cpu().numpy())
+    finally:
+        host.close()
