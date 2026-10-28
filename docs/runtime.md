@@ -374,6 +374,8 @@ Joint velocities become zero, and the base's too when the base is written. Every
 
 The home pose is the one to use when a free robot should stand. Both poses are computed at startup, so a reset to either is quick. After the ack, wait for a feedback record newer than the ack (see [Commands](#commands)) and hold the drive positions it reports: demands that still target the old pose pull the joints back to it.
 
+That feedback reports the reset joint state even while paused, before another physics step. `SimCore.write_joint_state` invalidates cached drive feedback; its next reader recomputes the positions and velocities from the written state.
+
 ### PAUSE (2) and RESUME (3)
 
 `{}`. Physics and plant time stop and resume; see [The clock](#the-clock). Acks: `paused`, `resumed`.

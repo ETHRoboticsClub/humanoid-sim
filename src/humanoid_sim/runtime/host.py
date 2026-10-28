@@ -338,7 +338,6 @@ class RuntimeHost:
         self.sim.write_joint_state(q, qd)
         env = torch.tensor([0], device=self.device)
         self.sim.plant.reset(env)  # plant time keeps running: the IMU's sample clock depends on it
-        self.sim.feedback = None
         self.sim.imu.reset(env, self.sim.t_ns, keep_seq=True)
 
     # -- descriptor and geometry ------------------------------------------------------------------
@@ -745,7 +744,7 @@ class RuntimeHost:
             return "cleared"
         if fault == "encoder_freeze":
             fb = self.sim.feedback
-            held = (fb.position_rad[0, d].item(), fb.velocity_rad_s[0, d].item()) if fb is not None else (0.0, 0.0)
+            held = (fb.position_rad[0, d].item(), fb.velocity_rad_s[0, d].item())
             self._faults[key] = (end, held)
         elif fault == "imu_bias":
             self.sim.imu.gyro_bias += value
@@ -912,7 +911,7 @@ class RuntimeHost:
     def _feedback_flat(self) -> torch.Tensor:
         """The feedback's fields as one float64 vector on the device; the integer fields travel bit-for-bit."""
         sim = self.sim
-        fb = sim.feedback if sim.feedback is not None else sim.plant.feedback(*sim.joint_state())
+        fb = sim.feedback
         imu = sim.imu.samples
         ints = torch.cat([imu.seq[0], imu.sample_ns[0], imu.stamp_ns[0], imu.count[:1]]).view(torch.float64)
         flat = torch.cat([fb.position_rad[0], fb.velocity_rad_s[0], fb.applied_torque_nm[0],
