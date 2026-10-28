@@ -4,8 +4,11 @@ import math
 
 import pytest
 
+from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description, robots
+from humanoid_sim.model.urdf import PreparedUrdf
 from humanoid_sim.sensors import rigs
+from humanoid_sim.sensors.geometry import Mount
 from humanoid_sim.sensors.models import (
     Camera,
     Imu,
@@ -16,6 +19,7 @@ from humanoid_sim.sensors.models import (
     Rig,
     UnitreeG1Imu,
     ZedMini,
+    ZedMiniImu,
 )
 
 ROBOTS = robots()
@@ -63,10 +67,11 @@ def test_the_g1_carries_its_body_imu_and_a_mid360(robot):
 def test_an_extra_rig_adds_sensors_and_unknown_or_clashing_ones_are_refused():
     desc = Description.load("g1_29dof_with_hand_rev_1_0")
     rig = rigs.load(desc.robot, desc, "g1-cameras")
-    assert {n: type(s) for n, s in rig.sensors.items()} == {"imu": UnitreeG1Imu, "mid360": LivoxMid360, "zed": ZedMini}
+    assert {n: type(s) for n, s in rig.sensors.items()} == {
+        "imu": UnitreeG1Imu, "mid360": LivoxMid360, "zed": ZedMini, "zed_imu": ZedMiniImu}
     rig = rigs.load(desc.robot, desc, "g1-cameras-d435")
     assert {n: type(s) for n, s in rig.sensors.items()} == {
-        "imu": UnitreeG1Imu, "mid360": LivoxMid360, "zed": ZedMini, "d435": RealSenseD435i}
+        "imu": UnitreeG1Imu, "mid360": LivoxMid360, "zed": ZedMini, "zed_imu": ZedMiniImu, "d435": RealSenseD435i}
     with pytest.raises(ValueError, match="g1-cameras"):
         rigs.load(desc.robot, desc, "g1-lidars")
     with pytest.raises(ValueError, match="already in the rig"):
@@ -149,6 +154,24 @@ def test_review_regressions_integer_ns_shapes_frozen_defaults_and_names():
     with pytest.raises(ValueError, match="two names"):
         Rig(imu=a, mid360=b, spare=a)
     assert (a.name, b.name) == ("", "")  # nothing named before the rig is accepted
+
+
+def test_the_zed_imu_is_a_labelled_guess_at_the_camera_frame():
+    desc = Description.load("g1_29dof_with_hand_rev_1_0")
+    zed_imu = rigs.load(desc.robot, desc, "g1-cameras").sensors["zed_imu"]
+    assert zed_imu.frame == rigs.load(desc.robot, desc, "g1-cameras").sensors["zed"].frame
+    assert "MODELED GUESS" in ZedMiniImu.source
+    cfg = zed_imu.delivery_cfg()
+    assert cfg.sample_period_ns == 1_250_000  # 800 Hz, the datasheet's
+    assert cfg.gyro_noise_density > 0 and cfg.accel_noise_density > 0
+    assert rigs.imu(desc).frame == desc.imu_link()  # the plant's own IMU stays the body one
+
+
+def test_the_zed_imu_mounts_on_the_body_the_physics_keeps_its_frame_on():
+    desc = Description.load("g1_29dof_with_hand_rev_1_0")
+    mount = Mount.from_urdf(desc.urdf_path, "camera0_camera")
+    bodies = PreparedUrdf(desc, load_profile(desc.robot)).build().body_tree()
+    assert mount.link in bodies and mount.link != desc.imu_link()
 
 
 @pytest.mark.parametrize("robot", ROBOTS)

@@ -15,7 +15,9 @@ the world origin (the scene's spawn point).
 
 With ``imu``, :attr:`SimCore.imu` produces the raw IMU samples as the robot's host receives them
 (:class:`~humanoid_sim.sensors.imu.ImuDelivery`, sampled at every step start); with ``contacts``, the scene has a
-contact sensor on every body (``backend.contacts``).
+contact sensor on every body (``backend.contacts``). With ``imu`` and ``extra_rig`` (a name of
+``sensors.rigs.EXTRAS``), :attr:`SimCore.extra_imus` holds the same for each further IMU of that rig, by name
+(not with ``cuda_graph``).
 
 With ``cuda_graph`` (CUDA only) the plant's work around the solver step runs as two captured CUDA graphs, one
 before the step (IMU sampling, drive bank, target shaping) and one after (drive feedback): one launch each instead
@@ -47,11 +49,23 @@ class SimCore:
                  solver: str | None = None, integrator: str | None = None, rerun: bool = False, rerun_rrd: str | None = None,
                  self_collision: bool | None = None, base_joints: bool = False, imu: bool = False,
                  contacts: bool = False, seed: int = 0, cuda_graph: bool = False, compile: bool = False,
-                 imu_history: int | None = None, scene: StaticBoxes | None = None,
+                 imu_history: int | None = None, extra_rig: str | None = None, scene: StaticBoxes | None = None,
                  entities: dict | None = None, render_each_step: bool = True,
                  queue_capacity: int | None = None):
         check_asset_robot(usd_path, robot)
         self.desc = Description.load(robot)
+        # The IMUs of ``extra_rig`` (sensors/rigs.py EXTRAS) besides the plant's own, each simulated where its frame
+        # is: ``SimCore.extra_imus[name]``, stepped with the plant's IMU.
+        extra_imus = {}
+        if extra_rig:
+            if not imu:
+                raise ValueError("extra_rig needs imu=True")
+            if cuda_graph:
+                raise ValueError("extra_rig IMUs are not captured in the CUDA graph yet")
+            from humanoid_sim.sensors import rigs
+
+            extra_imus = {n: s for n, s in rigs.load(robot, self.desc, extra_rig).sensors.items()
+                          if s.kind == "imu" and n != "imu"}
         self.profile = load_profile(robot)
         phys = self.profile["physics"]
         self.period_ns = int(period_ns or phys["period_ns"])
@@ -71,7 +85,8 @@ class SimCore:
             integrator=self.integrator, fixed_base=fixed_base, base_height_m=base_height_m,
             self_collision=phys["self_collision"] if self_collision is None else self_collision,
             base_joints=base_joints, ground_friction=self.profile["model"]["ground_friction"],
-            imu=imu, contacts=contacts, rerun=rerun, rerun_rrd=rerun_rrd, scene=scene, entities=entities,
+            imu=imu, extra_imus={n: s.frame for n, s in extra_imus.items()}, contacts=contacts, rerun=rerun,
+            rerun_rrd=rerun_rrd, scene=scene, entities=entities,
             render_each_step=render_each_step),
             props=props)
         self.scene = scene
@@ -98,6 +113,15 @@ class SimCore:
                 cfg = dataclasses.replace(cfg, history=imu_history)
             self.imu = ImuDelivery(cfg, num_envs, device=device, seed=seed)
             self.imu.reset(torch.arange(num_envs, device=device), 0)
+        self.extra_imus = {}
+        for i, (name, sensor) in enumerate(extra_imus.items(), 1):
+            from humanoid_sim.sensors.imu import ImuDelivery
+
+            cfg = sensor.delivery_cfg()
+            if imu_history is not None:
+                cfg = dataclasses.replace(cfg, history=imu_history)
+            self.extra_imus[name] = ImuDelivery(cfg, num_envs, device=device, seed=seed + i)
+            self.extra_imus[name].reset(torch.arange(num_envs, device=device), 0)
         if cuda_graph and not str(device).startswith("cuda"):
             raise ValueError("cuda_graph needs a CUDA device")
         self._graphs = _StepGraphs(self, compile=compile) if cuda_graph else None
@@ -139,6 +163,9 @@ class SimCore:
             if self.imu is not None:
                 data = self.backend.imu.data
                 self.imu.step(self.t_ns, data.ang_vel_b.torch, data.lin_acc_b.torch)
+            for name, delivery in self.extra_imus.items():
+                data = self.backend.extra_imus[name].data
+                delivery.step(self.t_ns, data.ang_vel_b.torch, data.lin_acc_b.torch)
             state = None if self._state_written else self.plant.post_state
             target = self.plant.pre_physics(self.t_ns, q, qd, state)
         bt, _ = self.backend.joint_state()

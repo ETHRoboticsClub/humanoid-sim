@@ -57,6 +57,7 @@ class IsaacLabCfg:
     base_joints: bool = False
     ground_friction: float = 1.0
     imu: bool = False  # the IMU sensor at the description's mount
+    extra_imus: dict | None = None  # more IMU sensors, scene name -> the URDF link each sits at
     contacts: bool = False  # a contact sensor on every body
     scene: StaticBoxes | None = None  # static boxes around the robot (every env's robot then starts at the origin)
     rerun: bool = False
@@ -204,13 +205,26 @@ def _quat_xyzw(roll: float, pitch: float, yaw: float) -> tuple[float, float, flo
             cr * cp * cy + sr * sp * sy)
 
 
-def imu_sensor_cfg(robot: str = "ethrc_v1"):
-    """Isaac Lab's IMU sensor at the description's mount (``imu_joint``): raw sensor-frame values."""
+def imu_sensor_cfg(robot: str = "ethrc_v1", frame: str | None = None, usd_path=None):
+    """Isaac Lab's IMU sensor at the description's mount (``imu_joint``): raw sensor-frame values.
+
+    With ``frame`` (a URDF link) it sits at that link instead, on the body the physics keeps it on; ``usd_path`` is
+    the robot asset, where the body's prim is found (the asset nests bodies along the kinematic tree)."""
     from isaaclab.sensors import ImuCfg
 
-    parent, xyz, rpy = Description.load(robot).imu_mount()
-    return ImuCfg(prim_path=f"{ROBOT_PRIM}/Geometry/{parent}",
-                  offset=ImuCfg.OffsetCfg(pos=tuple(xyz), rot=_quat_xyzw(*rpy)))
+    desc = Description.load(robot)
+    if frame is None:
+        parent, xyz, rpy = desc.imu_mount()
+        return ImuCfg(prim_path=f"{ROBOT_PRIM}/Geometry/{parent}",
+                      offset=ImuCfg.OffsetCfg(pos=tuple(xyz), rot=_quat_xyzw(*rpy)))
+    if usd_path is None:
+        raise ValueError("imu_sensor_cfg: a frame needs the robot asset (usd_path) to find its body")
+    from humanoid_sim.sensors.geometry import Mount
+    from humanoid_sim.sensors.rtx import body_paths
+
+    mount = Mount.from_urdf(desc.urdf_path, frame)
+    return ImuCfg(prim_path=f"{ROBOT_PRIM}/{body_paths(usd_path, {mount.link})[mount.link]}",
+                  offset=ImuCfg.OffsetCfg(pos=mount.translation_m, rot=mount.rotation_xyzw))
 
 
 def contact_sensor_cfg(history: int = 3, air_time: bool = True):
@@ -299,6 +313,8 @@ class IsaacLabRobot:
                                            contact_sensors=cfg.contacts)
         if cfg.imu:
             scene_cfg.imu = imu_sensor_cfg(desc.robot)
+        for name, frame in (cfg.extra_imus or {}).items():
+            setattr(scene_cfg, name, imu_sensor_cfg(desc.robot, frame, usd_path))
         if cfg.contacts:
             scene_cfg.contacts = contact_sensor_cfg(history=1, air_time=False)  # net forces now: the truth
         for name, entity in (cfg.entities or {}).items():
@@ -320,6 +336,7 @@ class IsaacLabRobot:
         apply_joint_limits(physics)
         self.robot = self.scene["robot"]
         self.imu = self.scene["imu"] if cfg.imu else None
+        self.extra_imus = {name: self.scene[name] for name in (cfg.extra_imus or {})}
         self.contacts = self.scene["contacts"] if cfg.contacts else None
         # Start every env at the articulation's default (standing) joint state.
         default = self.robot.data.default_joint_pos.torch.clone()

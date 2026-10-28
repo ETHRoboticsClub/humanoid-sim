@@ -137,6 +137,20 @@ class UnitreeG1Imu(Imu):
     source = "unmeasured: Unitree publishes no figures; an ideal sensor until a capture gives them"
 
 
+class ZedMiniImu(Imu):
+    model = "zed-mini-imu"
+    product = "Stereolabs ZED Mini built-in IMU (gyroscope and accelerometer)"
+    source = ("MODELED GUESS, placeholder until someone measures it. Stereolabs publishes the rate only (800 Hz, "
+              "ZED Mini datasheet); no chip, no noise or bias figures, no mount ('Not published' in its specifications). "
+              "The noise figures below are typical for a consumer MEMS part, not the ZED's. The sensor frame is taken "
+              "as the camera frame's axes at its origin; the real IMU sits a few cm away with its own axes "
+              "(camera_imu_transform, read per unit from the ZED SDK). One 60 s raw capture of one unit (SN11381414, "
+              "zed-open-capture, uncalibrated, 799.9 Hz) measured gyro 9.3e-5 to 1.0e-4 rad/s/rtHz and accel 1.1e-3 "
+              "to 1.7e-3 m/s^2/rtHz, near the figures below; too short for bias, not a calibration.")
+    gyro_noise_density_rad_s_sqrt_hz = 0.005 * DEG  # guess
+    accel_noise_density_m_s2_sqrt_hz = 150e-6 * G0  # guess
+
+
 class Camera(Sensor):
     """A camera product. Its frame is its reference imager's optical centre (x forward, y left, z up, as Controls'
     camera calibration has it); ``nominal_offsets_m`` places every stream's optical centre in it (a unit's
@@ -346,4 +360,4 @@ class Rig:
 
 
 __all__ = ["RTX_KINDS", "Camera", "Imu", "Lidar", "LivoxMid360", "Mti610", "OakDW", "RealSenseD435i", "Rig", "Sensor",
-           "UnitreeG1Imu", "ZedMini"]
+           "UnitreeG1Imu", "ZedMini", "ZedMiniImu"]
