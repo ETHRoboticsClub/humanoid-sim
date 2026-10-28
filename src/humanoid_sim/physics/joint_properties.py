@@ -17,6 +17,30 @@ import torch
 from humanoid_sim.core import PlantCore
 
 
+def joint_dynamics(desc, *, native: bool | None = None) -> dict:
+    """Nominal passive dynamics in solver coordinates, before task randomization.
+
+    Armature is kg m²; static/sliding friction is Nm; viscous damping is Nm s/rad.
+    Native ankles put rotor inertia on the crank shafts, never on both hinges too.
+    """
+    rows = {n: {"armature": j.armature, "friction": j.friction,
+                "dynamic_friction": j.dynamic_friction, "viscous_damping": j.damping}
+            for n, j in desc.joints.items()}
+    if native if native is not None else desc.usd_path is not None:
+        for spec in desc.ankle_model.payload["sides"].values():
+            armatures = {float(desc.table["joints"][n]["armature"]) for n in spec["joint_names"]}
+            if len(armatures) != 1:
+                raise ValueError("native crank armature is ambiguous in the description")
+            for n in spec["joint_names"]:
+                rows[n]["armature"] = 0.0
+            for role in ("upper", "lower"):
+                rows[spec["usd_joints"][role]] = {
+                    "armature": next(iter(armatures)), "friction": 0.0,
+                    "dynamic_friction": 0.0, "viscous_damping": 0.0}
+    return {"joint_names": list(rows), **{field: [r[field] for r in rows.values()]
+            for field in ("armature", "friction", "dynamic_friction", "viscous_damping")}}
+
+
 @dataclass
 class JointProperties:
     names: list[str]
@@ -34,6 +58,8 @@ def joint_properties(plant: PlantCore, names: list[str]) -> JointProperties:
     if plant.solver_map is not plant.map:
         return native_joint_properties(plant, names)
     pj = plant.map.joint_names
+    passive = joint_dynamics(desc, native=False)
+    pidx = [passive["joint_names"].index(n) for n in names]
     idx = [pj.index(n) for n in names]
     k0 = plant.k0[0, idx].tolist()
     d0 = plant.d0[0, idx].tolist()
@@ -49,9 +75,9 @@ def joint_properties(plant: PlantCore, names: list[str]) -> JointProperties:
             effort[pj[j]] = float(reach[col])
     return JointProperties(
         names=list(names), stiffness=k0, damping=d0,
-        armature=[desc.joints[n].armature for n in names],
-        friction=[desc.joints[n].friction for n in names],
-        passive_damping=[desc.joints[n].damping for n in names],
+        armature=[passive["armature"][i] for i in pidx],
+        friction=[passive["friction"][i] for i in pidx],
+        passive_damping=[passive["viscous_damping"][i] for i in pidx],
         effort_limit=[effort[n] for n in names],
         standing=[desc.joints[n].standing_offset_rad for n in names],
     )
@@ -63,18 +89,16 @@ def native_joint_properties(plant: PlantCore, names: list[str]) -> JointProperti
     physical = plant.solver_map.joint_names
     indices = [physical.index(n) for n in names]
     cranks = {}
-    hinges = {j for lk in desc.linkages for j in lk.joints}
+    passive = joint_dynamics(desc)
+    pidx = [passive["joint_names"].index(n) for n in names]
     for spec in desc.ankle_model.payload["sides"].values():
-        armatures = {float(desc.table["joints"][n]["armature"]) for n in spec["joint_names"]}
-        if len(armatures) != 1:
-            raise ValueError("native crank armature is ambiguous in the description")
         for role, drive in zip(("upper", "lower"), spec["motor_names"], strict=True):
-            cranks[spec["usd_joints"][role]] = (desc.drives[drive], next(iter(armatures)))
+            cranks[spec["usd_joints"][role]] = desc.drives[drive]
     return JointProperties(
         names=list(names), stiffness=plant.k0[0, indices].tolist(), damping=plant.d0[0, indices].tolist(),
-        armature=[cranks[n][1] if n in cranks else 0.0 if n in hinges else desc.joints[n].armature for n in names],
-        friction=[0.0 if n in cranks else desc.joints[n].friction for n in names],
-        passive_damping=[0.0 if n in cranks else desc.joints[n].damping for n in names],
-        effort_limit=[cranks[n][0].effort_peak if n in cranks else desc.joints[n].effort_peak for n in names],
+        armature=[passive["armature"][i] for i in pidx],
+        friction=[passive["friction"][i] for i in pidx],
+        passive_damping=[passive["viscous_damping"][i] for i in pidx],
+        effort_limit=[cranks[n].effort_peak if n in cranks else desc.joints[n].effort_peak for n in names],
         standing=[0.0 if n in cranks else desc.joints[n].standing_offset_rad for n in names],
     )
