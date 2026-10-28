@@ -62,6 +62,7 @@ import torch
 
 from humanoid_sim.devices.demand import LAW_FREEZE, DriveDemand
 from humanoid_sim.runtime.abi import plant_abi as abi
+from humanoid_sim.runtime.trajectory import ImuWriter, TrajectoryWriter
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
 from humanoid_sim.world.supports import GRAVITY_M_S2, NONE, _quat_rotate, level_under
@@ -174,13 +175,24 @@ class _Disturbance:
 
 def imu_descriptor(desc) -> dict:
     """The descriptor's ``imu``: the link ``imu_joint`` mounts it on, and the rig's IMU (its model and product, the
-    link it sits at, its sample period and delivery to the host), so a client can tell which device it reads."""
+    link it sits at, its sample period and delivery to the host), so a client can tell which device it reads. ``noise``
+    declares the model's errors (``SET_FIDELITY`` ``ideal`` turns them off): ``ideal`` when the model has none, else
+    ``modeled`` with the figures (the model's ``source`` says where they come from; the descriptor is size-limited)."""
     from humanoid_sim.sensors import rigs
 
     imu = rigs.imu(desc)
+    figures = {"gyro_noise_density_rad_s_sqrt_hz": imu.gyro_noise_density_rad_s_sqrt_hz,
+               "accel_noise_density_m_s2_sqrt_hz": imu.accel_noise_density_m_s2_sqrt_hz,
+               "gyro_turn_on_bias_rad_s": imu.gyro_turn_on_bias_rad_s,
+               "accel_turn_on_bias_m_s2": imu.accel_turn_on_bias_m_s2,
+               "gyro_bias_instability_rad_s": imu.gyro_bias_instability_rad_s,
+               "accel_bias_instability_m_s2": imu.accel_bias_instability_m_s2,
+               "bias_correlation_time_ns": imu.bias_correlation_time_ns}
+    ideal = not any(v for k, v in figures.items() if k != "bias_correlation_time_ns")
     return {"parent": desc.imu_mount()[0], "model": imu.model, "product": imu.product, "frame": imu.frame,
             "sample_period_ns": imu.sample_period_ns, "burst_period_ns": list(imu.burst_period_ns),
-            "in_burst_spacing_ns": imu.in_burst_spacing_ns}
+            "in_burst_spacing_ns": imu.in_burst_spacing_ns,
+            "noise": {"kind": "ideal" if ideal else "modeled", **figures}}
 
 
 class RuntimeHost:
@@ -189,7 +201,8 @@ class RuntimeHost:
                  bus_period_ns: int = 1_500_000,
                  client_timeout_ns: int = 500_000_000,
                  seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True,
-                 scene: StaticBoxes | None = None, gantry: GantryRig | None = None):
+                 scene: StaticBoxes | None = None, gantry: GantryRig | None = None,
+                 trajectory: str | Path | None = None):
         from humanoid_sim.devices.models import drive_models
         from humanoid_sim.model.asset import asset_meta, load_profile
         from humanoid_sim.model.description import Description
@@ -235,6 +248,8 @@ class RuntimeHost:
         self._drive_delays_ns = np.array([m.drive_delay_ns for m in self.drive_models.values()], dtype=np.int64)
         self.joints = list(self.desc.joints)
         self.client_timeout_ns = client_timeout_ns
+        if trajectory is not None and truth_every != 1:
+            raise ValueError("a trajectory records the truth of every step: truth_every must be 1")
         self.truth_every = truth_every
         self._soles = self._sole_geometry(meta["sole_boxes"])
         contacts = self.sim.backend.contacts
@@ -266,6 +281,13 @@ class RuntimeHost:
             path=segment, robot_id=robot, description_digest=self.desc.digest, sim_revision=sim_revision,
             num_drives=len(self.drives), num_joints=len(self.joints), physics_period_ns=self.period_ns,
             bus_period_ns=bus_period_ns, descriptor=self._descriptor(support), ready=False)
+        self.trajectory = None if trajectory is None else TrajectoryWriter(
+            trajectory, robot=robot, description_digest=self.desc.digest, joints=self.joints,
+            period_ns=self.period_ns, base_frame=self.robot.body_names[0],
+            scene=self._segment_args["descriptor"].get("scene"), gantry=self._segment_args["descriptor"].get("gantry"))
+        self.imu_log = None
+        if self.trajectory is not None:
+            self.imu_log = ImuWriter(f"{trajectory}.imu", self.trajectory.header, self._segment_args["descriptor"]["imu"])
         self.seg = None
         self._faults: dict[tuple[str, int | None], tuple[int | None, object]] = {}
         self._disturbances: list[_Disturbance] = []
@@ -947,6 +969,8 @@ class RuntimeHost:
         imu_rec["seq"][:valid], imu_rec["sample_ns"][:valid], imu_rec["stamp_ns"][:valid] = \
             seqs[:valid], sample_ns[:valid], stamp_ns[:valid]
         imu_rec["gyro_rad_s"][:valid], imu_rec["specific_force_m_s2"][:valid] = gyro[:valid], accel[:valid]
+        if self.imu_log is not None:
+            self.imu_log.append(imu_rec[:valid])
         self.seg.regions["feedback"].write(rec)
 
     def _truth_flat(self) -> torch.Tensor:
@@ -1002,6 +1026,8 @@ class RuntimeHost:
         t["gantry_strap_top_m"][:p] = take(3 * p).reshape(p, 3)
         t["gantry_strap_bottom_m"][:p] = take(3 * p).reshape(p, 3)
         self.seg.regions["truth"].write(t)
+        if self.trajectory is not None:
+            self.trajectory.append(t, self.session_id)
 
     def _frozen_encoders(self):
         for (fault, d), (_, held) in self._faults.items():
@@ -1054,6 +1080,9 @@ class RuntimeHost:
     def close(self) -> None:
         self.seg.end()
         self.seg.close()
+        if self.trajectory is not None:
+            self.trajectory.close()
+            self.imu_log.close()
         self.sim.close()
 
     def status(self) -> dict:

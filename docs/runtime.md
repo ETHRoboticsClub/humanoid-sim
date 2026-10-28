@@ -101,6 +101,14 @@ With `--persist`, a detached or lost session is followed by a new one (`RuntimeH
 
 A session is tied to the segment file and outlives the client process that drove it. A client that opens the path while the session is still ready, and echoes its session id, continues that session where the previous client left it.
 
+## Recording a run
+
+`serve --trajectory FILE` writes the truth of every physics step (it sets `--truth-every 1`) to `FILE`, the run's ground truth and the input the sensors are rendered from afterwards ([rtx-sensors.md](rtx-sensors.md#rendering-a-recorded-run)). The file is a JSON header line (`robot`, `description_digest`, the `joints` in the record's order, `period_ns`, `base_frame` (the floating root link), the host's `scene` and `gantry`, units) followed by fixed-size records, each whole once written: `sim_time_ns` (plant time), `session_id`, `base_position_m`, `base_quat_xyzw` (x y z w), `base_lin_vel_m_s`, `base_ang_vel_rad_s` (world frame), `joint_pos_rad` (URDF joint coordinates) and `gantry_position_m` (NaN without a crane). A truth published after a command shares its step's time and is not written twice. Plant time is the clock of the feedback and the IMU samples, so the recording lines up with what a client read. `humanoid_sim.runtime.trajectory.Trajectory.load(FILE).at(t_ns)` interpolates it (spherically for the orientation).
+
+Next to it, `FILE.imu` holds the body IMU's delivered samples (header: the trajectory's plus the descriptor's `imu` block with its `noise`): per sample `seq`, `sample_ns`, `stamp_ns` (plant ns, as in the feedback region), `gyro_rad_s` and `specific_force_m_s2` in the sensor frame, each written once, oldest first (`runtime.trajectory.read_imu`). It is the raw stream a client reads, so an IMU is available for a recorded run although the later render never steps physics.
+
+`humanoid-sim export-truth FILE --frames mid360_link camera0_camera imu_link --out DIR` writes the world pose of each description link along the run as `DIR/<link>.tum` (`t x y z qx qy qz qw`, t in seconds of plant time), the format evo and most SLAM evaluators read. A frame's pose is the base pose carried along the URDF chain with the recorded joint positions (`model/frames.py`), so a sensor's ground truth includes the swing on the gantry and the waist.
+
 ## The clock
 
 The runtime runs in real time only. `RuntimeHost.run` paces each physics period, 4 ms (`physics.period_ns` in `profiles/ethrc_v1.yaml`), to `CLOCK_MONOTONIC`: it sleeps until 100 µs before the step's deadline and spins for the rest (`SPIN_NS`). Each period does, in order (`RuntimeHost.step`):
@@ -210,7 +218,7 @@ The descriptor region holds one JSON object (sorted keys, at most 16,384 bytes) 
 | `description` | `robot`, `description_digest` and `description_revision` (the humanoid-urdf checkout's git `HEAD`, or null) |
 | `physics` | `engine` (`isaaclab/mjwarp` or `isaaclab/kamino`), `period_ns`, `integrator` |
 | `units` | One sentence each for `drive`, `joint`, `imu` and `time` |
-| `imu` | `parent`: the link the URDF's `imu_joint` mounts the IMU on. The rig's IMU ([sensors.md](sensors.md#sensor-models-and-the-rig)): `model` (its model name in `src/humanoid_sim/sensors/models.py`, `mti-610` on the V1), `product`, `frame` (the link it sits at), `sample_period_ns`, `burst_period_ns` and `in_burst_spacing_ns`. ABI 3.1 added all but `parent`. |
+| `imu` | `parent`: the link the URDF's `imu_joint` mounts the IMU on. The rig's IMU ([sensors.md](sensors.md#sensor-models-and-the-rig)): `model` (its model name in `src/humanoid_sim/sensors/models.py`, `mti-610` on the V1), `product`, `frame` (the link it sits at), `sample_period_ns`, `burst_period_ns` and `in_burst_spacing_ns`, and `noise`: `kind` is `ideal` when the model has no errors (the G1's body IMU: Unitree publishes no figures) or `modeled`, with the figures (`gyro_noise_density_rad_s_sqrt_hz`, `accel_noise_density_m_s2_sqrt_hz`, the turn-on biases, the bias instabilities and `bias_correlation_time_ns`); `SET_FIDELITY` `ideal` turns the errors off whatever `kind` says. ABI 3.1 added all but `parent` and `noise`. |
 | `soles` | The two sole bodies, left then right |
 | `commands` | Command codes to names, `{"1": "reset", ..., "10": "move_gantry"}` |
 | `faults` | `encoder_freeze`, `imu_spike`, `imu_bias`, `power_sag` |

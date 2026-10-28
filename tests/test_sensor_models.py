@@ -149,3 +149,16 @@ def test_review_regressions_integer_ns_shapes_frozen_defaults_and_names():
     with pytest.raises(ValueError, match="two names"):
         Rig(imu=a, mid360=b, spare=a)
     assert (a.name, b.name) == ("", "")  # nothing named before the rig is accepted
+
+
+@pytest.mark.parametrize("robot", ROBOTS)
+def test_the_runtime_descriptor_declares_whether_the_imu_has_errors(robot):
+    from humanoid_sim.runtime.host import imu_descriptor
+
+    desc = Description.load(robot)
+    noise = imu_descriptor(desc)["noise"]
+    cfg = rigs.imu(desc).delivery_cfg()
+    figures = (cfg.gyro_noise_density, cfg.accel_noise_density, cfg.gyro_turn_on_bias, cfg.accel_turn_on_bias,
+               cfg.gyro_bias_instability, cfg.accel_bias_instability)
+    assert noise["kind"] == ("modeled" if any(figures) else "ideal")
+    assert noise["gyro_noise_density_rad_s_sqrt_hz"] == cfg.gyro_noise_density
