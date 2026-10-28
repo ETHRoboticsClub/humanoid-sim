@@ -56,12 +56,20 @@ def runtime(tmp_path, monkeypatch):
             self.render_ns = 33_333_333
             self.sim = SimpleNamespace(plant=SimpleNamespace(cfg=SimpleNamespace(device="cpu")))
             self.renders = 0
+            self.viewport_times = []
+            self.poses = []
+            self.sensor_intervals = []
 
-        def pose(self, *_args):
-            pass
+        def pose(self, t_ns, q, base):
+            self.poses.append((t_ns, q.clone(), base.clone()))
 
-        def render_at(self, *_args):
+        def render(self, t_ns):
+            self.viewport_times.append(t_ns)
+
+        def render_at(self, t_ns, dt_ns):
             self.renders += 1
+            self.sensor_intervals.append(dt_ns)
+            self.render(t_ns)
 
         def close(self):
             pass
@@ -73,7 +81,7 @@ def runtime(tmp_path, monkeypatch):
     fb["written_mono_ns"] = clock[0]
     host.regions["truth"].write(truth)
     host.regions["feedback"].write(fb)
-    renderer = RuntimeRender(path, cfg)
+    renderer = RuntimeRender(path, cfg, window=True)
     try:
         yield host, renderer, clock, create, cfg
     finally:
@@ -97,6 +105,62 @@ def test_a_future_dated_heartbeat_ends_rendering(runtime):
     host, renderer, clock, _, _ = runtime
     host.header["heartbeat_mono_ns"] = clock[0] + 1
     assert not renderer.frame()
+
+
+def test_paused_reset_updates_the_viewport_without_publishing_sensor_frames(runtime):
+    host, renderer, clock, _, _ = runtime
+    assert renderer.frame()
+    _, truth = host.regions["truth"].read()
+    _, fb = host.regions["feedback"].read()
+    truth["joint_pos_rad"][0] = 0.37
+    truth["base_position_m"] = [1.0, -2.0, 1.4]
+    truth["base_quat_xyzw"] = [0.0, 0.0, 0.0, 1.0]
+    fb["paused"] = 1
+    host.regions["truth"].write(truth)
+    host.regions["feedback"].write(fb)
+    clock[0] += 100_000_000
+    host.heartbeat()
+
+    assert renderer.frame()
+    assert renderer.session.viewport_times == [1_000_000_000, 1_000_000_000]
+    assert renderer.session.renders == 1
+    _, q, base = renderer.session.poses[-1]
+    np.testing.assert_allclose(q.numpy(), [[0.37]])
+    np.testing.assert_allclose(base.numpy(), [[1.0, -2.0, 1.4, 0.0, 0.0, 0.0, 1.0]])
+
+    # Frozen plant time still allows camera/window interaction at a bounded wall-clock rate.
+    for _ in range(5):
+        clock[0] += 1_000_000
+        assert renderer.frame()
+    assert len(renderer.session.viewport_times) == 2
+    clock[0] += 100_000_000
+    host.heartbeat()
+    assert renderer.frame()
+    assert len(renderer.session.viewport_times) == 3
+    assert renderer.session.renders == 1
+
+    truth["sim_time_ns"] = fb["sim_time_ns"] = 1_100_000_000
+    fb["paused"] = 0
+    host.regions["truth"].write(truth)
+    host.regions["feedback"].write(fb)
+    assert renderer.frame()
+    assert renderer.session.renders == 2
+    assert renderer.session.sensor_intervals[-1] == 100_000_000
+
+
+def test_headless_pause_does_not_render_or_publish(runtime):
+    host, _, _, _, cfg = runtime
+    _, fb = host.regions["feedback"].read()
+    fb["paused"] = 1
+    host.regions["feedback"].write(fb)
+    renderer = RuntimeRender(host.path, cfg)
+    try:
+        assert renderer.frame()
+        assert renderer.session.viewport_times == []
+        assert renderer.session.renders == 0
+        assert renderer.session.poses == []
+    finally:
+        renderer.close()
 
 
 def test_reopen_refuses_the_dead_file_and_accepts_a_replacement_session(runtime):

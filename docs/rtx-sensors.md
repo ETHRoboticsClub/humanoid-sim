@@ -106,6 +106,8 @@ humanoid-sim render-runtime /run/hsim/plant --splat outputs/rtx/hangar_splat.usd
 
 The summary adds `render_rate_hz`, `lag_ms` (the host's plant time when a render's frames are out, minus the render's plant time) and `host_keeping_up` (the share of renders during which the host kept real time). Controls runs it as `just sim-isaac-rtx`. A heartbeat older than 500 ms or from a different monotonic clock ends rendering for that session, including when plant time is frozen. The renderer waits up to 10 s for a fresh session at the same path and then exits if the host does not return; a normally paused host keeps publishing its heartbeat and remains connected.
 
+While the host is paused, `--window` refreshes the viewport on wall time so a reset pose and camera interaction remain visible. It uses the sensor render period, or 30 Hz without sensors. These display refreshes do not step physics, advance plant time, publish sensor frames or enter the sensor-render summary. Headless rendering waits for the host to resume.
+
 ## Checks
 
 `tests/test_rtx_sensors.py` (marker `rtx`, in the Isaac Sim image on an RTX GPU, in a process of its own: `pytest -m rtx tests/test_rtx_sensors.py`) puts the G1 in a box room with targets and compares what each sensor reports with geometry worked out without the renderer (`tests/rtx_oracles.py`), using the mounts the G1's URDF in humanoid-urdf gives (read when the tests run) and the lens figures:

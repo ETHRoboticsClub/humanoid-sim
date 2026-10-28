@@ -27,6 +27,7 @@ import numpy as np
 from humanoid_sim.runtime.abi import plant_abi as abi
 
 FOLLOW_S = 10.0  # how long to wait for the next session of a `serve --persist` host
+VIEWPORT_PERIOD_NS = 1_000_000_000 // 30  # 30 Hz window refresh when no sensor defines a render period
 EDITOR_PANELS = ("Stage", "Layer", "Render Settings", "Property", "Content", "Console")  # hidden in the window
 
 
@@ -50,7 +51,7 @@ def host_scene(record: dict | None) -> tuple[str | None, tuple[float, float], st
 class RuntimeRender:
     """Renders one segment's robot; :meth:`frame` renders once if a render is due."""
 
-    def __init__(self, segment: str | Path, cfg, *, wait_s: float = 60.0):
+    def __init__(self, segment: str | Path, cfg, *, wait_s: float = 60.0, window: bool = False):
         from humanoid_sim.model.description import Description
         from humanoid_sim.sensors.session import SensorSession
 
@@ -71,6 +72,8 @@ class RuntimeRender:
         self._order = [joints.index(n) for n in desc.joints]  # the description's order, from the host's
         self.session_id = self.seg.session_id
         self._last_t = None
+        self._window = window
+        self._last_present_ns: int | None = None
         self.lag_ms: list[float] = []  # plant time now minus the render's, when its frames are out
         self.host_keeping_up: list[bool] = []
 
@@ -125,7 +128,15 @@ class RuntimeRender:
             return True
         t_ns = int(truth[1]["sim_time_ns"])
         session = self.session
-        if self._last_t is not None and t_ns - self._last_t < session.render_ns:
+        paused = bool(fb[1]["paused"])
+        present_ns = abi.mono_ns()
+        if paused:
+            if not self._window:
+                return True
+            period_ns = session.render_ns or VIEWPORT_PERIOD_NS
+            if self._last_present_ns is not None and present_ns - self._last_present_ns < period_ns:
+                return True
+        elif self._last_t is not None and t_ns - self._last_t < session.render_ns:
             return True
         tr = truth[1]
         device = session.sim.plant.cfg.device
@@ -133,6 +144,11 @@ class RuntimeRender:
         base = np.concatenate([tr["base_position_m"], tr["base_quat_xyzw"]])
         session.pose(t_ns, torch.as_tensor(q, device=device)[None], torch.as_tensor(base, device=device)[None])
         self._move_crane(tr)
+        self._last_present_ns = present_ns
+        if paused:
+            # A reset can change the pose without advancing plant time. Refresh Kit, not sensor outputs.
+            session.render(t_ns)
+            return True
         session.clock_ns = plant_now_ns(fb[1], abi.mono_ns())
         dt = session.render_ns if self._last_t is None else t_ns - self._last_t
         session.render_at(t_ns, dt)
@@ -149,6 +165,7 @@ class RuntimeRender:
                                     max_heartbeat_age_ns=abi.HEARTBEAT_TIMEOUT_NS, **self._identity)
         self.session_id = self.seg.session_id
         self._last_t = None
+        self._last_present_ns = None
 
     def summary(self, wall_s: float) -> dict:
         out = self.session.summary(wall_s)
@@ -201,7 +218,7 @@ def render_runtime(segment: str | Path, cfg, *, seconds: float | None = None, wa
 
         previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM)}
         try:
-            render = RuntimeRender(segment, cfg, wait_s=wait_s)
+            render = RuntimeRender(segment, cfg, wait_s=wait_s, window=window)
             start = time.monotonic()
             end = None if seconds is None else start + seconds
             try:
