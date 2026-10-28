@@ -144,9 +144,9 @@ class ZedMiniImu(Imu):
               "ZED Mini datasheet); no chip, no noise or bias figures, no mount ('Not published' in its specifications). "
               "The noise figures below are typical for a consumer MEMS part, not the ZED's. The sensor frame is taken "
               "as the camera frame's axes at its origin; the real IMU sits a few cm away with its own axes "
-              "(camera_imu_transform, read per unit from the ZED SDK). One 60 s raw capture of one unit (SN11381414, "
-              "zed-open-capture, uncalibrated, 799.9 Hz) measured gyro 9.3e-5 to 1.0e-4 rad/s/rtHz and accel 1.1e-3 "
-              "to 1.7e-3 m/s^2/rtHz, near the figures below; too short for bias, not a calibration.")
+              "(camera_imu_transform, read per unit from the ZED SDK). One 60 s raw capture of one unit "
+              "(zed-open-capture, uncalibrated; the capture is not in this repo) gave noise densities within a factor "
+              "of 1.5 of the figures below; too short for bias, not a calibration.")
     gyro_noise_density_rad_s_sqrt_hz = 0.005 * DEG  # guess
     accel_noise_density_m_s2_sqrt_hz = 150e-6 * G0  # guess
 

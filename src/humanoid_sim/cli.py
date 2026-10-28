@@ -414,6 +414,8 @@ def _gantry(args):
 def cmd_serve(args) -> int:
     from humanoid_sim.runtime.host import EXIT_CLIENT_LOST, EXIT_DETACHED, RuntimeHost
 
+    if args.truth_every is not None and (args.truth_every < 1 or (args.trajectory and args.truth_every != 1)):
+        raise SystemExit("--truth-every must be at least 1, and 1 with --trajectory (it records every step)")
     host = RuntimeHost(args.segment, _usd(args), device=args.device, robot=args.robot, solver=args.solver,
                        support=args.support, pose=args.pose, scene=_scene(args), gantry=_gantry(args),
                        bus_period_ns=int(args.bus_period_us * 1000),

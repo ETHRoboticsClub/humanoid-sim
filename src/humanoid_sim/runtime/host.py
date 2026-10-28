@@ -1078,11 +1078,11 @@ class RuntimeHost:
         return code
 
     def close(self) -> None:
-        self.seg.end()
-        self.seg.close()
-        if self.trajectory is not None:
+        if self.trajectory is not None:  # first: what is recorded must reach the files whatever fails below
             self.trajectory.close()
             self.imu_log.close()
+        self.seg.end()
+        self.seg.close()
         self.sim.close()
 
     def status(self) -> dict:

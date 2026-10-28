@@ -55,6 +55,10 @@ def render_trajectory(trajectory: str | Path, cfg, out: str | Path, *, start_s: 
     desc = Description.load(cfg.robot)
     order = check_trajectory(traj, desc)
     scene, spawn, scan_mesh = host_scene(traj.header.get("scene"))
+    recorded = traj.header.get("scene")
+    if recorded and not cfg.scene and scene is None:
+        raise ValueError(f"the recording's scene {recorded['file']} is not readable here: pass --scene (and --spawn) or "
+                         "mount the file at the same path")
     cfg = dataclasses.replace(cfg, scene=cfg.scene or scene, spawn_m=cfg.spawn_m if cfg.scene else spawn,
                               scan_mesh=cfg.scan_mesh or scan_mesh)
     host_gantry = traj.header.get("gantry")
@@ -93,11 +97,15 @@ def describe_sensors(writer, session, robot_links: list[str] | None = None) -> N
             "mount": _mount(session, lidar.sensor.name), "stage": stage})
 
 
+def expected_sensors(session) -> list[str]:
+    """The data sets a render of ``session`` writes: ``<camera_id>/<stream>`` per stream, a lidar's name."""
+    return [f"{c.camera_id}/{s.name}" for c in session.camera_specs for s in c.streams] + [
+        lidar.sensor.name for lidar in session.lidars]
+
+
 def missing_data(session, counts: dict[str, int]) -> list[str]:
-    """The sensors (``<camera_id>/<stream>`` or a lidar's name) of ``session`` that wrote nothing."""
-    expected = [f"{c.camera_id}/{s.name}" for c in session.camera_specs for s in c.streams]
-    expected += [lidar.sensor.name for lidar in session.lidars]
-    return [name for name in expected if not counts.get(name)]
+    """The sensors of ``session`` that wrote nothing."""
+    return [name for name in expected_sensors(session) if not counts.get(name)]
 
 
 def _render(traj, name, desc, order, cfg, out, start_s, end_s, gantry, log) -> dict:
@@ -114,6 +122,9 @@ def _render(traj, name, desc, order, cfg, out, start_s, end_s, gantry, log) -> d
         if not session.camera_specs and not session.lidars:
             raise ValueError(f"nothing to render: {desc.robot}'s rig with sensors={cfg.sensors!r} has no camera or "
                              f"lidar the RTX sensors simulate (unsimulated: {session.unsimulated})")
+        if cfg.splat and session.lidars:
+            raise ValueError("the lidar would trace the splat (RTX hides it from camera rays only): render the lidar "
+                             "in its own pass without --splat (--no-cameras) and the cameras with it (--no-lidar)")
         if len(session.lidars) > 1:
             raise ValueError("a dataset holds one lidar's sweeps: the session has " + str(len(session.lidars)))
         crane = crane_parts(gantry) if cfg.splat else {}
@@ -124,9 +135,10 @@ def _render(traj, name, desc, order, cfg, out, start_s, end_s, gantry, log) -> d
                              f"{traj.start_ns}..{traj.end_ns} ns")
         times = render_times(t0, t1, session.render_ns)
         writer = DatasetWriter(out, {
-            "robot": desc.robot, "description_digest": desc.digest, "trajectory": name, "start_ns": int(t0), "end_ns": int(t1), "render_period_ns": int(session.render_ns),
-            "unsimulated": session.unsimulated, "stamps": "plant time, ns"})
+            "robot": desc.robot, "description_digest": desc.digest, "trajectory": name, "start_ns": int(t0), "end_ns": int(t1), "stamps": "plant time, ns"})
         describe_sensors(writer, session, visual_links(desc.urdf_path))
+        writer.begin_pass({"sensors": expected_sensors(session), "render_period_ns": int(session.render_ns),
+                           "unsimulated": session.unsimulated})
         device = session.sim.plant.cfg.device
         due = {(c.camera_id, s.name): t0 for c in session.camera_specs for s in c.streams}
         seen = 0
@@ -161,8 +173,7 @@ def _render(traj, name, desc, order, cfg, out, start_s, end_s, gantry, log) -> d
             raise RuntimeError(f"the render produced no data for {empty} (frames and sweeps written: {counts})")
         summary = {"renders": len(times), "plant_s": float((t1 - t0) / 1e9), "wall_s": wall, "counts": counts,
                    "render_ms": _median(session.ms["render"])}
-        # Written and printed before Kit closes, which may end the process.
-        (Path(out) / "summary.json").write_text(json.dumps(summary, indent=1))
+        writer.finish_pass(summary)  # in the manifest, written below before Kit closes (which may end the process)
         log(json.dumps(summary, indent=1))
         return summary
     finally:
