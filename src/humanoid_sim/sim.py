@@ -16,8 +16,7 @@ the world origin (the scene's spawn point).
 With ``imu``, :attr:`SimCore.imu` produces the raw IMU samples as the robot's host receives them
 (:class:`~humanoid_sim.sensors.imu.ImuDelivery`, sampled at every step start); with ``contacts``, the scene has a
 contact sensor on every body (``backend.contacts``). With ``imu`` and ``extra_rig`` (a name of
-``sensors.rigs.EXTRAS``), :attr:`SimCore.extra_imus` holds the same for each further IMU of that rig, by name
-(not with ``cuda_graph``).
+``sensors.rigs.EXTRAS``), :attr:`SimCore.extra_imus` holds the same for each further IMU of that rig, by name.
 
 With ``cuda_graph`` (CUDA only) the plant's work around the solver step runs as two captured CUDA graphs, one
 before the step (IMU sampling, drive bank, target shaping) and one after (drive feedback): one launch each instead
@@ -60,8 +59,6 @@ class SimCore:
         if extra_rig:
             if not imu:
                 raise ValueError("extra_rig needs imu=True")
-            if cuda_graph:
-                raise ValueError("extra_rig IMUs are not captured in the CUDA graph yet")
             from humanoid_sim.sensors import rigs
 
             extra_imus = {n: s for n, s in rigs.load(robot, self.desc, extra_rig).sensors.items()
@@ -205,6 +202,8 @@ class _StepGraphs:
         e = q.shape[0]
         self.gyro = torch.zeros(e, 3, device=q.device)
         self.acc = torch.zeros(e, 3, device=q.device)
+        self.extra = {name: (torch.zeros(e, 3, device=q.device), torch.zeros(e, 3, device=q.device))
+                      for name in sim.extra_imus}
         p.feedback(self.q, self.qd)  # a post-step state for pre to start from
         side = torch.cuda.Stream()
         side.wait_stream(torch.cuda.current_stream())
@@ -213,7 +212,7 @@ class _StepGraphs:
                 self._post()
                 self._pre()
         torch.cuda.current_stream().wait_stream(side)
-        generators = [sim.imu.generator] if sim.imu is not None else []
+        generators = ([sim.imu.generator] if sim.imu is not None else []) + [d.generator for d in sim.extra_imus.values()]
         self.g_post, self.g_pre = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
         for g in (self.g_post, self.g_pre):
             for gen in generators:
@@ -230,6 +229,8 @@ class _StepGraphs:
         sim = self.sim
         if sim.imu is not None:
             sim.imu.step(self.t, self.gyro, self.acc, period_ns=sim.period_ns)
+        for name, delivery in sim.extra_imus.items():
+            delivery.step(self.t, *self.extra[name], period_ns=sim.period_ns)
         return sim.plant.pre_physics(self.t, self.q, self.qd, sim.plant.post_state)
 
     def pre(self, q: torch.Tensor, qd: torch.Tensor, *, refresh: bool) -> torch.Tensor:
@@ -242,6 +243,10 @@ class _StepGraphs:
             data = sim.backend.imu.data
             self.gyro.copy_(data.ang_vel_b.torch)
             self.acc.copy_(data.lin_acc_b.torch)
+        for name, (gyro, acc) in self.extra.items():
+            data = sim.backend.extra_imus[name].data
+            gyro.copy_(data.ang_vel_b.torch)
+            acc.copy_(data.lin_acc_b.torch)
         self.t.fill_(sim.t_ns)
         self.g_pre.replay()
         return self.target

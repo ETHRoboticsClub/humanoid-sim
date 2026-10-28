@@ -62,7 +62,7 @@ import torch
 
 from humanoid_sim.devices.demand import LAW_FREEZE, DriveDemand
 from humanoid_sim.runtime.abi import plant_abi as abi
-from humanoid_sim.runtime.trajectory import ImuWriter, TrajectoryWriter
+from humanoid_sim.runtime.trajectory import IMU_RECORD, ImuWriter, TrajectoryWriter
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
 from humanoid_sim.world.supports import GRAVITY_M_S2, NONE, _quat_rotate, level_under
@@ -173,14 +173,12 @@ class _Disturbance:
     end_ns: int
 
 
-def imu_descriptor(desc) -> dict:
-    """The descriptor's ``imu``: the link ``imu_joint`` mounts it on, and the rig's IMU (its model and product, the
-    link it sits at, its sample period and delivery to the host), so a client can tell which device it reads. ``noise``
-    declares the model's errors (``SET_FIDELITY`` ``ideal`` turns them off): ``ideal`` when the model has none, else
-    ``modeled`` with the figures (the model's ``source`` says where they come from; the descriptor is size-limited)."""
-    from humanoid_sim.sensors import rigs
-
-    imu = rigs.imu(desc)
+def _imu_block(imu) -> dict:
+    """What a client needs of an IMU model: which device, where it sits, how its samples arrive and its errors.
+    ``noise`` declares the model's errors (``SET_FIDELITY`` ``ideal`` turns them off): ``ideal`` when the model has
+    none, else its ``noise_basis`` (``modeled`` or ``measured``) with the figures; the model's ``source`` says where
+    they come from (the descriptor is size-limited). The bias is a first-order Gauss-Markov process with the bias
+    instability as its stationary sigma and ``bias_correlation_time_ns``; there is no random-walk term."""
     figures = {"gyro_noise_density_rad_s_sqrt_hz": imu.gyro_noise_density_rad_s_sqrt_hz,
                "accel_noise_density_m_s2_sqrt_hz": imu.accel_noise_density_m_s2_sqrt_hz,
                "gyro_turn_on_bias_rad_s": imu.gyro_turn_on_bias_rad_s,
@@ -189,10 +187,46 @@ def imu_descriptor(desc) -> dict:
                "accel_bias_instability_m_s2": imu.accel_bias_instability_m_s2,
                "bias_correlation_time_ns": imu.bias_correlation_time_ns}
     ideal = not any(v for k, v in figures.items() if k != "bias_correlation_time_ns")
-    return {"parent": desc.imu_mount()[0], "model": imu.model, "product": imu.product, "frame": imu.frame,
+    return {"model": imu.model, "product": imu.product, "frame": imu.frame,
             "sample_period_ns": imu.sample_period_ns, "burst_period_ns": list(imu.burst_period_ns),
             "in_burst_spacing_ns": imu.in_burst_spacing_ns,
-            "noise": {"kind": "ideal" if ideal else "modeled", **figures}}
+            "noise": {"kind": "ideal" if ideal else imu.noise_basis, "bias_model": "gauss_markov", **figures}}
+
+
+def imu_descriptor(desc) -> dict:
+    """The descriptor's ``imu``: the link ``imu_joint`` mounts the body IMU on, and the rig's IMU (see
+    :func:`_imu_block`), so a client can tell which device it reads."""
+    from humanoid_sim.sensors import rigs
+
+    return {"parent": desc.imu_mount()[0], **_imu_block(rigs.imu(desc))}
+
+
+def extra_imu_descriptors(desc, extra_rig: str | None) -> dict:
+    """The descriptor's ``extra_imus``: each IMU of the extra rig other than the body IMU, by rig name, with its
+    ``mount`` (the body the physics keeps its frame on, and the frame's pose in it, a rigid mount)."""
+    if not extra_rig:
+        return {}
+    from humanoid_sim.sensors import rigs
+    from humanoid_sim.sensors.geometry import Mount
+
+    out = {}
+    for name, sensor in rigs.load(desc.robot, desc, extra_rig).sensors.items():
+        if sensor.kind == "imu" and name != "imu":
+            mount = Mount.from_urdf(desc.urdf_path, sensor.frame)
+            out[name] = {**_imu_block(sensor), "mount": {
+                "body": mount.link, "translation_m": list(mount.translation_m),
+                "rotation": [list(row) for row in mount.rotation]}}
+    return out
+
+
+def imu_samples(gyro: np.ndarray, accel: np.ndarray, ints: np.ndarray, h: int) -> np.ndarray:
+    """The delivered samples of one IMU from its feedback transfer (``gyro``, ``accel`` ``[h, 3]``; ``ints``: ``seq``,
+    ``sample_ns``, ``stamp_ns`` of ``h`` slots, then the count), newest first, valid slots only."""
+    valid = min(int(ints[3 * h]), h)
+    out = np.zeros(valid, IMU_RECORD)
+    out["seq"], out["sample_ns"], out["stamp_ns"] = ints[:valid], ints[h:h + valid], ints[2 * h:2 * h + valid]
+    out["gyro_rad_s"], out["specific_force_m_s2"] = gyro[:valid], accel[:valid]
+    return out
 
 
 class RuntimeHost:
@@ -202,7 +236,7 @@ class RuntimeHost:
                  client_timeout_ns: int = 500_000_000,
                  seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True,
                  scene: StaticBoxes | None = None, gantry: GantryRig | None = None,
-                 trajectory: str | Path | None = None):
+                 trajectory: str | Path | None = None, extra_rig: str | None = None):
         from humanoid_sim.devices.models import drive_models
         from humanoid_sim.model.asset import asset_meta, load_profile
         from humanoid_sim.model.description import Description
@@ -230,7 +264,7 @@ class RuntimeHost:
         models = drive_models(Description.load(robot))
         self.sim = SimCore(usd, device=device, robot=robot, solver=solver,
                            base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
-                           compile=compile and cuda, imu_history=abi.IMU_SAMPLES, scene=scene,
+                           compile=compile and cuda, imu_history=abi.IMU_SAMPLES, scene=scene, extra_rig=extra_rig,
                            queue_capacity=_queue_capacity(max(m.drive_delay_ns for m in models.values()),
                                                           bus_period_ns,
                                                           int(load_profile(robot)["physics"]["period_ns"])))
@@ -250,6 +284,7 @@ class RuntimeHost:
         self.client_timeout_ns = client_timeout_ns
         if trajectory is not None and truth_every != 1:
             raise ValueError("a trajectory records the truth of every step: truth_every must be 1")
+        self._extra_rig = extra_rig
         self.truth_every = truth_every
         self._soles = self._sole_geometry(meta["sole_boxes"])
         contacts = self.sim.backend.contacts
@@ -286,8 +321,12 @@ class RuntimeHost:
             period_ns=self.period_ns, base_frame=self.robot.body_names[0],
             scene=self._segment_args["descriptor"].get("scene"), gantry=self._segment_args["descriptor"].get("gantry"))
         self.imu_log = None
+        self.extra_imu_logs: dict[str, ImuWriter] = {}
         if self.trajectory is not None:
-            self.imu_log = ImuWriter(f"{trajectory}.imu", self.trajectory.header, self._segment_args["descriptor"]["imu"])
+            descriptor = self._segment_args["descriptor"]
+            self.imu_log = ImuWriter(f"{trajectory}.imu", self.trajectory.header, descriptor["imu"])
+            self.extra_imu_logs = {name: ImuWriter(f"{trajectory}.{name}.imu", self.trajectory.header, block)
+                                   for name, block in descriptor["extra_imus"].items()}
         self.seg = None
         self._faults: dict[tuple[str, int | None], tuple[int | None, object]] = {}
         self._disturbances: list[_Disturbance] = []
@@ -336,9 +375,14 @@ class RuntimeHost:
         self._release_rope()
         if self.trolley is not None:
             self.trolley.place(torch.tensor([0], device=self.device), torch.tensor(self.rig.home_m))
-        self.sim.imu.set_noise(True)
+        for imu in self._imus():
+            imu.set_noise(True)
         self._reset({"pose": self.start_pose})
         self._open_session()
+
+    def _imus(self) -> list:
+        """The body IMU's delivery and the extra rig's, which reset and change fidelity together."""
+        return [self.sim.imu, *self.sim.extra_imus.values()]
 
     def _warm_up(self, steps: int = 3) -> None:
         """Step a few times and put the state back: the first steps compile kernels (seconds on a CPU), which must
@@ -361,11 +405,13 @@ class RuntimeHost:
         env = torch.tensor([0], device=self.device)
         self.sim.plant.reset(env)  # plant time keeps running: the IMU's sample clock depends on it
         self.sim.feedback = None
-        self.sim.imu.reset(env, self.sim.t_ns, keep_seq=True)
+        for imu in self._imus():
+            imu.reset(env, self.sim.t_ns, keep_seq=True)
 
     # -- descriptor and geometry ------------------------------------------------------------------
 
     def _descriptor(self, support: str) -> dict:
+        self._extra_imu_blocks = extra_imu_descriptors(self.desc, self._extra_rig)
         return {
             "robot": self.desc.robot, "drives": self.drives, "joints": self.joints, "support": support,
             "bodies": list(self.robot.body_names), "harness": self._support_cfg["harness"],
@@ -376,6 +422,7 @@ class RuntimeHost:
                       "joint": "URDF joint coordinates", "imu": "sensor frame, rad/s and m/s^2 (specific force)",
                       "time": "sim_time_ns and IMU stamps are plant time; *_mono_ns is CLOCK_MONOTONIC"},
             "imu": imu_descriptor(self.desc),
+            "extra_imus": self._extra_imu_blocks,
             "soles": [s["body"] for s in self._soles],
             "commands": {str(k): v for k, v in abi.COMMANDS.items()}, "faults": list(abi.FAULTS),
             "drive_models": self._drive_model_table(),
@@ -585,7 +632,8 @@ class RuntimeHost:
         elif roped and base is not None:
             self._release_rope()
         self.sim.plant.reset(env)
-        self.sim.imu.reset(env, self.sim.t_ns, keep_seq=True)
+        for imu in self._imus():
+            imu.reset(env, self.sim.t_ns, keep_seq=True)
         self._prescribed = None
         self._disturbances.clear()
         self._joint_torques.clear()  # the plant's reset zeroed the external torque
@@ -603,7 +651,8 @@ class RuntimeHost:
         imu = args["imu"]
         if imu not in ("ideal", "real"):
             raise ValueError(f"imu fidelity {imu!r}: ideal or real")
-        self.sim.imu.set_noise(imu == "real")
+        for delivery in self._imus():
+            delivery.set_noise(imu == "real")
         return f"imu {imu}"
 
     def _detach(self, args: dict) -> str:
@@ -940,7 +989,18 @@ class RuntimeHost:
         flat = torch.cat([fb.position_rad[0], fb.velocity_rad_s[0], fb.applied_torque_nm[0],
                           fb.demanded_torque_nm[0], imu.gyro[0].reshape(-1), imu.specific_force[0].reshape(-1),
                           ]).to(torch.float64)
-        return torch.cat([flat, ints])
+        return torch.cat([flat, ints, *self._extra_imu_flat()])
+
+    def _extra_imu_flat(self) -> list[torch.Tensor]:
+        """The extra IMUs being recorded, each as gyro, specific force and the integer fields (as the body IMU's),
+        to travel in the feedback's single transfer; none when nothing is recorded."""
+        out = []
+        for name in self.extra_imu_logs:
+            s = self.sim.extra_imus[name].samples
+            ints = torch.cat([s.seq[0], s.sample_ns[0], s.stamp_ns[0], s.count[:1]]).view(torch.float64)
+            out.append(torch.cat([s.gyro[0].reshape(-1), s.specific_force[0].reshape(-1)]).to(torch.float64))
+            out.append(ints)
+        return out
 
     def _write_feedback(self, host: np.ndarray) -> None:
         sim, n = self.sim, len(self.drives)
@@ -950,7 +1010,7 @@ class RuntimeHost:
             drive[0, d], drive[1, d] = position, velocity
         gyro = host[4 * n: 4 * n + 3 * h].reshape(h, 3)
         accel = host[4 * n + 3 * h: 4 * n + 6 * h].reshape(h, 3)
-        ints = host[4 * n + 6 * h:].view(np.int64)
+        ints = host[4 * n + 6 * h: 4 * n + 9 * h + 1].view(np.int64)
         seqs, sample_ns, stamp_ns, total = ints[:h], ints[h:2 * h], ints[2 * h:3 * h], int(ints[3 * h])
 
         now = abi.mono_ns()
@@ -971,6 +1031,11 @@ class RuntimeHost:
         imu_rec["gyro_rad_s"][:valid], imu_rec["specific_force_m_s2"][:valid] = gyro[:valid], accel[:valid]
         if self.imu_log is not None:
             self.imu_log.append(imu_rec[:valid])
+        at = 4 * n + 9 * h + 1  # the extra IMUs follow the body IMU's integers: gyro, specific force, integers each
+        for name, log in self.extra_imu_logs.items():
+            gyro_x, accel_x = host[at: at + 3 * h].reshape(h, 3), host[at + 3 * h: at + 6 * h].reshape(h, 3)
+            log.append(imu_samples(gyro_x, accel_x, host[at + 6 * h: at + 9 * h + 1].view(np.int64), h))
+            at += 9 * h + 1
         self.seg.regions["feedback"].write(rec)
 
     def _truth_flat(self) -> torch.Tensor:
@@ -1080,7 +1145,8 @@ class RuntimeHost:
     def close(self) -> None:
         if self.trajectory is not None:  # first: what is recorded must reach the files whatever fails below
             self.trajectory.close()
-            self.imu_log.close()
+            for log in (self.imu_log, *self.extra_imu_logs.values()):
+                log.close()
         self.seg.end()
         self.seg.close()
         self.sim.close()

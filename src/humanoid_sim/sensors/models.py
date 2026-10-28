@@ -73,6 +73,7 @@ class Imu(Sensor):
     gyro_bias_instability_rad_s: ClassVar[float] = 0.0
     accel_bias_instability_m_s2: ClassVar[float] = 0.0
     bias_correlation_time_ns: ClassVar[int] = 100_000_000_000
+    noise_basis: ClassVar[str] = "modeled"  # how the figures are known: "modeled" (a guess or an inference) or "measured"
 
     def __init__(self, frame: str, *, sample_period_ns: int, burst_period_ns: tuple[int, int] | None = None,
                  in_burst_spacing_ns: int = 0):
@@ -93,6 +94,8 @@ class Imu(Sensor):
 
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
+        if cls.noise_basis not in ("modeled", "measured"):
+            raise ValueError(f"{cls.__name__}.noise_basis {cls.noise_basis!r}: modeled or measured")
         _positive_ns(f"{cls.__name__}.bias_correlation_time_ns", cls.bias_correlation_time_ns)
         for name in ("gyro_noise_density_rad_s_sqrt_hz", "accel_noise_density_m_s2_sqrt_hz", "gyro_turn_on_bias_rad_s",
                      "accel_turn_on_bias_m_s2", "gyro_bias_instability_rad_s", "accel_bias_instability_m_s2"):
@@ -140,15 +143,25 @@ class UnitreeG1Imu(Imu):
 class ZedMiniImu(Imu):
     model = "zed-mini-imu"
     product = "Stereolabs ZED Mini built-in IMU (gyroscope and accelerometer)"
-    source = ("MODELED GUESS, placeholder until someone measures it. Stereolabs publishes the rate only (800 Hz, "
-              "ZED Mini datasheet); no chip, no noise or bias figures, no mount ('Not published' in its specifications). "
-              "The noise figures below are typical for a consumer MEMS part, not the ZED's. The sensor frame is taken "
-              "as the camera frame's axes at its origin; the real IMU sits a few cm away with its own axes "
-              "(camera_imu_transform, read per unit from the ZED SDK). One 60 s raw capture of one unit "
-              "(zed-open-capture, uncalibrated; the capture is not in this repo) gave noise densities within a factor "
-              "of 1.5 of the figures below; too short for bias, not a calibration.")
-    gyro_noise_density_rad_s_sqrt_hz = 0.005 * DEG  # guess
-    accel_noise_density_m_s2_sqrt_hz = 150e-6 * G0  # guess
+    # Stereolabs publishes the rate only (800 Hz, ZED Mini datasheet): no chip, noise, bias or mount. The noise figures
+    # are measured on one unit, not Stereolabs'; the mount is a guess.
+    source = ("Noise density and bias instability measured on one unit (SN 11381414, 55 min still on a desk with "
+              "disturbances masked out, raw samples from zed-open-capture; the capture is not in this repo; "
+              "uncalibrated, its accelerometer reads about 4 % high). Noise density: the mean of the three axes' "
+              "Allan deviation at 1 s (gyro 0.95 to 1.09e-4 rad/s/rtHz, accel 1.2 to 1.5e-3 m/s^2/rtHz). Bias "
+              "instability: the mean of each axis' Allan minimum over 0.664, UNRESOLVED (the minimum is at the "
+              "longest averaging time that had quiet data, 100 s), so a lower bound; the accelerometer's y axis "
+              "is 3 to 4 times its other axes. Turn-on bias: MODELED from the gyro axes' means on that unit "
+              "(RMS 7.2e-3 rad/s); the accelerometer's is 0 (not separable from gravity and the uncalibrated "
+              "scale). Correlation time: MODELED, 100 s. The sensor frame is the camera frame's axes at its origin "
+              "(MODELED GUESS): the real IMU sits a few cm away with its own axes (camera_imu_transform, read per "
+              "unit from the ZED SDK).")
+    noise_basis = "measured"
+    gyro_noise_density_rad_s_sqrt_hz = 1.0e-4
+    accel_noise_density_m_s2_sqrt_hz = 1.4e-3
+    gyro_bias_instability_rad_s = 3.0e-5
+    accel_bias_instability_m_s2 = 9.4e-4
+    gyro_turn_on_bias_rad_s = 7.2e-3  # modeled
 
 
 class Camera(Sensor):

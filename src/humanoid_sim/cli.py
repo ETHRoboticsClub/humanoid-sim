@@ -421,7 +421,8 @@ def cmd_serve(args) -> int:
                        bus_period_ns=int(args.bus_period_us * 1000),
                        client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
                        sim_revision=_revision(),
-                       truth_every=args.truth_every or (1 if args.trajectory else 5), trajectory=args.trajectory)
+                       truth_every=args.truth_every or (1 if args.trajectory else 5), trajectory=args.trajectory,
+                       extra_rig=args.sensors)
     try:
         while True:
             print(json.dumps({"segment": str(args.segment), "session_id": host.session_id, "ready": True}),
@@ -726,6 +727,9 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--trajectory", default=None, metavar="FILE", help="record the truth of every step to FILE (base "
                     "pose and twist, joints, gantry hook; plant time in ns): the run's ground truth and what "
                     "`render-trajectory` renders the sensors from")
+    sv.add_argument("--sensors", default=None, help="an extra rig (e.g. g1-cameras) whose IMUs are simulated besides "
+                    "the body IMU: declared in the descriptor's extra_imus and, with --trajectory, recorded as "
+                    "FILE.<name>.imu")
     sv.add_argument("--persist", action="store_true", help="when a client detaches or is lost, reset the robot "
                     "and serve the next client on a new session, until stopped")
     sv.add_argument("--max-steps", type=int, default=None, help="periods per session")
