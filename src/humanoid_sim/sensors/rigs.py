@@ -14,6 +14,7 @@ from humanoid_sim.sensors.models import (
     Rig,
     UnitreeG1Imu,
     ZedMini,
+    ZedMiniImu,
 )
 
 V1_MONO_LEFT = (283.604271, 283.556541, 321.744194, 196.769579)
@@ -43,7 +44,8 @@ def g1() -> Rig:
 
 
 def g1_cameras() -> Rig:
-    """The camera the lab G1 carries, at the description's camera link, until its rig declares it: the ZED Mini."""
+    """The camera the lab G1 carries, at the description's camera link, until its rig declares it: the ZED Mini, and its
+    IMU (a placeholder at the same frame)."""
     return Rig(
         # The helmet mount: the left eye's optical centre (the G1 URDF's camera0_camera). HD720 at 30 Hz as Controls'
         # zed backend opens it, with the factory calibration of the lab's unit (SN19945568, as Controls'
@@ -56,6 +58,9 @@ def g1_cameras() -> Rig:
                         "right": ("equidistant", (-0.0368591, 0.0234426, -0.0128113, 0.00625172))},
             stream_offsets_m={"right": (0.000233734, -0.0628272, 0.000181381)},
         ),
+        # MODELED GUESS: the ZED's IMU at the left eye's optical centre, in the camera frame's axes. The real one sits
+        # a few cm away (camera_imu_transform, per unit); 800 Hz is the datasheet's.
+        zed_imu=ZedMiniImu("camera0_camera", sample_period_ns=1_250_000),
     )
 
 
