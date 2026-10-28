@@ -18,6 +18,7 @@ each render moves those parts to where the truth has the crane. Needs the Isaac 
 from __future__ import annotations
 
 import dataclasses
+import signal
 import time
 from pathlib import Path
 
@@ -56,7 +57,8 @@ class RuntimeRender:
         self.path = Path(segment)
         desc = Description.load(cfg.robot)
         self._identity = {"robot_id": desc.robot, "description_digest": desc.digest}
-        self.seg = abi.Segment.open(self.path, wait_s=wait_s, **self._identity)
+        self.seg = abi.Segment.open(self.path, wait_s=wait_s,
+                                    max_heartbeat_age_ns=abi.HEARTBEAT_TIMEOUT_NS, **self._identity)
         record = self.seg.descriptor()
         scene, spawn, scan_mesh = host_scene(record.get("scene"))
         cfg = dataclasses.replace(cfg, physics=False, scene=cfg.scene or scene,
@@ -114,7 +116,9 @@ class RuntimeRender:
         """Render the latest truth if a render is due; False once the session has ended."""
         import torch
 
-        if self.seg.state == abi.STATE_ENDED or self.seg.session_id != self.session_id:
+        age = self.seg.heartbeat_age_ns()
+        if (self.seg.state != abi.STATE_READY or self.seg.session_id != self.session_id
+                or not 0 <= age <= abi.HEARTBEAT_TIMEOUT_NS):
             return False
         truth, fb = self._read("truth"), self._read("feedback")
         if truth is None or fb is None:
@@ -139,8 +143,10 @@ class RuntimeRender:
 
     def reopen(self, wait_s: float) -> None:
         """Follow the next session at the same path (``serve --persist``)."""
-        self.seg.close()
-        self.seg = abi.Segment.open(self.path, wait_s=wait_s, **self._identity)
+        if self.seg.buf is not None:
+            self.seg.close()
+        self.seg = abi.Segment.open(self.path, wait_s=wait_s,
+                                    max_heartbeat_age_ns=abi.HEARTBEAT_TIMEOUT_NS, **self._identity)
         self.session_id = self.seg.session_id
         self._last_t = None
 
@@ -185,30 +191,42 @@ def render_runtime(segment: str | Path, cfg, *, seconds: float | None = None, wa
 
     from humanoid_sim.sensors.rtx import start_kit
 
-    kit = start_kit(cfg.device, window=window)
-    render = RuntimeRender(segment, cfg, wait_s=wait_s)
-    if window:
-        _viewport_only(render.gantry)
-    start = time.monotonic()
-    end = None if seconds is None else start + seconds
-    try:
-        while end is None or time.monotonic() < end:
-            if not render.frame():
-                try:
-                    render.reopen(FOLLOW_S)
-                except (abi.AbiError, FileNotFoundError):
-                    break  # the host is gone
-            time.sleep(0.001)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        out = render.summary(time.monotonic() - start)
-        text = json.dumps(out, indent=1)
-        if summary:
-            Path(summary).write_text(text)
-        print(text, flush=True)
-        render.close()
-        kit.close()
+    with start_kit(cfg.device, window=window):
+        stopped = False
+
+        def stop(_signum, _frame):
+            nonlocal stopped
+            stopped = True  # Kit may swallow KeyboardInterrupt inside its callbacks.
+            raise KeyboardInterrupt
+
+        previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM)}
+        try:
+            render = RuntimeRender(segment, cfg, wait_s=wait_s)
+            start = time.monotonic()
+            end = None if seconds is None else start + seconds
+            try:
+                if window:
+                    _viewport_only(render.gantry)
+                while not stopped and (end is None or time.monotonic() < end):
+                    if not render.frame():
+                        try:
+                            render.reopen(FOLLOW_S)
+                        except (abi.AbiError, FileNotFoundError):
+                            break  # the host is gone
+                    time.sleep(0.001)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                out = render.summary(time.monotonic() - start)
+                text = json.dumps(out, indent=1)
+                if summary:
+                    Path(summary).write_text(text)
+                print(text, flush=True)
+                render.close()
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+
     return out
 
 

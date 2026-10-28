@@ -80,6 +80,8 @@ MAX_STRAPS = 2  # gantry harness straps, one per attachment point
 
 # Header state.
 STATE_CREATING, STATE_READY, STATE_ENDED = 0, 1, 2
+# The host publishes every physics period (normally 4 ms); readers allow 500 ms of host delay.
+HEARTBEAT_TIMEOUT_NS = 500_000_000
 
 # Mailbox commands. Arguments are a JSON object:
 # RESET            {"pose": "home" | "standing" | "current"} or {"joint_pos": {name: rad}, "base_pose": [x,y,z,qx,qy,qz,qw]}
@@ -478,8 +480,9 @@ class Segment:
         robot_id: str | None = None,
         description_digest: str | None = None,
         wait_s: float = 0.0,
+        max_heartbeat_age_ns: int | None = None,
     ) -> Segment:
-        """Attach to a ready segment, checking magic, ABI major, layout hash, size and the expected identity."""
+        """Attach to a ready segment with the expected identity and, when requested, a fresh heartbeat."""
         path = Path(path)
         deadline = time.monotonic() + wait_s
         while True:
@@ -487,9 +490,13 @@ class Segment:
                 seg = cls._open_once(path)
                 state = seg.state
                 if state == STATE_READY:
-                    break
+                    age = seg.heartbeat_age_ns()
+                    if max_heartbeat_age_ns is None or 0 <= age <= max_heartbeat_age_ns:
+                        break
+                    err = AbiError(f"{path}: stale heartbeat ({age} ns old)")
+                else:
+                    err = AbiError(f"{path}: segment not ready (state {state})")
                 seg.close()
-                err = AbiError(f"{path}: segment not ready (state {state})")
             except (FileNotFoundError, AbiError) as e:
                 err = e
             if time.monotonic() >= deadline:
@@ -562,7 +569,9 @@ class Segment:
         self.header["heartbeat_mono_ns"] = mono_ns()
 
     def heartbeat_age_ns(self) -> int:
-        return mono_ns() - int(self.header["heartbeat_mono_ns"][0])
+        # Read the shared timestamp first: the host may publish again before the clock is sampled.
+        heartbeat_ns = int(self.header["heartbeat_mono_ns"][0])
+        return mono_ns() - heartbeat_ns
 
     def mark_ready(self) -> None:
         self.header["state"] = STATE_READY

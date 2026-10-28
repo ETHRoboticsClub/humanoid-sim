@@ -1,12 +1,16 @@
 """The render runtime's clock and scene, without Kit: plant time now from the host's feedback, the host's scene
 from its descriptor."""
 
+import signal
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from humanoid_sim.runtime.abi import plant_abi as abi
-from humanoid_sim.runtime.render import host_scene, plant_now_ns
+from humanoid_sim.runtime.render import RuntimeRender, host_scene, plant_now_ns, render_runtime
 
 
 def test_plant_time_now_follows_the_hosts_mapping():
@@ -26,3 +30,147 @@ def test_the_hosts_scene_is_taken_only_when_readable_here(tmp_path: Path):
     assert host_scene(record) == (str(boxes), (-4.42, 3.48), None)  # the scan is not here
     mesh.write_text("o scan\n")
     assert host_scene(record) == (str(boxes), (-4.42, 3.48), str(mesh))
+
+
+@pytest.fixture
+def runtime(tmp_path, monkeypatch):
+    from humanoid_sim.model.description import Description
+    from humanoid_sim.sensors import session
+
+    clock = [10_000_000_000]
+    monkeypatch.setattr(abi, "mono_ns", lambda: clock[0])
+    identity = {"robot_id": "fixture", "description_digest": "d" * 64}
+    descriptor = {"drives": ["drive"], "joints": ["joint"]}
+    path = tmp_path / "plant"
+
+    def create():
+        return abi.Segment.create(path, **identity, sim_revision="test", num_drives=1, num_joints=1,
+                                  physics_period_ns=4_000_000, bus_period_ns=2_000_000, descriptor=descriptor)
+
+    host = create()
+    monkeypatch.setattr(Description, "load", lambda _: SimpleNamespace(robot="fixture", digest="d" * 64,
+                                                                       joints={"joint": None}))
+
+    class Sensors:
+        def __init__(self, cfg):
+            self.render_ns = 33_333_333
+            self.sim = SimpleNamespace(plant=SimpleNamespace(cfg=SimpleNamespace(device="cpu")))
+            self.renders = 0
+
+        def pose(self, *_args):
+            pass
+
+        def render_at(self, *_args):
+            self.renders += 1
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(session, "SensorSession", Sensors)
+    cfg = session.SessionCfg(robot="fixture")
+    truth, fb = np.zeros((), abi.TRUTH), np.zeros((), abi.FEEDBACK)
+    truth["sim_time_ns"] = fb["sim_time_ns"] = 1_000_000_000
+    fb["written_mono_ns"] = clock[0]
+    host.regions["truth"].write(truth)
+    host.regions["feedback"].write(fb)
+    renderer = RuntimeRender(path, cfg)
+    try:
+        yield host, renderer, clock, create, cfg
+    finally:
+        renderer.close()
+        host.close()
+
+
+def test_a_paused_host_stays_alive_but_a_stopped_heartbeat_ends_rendering(runtime):
+    host, renderer, clock, _, _ = runtime
+    assert renderer.frame()
+    assert renderer.session.renders == 1
+    clock[0] += 600_000_000
+    host.heartbeat()  # paused plant time, live host
+    assert renderer.frame()
+    assert renderer.session.renders == 1
+    clock[0] += 500_000_001
+    assert not renderer.frame()
+
+
+def test_a_future_dated_heartbeat_ends_rendering(runtime):
+    host, renderer, clock, _, _ = runtime
+    host.header["heartbeat_mono_ns"] = clock[0] + 1
+    assert not renderer.frame()
+
+
+def test_reopen_refuses_the_dead_file_and_accepts_a_replacement_session(runtime):
+    _, renderer, clock, create, _ = runtime
+    clock[0] += 500_000_001
+    with pytest.raises(abi.AbiError, match="stale heartbeat"):
+        renderer.reopen(wait_s=0)
+    old_session = renderer.session_id
+    replacement = create()
+    try:
+        renderer.reopen(wait_s=0)
+        assert renderer.session_id == replacement.session_id != old_session
+        assert renderer._last_t is None
+    finally:
+        replacement.close()
+
+
+def test_kit_is_closed_when_startup_refuses_a_dead_host(runtime, monkeypatch):
+    from humanoid_sim.sensors import rtx
+
+    host, _, clock, _, cfg = runtime
+    exits = []
+
+    @contextmanager
+    def kit_runtime():
+        # Isaac Lab chooses the process exit status from the exception passed into
+        # its context. ExitStack.close() would hide it and exit successfully.
+        try:
+            yield
+        except BaseException as exc:
+            exits.append(type(exc))
+            raise
+        else:
+            exits.append(None)
+
+    def start_kit(*_args, **_kwargs):
+        stack = ExitStack()
+        stack.enter_context(kit_runtime())
+        return stack
+
+    monkeypatch.setattr(rtx, "start_kit", start_kit)
+    clock[0] += 500_000_001
+    with pytest.raises(abi.AbiError, match="stale heartbeat"):
+        render_runtime(host.path, cfg, wait_s=0)
+    assert exits == [abi.AbiError]
+
+
+def test_ctrl_c_stops_even_when_a_kit_callback_swallows_the_interrupt(monkeypatch):
+    from humanoid_sim.runtime import render as module
+    from humanoid_sim.sensors import rtx
+
+    frames, closed = [], []
+
+    class Renderer:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def frame(self):
+            frames.append(True)
+            try:
+                signal.raise_signal(signal.SIGINT)
+            except KeyboardInterrupt:
+                pass  # Kit's async callback can consume the interrupt.
+            return True
+
+        def summary(self, _elapsed):
+            return {"frames": len(frames)}
+
+        def close(self):
+            closed.append(True)
+
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    monkeypatch.setattr(rtx, "start_kit", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(module, "RuntimeRender", Renderer)
+    assert render_runtime("unused", SimpleNamespace(device="cpu"), seconds=0.02) == {"frames": 1}
+    assert closed == [True]
+    assert {sig: signal.getsignal(sig) for sig in previous} == previous

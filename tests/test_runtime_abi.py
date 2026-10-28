@@ -84,6 +84,64 @@ def test_open_checks_identity_and_layout(tmp_path):
         abi.Segment.open(tmp_path / "missing")
 
 
+def test_heartbeat_age_reads_the_published_time_before_sampling_the_clock(tmp_path, monkeypatch):
+    seg = _create(tmp_path / "plant")
+    try:
+        seg.header["heartbeat_mono_ns"] = 100
+
+        def now():
+            # A publish between reading the header and returning the clock must not look future-dated.
+            seg.header["heartbeat_mono_ns"] = 102
+            return 101
+
+        monkeypatch.setattr(abi, "mono_ns", now)
+        assert seg.heartbeat_age_ns() == 1
+    finally:
+        seg.close()
+
+
+@pytest.mark.parametrize("age_ns", [-1, 0, 500_000_000, 500_000_001])
+def test_open_can_require_a_fresh_heartbeat(tmp_path, monkeypatch, age_ns):
+    seg = _create(tmp_path / "plant")
+    now = 10_000_000_000
+    seg.header["heartbeat_mono_ns"] = now - age_ns
+    monkeypatch.setattr(abi, "mono_ns", lambda: now)
+    try:
+        if 0 <= age_ns <= 500_000_000:
+            reader = abi.Segment.open(seg.path, max_heartbeat_age_ns=500_000_000)
+            reader.close()
+        else:
+            with pytest.raises(abi.AbiError, match="stale heartbeat"):
+                abi.Segment.open(seg.path, max_heartbeat_age_ns=500_000_000)
+    finally:
+        seg.close()
+
+
+def test_open_waits_out_a_dead_file_until_a_live_host_replaces_it(tmp_path, monkeypatch):
+    path = tmp_path / "plant"
+    old = _create(path)
+    old.header["heartbeat_mono_ns"] = 1
+    monkeypatch.setattr(abi, "mono_ns", lambda: 10_000_000_000)
+    replacement = []
+
+    def replace(_seconds):
+        replacement.append(_create(path))
+
+    monkeypatch.setattr(abi.time, "sleep", replace)
+    try:
+        reader = abi.Segment.open(path, wait_s=1, max_heartbeat_age_ns=500_000_000)
+        try:
+            assert len(replacement) == 1
+            assert reader.session_id == replacement[0].session_id
+            assert reader.session_id != old.session_id
+        finally:
+            reader.close()
+    finally:
+        old.close()
+        for seg in replacement:
+            seg.close()
+
+
 def test_region_rejects_torn_and_corrupt_copies(tmp_path):
     seg = _create(tmp_path / "plant")
     fb = seg.regions["feedback"]
