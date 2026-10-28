@@ -181,10 +181,10 @@ class Description:
                 raise ValueError(f"{name}: dynamic_friction {dynamic} outside [0, friction {friction}]")
             out[name] = Joint(
                 name=name, region=j["region"], device=j.get("device", name), sign=int(j["sign"]),
-                standing_offset_rad=float(j["standing_offset_rad"]),
+                standing_offset_rad=float(j.get("standing_offset_rad", 0.0)),
                 armature=float(j["armature_joint"]) if "armature_joint" in j else value("armature"),
                 damping=value("damping"), friction=friction,
-                effort_peak=float(j["effort"]), velocity=float(j["velocity"]), dynamic_friction=dynamic,
+                effort_peak=value("effort"), velocity=float(j["velocity"]), dynamic_friction=dynamic,
             )
         return out
 
@@ -223,6 +223,7 @@ class Description:
 
         out = {}
         for name, j in self.table["joints"].items():
+            j = self.actuator_values(j)
             device = j.get("device", name)
             if device is None:
                 continue
@@ -235,6 +236,7 @@ class Description:
                 motor_index=int(j["motor_index"]) if "motor_index" in j else None,
             )
         for device, d in self.table.get("drives", {}).items():
+            d = self.actuator_values(d)
             k, dmp = gain(device, d)
             out[device] = Drive(
                 name=device, family=d["family"], joints=tuple(d["joints"]), sign=1, crank=d["crank"],
@@ -288,6 +290,11 @@ class Description:
         """A motor family's ``key``, or ``default`` when the family does not record it."""
         return self.table.get("families", {}).get(family, {}).get(key, default)
 
+    def actuator_values(self, entry: dict) -> dict:
+        """Resolve torque ratings from the family, keeping an actuator's explicit overrides."""
+        family = self.table.get("families", {}).get(entry.get("family"), {})
+        return {**{key: family[key] for key in ("effort", "effort_nominal") if key in family}, **entry}
+
     def calibration_travel(self, name: str) -> tuple[float, float]:
         """Simulated travel in URDF (calibration) radians: the recorded mechanical stop where there is one,
         else the position limit. Same rule as Controls ``ethrc_ssot/joint_travel.py``. An ankle hinge has no limit
@@ -296,7 +303,7 @@ class Description:
         linkage = next((lk for lk in self.linkages if name in lk.joints), None)
         if linkage is not None:
             return self._ankle_bounds(linkage.side)[linkage.joints.index(name)]
-        offset = float(entry["standing_offset_rad"])
+        offset = float(entry.get("standing_offset_rad", 0.0))
         lo, hi = (float(b) + offset for b in entry["position_limit"])
         stop = entry.get("mechanical_stop_calibration_rad")
         if stop is None:
