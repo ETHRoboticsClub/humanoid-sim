@@ -160,6 +160,9 @@ class RobotPlant:
         apply_joint_limits(self.profile["physics"])
         apply_loop_closure(self.profile["physics"])
         apply_heightfield_base(self.profile["physics"])
+        from humanoid_sim.physics.contact_capacity import contact_capacity_guard
+
+        self._contact_capacity = contact_capacity_guard(self.profile["physics"], e, self.device)
         self._write_physics()
         self._write_device(torch.arange(e, device=self.device))
 
@@ -309,6 +312,8 @@ class RobotPlant:
     def pre_physics(self) -> None:
         """Before each physics step: sample sensors at the step start, run the drives, write the targets, apply
         the gantry rope."""
+        if self._contact_capacity is not None:
+            self._contact_capacity.check()
         q, qd = self.solver_state()
         fb = self.core.feedback(q, qd)
         self._push_history(fb)

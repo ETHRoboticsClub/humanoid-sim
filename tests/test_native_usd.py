@@ -18,6 +18,63 @@ def test_fixed_body_contacts_are_excluded_transitively_without_excluding_movable
         ('bracket', 'wrist'), ('finger', 'palm'), ('finger', 'tip'), ('palm', 'tip')]
 
 
+def test_fixed_joint_collapse_preserves_native_mass_geometry_and_moving_joints(desc, tmp_path):
+    newton = pytest.importorskip("newton")
+    import warp as wp
+
+    from humanoid_sim.physics.model_build import _FixedJointCollapse
+
+    asset = build_asset(desc, load_profile(desc.robot), tmp_path)
+    builder = newton.ModelBuilder()
+    builder.add_usd(str(asset), floating=True)
+
+    def snapshot():
+        total_mass = sum(builder.body_mass)
+        first_moment = np.zeros(3)
+        world_inertia = np.zeros((3, 3))
+        for pose, mass, com, inertia in zip(builder.body_q, builder.body_mass, builder.body_com,
+                                           builder.body_inertia, strict=True):
+            p = np.asarray(wp.transform_point(pose, wp.vec3(com)), dtype=float)
+            rotation = np.asarray(wp.quat_to_matrix(wp.transform_get_rotation(pose)), dtype=float).reshape(3, 3)
+            first_moment += mass * p
+            world_inertia += rotation @ np.asarray(inertia).reshape(3, 3) @ rotation.T
+            world_inertia += mass * (np.dot(p, p) * np.eye(3) - np.outer(p, p))
+        shapes = {label: np.asarray(wp.transform_multiply(builder.body_q[body], local))
+                  for label, body, local in zip(builder.shape_label, builder.shape_body,
+                                                builder.shape_transform, strict=True) if body >= 0}
+        joints = {label: (int(kind), np.asarray(wp.transform_multiply(builder.body_q[child], frame)))
+                  for label, kind, child, frame in zip(builder.joint_label, builder.joint_type,
+                                                       builder.joint_child, builder.joint_X_c, strict=True)
+                  if kind != newton.JointType.FIXED}
+        return total_mass, first_moment, world_inertia, shapes, joints
+
+    before = snapshot()
+    original_bodies = builder.body_count
+    has_fixed_joints = any(kind == newton.JointType.FIXED for kind in builder.joint_type)
+    hook = _FixedJointCollapse()
+    hook.world(builder, 0, None, None)
+    hook.finalize(None)
+    after = snapshot()
+    assert builder.body_count <= original_bodies
+    if has_fixed_joints:
+        assert builder.body_count < original_bodies
+    for a, b in zip(before[:3], after[:3], strict=True):
+        np.testing.assert_allclose(a, b, atol=2e-5, rtol=2e-6)
+    assert before[3].keys() == after[3].keys()
+    def assert_pose(a, b):
+        a = a.copy()
+        if np.dot(a[3:], b[3:]) < 0:
+            a[3:] *= -1  # q and -q encode the same rotation
+        np.testing.assert_allclose(a, b, atol=2e-6, rtol=0)
+
+    for label, pose in before[3].items():
+        assert_pose(after[3][label], pose)
+    assert before[4].keys() == after[4].keys()
+    for label, (kind, pose) in before[4].items():
+        assert after[4][label][0] == kind
+        assert_pose(after[4][label][1], pose)
+
+
 @pytest.fixture(scope="module")
 def desc():
     return Description.load("ethrc_v1")

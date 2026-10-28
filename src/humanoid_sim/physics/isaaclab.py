@@ -23,8 +23,9 @@ import torch
 
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.urdf import BASE_JOINTS
-from humanoid_sim.physics.crank_stops import check_crank_stops, crank_stop_hook
+from humanoid_sim.physics.crank_stops import check_crank_stops
 from humanoid_sim.physics.joint_properties import JointProperties
+from humanoid_sim.physics.model_build import model_build
 from humanoid_sim.world.boxes import StaticBoxes
 
 # Base-joint PD. Each joint carries the whole robot (a few kg m² about yaw, ~10 about pitch and roll at the
@@ -366,12 +367,15 @@ class IsaacLabRobot:
         physics = {"solver": cfg.solver, cfg.solver: cfg.settings}
         self.sim = sim_utils.SimulationContext(simulation_cfg(physics, device=cfg.device, period_s=cfg.period_s,
                                                               integrator=cfg.integrator, visualizers=visualizers))
-        with crank_stop_hook(desc.robot, physics):
+        with model_build(desc.robot, physics):
             self.scene = instantiate(scene_cfg)
             self.sim.reset()
         check_crank_stops(desc.robot, physics)
         apply_joint_limits(physics)
         apply_loop_closure(physics)
+        from humanoid_sim.physics.contact_capacity import contact_capacity_guard
+
+        self._contact_capacity = contact_capacity_guard(physics, cfg.num_envs, cfg.device)
         self.robot = self.scene["robot"]
         self.imu = self.scene["imu"] if cfg.imu else None
         self.contacts = self.scene["contacts"] if cfg.contacts else None
@@ -404,6 +408,8 @@ class IsaacLabRobot:
     def step(self) -> None:
         self.scene.write_data_to_sim()
         self.sim.step(render=self.cfg.render_each_step)
+        if self._contact_capacity is not None:
+            self._contact_capacity.check()
         self.scene.update(self.cfg.period_s)
 
     def close(self) -> None:

@@ -137,8 +137,9 @@ def robot_sim_cfg(robot: str = "ethrc_v1", *, device: str = "cuda:0", solver: st
 
 def robot_build(robot: str = "ethrc_v1", *, solver: str | None = None):
     """Context to build the environment or scene in: the solver model gets the ankle cranks' stops when the profile
-    asks for them (:func:`~humanoid_sim.physics.crank_stops.crank_stop_hook`). ``solver``: as for
+    asks for them, and optionally collapses fixed joints
+    (:func:`~humanoid_sim.physics.model_build.model_build`). ``solver``: as for
     :func:`robot_sim_cfg`."""
-    from humanoid_sim.physics.crank_stops import crank_stop_hook
+    from humanoid_sim.physics.model_build import model_build
 
-    return crank_stop_hook(robot, load_profile(robot)["physics"], solver)
+    return model_build(robot, load_profile(robot)["physics"], solver)
