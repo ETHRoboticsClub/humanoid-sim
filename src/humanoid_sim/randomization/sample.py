@@ -76,7 +76,13 @@ class Randomizer:
         value = values[spec.param]
         width = value.shape[2:] if value.dim() == 3 else ()
         shape = (len(env_ids), len(cols) if spec.per_target else 1) + tuple(width)
-        x = self._sample(spec, shape).expand(len(env_ids), len(cols), *width)
+        if spec.buckets is None:
+            x = self._sample(spec, shape)
+        else:
+            table = self._sample(spec, (spec.buckets,))
+            indices = torch.randint(spec.buckets, shape, generator=self.generator, device=self.device)
+            x = table[indices]
+        x = x.expand(len(env_ids), len(cols), *width)
         current = value[env_ids][:, cols]
         if spec.op == "scale":
             new = current * x
@@ -90,7 +96,11 @@ class Randomizer:
     def _sample(self, spec: ParamSpec, shape: tuple[int, ...]) -> torch.Tensor:
         lo, hi = spec.range
         u = torch.rand(shape, generator=self.generator, device=self.device, dtype=torch.float64)
-        if spec.dist == "uniform":
+        if spec.dist == "discrete_uniform":
+            count = round((hi - lo) / spec.quantum) + 1
+            x = lo + torch.floor(u * count) * spec.quantum
+            centre = 0.5 * (lo + hi)
+        elif spec.dist == "uniform":
             x = lo + (hi - lo) * u
             centre = 0.5 * (lo + hi)
         elif spec.dist == "log_uniform":

@@ -138,13 +138,17 @@ class RobotPlant:
         nominal = {name: v for name, v in self._nominal_physics.items()} | self._device_nominal()
         self._ratio = nominal["joint_friction_ratio"]
         used = {s.param for s in specs}
+        if {"friction", "shape_friction"} <= used:
+            raise ValueError("choose per-env friction or per-shape friction, not both")
         self.randomizer = Randomizer(specs, {k: v for k, v in nominal.items() if k in used},
-                                     {"body": list(robot.body_names), "joint": self.core.solver_map.joint_names, "drive": self.drives},
+                                     {"body": list(robot.body_names), "joint": self.core.solver_map.joint_names,
+                                      "drive": self.drives,
+                                      "shape": [f"shape_{i}" for i in range(nominal.get("shape_friction", torch.empty(e, 0)).shape[1])]},
                                      num_envs=e, device=self.device, seed=cfg.seed, level=cfg.level)
         from humanoid_sim.physics.crank_stops import check_crank_stops
         from humanoid_sim.physics.isaaclab import apply_heightfield_base, apply_joint_limits, running_solver
 
-        if "friction" in used and physics_manager is None:
+        if used & {"friction", "shape_friction"} and physics_manager is None:
             raise ValueError("randomizing friction needs the physics manager (env.sim.physics_manager)")
         self._solver = running_solver()
         check_crank_stops(cfg.robot, self.profile["physics"])
@@ -170,6 +174,7 @@ class RobotPlant:
         if self._physics_manager is not None:
             mu = self._shape_friction()
             out["friction"] = mu[:, :1].clone()
+            out["shape_friction"] = mu.clone()
         return out
 
     def _device_nominal(self) -> dict[str, torch.Tensor]:
@@ -218,11 +223,11 @@ class RobotPlant:
         if "joint_damping" in v:
             r.write_joint_viscous_friction_coefficient_to_sim_index(joint_viscous_friction_coeff=v["joint_damping"],
                                                                     joint_ids=self.solver_joint_ids)
-        if "friction" in v:
+        if "friction" in v or "shape_friction" in v:
             from newton import ModelFlags
 
             mu = self._shape_friction()
-            mu[:] = v["friction"].to(mu.dtype)
+            mu[:] = v["shape_friction" if "shape_friction" in v else "friction"].to(mu.dtype)
             self._physics_manager.add_model_change(ModelFlags.SHAPE_PROPERTIES)
 
     def _write_device(self, env_ids: torch.Tensor) -> None:

@@ -16,6 +16,34 @@ import torch
 from humanoid_sim.timing.clock import NS_PER_S
 
 
+class VelocityPush:
+    """Periodically set root horizontal velocity, preserving vertical and angular velocity.
+
+    The caller chooses the interval and uniform velocity range. Times are ns;
+    masks and writes are batched without extracting active indices to the host.
+    """
+
+    def __init__(self, robot, *, interval_ns: int, velocity_range_m_s: tuple[float, float], seed: int = 0):
+        if interval_ns <= 0 or velocity_range_m_s[0] > velocity_range_m_s[1]:
+            raise ValueError("velocity push needs a positive interval and ordered velocity range")
+        self.robot, self.interval_ns, self.velocity_range = robot, interval_ns, velocity_range_m_s
+        self.next_ns = torch.full((robot.num_instances,), interval_ns, device=robot.device, dtype=torch.long)
+        self.generator = torch.Generator(device=robot.device).manual_seed(seed)
+        self.ids = torch.arange(robot.num_instances, device=robot.device)
+
+    def reset(self, ids: torch.Tensor, t_ns: int) -> None:
+        self.next_ns[ids] = t_ns + self.interval_ns
+
+    def step(self, t_ns: int) -> None:
+        active = self.next_ns <= t_ns
+        velocity = self.robot.data.root_com_vel_w.torch.clone()
+        lo, hi = self.velocity_range
+        drawn = lo + (hi - lo) * torch.rand(velocity.shape[0], 2, device=velocity.device, generator=self.generator)
+        velocity[:, :2] = torch.where(active[:, None], drawn, velocity[:, :2])
+        self.robot.write_root_velocity_to_sim_index(root_velocity=velocity, env_ids=self.ids)
+        self.next_ns = torch.where(active, t_ns + self.interval_ns, self.next_ns)
+
+
 class ForcePush:
     def __init__(self, robot, body: str, *, interval_s: tuple[float, float], duration_s: tuple[float, float],
                  magnitude_n: tuple[float, float], level: float = 1.0, seed: int = 0):

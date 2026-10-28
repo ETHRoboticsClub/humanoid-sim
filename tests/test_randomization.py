@@ -106,3 +106,36 @@ def test_no_specs():
     r = Randomizer([], {}, NAMES, num_envs=4)
     assert r.values == {} and r.physics_params == []
     r.draw_reset(torch.tensor([1]))
+
+
+def test_discrete_latency_shares_one_of_four_exact_durations_per_env():
+    specs = parse_specs([{'param': 'latency', 'dist': 'discrete_uniform', 'range': [0., .015],
+                          'quantum': .005, 'op': 'set', 'per_target': False}])
+    r = Randomizer(specs, _nominal(), NAMES, num_envs=64, seed=4)
+    value = r.values['latency']
+    torch.testing.assert_close(value[:, 0], value[:, 2])
+    assert sorted(torch.unique((value / .005).round()).tolist()) == [0., 1., 2., 3.]
+    torch.testing.assert_close(value / .005, (value / .005).round())
+    previous = value.clone()
+    r.draw_reset(torch.tensor([1, 3]))
+    torch.testing.assert_close(r.values['latency'][[0, 2]], previous[[0, 2]])
+
+
+def test_shape_material_buckets_are_shared_and_startup_only():
+    specs = parse_specs([{'param': 'shape_friction', 'dist': 'uniform', 'range': [.3, 1.],
+                          'op': 'set', 'buckets': 8}])
+    r = Randomizer(specs, {'shape_friction': torch.ones(16, 10)}, {'shape': [f'shape_{i}' for i in range(10)]},
+                   num_envs=16)
+    mu = r.values['shape_friction'].clone()
+    assert torch.unique(mu).numel() == 8
+    assert ((mu >= .3) & (mu <= 1.)).all()
+    r.draw_reset(torch.arange(16))
+    torch.testing.assert_close(mu, r.values['shape_friction'])
+
+
+@pytest.mark.parametrize('overrides', [{'quantum': 0.}, {'quantum': .004}, {'buckets': 0}, {'buckets': True}])
+def test_invalid_discrete_or_bucket_specs_fail(overrides):
+    base = {'param': 'shape_friction', 'dist': 'discrete_uniform', 'range': [0., .015],
+            'quantum': .005, 'op': 'set'}
+    with pytest.raises(ValueError):
+        ParamSpec.from_dict(base | overrides)
