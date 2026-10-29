@@ -1,0 +1,22 @@
+{
+  "_src/solvers/kamino/_src/linalg/factorize/llt_blocked.py": {
+    "before": "2c35d2e3fec5d088f26899af8c6d99fde7c882304a7abd2d1dc3752cdd5ec872",
+    "after": "f53e8ed8b37da653c25f7336816321bd1d2a49947538b9bd9600c9910f462859"
+  },
+  "_src/solvers/kamino/_src/linalg/linear.py": {
+    "before": "336d065c6319cc77c6bdce6d128e1231cb59f8c024b845944af7393b72c02cce",
+    "after": "48aaa8ae839ff7562cb32bf3b071dc280055d5d9a109a9b3521e02ec3d3cbb59"
+  },
+  "_src/solvers/kamino/_src/dynamics/delassus.py": {
+    "before": "5429cdf3c1d6338c6f056f9434cab400761bdb2ab964504410b3fad9e976bb84",
+    "after": "3c71c4069f7bc140e79f79b5334134258c9d681829a45531331a9e8f77659360"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/types.py": {
+    "before": "2a618c5e037176a289f112545fbefdaef40f3badc73752bfef6e0053c183dfd7",
+    "after": "06915bf778728dfbe82a866a4d9b32b99fb436666d2effd4041372c2b83ae539"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/solver.py": {
+    "before": "30d0703e904401d4dcfd292b09e47de3853e88d48711a0f6544cdbf39b7b0d8b",
+    "after": "361a705b7226e9a4e7522a32571fb83b609c8d39579067e2c9472fc1e3d17ab0"
+  }
+}

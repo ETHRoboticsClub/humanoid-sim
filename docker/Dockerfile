@@ -39,6 +39,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY docker/apply_mjwarp_patch.py docker/verify_mjwarp_active_rows.py docker/verify_mjwarp_sensor_guard.py docker/verify_mjwarp_rk4_stages.py /opt/humanoid-sim-build/
 COPY docker/patches/ /opt/humanoid-sim-build/patches/
 RUN python /opt/humanoid-sim-build/apply_mjwarp_patch.py
+# Keep converged PADMM worlds out of subsequent LLTB solves without changing
+# the equations, stopping criteria, or the converged solution.
+COPY docker/apply_kamino_patch.py /opt/humanoid-sim-build/
+RUN python /opt/humanoid-sim-build/apply_kamino_patch.py
 LABEL org.ethrc.mjwarp.solver.sha256=c737461c682ec74fcd9fcd4714f63b063d22bbac1f1c1e71470e1249d11e355f
 LABEL org.ethrc.mjwarp.sensor.sha256=1b64d41dac172b7ba6488bfe69a22dfc90363907d7fd9c971a1123f5a02d5eb6
 LABEL org.ethrc.mjwarp.forward.sha256=6f4220103cbb0605bb9f1201d22da9e0c2f3fb3ac985fa5c4666e77f24acdc14

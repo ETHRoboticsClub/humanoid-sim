@@ -1,0 +1,182 @@
+--- a/_src/solvers/kamino/_src/linalg/factorize/llt_blocked.py
++++ b/_src/solvers/kamino/_src/linalg/factorize/llt_blocked.py
+@@ -225,6 +225,7 @@
+         vio: wp.array[wp.int32],
+         L: wp.array[wp.float32],
+         b: wp.array[wp.float32],
++        active_mask: wp.array[wp.bool],
+         # Outputs:
+         y: wp.array[wp.float32],
+         x: wp.array[wp.float32],
+@@ -232,6 +233,10 @@
+         # Retrieve the thread index and thread-block configuration
+         tid, tid_block = wp.tid()
+         num_threads_per_block = wp.block_dim()
++
++        # The whole tile block skips together; retain both output buffers.
++        if active_mask and not active_mask[tid]:
++            return
+ 
+         # Retrieve the matrix block dimensions and size
+         n_i = dim[tid]
+@@ -445,11 +450,13 @@
+     # better than 64 across the tested size range. Callers may override for batch
+     # sweeps with very small matrices where 64 is marginally faster.
+     block_dim: int = 128,
++    active_mask: wp.array[wp.bool] | None = None,
+ ):
+     """
+     Launches the blocked Cholesky solve kernel for a block partitioned matrix.
+ 
+     Args:
++        active_mask: Optional per-world mask. False preserves x and y for that world.
+         kernel: The kernel function to use for the blocked solve.
+         dim: An array of shape `(num_blocks,)` containing the dimensions of each matrix block.
+         mio: An array of shape `(num_blocks,)` containing the matrix index offsets of each matrix block.
+@@ -462,7 +469,7 @@
+         block_dim: The dimension of the thread block to use for the kernel launch.
+     """
+     wp.launch_tiled(
+-        kernel=kernel, dim=num_blocks, inputs=[dim, mio, vio, L, b, y, x], block_dim=block_dim, device=L.device
++        kernel=kernel, dim=num_blocks, inputs=[dim, mio, vio, L, b, active_mask, y, x], block_dim=block_dim, device=L.device
+     )
+ 
+ 
+--- a/_src/solvers/kamino/_src/linalg/linear.py
++++ b/_src/solvers/kamino/_src/linalg/linear.py
+@@ -167,6 +167,11 @@
+         if not self._operator.info.is_matrix_compatible(A):
+             raise ValueError("The provided flat matrix data array does not have enough memory!")
+         self._compute_impl(A=A, **kwargs)
++
++    @property
++    def supports_active_mask(self) -> bool:
++        """Whether solve accepts a per-world active_mask and preserves inactive outputs."""
++        return False
+ 
+     def solve(self, b: wp.array[ScalarType], x: wp.array[ScalarType], **kwargs: dict[str, Any]) -> None:
+         """Solves the multi-linear systems `A @ x = b`."""
+@@ -650,6 +655,10 @@
+     ###
+ 
+     @property
++    def supports_active_mask(self) -> bool:
++        return True
++
++    @property
+     def L(self) -> wp.array[ScalarType]:
+         if self._L is None:
+             raise ValueError("The factorization array has not been allocated!")
+@@ -704,7 +713,8 @@
+         raise NotImplementedError("LLT matrix reconstruction is not yet implemented.")
+ 
+     @override
+-    def _solve_impl(self, b: wp.array[ScalarType], x: wp.array[ScalarType]) -> None:
++    def _solve_impl(self, b: wp.array[ScalarType], x: wp.array[ScalarType],
++                    active_mask: wp.array[wp.bool] | None = None) -> None:
+         # Solve the system L * y = b and L^T * x = y
+         factorize.llt_blocked_solve(
+             kernel=self._solve_kernel,
+@@ -715,6 +725,7 @@
+             vio=self._operator.info.vio,
+             L=self._L,
+             b=b,
++            active_mask=active_mask,
+             y=self._y,
+             x=x,
+         )
+--- a/_src/solvers/kamino/_src/dynamics/delassus.py
++++ b/_src/solvers/kamino/_src/dynamics/delassus.py
+@@ -1191,7 +1191,12 @@
+         # Perform the Cholesky factorization
+         self._solver.compute(A=self._operator.mat)
+ 
+-    def solve(self, v: wp.array[wp.float32], x: wp.array[wp.float32]):
++    @property
++    def supports_active_mask(self) -> bool:
++        return self._solver is not None and self._solver.supports_active_mask
++
++    def solve(self, v: wp.array[wp.float32], x: wp.array[wp.float32],
++              active_mask: wp.array[wp.bool] | None = None):
+         """
+         Solves the linear system D * x = v using the Cholesky factorization.
+ 
+@@ -1212,6 +1217,10 @@
+             raise ValueError("A linear system solver is not available. Allocate with solver=LINEAR_SOLVER_TYPE.")
+ 
+         # Solve the linear system using the factorized matrix
++        if active_mask is not None:
++            if not self.supports_active_mask:
++                raise ValueError("This linear solver does not support an active mask")
++            return self._solver.solve(b=v, x=x, active_mask=active_mask)
+         return self._solver.solve(b=v, x=x)
+ 
+     def solve_inplace(self, x: wp.array[wp.float32]):
+--- a/_src/solvers/kamino/_src/solvers/padmm/types.py
++++ b/_src/solvers/kamino/_src/solvers/padmm/types.py
+@@ -493,6 +493,9 @@
+             size: The model-size utility container holding the dimensionality of the model.
+         """
+ 
++        self.active_mask: wp.array[wp.bool] | None = None
++        """Per-world linear-solve mask, refreshed from terminal status before every solve."""
++
+         self.done: wp.array[wp.int32] | None = None
+         """
+         A single-element array containing the global flag that indicates whether the solver should terminate.
+@@ -612,6 +615,7 @@
+         """
+         # Allocate per-world solver done flags
+         self.done = wp.zeros(1, dtype=wp.int32)
++        self.active_mask = wp.zeros(size.num_worlds, dtype=wp.bool)
+ 
+         # Allocate primary state variables
+         self.sigma = wp.zeros(size.num_worlds, dtype=wp.vec2f)
+@@ -647,6 +651,7 @@
+         """
+         # Reset primary state variables
+         self.done.zero_()
++        self.active_mask.zero_()
+         self.sigma.zero_()
+         self.s.zero_()
+         self.v.zero_()
+--- a/_src/solvers/kamino/_src/solvers/padmm/solver.py
++++ b/_src/solvers/kamino/_src/solvers/padmm/solver.py
+@@ -50,6 +50,7 @@
+ from .types import (
+     PADMMConfigStruct,
+     PADMMData,
++    PADMMStatus,
+     PADMMPenaltyUpdate,
+     PADMMWarmStartMode,
+     convert_config_to_struct,
+@@ -71,6 +72,14 @@
+ ###
+ # Interfaces
+ ###
++
++
++@wp.kernel
++def _compute_linear_solve_mask(status: wp.array[PADMMStatus], active: wp.array[wp.bool]):
++    wid = wp.tid()
++    # Only convergence is used here: exhausted-but-unconverged worlds retain
++    # the reference behavior, including heterogeneous iteration budgets.
++    active[wid] = status[wid].converged == 0
+ 
+ 
+ class PADMMSolver:
+@@ -1001,7 +1010,13 @@
+         # TODO: We should do this in-place
+         # wp.copy(self._data.state.x, self._data.state.v)
+         # problem._delassus.solve_inplace(x=self._data.state.x)
+-        problem._delassus.solve(v=self._data.state.v, x=self._data.state.x)
++        if getattr(problem._delassus, "supports_active_mask", False):
++            wp.launch(_compute_linear_solve_mask, dim=self._size.num_worlds,
++                      inputs=[self._data.status, self._data.state.active_mask], device=self.device)
++            problem._delassus.solve(v=self._data.state.v, x=self._data.state.x,
++                                    active_mask=self._data.state.active_mask)
++        else:
++            problem._delassus.solve(v=self._data.state.v, x=self._data.state.x)
+ 
+     def _update_projection_argument(self, problem: DualProblem, z: wp.array[wp.float32]):
+         """
