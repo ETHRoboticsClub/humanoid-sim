@@ -99,31 +99,65 @@ class NativeState:
             vector = np.linalg.inv(f1) @ np.r_[rod_frame[:3, 3], 1.0]
             self.rods.append((ball, parent, foot, tensor(f0), tensor(vector[:3]), tensor(foot_frame[:3, 3])))
 
-    def forward(self, q: torch.Tensor) -> tuple[dict, dict]:
-        """Scalar joint positions and body transforms along the non-rod branches."""
-        q = q.to(device=self.device, dtype=self.dtype)
+        # A rod's orientation depends only on the paths below the common
+        # ancestor of its shaft and foot. Upstream rigid motion cancels. Build
+        # those small trees once, sharing branches between rods in each tree.
+        parents = {row[2]: row[1] for row in self.tree}
+
+        def ancestry(body):
+            path = [body]
+            while body in parents:
+                body = parents[body]
+                path.append(body)
+            return path
+
+        groups = {}
+        for rod in self.rods:
+            _, parent, foot, *_ = rod
+            parent_path, foot_path = ancestry(parent), ancestry(foot)
+            root = next(body for body in parent_path if body in foot_path)
+            children, rods = groups.setdefault(root, (set(), []))
+            children.update(parent_path[:parent_path.index(root)])
+            children.update(foot_path[:foot_path.index(root)])
+            rods.append(rod)
+        self.closure_trees = [(root, [row for row in self.tree if row[2] in children], rods)
+                              for root, (children, rods) in groups.items()]
+
+    def _values(self, q):
         values = {name: q[:, i] for i, name in enumerate(self.names)}
         for cols, names, tr in self.ankles:
             cranks = tr.cranks(q[:, cols])
             values.update({name: cranks[:, i] for i, name in enumerate(names)})
+        return values
+
+    def _poses(self, q, values, root, tree):
         eye = torch.eye(4, dtype=q.dtype, device=q.device).expand(q.shape[0], -1, -1)
-        poses = {self.root: eye}
-        for name, parent, child, f0, inv_f1, axis in self.tree:
+        poses = {root: eye}
+        for name, parent, child, f0, inv_f1, axis in tree:
             motion = eye.clone()
             if name in values and axis is not None:
                 motion[:, :3, :3] = _rotation(axis, values[name])
             poses[child] = poses[parent] @ f0 @ motion @ inv_f1
-        return values, poses
+        return poses
+
+    def forward(self, q: torch.Tensor) -> tuple[dict, dict]:
+        """Scalar joint positions and body transforms along the non-rod branches."""
+        q = q.to(device=self.device, dtype=self.dtype)
+        values = self._values(q)
+        return values, self._poses(q, values, self.root, self.tree)
 
     def coordinates(self, q: torch.Tensor) -> tuple[dict, dict]:
         """Scalar joint positions and open ball quaternions, for a batch of body poses."""
-        values, poses = self.forward(q)
+        q = q.to(device=self.device, dtype=self.dtype)
+        values = self._values(q)
         balls = {}
-        for name, parent, foot, f0, rod_vector, foot_point in self.rods:
-            joint = poses[parent] @ f0
-            target = (poses[foot][:, :3, :3] @ foot_point) + poses[foot][:, :3, 3]
-            wanted = (joint[:, :3, :3].transpose(-1, -2) @ (target - joint[:, :3, 3]).unsqueeze(-1)).squeeze(-1)
-            balls[name] = _quat_between(rod_vector, wanted)
+        for root, tree, rods in self.closure_trees:
+            poses = self._poses(q, values, root, tree)
+            for name, parent, foot, f0, rod_vector, foot_point in rods:
+                joint = poses[parent] @ f0
+                target = (poses[foot][:, :3, :3] @ foot_point) + poses[foot][:, :3, 3]
+                wanted = (joint[:, :3, :3].transpose(-1, -2) @ (target - joint[:, :3, 3]).unsqueeze(-1)).squeeze(-1)
+                balls[name] = _quat_between(rod_vector, wanted)
         return values, balls
 
     def body_transforms(self, q: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -146,13 +180,10 @@ class NativeState:
     def dofs(self, q: torch.Tensor, qd: torch.Tensor) -> tuple[dict, dict]:
         """Isaac Lab DOF-space positions and velocities, including each ball's three axes."""
         q = q.to(device=self.device, dtype=self.dtype)
-        values, balls = self.coordinates(q)
         qd = qd.to(device=self.device, dtype=self.dtype)
-        rates = {name: qd[:, i] for i, name in enumerate(self.names)}
-        for cols, names, tr in self.ankles:
-            velocity = (tr.jacobian(q.to(qd)[:, cols]) @ qd[:, cols].unsqueeze(-1)).squeeze(-1)
-            rates.update({name: velocity[:, i] for i, name in enumerate(names)})
-        _, derivatives = torch.func.jvp(lambda pose: self.coordinates(pose)[1], (q,), (qd,))
+        # JVP supplies the primal coordinates as well as every scalar/ball rate;
+        # avoid repeating the position solve and a separate crank Jacobian.
+        (values, balls), (rates, derivatives) = torch.func.jvp(self.coordinates, (q,), (qd,))
         for name, quat in balls.items():
             position = _rotvec(quat)
             velocity = 2 * _relative_quat(derivatives[name], quat)[..., :3]
