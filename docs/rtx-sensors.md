@@ -80,6 +80,27 @@ humanoid-sim export-truth /data/run1.traj --frames mid360_link camera0_camera im
 
 `render-trajectory` poses the robot at each render time (the recording interpolated to it), renders every camera period (33.3 ms at 30 Hz) and lets the lidar complete its sweeps (10 Hz), however long the GPU takes. Every stream is rendered at the render period, the fastest stream's; a slower stream gets the first render at or after each of its periods. Each frame is stamped with the plant time it was rendered at, a sweep with the plant time its first ray fired, so stamps, ground truth and the runtime's feedback and IMU samples share one clock. The dataset it writes (`humanoid-sim-sensor-dataset/v1`, `sensors/dataset.py`) holds `manifest.json` (the camera calibrations as the feed descriptor has them, each sensor's mount on its body, nominal rates, counts, and `passes`: each render's sensors and summary, `complete` only if it finished), `cameras/<camera_id>/<stream>/` (8-bit grey, RGB or 16-bit millimetre PNGs and `index.csv`: `seq,stamp_ns,file`) and `lidars/<name>/` (one `.npz` per sweep with `points_m`, `hit`, `time_s`, `start_ns` and the sensor's world pose, and `index.csv`; `start_ns` and `time_s` are the sweep's start and each ray's firing time after it, but `origin_w` and `rotation_w` are the sensor's pose at the render that completed the sweep, about one sweep period after `start_ns`: to place a ray in the world at its firing time, take the sensor's pose at that time from the trajectory). A dataset holds one lidar's sweeps. The IMU is not rendered (the render never steps physics): the live run records it next to the trajectory (`FILE.imu`, [runtime.md](runtime.md#recording-a-run)), on the same plant clock.
 
+### Inputs for sensor-contract replay
+
+For URDF-backed descriptions, the dataset also contains `robot.urdf`,
+`kinematics.npz` (plant timestamps, joint positions and joint names) and copies of
+recorded IMU side files. The manifest's `replay` block identifies these by SHA-256
+and names the base frame; `trajectory_sha256` identifies the source recording.
+Trajectory and IMU headers share a unique `recording_id`, so an IMU file from a
+different run is refused even when the robot and description match. Render older
+recordings again when this identity is absent.
+
+Kinematics contains no base/world pose. A downstream converter supplies local
+mount TF and measured joints to SLAM; the original trajectory is a separate
+reference for evaluation. LiDAR NPZs include `intensity`, the same modeled
+constant used by the live transport, not a measured reflectance. Replay metadata
+for USD-backed descriptions is not supported.
+
+The manifest is marked incomplete before a pass replaces any indexed frames.
+A process killed during a rerender cannot leave an older completed pass looking
+like a valid dataset. A different trajectory checksum is refused even when the
+file name and time range match.
+
 ### Two passes: the lidar must not trace the splat
 
 RTX hides the splat from camera rays only (`SPLAT_PRIM`): a lidar ray hits its Gaussians wherever it meets one, low-opacity and large ones included, so a lidar rendered with a splat returns points in mid-air. `render-trajectory` refuses a lidar with `--splat`: the lidar and the cameras are rendered in two runs into one `--out`, the lidar without the splat (`--no-cameras`), the cameras with it (`--no-lidar`). A dataset directory that holds a manifest of the same run (robot, description digest, trajectory, time range) is added to, each pass keeping the other's sensors and counts; a manifest of another run is refused, and a render that fails leaves its pass `complete: false`. Each sensor's manifest `stage` records `splat` (whether it was on the stage for that sensor) and `robot_links_traced`. The recording's scene files must be readable where it is rendered (same paths), or be given with `--scene`.
