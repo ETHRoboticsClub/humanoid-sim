@@ -40,7 +40,7 @@ def test_the_harness_hooks_on_kept_bodies_with_the_shoulders_fixed_on_it(robot):
             link = joint_of[link].find("parent").get("link")
         return link
 
-    assert moving(harness["body"])
+    assert body_of(harness["body"]) == harness["body"]
     assert len(harness["shoulders"]) == 2
     for shoulder in harness["shoulders"]:
         assert moving(shoulder)

@@ -121,7 +121,7 @@ def test_the_runtime_start_pose_lies_inside_every_drive_window(robot):
     for name, d in desc.drives.items():
         if d.crank is None:
             entry = desc.table["joints"][d.joints[0]]
-            lo, hi = (float(b) + float(entry["standing_offset_rad"]) for b in entry["position_limit"])
+            lo, hi = (float(b) + desc.joints[d.joints[0]].standing_offset_rad for b in entry["position_limit"])
             assert lo < pose[d.joints[0]] < hi, name
         else:
             lo, hi = d.position_limit_device
@@ -168,7 +168,8 @@ def test_a_built_asset_opens_only_for_its_robot(tmp_path):
     usd = tmp_path / "g1" / "usd" / "robot.usda"
     usd.parent.mkdir(parents=True)
     usd.write_text("#usda 1.0\n")
-    (tmp_path / "g1" / "asset.json").write_text(json.dumps({"robot": "g1_29dof_rev_1_0", "usd": "usd/robot.usda"}))
+    (tmp_path / "g1" / "asset.json").write_text(json.dumps({
+        **Description.load("g1_29dof_rev_1_0").identity(), "usd": "usd/robot.usda"}))
     check_asset_robot(usd, "g1_29dof_rev_1_0")
     with pytest.raises(ValueError, match="pass robot='g1_29dof_rev_1_0'"):
         check_asset_robot(usd, "ethrc_v1")

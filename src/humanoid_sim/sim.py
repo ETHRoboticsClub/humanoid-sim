@@ -64,7 +64,12 @@ class SimCore:
         self.plant = PlantCore(self.desc, joints, num_envs,
                                PlantCfg(robot=robot, physics_period_ns=self.period_ns, device=device,
                                         **({} if queue_capacity is None else {"queue_capacity": queue_capacity})))
-        props = joint_properties(self.plant, joints)
+        self.native = None
+        if self.desc.usd_path is not None and self.desc.linkages:
+            from humanoid_sim.physics.native import NativeDrivePlant
+
+            self.native = NativeDrivePlant(self.plant)
+        props = joint_properties(self.native.core, self.native.names) if self.native else joint_properties(self.plant, joints)
         period_s = self.period_ns / NS_PER_S
         self.backend = IsaacLabRobot(self.desc, usd_path, IsaacLabCfg(
             num_envs=num_envs, device=device, period_s=period_s, solver=self.solver, settings=settings,
@@ -77,6 +82,8 @@ class SimCore:
         self.scene = scene
         order = [self.backend.joint_names.index(n) for n in joints]
         self._to_plant = torch.tensor(order, device=self.plant.cfg.device)
+        self._to_native = (torch.tensor([self.backend.joint_names.index(name) for name in self.native.names],
+                                       device=self.plant.cfg.device) if self.native else None)
         self._base = (torch.tensor([self.backend.joint_names.index(n) for n, _ in BASE_JOINTS],
                                    device=self.plant.cfg.device) if base_joints else None)
         self._base_target: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -106,11 +113,23 @@ class SimCore:
         q, qd = self.backend.joint_state()
         return q[:, self._to_plant].to(self.plant.cfg.dtype), qd[:, self._to_plant].to(self.plant.cfg.dtype)
 
+    def _solver_state(self) -> tuple[torch.Tensor, torch.Tensor]:
+        positions, velocities = self.backend.joint_state()
+        ids = self._to_native if self.native else self._to_plant
+        return positions[:, ids].to(self.plant.cfg.dtype), velocities[:, ids].to(self.plant.cfg.dtype)
+
+    def drive_feedback(self) -> DriveFeedback:
+        positions, velocities = self._solver_state()
+        return (self.native.feedback(positions, velocities) if self.native
+                else self.plant.feedback(positions, velocities))
+
     def write_joint_state(self, q: torch.Tensor, qd: torch.Tensor) -> None:
         bq, bqd = self.backend.joint_state()
         bq, bqd = bq.clone(), bqd.clone()
         bq[:, self._to_plant] = q.to(bq.dtype)
         bqd[:, self._to_plant] = qd.to(bqd.dtype)
+        if self.native:
+            bq, bqd = self.native.complete_articulation_state(q, qd, bq, bqd, self.backend.joint_names)
         self.backend.write_state(bq, bqd)
         self._state_written = True
 
@@ -132,9 +151,14 @@ class SimCore:
             self._state_written = True
 
     def step(self) -> DriveFeedback:
-        q, qd = self.joint_state()
+        q, qd = self._solver_state()
         if self._graphs is not None:
             target = self._graphs.pre(q, qd, refresh=self._state_written)
+        elif self.native:
+            if self.imu is not None:
+                data = self.backend.imu.data
+                self.imu.step(self.t_ns, data.ang_vel_b.torch, data.lin_acc_b.torch)
+            target = self.native.pre_physics(self.t_ns, q, qd)
         else:
             if self.imu is not None:
                 data = self.backend.imu.data
@@ -143,19 +167,23 @@ class SimCore:
             target = self.plant.pre_physics(self.t_ns, q, qd, state)
         bt, _ = self.backend.joint_state()
         bt = bt.clone()
-        bt[:, self._to_plant] = target.to(bt.dtype)
+        bt[:, self._to_native if self.native else self._to_plant] = target.to(bt.dtype)
+        effort = None
+        if self.native:
+            effort = torch.zeros_like(bt)
+            effort[:, self._to_native] = self.native.effort.to(bt.dtype)
         if self._base_target is not None:
             bv = torch.zeros_like(bt)
             bt[:, self._base] = self._base_target[0].to(bt.dtype)
             bv[:, self._base] = self._base_target[1].to(bt.dtype)
-            self.backend.set_targets(bt, bv)
+            self.backend.set_targets(bt, bv, effort)
         else:
-            self.backend.set_targets(bt)
+            self.backend.set_targets(bt, effort=effort)
         self.gantry.apply(self.t_ns)
         self.backend.step()
         self.t_ns += self.period_ns
-        q, qd = self.joint_state()
-        self.feedback = self._graphs.post(q, qd) if self._graphs is not None else self.plant.feedback(q, qd)
+        q, qd = self._solver_state()
+        self.feedback = self._graphs.post(q, qd) if self._graphs is not None else self.drive_feedback()
         self._state_written = False
         return self.feedback
 
@@ -171,14 +199,13 @@ class _StepGraphs:
         if compile:
             self._post = torch.compile(self._post, dynamic=False)
             self._pre = torch.compile(self._pre, dynamic=False)
-        p = sim.plant
-        q, qd = sim.joint_state()
+        q, qd = sim._solver_state()
         self.q, self.qd = q.clone(), qd.clone()
         self.t = torch.zeros((), dtype=torch.int64, device=q.device)
         e = q.shape[0]
         self.gyro = torch.zeros(e, 3, device=q.device)
         self.acc = torch.zeros(e, 3, device=q.device)
-        p.feedback(self.q, self.qd)  # a post-step state for pre to start from
+        self._post()
         side = torch.cuda.Stream()
         side.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(side):
@@ -197,12 +224,15 @@ class _StepGraphs:
             self.target = self._pre()
 
     def _post(self) -> DriveFeedback:
-        return self.sim.plant.feedback(self.q, self.qd)
+        return (self.sim.native.feedback(self.q, self.qd) if self.sim.native
+                else self.sim.plant.feedback(self.q, self.qd))
 
     def _pre(self) -> torch.Tensor:
         sim = self.sim
         if sim.imu is not None:
             sim.imu.step(self.t, self.gyro, self.acc, period_ns=sim.period_ns)
+        if sim.native:
+            return sim.native.pre_physics(self.t, self.q, self.qd)
         return sim.plant.pre_physics(self.t, self.q, self.qd, sim.plant.post_state)
 
     def pre(self, q: torch.Tensor, qd: torch.Tensor, *, refresh: bool) -> torch.Tensor:

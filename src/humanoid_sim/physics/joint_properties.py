@@ -1,7 +1,8 @@
 """Per-joint solver properties, written to the articulation at spawn.
 
-* ``stiffness``, ``damping``: the plant's constant solver PD (``k0``, ``d0``; ankles via J at standing).
-* ``armature``: description (ankles: ``armature_joint``, the reflected crank inertia).
+* ``stiffness``, ``damping``: the plant's constant solver PD (``k0``, ``d0``), on native crank shafts
+  rather than the passive ankle hinges for a delivered USD mechanism.
+* ``armature``: description rotor inertia, on native shafts without duplicate hinge armature.
 * ``friction`` (Coulomb) and ``passive_damping`` (viscous): description, enabled-drive values.
 * ``effort_limit``: the drive peak for 1:1 joints; for the ankle hinges, the joint torque the two cranks
   can reach at their peak at standing (``Σ |J| · peak`` per column), so the solver clamp never binds
@@ -31,12 +32,16 @@ class JointProperties:
 
 def joint_properties(plant: PlantCore, names: list[str]) -> JointProperties:
     desc = plant.desc
+    properties = desc.physics_joints if any(n not in desc.joints for n in names) else desc.joints
     pj = plant.map.joint_names
     idx = [pj.index(n) for n in names]
     k0 = plant.k0[0, idx].tolist()
     d0 = plant.d0[0, idx].tolist()
-    effort = {n: desc.joints[n].effort_peak for n in names}
-    standing = torch.tensor([desc.joints[n].standing_offset_rad for n in pj], dtype=torch.float64)
+    effort = {n: properties[n].effort_peak for n in names}
+    if properties is not desc.joints:
+        actuated = {pj[index] for index in plant.actuated.tolist()}
+        effort.update({name: float("inf") for name in names if name not in actuated})
+    standing = torch.tensor([properties[n].standing_offset_rad for n in pj], dtype=torch.float64)
     for _, d_idx, j_idx, tr in plant.map.ankles:
         jac = tr.to("cpu", torch.float64).jacobian(standing[j_idx.cpu()].unsqueeze(0))[0]
         peaks = torch.tensor([desc.drives[plant.map.drive_names[int(i)]].effort_peak for i in d_idx],
@@ -47,9 +52,9 @@ def joint_properties(plant: PlantCore, names: list[str]) -> JointProperties:
             effort[pj[j]] = float(reach[col])
     return JointProperties(
         names=list(names), stiffness=k0, damping=d0,
-        armature=[desc.joints[n].armature for n in names],
-        friction=[desc.joints[n].friction for n in names],
-        passive_damping=[desc.joints[n].damping for n in names],
+        armature=[properties[n].armature for n in names],
+        friction=[properties[n].friction for n in names],
+        passive_damping=[properties[n].damping for n in names],
         effort_limit=[effort[n] for n in names],
-        standing=[desc.joints[n].standing_offset_rad for n in names],
+        standing=[properties[n].standing_offset_rad for n in names],
     )

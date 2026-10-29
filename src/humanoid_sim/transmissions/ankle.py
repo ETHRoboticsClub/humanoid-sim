@@ -1,18 +1,17 @@
 """Batched torch transmission for the two-crank parallel ankle.
 
-The ankle is simulated as two hinges (pitch about +Y, then roll about +X: the URDF tree). Two crank
-drives move the foot through rods. This module maps between the hinge state and the crank state:
+Two crank drives move the foot through rods. This module maps between the hinge state and the crank state
+for semantic commands, initial states and kinematic checks. The delivered USD's physics drives its explicit
+crank joints and closes the rods in the solver:
 
 * ``cranks(q)``: hinge angles → crank angles (analytic circle-sphere IK on the branch connected to the
   linkage neutral, as in humanoid-urdf ``ankle_model``);
 * ``jacobian(q)``: ``dθ/dq`` from the rod constraints;
 * crank torque → hinge torque is ``Jᵀ τ``; hinge velocity → crank velocity is ``J q̇``.
 
-Geometry, axes, frame signs and the linkage neutral come from the description (``actuators.yaml``
-``ankle_model``); nothing is typed in here. ``q`` is in URDF (calibration) joint coordinates. The linkage
-neutral, where both cranks read zero (the drives' calibration zero), sits at ``semantic_neutral_rad``; the
-linkage is solved on the offset from it, which ``semantic_to_kinematic_sign`` maps to the linkage frame.
-Crank angles are relative to the linkage neutral.
+Geometry comes from the description's USD through its ``ankle_model`` module. ``q`` is in URDF/USD joint
+coordinates. Delivered CAD geometry uses ``absolute_cranks=True``: no subtraction of the crank angle at
+joint zero, and no pitch/roll neutral offset. The default relative convention remains available for fixtures.
 
 It is golden-tested against humanoid-urdf ``ankle_model``.
 """
@@ -74,7 +73,8 @@ def mirror_right(right: dict) -> dict:
 class AnkleTransmission:
     """One ankle side, batched over leading dims. ``q``: ``[..., 2]`` (pitch, roll), URDF coordinates."""
 
-    def __init__(self, geometry: dict, kinematic_sign, neutral=(0.0, 0.0), *, device="cpu", dtype=torch.float32):
+    def __init__(self, geometry: dict, kinematic_sign, neutral=(0.0, 0.0), *, device="cpu", dtype=torch.float32,
+                 absolute_cranks: bool = False):
         for name, axis in (("pitch_axis", [0, 1, 0]), ("roll_axis", [1, 0, 0])):
             if not np.allclose(geometry[name], axis):
                 raise ValueError(f"ankle transmission requires {name}={axis}")
@@ -86,6 +86,7 @@ class AnkleTransmission:
         if neutral.shape != (2,) or not np.isfinite(neutral).all():
             raise ValueError("invalid semantic_neutral_rad")
         self._neutral_np = neutral
+        self.absolute_cranks = absolute_cranks
         self.to(device, dtype, sign=sign)
 
     def to(self, device, dtype, *, sign=None):
@@ -105,7 +106,7 @@ class AnkleTransmission:
         self._v = t(np.stack([c.v_hat for c in g]))
         self._r = t([c.radius for c in g])
         self._len = t([c.length for c in g])
-        self._theta0 = t([c.theta0 for c in g])
+        self._theta0 = t([0.0 if self.absolute_cranks else c.theta0 for c in g])
         self._branch = t([float(c.branch) for c in g])
         return self
 
@@ -128,7 +129,7 @@ class AnkleTransmission:
         return theta, ratio.abs()
 
     def cranks(self, q: torch.Tensor, *, return_reach: bool = False):
-        """Crank angles relative to neutral, ``[..., 2]`` (upper, lower). ``reach`` = |K/R| (≥1: unreachable)."""
+        """Crank angles ``[..., 2]`` (upper, lower), absolute or neutral-relative. ``reach`` = |K/R|."""
         p_f, _, _, _ = self._foot((q - self.neutral) * self.sign)
         theta, reach = self._theta_abs(p_f)
         rel = torch.remainder(theta - self._theta0 + torch.pi, 2 * torch.pi) - torch.pi

@@ -35,6 +35,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import torch
+
 from humanoid_sim.model.asset import check_asset_robot, load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.poses import POSES, STANDING_CLEARANCE_M, initial_pose
@@ -52,7 +54,7 @@ def plant_joint_properties(robot: str = "ethrc_v1") -> JointProperties:
     from humanoid_sim.physics.joint_properties import joint_properties
 
     desc = Description.load(robot)
-    joints = list(desc.joints)
+    joints = list(desc.physics_joints)
     return joint_properties(PlantCore(desc, joints, 1, PlantCfg(robot=robot)), joints)
 
 
@@ -85,10 +87,20 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
         pass
 
     cfg = RobotSceneCfg(num_envs=num_envs, env_spacing=env_spacing, replicate_physics=True)
+    if Description.load(robot).usd_path is not None:
+        from humanoid_sim.core import PlantCfg, PlantCore
+        from humanoid_sim.physics.native import NativeDrivePlant
+
+        desc = Description.load(robot)
+        native = NativeDrivePlant(PlantCore(desc, names, 1, PlantCfg(robot=robot)))
+        full, _ = native.complete_state(q.unsqueeze(0), torch.zeros_like(q).unsqueeze(0))
+        positions = full[0].tolist()
+    else:
+        positions = [float(q[names.index(n)]) for n in props.names]
     cfg.robot = articulation_cfg(
         usd, props, base_height_m=height + STANDING_CLEARANCE_M, contact_sensors=contacts,
         self_collision=profile["physics"]["self_collision"] if self_collision is None else self_collision,
-        joint_pos=[float(q[names.index(n)]) for n in props.names])
+        joint_pos=positions)
     friction = profile["model"]["ground_friction"] if ground_friction is None else ground_friction
     if terrain is not None:
         cfg.terrain = terrain

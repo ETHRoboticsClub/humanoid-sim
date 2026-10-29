@@ -177,6 +177,21 @@ def articulation_cfg(usd_path: Path, props: JointProperties, *, fixed_base: bool
         joint_effort_limit=_per_joint(joints, props.effort_limit),
     )}
     joint_pos = _per_joint(joints, props.standing if joint_pos is None else joint_pos)
+    from humanoid_sim.model.asset import asset_meta
+
+    try:
+        meta = asset_meta(usd_path)
+    except FileNotFoundError:
+        meta = {}
+    if meta.get("crank_joints"):
+        from humanoid_sim.model.native_state import NativeState
+
+        desc = Description.load(meta["robot"])
+        semantic = list(desc.joints)
+        positions = torch.tensor([[joint_pos[f"^{name}$"] for name in semantic]], dtype=torch.float64)
+        native = NativeState(desc, semantic, dtype=torch.float64)
+        joint_pos.update({f"^{name}$": float(position[0])
+                          for name, (position, _) in native.state(positions, torch.zeros_like(positions)).items()})
     if base_joints:
         names = [name for name, _ in BASE_JOINTS]
         actuators["base"] = ImplicitActuatorCfg(
@@ -208,8 +223,20 @@ def imu_sensor_cfg(robot: str = "ethrc_v1"):
     """Isaac Lab's IMU sensor at the description's mount (``imu_joint``): raw sensor-frame values."""
     from isaaclab.sensors import ImuCfg
 
-    parent, xyz, rpy = Description.load(robot).imu_mount()
-    return ImuCfg(prim_path=f"{ROBOT_PRIM}/Geometry/{parent}",
+    desc = Description.load(robot)
+    parent, xyz, rpy = desc.imu_mount()
+    parent_path = f"{ROBOT_PRIM}/Geometry/{parent}"
+    if desc.usd_path is not None:
+        from pxr import Usd, UsdPhysics
+
+        stage = Usd.Stage.Open(str(desc.usd_path))
+        matches = [prim for prim in stage.Traverse()
+                   if prim.GetName() == parent and prim.HasAPI(UsdPhysics.RigidBodyAPI)]
+        if len(matches) != 1:
+            raise ValueError(f"USD must contain one IMU parent body named {parent}")
+        relative = matches[0].GetPath().MakeRelativePath(stage.GetDefaultPrim().GetPath())
+        parent_path = f"{ROBOT_PRIM}/{relative}"
+    return ImuCfg(prim_path=parent_path,
                   offset=ImuCfg.OffsetCfg(pos=tuple(xyz), rot=_quat_xyzw(*rpy)))
 
 
@@ -217,7 +244,7 @@ def contact_sensor_cfg(history: int = 3, air_time: bool = True):
     """Contact sensor on every body: net forces with history, air time."""
     from isaaclab.sensors import ContactSensorCfg
 
-    return ContactSensorCfg(prim_path=f"{ROBOT_PRIM}/Geometry/.*", history_length=history, track_air_time=air_time)
+    return ContactSensorCfg(prim_path=f"{ROBOT_PRIM}/.*", history_length=history, track_air_time=air_time)
 
 
 def ground_cfg(friction: float):
@@ -340,10 +367,12 @@ class IsaacLabRobot:
         self.robot.write_joint_position_to_sim_index(position=q, env_ids=env_ids)
         self.robot.write_joint_velocity_to_sim_index(velocity=qd, env_ids=env_ids)
 
-    def set_targets(self, target: torch.Tensor, velocity: torch.Tensor | None = None) -> None:
+    def set_targets(self, target: torch.Tensor, velocity: torch.Tensor | None = None,
+                    effort: torch.Tensor | None = None) -> None:
         tc = self.robot.actuators.target_command
         tc.set_position_index(value=target)
         tc.set_velocity_index(value=torch.zeros_like(target) if velocity is None else velocity)
+        tc.set_effort_index(value=torch.zeros_like(target) if effort is None else effort)
 
     def step(self) -> None:
         self.scene.write_data_to_sim()

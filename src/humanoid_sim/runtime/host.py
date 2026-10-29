@@ -80,7 +80,7 @@ SUSPENDED_LIFT_M = 0.3  # a suspended robot's soles above the ground
 FIDELITY_GAPS = [
     "drive current, thermal and backlash models absent; applied torque is the envelope-clipped control law",
     "upper-body passive joint parameters (waist, shoulders, elbows) are description values, not identified",
-    "ankle as pitch and roll hinges driven through the crank transmission (no closed chain)",
+    "ankle linkage uses the delivered rigid bodies and loop joints; compliance and backlash are unmodeled",
     "IMU errors from the rig's model: white noise, turn-on bias, Gauss-Markov drift (SET_FIDELITY ideal turns them "
     "off); the turn-on bias is redrawn at every IMU reset, not only at power-on",
     "drive delay is each family's fixed figure (actuators.yaml drive_delay_s), without per-cycle jitter",
@@ -912,7 +912,7 @@ class RuntimeHost:
     def _feedback_flat(self) -> torch.Tensor:
         """The feedback's fields as one float64 vector on the device; the integer fields travel bit-for-bit."""
         sim = self.sim
-        fb = sim.feedback if sim.feedback is not None else sim.plant.feedback(*sim.joint_state())
+        fb = sim.feedback if sim.feedback is not None else sim.drive_feedback()
         imu = sim.imu.samples
         ints = torch.cat([imu.seq[0], imu.sample_ns[0], imu.stamp_ns[0], imu.count[:1]]).view(torch.float64)
         flat = torch.cat([fb.position_rad[0], fb.velocity_rad_s[0], fb.applied_torque_nm[0],
@@ -1059,4 +1059,3 @@ class RuntimeHost:
     def status(self) -> dict:
         return {"session_id": self.session_id, "steps": self.step_count, "late_steps": self.late_steps,
                 "sim_time_s": self.sim.t_ns / NS_PER_S, "attached": self.attached}
-

@@ -27,16 +27,16 @@ def test_inventory(built):
 
 def test_unlisted_joints_welded_and_actuated_joints_limited(built):
     desc, p = built
-    source = ET.parse(desc.package_dir / load_profile("ethrc_v1")["model"]["urdf"]).getroot()
+    source = ET.parse(desc.urdf_path).getroot()
     unlisted = {j.get("name") for j in source.findall("joint") if j.get("type") != "fixed"} - set(desc.joints)
-    assert set(p.welded) == unlisted  # URDF_6.urdf ships the ORCA hands fixed already
+    assert set(p.welded) == unlisted
     movable = {j.get("name"): j for j in p.root.findall("joint") if j.get("type") != "fixed"}
     assert set(movable) == set(desc.joints)
     for name, j in movable.items():
         lim = j.find("limit")
         assert (float(lim.get("lower")), float(lim.get("upper"))) == pytest.approx(desc.calibration_travel(name))
     # An ankle hinge's travel is the hull of its cranks' stops (ankle_model.bounds), with no limit of its own.
-    assert desc.calibration_travel("foot_pitch_l") == pytest.approx(desc.ankle_model.bounds("l")[0])
+    assert desc.calibration_travel(desc.linkages[0].joints[0]) == pytest.approx(desc.ankle_model.bounds("l")[0])
 
 
 def test_sole_plate_fit_recovers_a_plate():
@@ -60,7 +60,11 @@ def test_sole_boxes_on_the_profiles_feet(built):
     child = {j.get("name"): j.find("child").get("link") for j in p.root.findall("joint")}
     assert {s.body for s in p.soles} == {child[j] for j in sole["joints"].values()}
     for s in p.soles:
-        assert s.half_extents[2] * 2 == pytest.approx(sole["box_thickness_m"])
+        if sole.get("fit", "plate") == "plate":
+            assert s.half_extents[2] * 2 == pytest.approx(sole["box_thickness_m"])
+        else:
+            assert (s.half_extents > 0).all()
+            assert s.mesh is None
         assert np.allclose(s.rotation.T @ s.rotation, np.eye(3), atol=1e-9)
         assert s.rotation[2, 2] > 0.99  # box z (into the plate) points up
 
@@ -105,8 +109,10 @@ def test_body_tree(built):
 
 
 def test_one_collision_mesh_per_body(built):
-    desc, p = built
-    per_mesh = PreparedUrdf(desc, _profile(collision_hulls="per_mesh")).build()
+    desc, _ = built
+    sole = {**load_profile(desc.robot)["model"]["sole"], "fit": "plate"}
+    p = PreparedUrdf(desc, _profile(collision_hulls="per_body", sole=sole)).build()
+    per_mesh = PreparedUrdf(desc, _profile(collision_hulls="per_mesh", sole=sole)).build()
     for body in p.body_tree():
         meshes = [c for c in p._links[body].findall("collision") if c.find("geometry/mesh") is not None]
         subtree = [link for link, _ in p._fixed_subtree(body, np.eye(4))]

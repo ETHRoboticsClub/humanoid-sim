@@ -202,6 +202,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pyyaml" },
     { name = "torch" },
+    { name = "usd-core" },
 ]
 
 [package.optional-dependencies]
@@ -222,7 +223,6 @@ newton = [
     { name = "resolve-robotics-uri-py" },
     { name = "scipy" },
     { name = "trimesh" },
-    { name = "usd-core" },
     { name = "warp-lang" },
 ]
 viz = [
@@ -247,7 +247,7 @@ requires-dist = [
     { name = "scipy", marker = "extra == 'newton'", specifier = ">=1.11" },
     { name = "torch", specifier = "==2.11.0" },
     { name = "trimesh", marker = "extra == 'newton'", specifier = ">=4.6.8" },
-    { name = "usd-core", marker = "extra == 'newton'", specifier = ">=25.5" },
+    { name = "usd-core", specifier = ">=25.5" },
     { name = "warp-lang", marker = "extra == 'newton'", specifier = "==1.17.0" },
 ]
 provides-extras = ["newton", "viz", "bag", "kinematics-check", "dev"]

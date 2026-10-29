@@ -28,7 +28,7 @@ def ethrc_v1() -> Rig:
         # As Controls' camera service opens it, with the unit's calibration (camera_info on the V1, 2026-10-20) for
         # rgb and mono_left. mono_right (the same OV9282 sensor) and depth (aligned to the rectified left image) are
         # modeled with mono_left's pinhole until the unit's are read.
-        camera0=OakDW("camera0_camera", width=640, height=400, frame_period_ns=33_333_333,
+        camera0=OakDW("camera0_link", width=640, height=400, frame_period_ns=33_333_333,
                       intrinsics={"rgb": (283.087462, 282.805448, 325.969479, 198.375709),
                                   "mono_left": V1_MONO_LEFT, "mono_right": V1_MONO_LEFT, "depth": V1_MONO_LEFT}),
     )

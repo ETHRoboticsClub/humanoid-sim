@@ -173,7 +173,7 @@ def test_cranks_driven_past_their_stops_stop_at_them(request):
     n = len(CRANK_DIRECTIONS)
     sim = SimCore(built_usd(ROBOT), device="cpu", robot=ROBOT, fixed_base=True, num_envs=n)
     request.addfinalizer(sim.close)
-    assert check_crank_stops(ROBOT, sim.profile["physics"]) == 4 * len(sim.desc.linkages)
+    assert check_crank_stops(ROBOT, sim.profile["physics"]) == (0 if sim.desc.usd_path else 4 * len(sim.desc.linkages))
     p, desc, joints = sim.plant, sim.desc, list(sim.desc.joints)
     q, qd = sim.joint_state()
     target, _, _ = p.map.drive_state(q, qd)

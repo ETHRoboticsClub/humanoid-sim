@@ -27,8 +27,8 @@ PHYSICS_ROBOTS = ("ethrc_v1", "g1_29dof_rev_1_0", "g1_29dof_with_hand_rev_1_0")
 _G1 = {"torso": "torso_link", "vertical_joint": "waist_yaw_joint", "elbow": "right_elbow_joint",
        "ankle_pitch": ("left_ankle_pitch_joint", "right_ankle_pitch_joint")}
 PARTS = {
-    "ethrc_v1": {"torso": "Component171_1", "vertical_joint": "waist_upperbody_yaw", "elbow": "elbow_flexion_r",
-                 "ankle_pitch": ("foot_pitch_l", "foot_pitch_r")},
+    "ethrc_v1": {"torso": "base_link", "vertical_joint": "torso_axial_rotation", "elbow": "elbow_flexion_r",
+                 "ankle_pitch": ("ankle_dorsiflexion_l", "ankle_dorsiflexion_r")},
     "g1_29dof_rev_1_0": _G1,
     "g1_29dof_with_hand_rev_1_0": _G1,
 }

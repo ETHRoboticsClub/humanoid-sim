@@ -91,7 +91,17 @@ class RobotPlant:
                                                                   queue_capacity=cfg.queue_capacity,
                                                                   device=str(self.device)))
         self.drives = self.core.map.drive_names
+        self.native = None
+        self.native_ids = None
+        if self.desc.usd_path is not None and self.desc.linkages:
+            from humanoid_sim.physics.native import NativeDrivePlant
+
+            self.native = NativeDrivePlant(self.core)
+            self.native_ids = torch.tensor([robot.joint_names.index(name) for name in self.native.names],
+                                           device=self.device)
         d = len(self.drives)
+        self.physics_names = self.native.names if self.native else self.joints
+        self.physics_ids = self.native_ids if self.native else self.joint_ids
         self.t_ns = 0
         self.latency_ns = torch.zeros(e, d, dtype=torch.int64, device=self.device)  # before the drive, randomized
         models = drive_models(self.desc)
@@ -129,7 +139,7 @@ class RobotPlant:
         self._ratio = nominal["joint_friction_ratio"]
         used = {s.param for s in specs}
         self.randomizer = Randomizer(specs, {k: v for k, v in nominal.items() if k in used},
-                                     {"body": list(robot.body_names), "joint": self.joints, "drive": self.drives},
+                                     {"body": list(robot.body_names), "joint": self.physics_names, "drive": self.drives},
                                      num_envs=e, device=self.device, seed=cfg.seed, level=cfg.level)
         from humanoid_sim.physics.crank_stops import check_crank_stops
         from humanoid_sim.physics.isaaclab import apply_heightfield_base, apply_joint_limits, running_solver
@@ -146,7 +156,7 @@ class RobotPlant:
     # -- randomization ----------------------------------------------------------------------------
 
     def _read_physics(self) -> dict[str, torch.Tensor]:
-        data, ids = self.robot.data, self.joint_ids
+        data, ids = self.robot.data, self.physics_ids
         out = {
             "body_mass": data.body_mass.torch.clone(),
             "body_com": torch.zeros_like(data.body_com_pos_b.torch),
@@ -166,8 +176,8 @@ class RobotPlant:
         e, d = self.num_envs, len(self.drives)
         ones = torch.ones(e, d, device=self.device)
         zeros3 = torch.zeros(e, 3, device=self.device)
-        static = torch.tensor([self.desc.joints[n].friction for n in self.joints], device=self.device)
-        dynamic = torch.tensor([self.desc.joints[n].dynamic_friction for n in self.joints], device=self.device)
+        static = torch.tensor([self.desc.physics_joints[n].friction for n in self.physics_names], device=self.device)
+        dynamic = torch.tensor([self.desc.physics_joints[n].dynamic_friction for n in self.physics_names], device=self.device)
         ratio = torch.where(static > 0, dynamic / static.clamp(min=1e-12), torch.ones_like(static))
         return {"drive_stiffness": ones, "drive_damping": ones.clone(), "torque_limit": ones.clone(),
                 "latency": torch.zeros_like(ones), "encoder_offset": torch.zeros_like(ones),
@@ -186,8 +196,10 @@ class RobotPlant:
         if self._solver == "kamino":
             # Kamino cannot switch a DoF's armature, damping or friction on or off without being rebuilt.
             for name in ("joint_armature", "joint_friction", "joint_damping"):
-                if name in v and bool((v[name] <= 0).any()):
-                    raise ValueError(f"Kamino needs {name} above zero; the randomization drew zero or less")
+                if name in v:
+                    nominal = self._nominal_physics[name]
+                    if bool(((v[name] < 0) | ((v[name] == 0) != (nominal == 0))).any()):
+                        raise ValueError(f"Kamino requires {name} to preserve the nominal zero/nonzero structure")
         if "body_mass" in v:
             r.set_masses_index(masses=v["body_mass"])
         if "body_mass" in v or "body_inertia" in v:
@@ -200,13 +212,13 @@ class RobotPlant:
         if "body_com" in v:
             r.set_coms_index(coms=self._com0 + v["body_com"])
         if "joint_armature" in v:
-            r.write_joint_armature_to_sim_index(armature=v["joint_armature"], joint_ids=self.joint_ids)
+            r.write_joint_armature_to_sim_index(armature=v["joint_armature"], joint_ids=self.physics_ids)
         if "joint_friction" in v:
             r.write_joint_friction_coefficient_to_sim_index(joint_friction_coeff=v["joint_friction"],
-                                                            joint_ids=self.joint_ids)
+                                                            joint_ids=self.physics_ids)
         if "joint_damping" in v:
             r.write_joint_viscous_friction_coefficient_to_sim_index(joint_viscous_friction_coeff=v["joint_damping"],
-                                                                    joint_ids=self.joint_ids)
+                                                                    joint_ids=self.physics_ids)
         if "friction" in v:
             from newton import ModelFlags
 
@@ -227,7 +239,11 @@ class RobotPlant:
             static = v.get("joint_friction", self._nominal_physics["joint_friction"])[env_ids]
             ratio = v["joint_friction_ratio"][env_ids] if "joint_friction_ratio" in v else self._ratio[env_ids]
             relief = self.core.friction_relief
-            relief[env_ids] = (static * (1 - ratio.clamp(0, 1))).to(relief.dtype)
+            physical_relief = (static * (1 - ratio.clamp(0, 1))).to(relief.dtype)
+            if self.native:
+                self.native.core.friction_relief[env_ids] = physical_relief
+                physical_relief = physical_relief[:, self.native.semantic_ids]
+            relief[env_ids] = physical_relief
         if self.imu is not None:
             for name, target in (("imu_gyro_bias", self.imu.gyro_bias), ("imu_accel_bias", self.imu.accel_bias),
                                  ("imu_misalignment", self.imu.misalignment)):
@@ -271,16 +287,24 @@ class RobotPlant:
         """Before each physics step: sample sensors at the step start, run the drives, write the targets, apply
         the gantry rope."""
         q, qd = self.joint_state()
-        fb = self.core.feedback(q, qd)
+        if self.native:
+            data = self.robot.data
+            q, qd = data.joint_pos.torch[:, self.native_ids], data.joint_vel.torch[:, self.native_ids]
+        fb = self.native.feedback(q, qd) if self.native else self.core.feedback(q, qd)
         self._push_history(fb)
         if self.imu is not None:
             data = self.imu_sensor.data
             self.imu.step(self.t_ns, data.ang_vel_b.torch, data.lin_acc_b.torch)
-        target = self.core.pre_physics(self.t_ns, q, qd, self.core.post_state)  # feedback converted q above
-        self._targets[:, self.joint_ids] = target.to(self._targets.dtype)
+        target = (self.native.pre_physics(self.t_ns, q, qd) if self.native
+                  else self.core.pre_physics(self.t_ns, q, qd, self.core.post_state))
+        self._targets[:, self.native_ids if self.native else self.joint_ids] = target.to(self._targets.dtype)
         tc = self.robot.actuators.target_command
         tc.set_position_index(value=self._targets)
         tc.set_velocity_index(value=torch.zeros_like(self._targets))
+        if self.native:
+            effort = torch.zeros_like(self._targets)
+            effort[:, self.native_ids] = self.native.effort.to(effort.dtype)
+            tc.set_effort_index(value=effort)
         self.gantry.apply(self.t_ns)
         self.t_ns += self.period_ns
 
@@ -299,7 +323,7 @@ class RobotPlant:
     def measured(self) -> Measured:
         q, qd = self.joint_state()
         offset = self.core.bank.position_offset
-        drive = self._with_offset(self.core.feedback(q, qd), offset)
+        drive = self._with_offset(self._drive_feedback(), offset)
         history = self._with_offset(self._hist, offset.unsqueeze(1))
         if self.reporting is not None:
             drive, history = self.reporting.report(drive), self.reporting.report(history)
@@ -310,7 +334,14 @@ class RobotPlant:
         data = self.robot.data
         forces = self.contacts.data.net_forces_w.torch if self.contacts is not None else None
         return Truth(q, qd, data.root_link_pose_w.torch, data.root_com_vel_w.torch[:, :3],
-                     data.root_com_ang_vel_b.torch, self.core.feedback(q, qd), forces)
+                     data.root_com_ang_vel_b.torch, self._drive_feedback(), forces)
+
+    def _drive_feedback(self) -> DriveFeedback:
+        if self.native:
+            data = self.robot.data
+            return self.native.feedback(data.joint_pos.torch[:, self.native_ids],
+                                        data.joint_vel.torch[:, self.native_ids])
+        return self.core.feedback(*self.joint_state())
 
     # -- reset ------------------------------------------------------------------------------------
 
@@ -330,6 +361,12 @@ class RobotPlant:
             qd = torch.zeros_like(q) if joint_vel is None else joint_vel
             r.write_joint_state_to_sim_index(position=q, velocity=qd, joint_ids=self.joint_ids, env_ids=env_ids)
             self._targets[env_ids.unsqueeze(1), self.joint_ids.unsqueeze(0)] = q.to(self._targets.dtype)
+            if self.native:
+                positions, velocities = self.native.complete_articulation_state(
+                    q, qd, r.data.joint_pos.torch[env_ids], r.data.joint_vel.torch[env_ids], list(r.joint_names))
+                r.write_joint_state_to_sim_index(position=positions, velocity=velocities,
+                                                env_ids=env_ids)
+                self._targets[env_ids] = positions.to(self._targets.dtype)
         self.core.reset(env_ids, demand)
         self.randomizer.draw_reset(env_ids)
         self._write_device(env_ids)

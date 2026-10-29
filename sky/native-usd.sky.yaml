@@ -1,0 +1,24 @@
+name: humanoid-sim-native-usd
+workdir: .
+
+resources:
+  accelerators: L4:1
+  cpus: 8+
+  memory: 32+
+  disk_size: 150
+
+envs:
+  ISAACLAB_COMMIT: 32712682b69edd488eea26689da6905c48d31037
+  UV_VERSION: 0.13.1
+
+setup: |
+  bash sky/setup.sh
+  "$HOME/.local/bin/uv" pip install --python "$HOME/il-venv/bin/python" "pytest>=9,<10"
+
+run: |
+  set -euo pipefail
+  export PATH="$HOME/.local/bin:$HOME/il-venv/bin:$PATH"
+  python -c 'import torch; assert torch.cuda.is_available(), "CUDA is required for native physics checks"'
+  humanoid-sim build-asset
+  humanoid-sim build-asset --base-joints
+  pytest -v -s tests/test_native_usd.py tests/test_description_delivery.py tests/test_native_parameters.py tests/test_native_physics.py

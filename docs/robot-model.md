@@ -5,19 +5,45 @@ humanoid-sim does not define the robot. Geometry, masses, joints, drives and the
 ```
 third_party/humanoid-urdf/ethrc_v1/            profiles/ethrc_v1.yaml
   actuators.yaml                                 model:    build choices (asset)
-  v1_description/urdf/*.urdf, meshes/            physics:, devices:  (spawn and run time)
+  v1_description/usd/, urdf/, meshes/            physics:, devices:  (spawn and run time)
         |                                              |
         v                                              |
   Description             model/description.py         |
         |                                              |
         +----------------------+-----------------------+
                                v
-  PreparedUrdf            model/urdf.py      ->  outputs/assets/ethrc_v1/<key>/robot.urdf, collision/*.stl
+  native USD preparation  model/usd.py       ->  outputs/assets/ethrc_v1/<key>/robot.usdc
                                v
-  build_asset             model/asset.py     ->  outputs/assets/ethrc_v1/<key>/usd/robot/robot.usda, asset.json
+  build_asset             model/asset.py     ->  asset.json (source hashes, joints, sole bounds)
                                v
   joint_properties        physics/joint_properties.py, physics/isaaclab.py   (written at spawn)
 ```
+
+## Native USD delivery
+
+For ETHRC V1, `Description.usd_path` resolves the delivered `v1_description/usd/humanoid_V1.usda`.
+`model/usd.py` flattens it and its mesh layer into `outputs/assets/ethrc_v1/<key>/robot.usdc`.
+This path bypasses `PreparedUrdf` and the Isaac URDF converter. It preserves the delivered body inertias,
+cranks, rods, spherical joints and loop closures, welds unlisted hand joints, removes authored drive gains,
+and applies description joint limits and crank stops. The profile selects mesh collision approximation;
+the native path does not replace the delivered feet with synthetic sole plates.
+
+The asset key and metadata include a hash of all used USD layers as well as the description and model profile.
+The runtime description digest remains the hash of the selected URDF and `actuators.yaml`, for client ABI
+compatibility; it is not a substitute for the native asset's source-layer hash.
+
+Public joint observations remain in semantic pitch/roll coordinates. `physics_joints` additionally contains
+the native crank shafts. Drive gains and rotor armature belong on these shafts; passive ankle hinges have
+zero drive gains and zero rotor armature. `NativeDrivePlant` connects both `SimCore` and the training plant
+to these physical coordinates. Feedback reads shaft state, not reconstructed semantic crank angles.
+Reset and host-viewer kinematics initialize crank and rod coordinates from the same delivered geometry.
+
+Training joint randomization and PACE fitting use the physical joint inventory, including shafts. PACE fixes
+structural zero parameters rather than fitting duplicate hinge inertia. Kamino randomization must retain
+the nominal zero/nonzero structure. Semantic commands and observations keep their original ordering.
+
+The prepared-URDF pipeline below applies to descriptions without a native USD delivery, such as the G1.
+Native source checks and CPU kinematics do not establish CUDA solver stability or hardware fidelity.
 
 ## Robots
 
@@ -30,10 +56,10 @@ Nothing in the code names a robot. What differs between them comes from the desc
 | Drives | 22 EPOS4 drives: 18 drive a joint each, two crank drives per ankle move pitch and roll through a linkage | 29 motors, one per joint, in `LowCmd` slots `motor_index` 0 to 28 |
 | Gains | `baseline_position_gains` per drive | `baseline_stiffness` and `baseline_damping` per joint (Unitree's deploy gains) |
 | Home pose | the URDF's zero, the pose the CAD is exported in (`poses.home: zero`) | Unitree's standing pose, knees bent 0.3 rad (`poses.home: {preset: standing-init-v1}` from `position-presets.yaml`) |
-| Feet | a sole plate fitted to each foot's lowest face (`model.sole`) | four 5 mm spheres per foot, bounded by a sole box for the truth (`model.sole.fit: bounds`) |
-| Self-collision | on, with Controls' contact excludes | with hands: arms against legs and each other, legs against each other (`model.self_collision`), so the hands stop at the hips; without hands: off, as Isaac Lab's own G1 has it |
+| Feet | delivered collision meshes; sole bounds derived from USD for runtime truth | four 5 mm spheres per foot, bounded by a sole box for the truth (`model.sole.fit: bounds`) |
+| Self-collision | on, using the delivered joint collision settings | with hands: arms against legs and each other, legs against each other (`model.self_collision`), so the hands stop at the hips; without hands: off, as Isaac Lab's own G1 has it |
 | IMU | the URDF's `imu_joint` | the URDF's `imu_joint`, on the pelvis |
-| Holding the home pose at the baseline gains | stands: its crank-driven ankles are about 4.6 times as stiff in pitch as the stiffness at which its body topples | tips over within about 1.3 s: its ankles (40 Nm/rad each) are about 0.4 times as stiff as that (about 210 Nm/rad), so the G1 needs a policy to stand |
+| Holding the home pose at the baseline gains | stability must be checked on the native closed-chain asset and chosen solver | requires stabilization; baseline drive gains alone are not a balance policy |
 
 `tests/test_robots.py` runs over every robot `robots()` finds: inventory, profile merge, the prepared URDF, sole boxes, mirror pairs, the home pose inside the travel, and the plant at the home pose. The physics, world, training, gantry, runtime and runtime-view tests run on the V1 and both G1s (`PHYSICS_ROBOTS` in `tests/conftest.py`); what they expect of each robot comes from its description, profile and host kinematics: mass and body count from the URDF, gravity sag from the drives' stiffness, the IMU rate from the profile, the joint-stop sink from MuJoCo's soft-limit law, the toppling stiffness from the centre of mass. `tests/test_runtime_host.py::test_the_host_serves_the_g1` also checks the G1's motor slots and soles through the runtime segment.
 
@@ -52,12 +78,13 @@ Nothing in the code names a robot. What differs between them comes from the desc
 
 | File (under `ethrc_v1/`) | What humanoid-sim takes from it |
 |---|---|
-| `actuators.yaml` | Joint and drive inventory, signs, standing offsets, position limits, passive joint parameters, drive families, baseline drive gains, ankle linkage geometry. Its `schema` must be `ethrc-actuators/v1`; anything else raises. |
-| `v1_description/urdf/URDF_6.urdf` | The URDF that `actuators.yaml` names in its `urdf:` key, and the one the profile selects (`model.urdf`) and the asset is built from: 60.15 kg, with the ORCA hands fixed at zero. Also read for the description digest, the IMU mount (`Description.imu_mount`, the URDF's `imu_joint`) and the mirror map. |
-| `v1_description/urdf/URDF_6_orca_hands.urdf` | The same robot with the 34 hand joints movable. Welding them, as Controls' `--fixed-orca-hands` does, gives `URDF_6.urdf`. |
+| `actuators.yaml` | Joint and drive inventory, signs, optional standing offsets, position limits, passive parameters, motor-family ratings and baseline gains. Its schema must be `ethrc-actuators/v1`. |
+| `v1_description/urdf/humanoid_V1.urdf` | Semantic tree, description digest, IMU mount and mirror map. Not the physical closed-chain asset. |
+| `v1_description/usd/humanoid_V1.usda`, `humanoid_V1_meshes.usdc` | Authoritative delivered physical bodies, inertias, collision meshes and closed ankle mechanisms. |
+| `v1_description/v1_description/ankle_model.py` | Derives the analytical semantic-to-crank geometry from the delivered USD joint frames. |
 | `v1_description/meshes/` | Visual and collision meshes (STL), referenced as `package://v1_description/meshes/...`. |
 
-URDF_6 is the full-body CAD export, and its zero is the calibration pose: the pose of the export itself (humanoid_description 8e0f840), arms down and legs straight. Captures recorded in URDF_5's frame do not carry over; re-record them on URDF_6.
+The selected description defines the coordinate frames. Captures from older CAD deliveries must not be assumed compatible: verify their description identity and calibration convention before replaying them.
 
 ### Joint coordinates
 
@@ -67,15 +94,15 @@ The [standing offset](glossary.md#standing-offset) `standing_offset_rad` is the 
 
 A joint's `position_limit` is in standing-relative radians. `Description.calibration_travel(name)` turns it into the simulated range in URDF radians: both bounds plus the standing offset, then replaced on either side by `mechanical_stop_calibration_rad` where a stop is recorded (none is, at present). A stop that lies inside the position limit raises, since the limit could never be reached. This is the rule of Controls' `ethrc_ssot/joint_travel.py`. humanoid-sim applies the travel the description gives and adds no stop of its own. The knee's upper bound is +0.05 rad, just past straight.
 
-The ankle hinges have no limit of their own. Each crank's `position_limit` under `drives:` is its physical stop (device frame, zero at the linkage neutral, which sits at the hinge angles `ankle_model.semantic_neutral_rad`: pitch -0.329 rad), and the ankle's only limit; a hinge's simulated travel is the axis hull of the poses those stops allow, from humanoid-urdf's `ankle_model` (`AnkleModel.bounds`, through `Description.ankle_model`). The hull is a box around a non-rectangular set: the solver's hinge limits let through some poses near its corners that a crank stop would block.
+Each crank's device-space `position_limit` is authored on its native shaft. The analytical ankle model derives the semantic feasible region from these stops and the USD joint frames. Its bounds form a rectangular hull, not the full nonlinear feasible set. The physical linkage and shaft stops enforce the coupled constraint. Crank positions are absolute CAD joint angles; no old neutral offset is subtracted.
 
 ### Base frame and forward direction
 
-The root body `base_link` carries the base frame. With the base upright, z points up and x is the lateral axis: the left foot sits at -x and the right foot at +x, which makes +y the robot's forward direction. Code that assumes x forward gets this robot wrong, so check the forward direction from the sole boxes. Their long axis runs heel to toe and lies along world y when the robot stands with an upright base (seen from above, along y in the home pose). That axis is the box x axis, the first column of `rotation` in `asset.json` `sole_boxes`. Its sign comes from a fit (it points to -y on the current asset), so it gives the fore-aft line only; which end is the toe follows from the foot positions above.
+The delivered `base_link` carries the root frame. Read axes and sensor mounts from the current description rather than assuming the orientation of an older CAD export. Native sole metadata is a body-frame collision bound, not a replacement collision shape or an independently calibrated forward-direction frame.
 
 ### Joints, drives and families
 
-The description has 22 joints and 22 EtherCAT drives. 18 joints have a one-to-one drive, named by the joint's `device:` field. The four ankle joints (`foot_pitch_l/r`, `foot_roll_l/r`) have `device: null`: each foot is moved by two HEJ 50 drives stacked on the back of the shin, the `upper` and `lower` *crank*. Each crank drive turns a short arm that pushes a rod down to the foot, so the two together set both pitch and roll. The cranks are listed under `drives:` with both joints they move. The linkage geometry (`ankle_model`) feeds the transmission described in [drives.md](drives.md).
+The description separates semantic joints from drives. Most joints have a one-to-one drive named by `device`. The ankle dorsiflexion and inversion joints instead share two crank drives per side. The native shaft names and linkage geometry are extracted from USD, while gains, family ratings and limits come from `actuators.yaml`. See [drives.md](drives.md).
 
 `Description.joints` holds, per joint: `region`, `device`, `sign`, `standing_offset_rad`, `armature` (for the ankle hinges, `armature_joint`, the crank inertia reflected into joint space), passive viscous `damping` (Nm s/rad), Coulomb `friction` (Nm, the static friction) and `dynamic_friction` (Nm while sliding: the joint's or its family's optional `dynamic_friction`, else `friction`; it must lie in [0, `friction`]), peak `effort` and `velocity`. `Description.drives` holds every drive: the 18 one-to-one drives in joint order, then the four cranks. Each drive carries its family, peak and nominal effort, no-load velocity, and its baseline position gains from `baseline_position_gains` (the stiffness and damping the drive's own position loop runs with; see [drives.md](drives.md)).
 
@@ -104,14 +131,14 @@ EOF
 
 ### Identity and hash checks
 
-`Description.digest` is a sha256 over the file name and bytes of `URDF_6.urdf` and `actuators.yaml` (`description_digest` in `src/humanoid_sim/runtime/abi/plant_abi.py`). `Description.revision` is the git commit of the description root, or `None` outside a git checkout. `Description.identity()` returns the robot id, digest and revision. It is recorded in every `asset.json`, in the results of `replay`, `fit-delay` and `fit-passive`, and in the runtime segment's header and metadata.
+`Description.digest` is a sha256 over the file name and bytes of the selected URDF and `actuators.yaml` (`description_digest` in `src/humanoid_sim/runtime/abi/plant_abi.py`). `Description.revision` is the git commit of the description root, or `None` outside a git checkout. `Description.identity()` returns the robot id, digest and revision. It is recorded in every `asset.json`, in the results of `replay`, `fit-delay` and `fit-passive`, and in the runtime segment's header and metadata.
 
 humanoid-sim has no expected digest built in. The digest is compared where two parties must agree on the description:
 
 - It is part of the asset key (see [Output directory](#output-directory-and-assetjson)). Every command that loads the robot (`replay`, `view-replay`, `view-runtime`, `bench`, `fit-delay`, `fit-passive`, `serve`) looks up the asset built from the current description and profile, and stops with `asset ... is not built for this description and profile` when there is none. `--usd PATH` (a global option, before the subcommand) skips that lookup.
 - The runtime host writes it into the segment header. A client that passes its own digest to `Segment.open` (`plant_abi.py`) refuses a segment whose digest differs ("the sim and the client read different descriptions"). See [controls-integration.md](controls-integration.md).
 
-The digest covers `URDF_6.urdf` and `actuators.yaml` only. The home pose table is covered by the description's git revision, which is recorded next to the digest, and the mesh files by neither: after a change to an STL alone, rebuild with `humanoid-sim build-asset --force`.
+The runtime digest covers the selected URDF and `actuators.yaml` only. Native asset identity additionally hashes all used USD layers, including the mesh layer. For URDF-only assets, standalone STL changes require `humanoid-sim build-asset --force`. The description revision records the home-pose table's provenance.
 
 ### Using a different description root
 
@@ -137,36 +164,21 @@ docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim hum
 
 Each prints the path of the USD. `--force` rebuilds an existing asset in place. `--assets DIR` (a global option, before the subcommand: `humanoid-sim --assets /tmp/assets build-asset`) changes the output root from `outputs/assets`. The URDF conversion needs Isaac Lab; everything before it runs anywhere with the core dependencies, which is how a host checkout computes the asset key and finds an asset the image built.
 
-### The prepared URDF
+### The prepared URDF (URDF-only assets)
 
 `PreparedUrdf.build` (`src/humanoid_sim/model/urdf.py`) applies the profile's modeling choices to the selected URDF, in this order. Every number comes from the meshes, the description or the profile.
 
-1. With `model.weld_unlisted_joints: true`, every movable joint without an entry in `actuators.yaml` becomes a fixed joint at its URDF zero. `URDF_6.urdf` already has its 34 hand joints fixed, so nothing is welded; on `URDF_6_orca_hands.urdf` those 34 would be, the same as Controls' `--fixed-orca-hands`. A listed joint missing from the URDF raises.
+1. With `model.weld_unlisted_joints: true`, every movable joint without an entry in `actuators.yaml` becomes a fixed joint at its URDF zero. A listed joint missing from the URDF raises. This rule is for URDF-only assets; native USD preparation explicitly retains crank and rod joints.
 2. Each of the 22 joints becomes `revolute` (14 of them are `continuous` in the URDF) with the calibration travel as its range, the drive's peak `effort` and its `velocity`.
 3. Each foot gets a sole box. On the body carrying each `foot_roll` joint (profile `model.sole.joints`), the collision mesh with the lowest point, including meshes of links welded to that body, is the foot plate. `fit_sole_plate` fits a thin box to the plate's bottom face: it takes the vertices within 1.5 mm of the lowest point, fits the face normal by SVD, refits with the vertices within `face_depth_m` of the face (at most five rounds, until the set stops changing), and sizes the box from the face's extent along its principal in-plane axis and the axis across it. The box is `box_thickness_m` thick, its bottom face on the plate's bottom face, its x axis along the principal in-plane axis (the sole's long axis, heel to toe) and its z axis pointing up into the plate. The plate mesh's collision is removed and the box (`sole_box_l`, `sole_box_r`) is added. On the current description both boxes are about 250 x 90 x 5 mm. The algorithm is Controls' `build_mjcf.py` `sole_plate`, ported unchanged. A profile with `model.sole.fit: bounds` (the G1's) instead takes the box bounding the collision shapes of the foot body and its welded links, along the body's axes, and leaves the collision geometry as it is: the G1's box bounds its four 5 mm contact spheres, 180 x 70 x 10 mm.
 4. The physics collides convex shapes, and the URDF converter turns each collision mesh into its convex hull (the smallest convex shape enclosing it). With `model.collision_hulls: per_body`, `merge_body_collisions` first combines every remaining collision mesh of a body and of the links welded to it into one mesh in the body frame, written as `collision/<body>.stl`, so each body gets one hull: 23 hulls plus the two sole boxes. With `per_mesh` each of the 118 remaining meshes becomes its own hull. Against the ground the hull of the union reaches exactly as far as the separate hulls did; between bodies it fills the gaps between parts. Primitive colliders (the sole boxes) are left alone.
 5. With `--base-joints` only, three base joints are added above the root; see [Base joints](#base-joints).
 6. `package://` mesh URIs are resolved to absolute paths for the converter. A mesh from any other package raises.
 
-A *body* is a link that no fixed joint merges into a parent: the root and the child of every movable joint. The converter merges welded links into their body (`merge_fixed_joints=True`), so the asset has 23 rigid bodies. Their names come from the CAD export and do not reliably say which side they are on; the joint above each body does:
-
-| Body | Joint above it | Self-collision set |
-|---|---|---|
-| `base_link` (carries the IMU) | none, it is the root | `trunk` |
-| `hej90_hip_abduction_1` | `hip_central_rotation` | `trunk` |
-| `Component171_1` (torso) | `waist_upperbody_yaw` | `trunk` |
-| `leg_flexion_abduction_connector_l_1`, `..._r_1` | `leg_flexion_l`, `leg_flexion_r` | `leg_l`, `leg_r` |
-| `hej90_leg_abduction_l_1`, `..._r_1` | `leg_abduction_l`, `leg_abduction_r` | `leg_l`, `leg_r` |
-| `new_lower_leg_Mirror__1`, `new_lower_leg_1` | `hip_yaw_l`, `hip_yaw_r` | `leg_l`, `leg_r` |
-| `new_upperl_leg_Mirror__1`, `new_upperl_leg_1` | `knee_l`, `knee_r` | `leg_l`, `leg_r` |
-| `universal_joint_cross_l_Mirror__1`, `universal_joint_cross_l_1` | `foot_pitch_l`, `foot_pitch_r` | `leg_l`, `leg_r` |
-| `bottom_universal_joint_l_Mirror__1`, `bottom_universal_joint_l_1` (feet, with the sole boxes) | `foot_roll_l`, `foot_roll_r` | `leg_l`, `leg_r` |
-| `shoulder_connector_l_1`, `..._r_1` | `shoulder_flexion_l`, `shoulder_flexion_r` | `arm_l`, `arm_r` |
-| `shoulder_arm_connector_l_1`, `..._r_1` | `shoulder_abduction_l`, `shoulder_abduction_r` | `arm_l`, `arm_r` |
-| `hej50_arm_rotation_l_1`, `..._r_1` | `shoulder_rotation_l`, `shoulder_rotation_r` | `arm_l`, `arm_r` |
-| `connector_elbow_forearm_l_1`, `..._r_1` (forearm and welded hand) | `elbow_flexion_l`, `elbow_flexion_r` | `arm_l`, `arm_r` |
-
-`PreparedUrdf.body_tree()` returns this table for any build.
+For URDF-only assets, the converter merges fixed links into their parent body. `PreparedUrdf.body_tree()`
+reports the resulting tree. Native USD assets retain delivered rigid bodies, including the crank and rod
+bodies: their count is not the semantic joint count plus one. Read native body names and relationships from
+the USD joints; CAD names alone do not reliably identify a side or function.
 
 ### Conversion, self-collision and contact excludes
 
@@ -195,7 +207,7 @@ outputs/assets/ethrc_v1/<key>/
   asset.json             provenance and build record
 ```
 
-`build_asset` returns the existing USD without rebuilding when `asset.json` is present and `--force` is not given. A change to `actuators.yaml`, to `URDF_6.urdf`, to the selected URDF variant or to anything in the profile's `model` block produces a new key, so the old asset stays on disk and commands ask for a build. Changes to the `physics` and `devices` blocks are applied at spawn or run time and need no rebuild. Mesh file contents are not part of the key, nor are build steps that leave the prepared URDF text unchanged (the converter settings, the authoring of contact excludes); after changing either, rebuild with `--force`.
+`build_asset` reuses an asset when its keyed `asset.json` exists and `--force` is not given. Description and model-profile changes produce a new key. Native USD keys additionally cover every used source layer, including mesh data, and the preparation schema version. Changes to `physics` and `devices` apply at spawn or run time. For URDF-only conversion, standalone mesh edits or converter changes not reflected in the prepared URDF still require `--force`.
 
 | `asset.json` field | Content |
 |---|---|
@@ -231,8 +243,8 @@ The USD carries geometry, inertia and joint ranges. The remaining per-joint valu
 
 | Property | Value | Source |
 |---|---|---|
-| `stiffness`, `damping` | The solver's constant PD gains `k0`, `d0`. One-to-one joints: the drive's `baseline_position_gains`. Ankle hinges: `diag(Jᵀ K J)` with the crank Jacobian `J` at the standing pose (`DriveJointMap.joint_space_gains`). | `actuators.yaml` `baseline_position_gains` |
-| `armature` | Rotor inertia reflected to the joint, added to the joint's inertia. Ankle hinges use `armature_joint`. | `actuators.yaml` `armature` / `armature_joint` |
+| `stiffness`, `damping` | Constant PD gains `k0`, `d0` on directly driven joints and native crank shafts; zero on passive ankle hinges. | `actuators.yaml` `baseline_position_gains` |
+| `armature` | Rotor inertia on drive shafts; zero duplicate rotor inertia on native ankle hinges. | `actuators.yaml` `armature` |
 | `friction` | Coulomb friction of an enabled drive (Nm). | `actuators.yaml` `friction` |
 | `viscous_friction` | Passive viscous damping (Nm s/rad), separate from the PD damping. | `actuators.yaml` `damping` |
 | `joint_effort_limit` | One-to-one joints: the drive's peak `effort`. Ankle hinges: the torque both cranks reach at their peak at the standing pose (per hinge, the sum over the two cranks of the Jacobian entry's magnitude times the crank's peak), so the solver's clamp never binds before the drive model's own torque envelope does. | `actuators.yaml` `effort` |
@@ -304,19 +316,14 @@ The training scene places the base 1 mm (`STANDING_CLEARANCE_M`) above the pose'
 `mirror_map(desc)` (`src/humanoid_sim/model/mirror.py`) returns a `MirrorMap`: which joint and drive is whose left/right mirror image, and with which sign. Joint positions mirror about the standing pose `c`: `q'[perm[i]] = c[perm[i]] + sign[i] · (q[i] - c[i])`. Velocities, torques and deviations map with the signs alone. Everything is derived from the description:
 
 - Pairs are joints named `*_l` / `*_r`. Drives follow their joints; the ankle cranks pair upper with upper and lower with lower.
-- The sagittal plane is the plane between the first pair's joint frames, snapped to the nearest base axis. In the base frame of this URDF that is the plane normal to x (`lateral_axis = 0`; see [Base frame and forward direction](#base-frame-and-forward-direction)).
+- The sagittal plane is the plane between the first pair's joint frames, snapped to the nearest base axis. `lateral_axis` is derived from the current description, not fixed to an older CAD frame.
 - A joint's sign is +1 where its partner's axis equals the mirror image of its own axis and -1 where it is the opposite. A rotation axis is a pseudovector, so its mirror image is `-M a` for the reflection `M`. Joints on the plane map to themselves: -1 for a yaw or roll joint, +1 for a pitch joint.
 - A one-to-one drive's sign combines the joint sign with both drives' `sign` fields. For the cranks it is the sign that maps the left cranks of an ankle pose onto the right cranks of its mirror image, checked over ±15° about standing.
 
-| Joint (pair) | Joint sign |
-|---|---|
-| `hip_central_rotation`, `waist_upperbody_yaw` (map to themselves) | -1 |
-| `leg_flexion`, `hip_yaw` | -1 |
-| `leg_abduction`, `knee`, shoulders, elbows, `foot_pitch`, `foot_roll` | +1 |
-
-With the current description every drive sign is -1.
-
-The robot is not exactly mirror-symmetric: at the standing pose (the V1's zero) the feet sit a few centimetres from each other's mirror image. `MirrorMap.standing_asymmetry_m` is the largest mismatch of a joint frame at the standing pose, 0.041 m on the current description. Because each side mirrors about its own standing pose, the mirror of the standing pose is the standing pose, but a mirrored state is the other side doing the mirrored motion with its own geometry, which is close to the geometric mirror image without being equal to it. The map reads `URDF_6.urdf`, the URDF `actuators.yaml` names and the asset is built from.
+Joint and drive signs are derived rather than copied from a fixed table. `MirrorMap.standing_asymmetry_m`
+reports the largest joint-frame mismatch at the standing pose. Each side mirrors about its own standing
+pose, so mirroring preserves that pose even if the two delivered mechanisms are not exactly symmetric.
+The map reads the URDF selected by `actuators.yaml` and the USD-derived crank geometry.
 
 ```python
 import numpy as np
@@ -389,12 +396,12 @@ A measured value reaches the simulation through humanoid-urdf. Find where the fa
 |---|---|---|
 | Joint Coulomb friction or viscous damping | `actuators.yaml` `joints.<joint>.friction` / `damping`, with `damping_friction_source` | Solver friction and passive damping at spawn |
 | Back-driving torque of a disabled drive | `actuators.yaml` `families.<family>.backdrive_torque` | Friction of a disabled drive's joint in the runtime host |
-| Rotor inertia | `joints.<joint>.armature` (ankles: `armature_joint`) | Solver armature |
+| Rotor inertia | `joints.<joint>.armature` | Solver armature on native drive shafts, not duplicated on ankle hinges |
 | A joint's zero or the standing pose | `joints.<joint>.standing_offset_rad` and `standing_reference`; edited by hand in `actuators.yaml` with its source (never move URDF joint origins for this) | Standing pose, simulated travel, ankle gains and effort limits, mirror center |
 | The CAD (a new export) | Hardware delivers it to humanoid-urdf as `URDF := f(CAD)`, already at the calibration pose (see humanoid-urdf's `README.md`) | Geometry, masses, the home pose and its spawn height |
 | Joint travel or a mechanical stop | `joints.<joint>.position_limit` (standing-relative) or `mechanical_stop_calibration_rad` (URDF radians) | Joint range in the USD |
 | Drive gains, peak torque, torque-speed curve | `baseline_position_gains`, `effort`, `families.<family>.torque_speed` | Solver PD, effort limits, torque envelope |
-| A link's mass, inertia or geometry | The link's `<inertial>`, `<origin>` or meshes in the URDF, changed in the CAD and delivered again by hardware; humanoid-urdf never patches a delivered URDF. humanoid-sim simulates `URDF_6.urdf`, so the change must reach that file. | Mass, inertia and collision shapes in the USD |
+| A link's mass, inertia or geometry | Update the authoritative CAD delivery in humanoid-urdf: native USD layers for V1, URDF and meshes for URDF-only robots. | Mass, inertia and collision shapes in the prepared USD |
 | Encoder resolution, IMU timing or noise | `profiles/ethrc_v1.yaml` in this repository | Training plant feedback, IMU delivery |
 
 Then:

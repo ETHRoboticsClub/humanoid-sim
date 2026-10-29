@@ -12,44 +12,40 @@ poses:
   start: standing
 
 model:
-  # The URDF actuators.yaml names (60.15 kg, ORCA hands fixed at zero), so the description digest covers the
-  # simulated URDF. It equals URDF_6_orca_hands.urdf with the hands welded, as Controls builds its MJCF.
-  # Relative to v1_description/.
-  urdf: urdf/URDF_6.urdf
   # Movable URDF joints without an actuators.yaml entry are welded at zero (Controls --fixed-orca-hands).
   weld_unlisted_joints: true
-  # Sole contact primitive (Controls build_mjcf.py SOLE_JOINTS / SOLE_BOX_THICKNESS_M / SOLE_FACE_DEPTH_M
-  # @ 447b4acb): a box on the body carrying each foot_roll joint, fitted to the face of that body's
-  # lowest collision mesh, which then stops colliding.
   sole:
-    joints: {l: foot_roll_l, r: foot_roll_r}
+    joints: {l: ankle_inversion_l, r: ankle_inversion_r}
+    fit: bounds
     box_thickness_m: 0.005
     face_depth_m: 0.001
   # Self-contact excludes (Controls build_mjcf.py REST_EXCLUDES + ORCA_REST_EXCLUDES @ 447b4acb), as
   # merged-body names. Bodies overlapping at rest by construction of convex-hull collision.
   contact_excludes:
-    - [Component171_1, base_link]
-    - [Component171_1, hej90_hip_abduction_1]
     - [base_link, hej90_hip_abduction_1]
-    - [bottom_universal_joint_l_1, new_upperl_leg_1]
-    - [bottom_universal_joint_l_Mirror__1, new_upperl_leg_Mirror__1]
     - [hej90_hip_abduction_1, hej90_leg_abduction_l_1]
     - [hej90_hip_abduction_1, hej90_leg_abduction_r_1]
     - [hej50_arm_rotation_l_1, shoulder_connector_l_1]
     - [hej50_arm_rotation_r_1, shoulder_connector_r_1]
-  # One convex hull per body (see model/urdf.py): the hands' 17 finger links and every bracket become
-  # part of their body's hull. `per_mesh` makes one hull per URDF collision mesh: 118 hulls instead of 23.
-  collision_hulls: per_body
+  collision_hulls: per_mesh
+  usd_collision_approximation: convexHull
   # Which bodies collide with each other. A set is every body at or below its joint; the bodies in no
   # set (base, hip carrier, torso) are `rest`. `pairs` lists the set pairs that collide, or `all`.
   # Every pair collides: on an L40S at 4096-16384 envs, colliding only legs with legs and arms with the
   # trunk and their own leg ran no faster.
   self_collision:
-    sets: {leg_l: leg_flexion_l, leg_r: leg_flexion_r, arm_l: shoulder_flexion_l, arm_r: shoulder_flexion_r}
+    sets: {leg_l: hip_flexion_l, leg_r: hip_flexion_r, arm_l: shoulder_flexion_l, arm_r: shoulder_flexion_r}
     rest: trunk
     pairs: all
   # Ground contact (Controls urdf/scene.xml floor: friction 1, condim 3).
   ground_friction: 1.0
+
+physics:
+  mjwarp:
+    nconmax: 1024
+    njmax: 4096
+  kamino:
+    max_contacts_per_world: 1024
 
 devices:
   # Output encoder resolution per drive family: the counts every reported position is in (Controls
@@ -63,6 +59,4 @@ devices:
 solver_gains: baseline        # constant per-episode PD = humanoid-urdf baseline_position_gains (ankles via J at standing)
 
 support:
-  # The torso (Component171_1, below the waist yaw, with the fixed torso frame merged in) carries the shoulders,
-  # by which Controls hangs the V1 (guided_sagittal_scenario.py SHOULDER_ROPES).
-  harness: {body: Component171_1, shoulders: [shoulder_connector_l_1, shoulder_connector_r_1]}
+  harness: {body: base_link, shoulders: [shoulder_connector_l_1, shoulder_connector_r_1]}

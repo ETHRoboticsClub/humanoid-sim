@@ -141,10 +141,10 @@ def cmd_bench(args) -> int:
 
 # Joints tied left/right for the passive fit: the upper body, the worst-replayed part of the robot.
 UPPER_BODY_GROUPS = {
-    "waist": ("waist_upperbody_yaw",),
+    "waist": ("torso_axial_rotation",),
     "shoulder_flexion": ("shoulder_flexion_l", "shoulder_flexion_r"),
     "shoulder_abduction": ("shoulder_abduction_l", "shoulder_abduction_r"),
-    "shoulder_rotation": ("shoulder_rotation_l", "shoulder_rotation_r"),
+    "shoulder_rotation": ("shoulder_internal_rotation_l", "shoulder_internal_rotation_r"),
     "elbow": ("elbow_flexion_l", "elbow_flexion_r"),
 }
 
@@ -253,7 +253,7 @@ def cmd_fit_pace(args) -> int:
 
     from humanoid_sim.replay.replay import fit_commands
     from humanoid_sim.sim import SimCore
-    from humanoid_sim.sysid.pace import PaceSpace, evaluate, fit, save, start_values
+    from humanoid_sim.sysid.pace import PaceSpace, evaluate, fit, save, start_values, structural_fixed
 
     captures = [open_capture(c) for c in args.captures]
     held = [open_capture(c) for c in args.holdout]
@@ -276,8 +276,10 @@ def cmd_fit_pace(args) -> int:
               delay_bounds_ns=tuple(int(round(v * 1e6)) for v in args.delay_ms),
               separate_dynamic_friction=not args.no_dynamic_friction,
               delay_groups=None if args.one_delay else [sim.desc.drives[d].family for d in drives])
-    sizes = PaceSpace(joints, drives, start_values(sim.desc, joints), **kw).sizes
-    fixed = {}
+    joints = sim.native.names if sim.native else joints
+    start = start_values(sim.desc, joints)
+    fixed = structural_fixed(start)
+    sizes = PaceSpace(joints, drives, start, fixed=fixed, **kw).sizes
     for item in args.fix:
         param, _, name = item.partition(".")
         names = drives if param == "bias" else joints
@@ -326,6 +328,7 @@ def cmd_pace_selftest(args) -> int:
         fit,
         save,
         start_values,
+        structural_fixed,
         synthetic_capture,
     )
 
@@ -333,7 +336,9 @@ def cmd_pace_selftest(args) -> int:
                   solver=args.solver)
     plant = sim.plant
     joints, drives = list(plant.map.joint_names), list(plant.map.drive_names)
-    space = PaceSpace(joints, drives, start_values(sim.desc, joints), log_bound=math.log(args.bound),
+    physics_joints = sim.native.names if sim.native else joints
+    start = start_values(sim.desc, physics_joints)
+    space = PaceSpace(physics_joints, drives, start, fixed=structural_fixed(start), log_bound=math.log(args.bound),
                       separate_dynamic_friction=not args.no_dynamic_friction,
                       delay_groups=None if args.one_delay else [sim.desc.drives[d].family for d in drives])
     rng = np.random.default_rng(args.seed)

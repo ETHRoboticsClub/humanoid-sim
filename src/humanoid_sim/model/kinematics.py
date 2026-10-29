@@ -26,6 +26,18 @@ class RobotKinematics:
         if missing:
             raise RuntimeError(f"USD lacks joints {missing}")
         self.joint_names = list(joint_names)
+        self.native_state = None
+        from humanoid_sim.model.asset import asset_meta
+        from humanoid_sim.model.description import Description
+        from humanoid_sim.model.native_state import NativeState
+
+        try:
+            meta = asset_meta(usd_path)
+        except FileNotFoundError:
+            meta = {}
+        if meta.get("crank_joints"):
+            self.native_state = NativeState(Description.load(meta["robot"]), joint_names)
+        self._native_columns = {label: robot.joint_q_start[index] for index, label in enumerate(labels)}
         self.num_envs = num_envs
         self.base_origin = np.array([0.0, 0.0, base_height_m])  # the robot root's position in world 0
         qstart = list(robot.joint_q_start)
@@ -34,6 +46,7 @@ class RobotKinematics:
         self.model = scene.finalize(device="cpu")
         self.state = self.model.state()
         per_q = len(robot.joint_q)
+        self._per_q = per_q
         e = np.arange(num_envs)[:, None]
         self._qcols = torch.as_tensor(e * per_q + np.asarray([qstart[labels.index(n)] for n in joint_names])[None])
         self._newton, self._wp = newton, wp
@@ -42,6 +55,13 @@ class RobotKinematics:
         """World poses ``[E * B, 7]`` (position, quaternion xyzw) for joint positions ``q`` ``[E, J]``."""
         jq = self._wp.to_torch(self.model.joint_q).clone()
         jq[self._qcols] = q.to(jq.dtype)
+        if self.native_state is not None:
+            for name, value in self.native_state.coordinates(q.to(jq.dtype)).items():
+                start = self._native_columns[name]
+                width = 4 if value.ndim == q.ndim else 1
+                columns = (torch.arange(self.num_envs)[:, None] * self._per_q
+                           + start + torch.arange(width)[None])
+                jq[columns] = value if width == 4 else value.unsqueeze(-1)
         joint_q = self._wp.from_torch(jq)
         self._newton.eval_fk(self.model, joint_q, self.model.joint_qd, self.state)
         return self.state.body_q.numpy().copy()

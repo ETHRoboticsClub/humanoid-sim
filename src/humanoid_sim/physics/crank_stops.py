@@ -133,7 +133,7 @@ def crank_stops(desc: Description, urdf: PreparedUrdf | None = None) -> list[Cra
     for lk in desc.linkages:
         chain = AnkleChain.from_urdf(urdf, *lk.joints)
         sign = np.asarray(desc.ankle_kinematic_sign(lk.side), dtype=np.float64)
-        neutral = np.asarray(desc.ankle_neutral(lk.side), dtype=np.float64)
+        neutral = np.zeros(2, dtype=np.float64)
         # Both hinge axes in the shank frame at the neutral, and where they meet.
         rot_p = chain.pitch_frame[:3, :3]
         axis_p = rot_p @ chain.pitch_axis
@@ -159,7 +159,7 @@ def crank_stops(desc: Description, urdf: PreparedUrdf | None = None) -> list[Cra
             if limits is None:
                 raise ValueError(f"{drive}: a crank without position_limit")
             for bound, stop in zip(("lower", "upper"), limits, strict=True):
-                theta = g.theta0 + float(stop)
+                theta = float(stop)
                 tip_link = g.center + g.radius * (np.cos(theta) * g.u_hat + np.sin(theta) * g.v_hat)
                 inner = np.linalg.norm(tip_link - g.p_anchor0) - g.length  # at the neutral, inside every stop
                 if inner == 0.0:
@@ -261,6 +261,9 @@ def crank_stop_hook(robot: str, physics: dict, solver: str | None = None):
     (``PHYSICS_READY``, ahead of the assets' order) their owner is cleared."""
     solver = solver or physics["solver"]
     desc = Description.load(robot)
+    if desc.usd_path is not None:
+        yield None
+        return
     if ankle_stops_setting(physics, solver) != "cranks" or not desc.linkages:
         yield None
         return
@@ -310,6 +313,11 @@ def check_crank_stops(robot: str, physics: dict) -> int:
 
     solver = running_solver()
     desc = Description.load(robot)
+    if desc.usd_path is not None:
+        from humanoid_sim.physics.native import check_native_cranks
+
+        check_native_cranks(desc)
+        return 0
     expected = 4 * len(desc.linkages) if ankle_stops_setting(physics, solver) == "cranks" else 0
     found = 0
     if solver == "mjwarp":

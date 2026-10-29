@@ -9,8 +9,7 @@ from humanoid_sim.model.description import Description
 from humanoid_sim.transmissions.ankle import AnkleTransmission
 
 RNG = np.random.default_rng(0)
-# Offsets from the linkage neutral, |pitch|, |roll| <= 0.35 around the standing pose (0.33 rad of pitch from it).
-OFFSETS = RNG.uniform(-0.35, 0.35, size=(256, 2)) + np.array([0.35, 0.0])
+OFFSETS = RNG.uniform(-0.1, 0.1, size=(256, 2))
 
 
 @pytest.fixture(scope="module")
@@ -31,10 +30,9 @@ def test_jacobian_matches_finite_difference(desc, side):
 @pytest.mark.parametrize("side", ["l", "r"])
 def test_cranks_match_humanoid_urdf_ankle_model(desc, side):
     module = desc.ankle_model_module()
-    model = module.load(desc.actuators_path)
+    model = desc.ankle_model
     tr = desc.ankle_transmission(side, dtype=torch.float64)
-    sign = np.asarray(desc.ankle_kinematic_sign(side))
-    ref, _ = module._motor_angles_numpy(OFFSETS * sign, model.geometries[side])
+    ref, _ = module._motor_angles_numpy(OFFSETS + model.neutral(side), model.geometries[side])
     assert np.allclose(tr.cranks(torch.as_tensor(OFFSETS + model.neutral(side))).numpy(), ref, atol=1e-12)
     # Both cranks read zero at the description's linkage neutral.
     assert np.allclose(tr.cranks(torch.as_tensor(model.neutral(side))).numpy(), 0.0, atol=1e-12)

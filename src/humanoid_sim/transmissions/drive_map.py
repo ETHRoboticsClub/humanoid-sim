@@ -26,11 +26,16 @@ class DriveJointMap:
         if unknown:
             raise ValueError(f"drives not in the description: {unknown}")
         lin_d, lin_j, lin_s = [], [], []
+        native = {}
+        if desc.usd_path is not None:
+            from humanoid_sim.model.usd import crank_joints
+
+            native = crank_joints(desc)
         for i, name in enumerate(self.drive_names):
             d = drives[name]
-            if d.crank is None:
+            if d.crank is None or native.get(name) in jidx:
                 lin_d.append(i)
-                lin_j.append(jidx[d.joints[0]])
+                lin_j.append(jidx[native[name] if d.crank else d.joints[0]])
                 lin_s.append(float(d.sign))
         self.device, self.dtype = torch.device(device), dtype
         self._lin_d = torch.tensor(lin_d, device=device, dtype=torch.long)
@@ -39,6 +44,11 @@ class DriveJointMap:
         self.ankles = []
         for lk in desc.linkages:
             if lk.upper not in self.drive_names:
+                continue
+            present = [native.get(drive) in jidx for drive in (lk.upper, lk.lower)]
+            if any(present):
+                if not all(present):
+                    raise ValueError(f"{lk.side}: native ankle requires both crank shafts")
                 continue
             self.ankles.append((
                 lk.side,

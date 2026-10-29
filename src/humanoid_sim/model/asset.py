@@ -1,5 +1,8 @@
 """Robot asset: description + profile → USD, the model the physics and host kinematics load.
 
+A delivered USD is prepared directly, preserving its bodies, inertias and loop joints. Its source layers
+participate in the asset key. Robots delivered only as URDF use the conversion path below.
+
 Isaac Lab spawns robots only from USD, so the canonical sim model is a USD built here:
 
 1. :class:`~humanoid_sim.model.urdf.PreparedUrdf` (welds, sole boxes, collision meshes, absolute mesh paths);
@@ -58,6 +61,10 @@ def asset_key(desc: Description, profile: dict, prepared: PreparedUrdf) -> str:
 
 def asset_dir(desc: Description, profile: dict, out_root: Path, *, base_joints: bool = False) -> Path:
     """Directory of the asset for this description and profile (exists only once built)."""
+    if desc.usd_path is not None:
+        from humanoid_sim.model.usd import asset_key as usd_asset_key
+
+        return Path(out_root) / desc.robot / usd_asset_key(desc, profile, base_joints=base_joints)
     prepared = PreparedUrdf(desc, profile).build(base_joints=base_joints)
     return Path(out_root) / desc.robot / asset_key(desc, profile, prepared)
 
@@ -103,16 +110,41 @@ def check_asset_robot(usd_path: Path, robot: str) -> None:
     """Raise when ``usd_path`` is a built asset of a robot other than ``robot``: the description of ``robot``
     supplies the joint properties, drives and poses it is driven with. A USD outside a built asset is not checked."""
     try:
-        built = asset_meta(usd_path)["robot"]
+        meta = asset_meta(usd_path)
+        built = meta["robot"]
     except FileNotFoundError:
         return
     if built != robot:
         raise ValueError(f"{usd_path} is a {built} asset, opened for {robot!r}: pass robot={built!r}")
+    desc = Description.load(robot)
+    if meta.get("description_digest") != desc.digest:
+        raise ValueError(f"{usd_path}: stale description; rebuild the robot asset")
+    if desc.usd_path is not None:
+        from humanoid_sim.model.usd import source_digest
+
+        if meta.get("source_digest") != source_digest(desc):
+            raise ValueError(f"{usd_path}: stale or missing delivered USD; rebuild the robot asset")
 
 
 def build_asset(desc: Description, profile: dict, out_root: Path, *, force: bool = False,
                 base_joints: bool = False) -> Path:
     """Build (or reuse) the robot USD; returns its path. Writes ``asset.json`` with the provenance."""
+    if desc.usd_path is not None:
+        from humanoid_sim.model.usd import prepare, sole_boxes
+
+        out = asset_dir(desc, profile, out_root, base_joints=base_joints)
+        meta_path = out / "asset.json"
+        if meta_path.exists() and not force:
+            return out / json.loads(meta_path.read_text())["usd"]
+        usd = out / "robot.usdc"
+        native = prepare(desc, usd, base_joints=base_joints,
+                         collision_approximation=profile["model"].get("usd_collision_approximation", "convexHull"))
+        excludes = add_contact_excludes(usd, profile["model"].get("contact_excludes", []))
+        meta = {"schema": ASSET_SCHEMA, "key": out.name, "usd": usd.name, **desc.identity(), **native,
+                "sole_boxes": sole_boxes(usd, profile), "merged_collision_bodies": [], "contact_excludes": excludes,
+                "self_collision_excludes": []}
+        meta_path.write_text(json.dumps(meta, indent=1))
+        return usd
     prepared = PreparedUrdf(desc, profile).build(base_joints=base_joints)
     key = asset_key(desc, profile, prepared)
     out = Path(out_root) / desc.robot / key

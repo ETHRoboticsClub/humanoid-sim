@@ -11,6 +11,7 @@ dependencies = [
     "numpy>=2",
     "torch==2.11.0",
     "PyYAML>=6.0.3,<7",
+    "usd-core>=25.5",
 ]
 
 [project.optional-dependencies]
@@ -21,7 +22,6 @@ newton = [
     "newton[sim]==1.6.1",
     "warp-lang==1.17.0",
     "newton-usd-schemas>=0.5.0",
-    "usd-core>=25.5",
     "trimesh>=4.6.8",
     "scipy>=1.11",
     "pycollada>=0.9",

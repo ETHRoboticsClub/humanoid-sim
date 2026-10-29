@@ -45,7 +45,7 @@ class FitSpace:
             raise ValueError(f"start values for unknown group parameters {sorted(set(self.start) - names)}")
 
     def start_value(self, desc, group: Group, joint: str, param: str) -> float:
-        return float(self.start.get(f"{group.name}.{param}", getattr(desc.joints[joint], param)))
+        return float(self.start.get(f"{group.name}.{param}", getattr(desc.physics_joints[joint], param)))
 
     @property
     def names(self) -> list[str]:

@@ -95,11 +95,11 @@ def test_drive_targets_as_the_master_builds_them(plant):
     desc = plant.desc
     joints = list(desc.joints)
     q = np.zeros((2, len(joints)))
-    q[1, joints.index("knee_l")] = 0.1
-    q[1, joints.index("foot_pitch_l")] = 0.05
+    q[1, joints.index("knee_flexion_l")] = 0.1
+    q[1, joints.index(desc.linkages[0].joints[0])] = 0.05
     targets, t = drive_targets(plant, CommandTrace(np.array([0, 20]), joints, q))
     drives = plant.map.drive_names
-    knee = desc.joints["knee_l"]
+    knee = desc.joints["knee_flexion_l"]
     assert targets[1, drives.index(knee.device)] == pytest.approx(knee.sign * (0.1 + knee.standing_offset_rad))
     standing = torch.tensor([[desc.joints[j].standing_offset_rad for j in joints]], dtype=torch.float64)
     qdrv, _, _ = plant.map.drive_state(standing, torch.zeros_like(standing))

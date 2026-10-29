@@ -64,7 +64,8 @@ class PlantCore:
                               device=dev, dtype=dt)
         self.drive_stiffness = torch.tensor([d.baseline_stiffness for d in drives], device=dev, dtype=dt)
         self.drive_damping = torch.tensor([d.baseline_damping for d in drives], device=dev, dtype=dt)
-        standing = torch.tensor([desc.joints[n].standing_offset_rad if n in desc.joints else 0.0
+        properties = desc.physics_joints if any(n not in desc.joints for n in joint_names) else desc.joints
+        standing = torch.tensor([properties[n].standing_offset_rad if n in properties else 0.0
                                  for n in joint_names], device=dev, dtype=dt)
         k0, d0 = self.map.joint_space_gains(self.drive_stiffness, self.drive_damping, standing)
         # Constant per-episode solver gains [E, J], written at reset only.
@@ -79,7 +80,7 @@ class PlantCore:
         # feedback. Written in place.
         self.external_torque = torch.zeros(num_envs, len(joint_names), device=dev, dtype=dt)
         # Static minus dynamic Coulomb friction [E, J] (Nm), returned to a sliding joint. Written in place.
-        relief = [desc.joints[n].friction - desc.joints[n].dynamic_friction if n in desc.joints else 0.0
+        relief = [properties[n].friction - properties[n].dynamic_friction if n in properties else 0.0
                   for n in joint_names]
         self.friction_relief = torch.tensor(relief, device=dev, dtype=dt).expand(num_envs, -1).clone()
 
@@ -160,4 +161,3 @@ def _rebuild(template, leaves):
     if isinstance(template, (tuple, list)):
         return type(template)(_rebuild(v, leaves) for v in template)
     return type(template)(**{f.name: _rebuild(getattr(template, f.name), leaves) for f in fields(template)})
-

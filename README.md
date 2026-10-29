@@ -128,7 +128,7 @@ cfg.actions.drives = PlantActionCfg(class_type=Drives, action_dim=22, plant=Trai
 
 ```
 src/humanoid_sim/
-  model/           description -> prepared URDF -> USD asset; host kinematics; named poses; mirror map
+  model/           delivered USD preparation or URDF conversion; host kinematics; named poses; mirror map
   timing/          when each demand reaches its drive
   devices/         drive law, torque-speed envelope, faults
   transmissions/   drive frame <-> joint frame, the ankle linkage

@@ -32,7 +32,7 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `Measured`, `Truth` | `src/humanoid_sim/train/plant.py` | What `measured()` and `truth()` return |
 | `PlantAction`, `PlantActionCfg` | `src/humanoid_sim/train/isaaclab.py` | An Isaac Lab action term that owns a `RobotPlant`; you subclass it and implement `demands()` |
 | `robot_scene_cfg`, `robot_sim_cfg` | `src/humanoid_sim/train/scene.py` | The `InteractiveSceneCfg` (robot, IMU, contact sensor, ground or terrain, static boxes) and the `SimulationCfg` (one 4 ms step on MJWarp) |
-| `robot_build` | `src/humanoid_sim/train/scene.py` | The context to build the environment in: it adds the ankle cranks' stops to the solver model (profile `physics.mjwarp.ankle_stops`), which Newton cannot import from the USD. `RobotPlant` refuses a model built outside it |
+| `robot_build` | `src/humanoid_sim/train/scene.py` | Scene-construction context. The delivered V1 USD carries its native crank stops and loop closures; startup verifies the imported crank limits |
 | `StaticBoxes` | `src/humanoid_sim/world/boxes.py` | A room's walls and furniture as static boxes, read from a file, described in [world.md](world.md#static-boxes) |
 | `initial_pose`, `POSES` | `src/humanoid_sim/model/poses.py`, re-exported by `humanoid_sim.train.scene` | The joint positions and base height of a named initial pose |
 | `heightfield_terrain_cfg` | `src/humanoid_sim/world/terrain.py` | The terrain-importer config for a heightfield terrain the caller lays out, described in [world.md](world.md#heightfield-terrain) |
@@ -354,6 +354,11 @@ class HeldPoseOffsets(PoseOffsets):  # PoseOffsets from the minimal environment
 ```
 
 ## Randomization
+
+For native USD ankles, joint-parameter selectors use `plant.physics_names`: semantic joints plus crank
+shafts. Rotor armature is randomized on shafts, not duplicated on passive ankle hinges. Friction relief is
+mapped back to the semantic API where needed. `plant.joints` and truth joint arrays remain semantic-only.
+Kamino requires randomization to preserve each parameter's nominal zero/nonzero structure.
 
 The plant draws its own [randomization](glossary.md#domain-randomization) (`src/humanoid_sim/randomization/`), batched on the device and seeded by `TrainPlantCfg.seed`. Each entry of `TrainPlantCfg.randomization` is a dict (parsed by `ParamSpec.from_dict`) or a `ParamSpec`:
 

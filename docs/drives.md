@@ -19,9 +19,9 @@ Drive facts (family, sign, gains, torque-speed curves, ankle geometry) come from
 
 `PlantCore` in `src/humanoid_sim/core.py` sits between the demands and the solver. For each physics step `[t0, t0 + 4 ms)` it does the following:
 
-1. Converts the joint state to drive-frame state (`DriveJointMap.drive_state`): signs for the 1:1 drives, the crank transmission for the ankles.
+1. Reads drive-frame state (`DriveJointMap.drive_state`): signed joint coordinates for one-to-one drives and actual native shaft coordinates for USD ankles.
 2. Runs the drive bank (`DriveBank.compute`) over every demand in force during the step, giving demanded and applied drive torque.
-3. Maps drive torque to joint torque (`DriveJointMap.joint_torque`: the sign, or Jᵀ for the ankles) and adds any external joint torque (`PlantCore.external_torque`: the runtime's joint disturbances, and tests).
+3. Applies drive torque to the driven coordinates, including native crank shafts, and adds external joint torque. The closed mechanism transfers crank torque to the passive ankle hinges; the analytical semantic-only map uses Jᵀ when no native shafts are present.
 4. Turns the joint torque into a position target for the solver's constant PD ([target shaping](glossary.md#target-shaping)).
 5. After the solver step, `PlantCore.feedback` returns drive-frame feedback.
 
@@ -29,7 +29,7 @@ The physics period is 4 ms (`physics.period_ns` in `profiles/ethrc_v1.yaml`). Al
 
 ## Frames
 
-The plant uses two sets of coordinates.
+The public plant API separates semantic joint coordinates from drive coordinates. The native solver additionally contains crank and rod coordinates; callers do not append those to semantic observations or commands.
 
 URDF joint coordinates are what the solver and the URDF use: one angle per joint, with the ankle as two hinges, foot_pitch and foot_roll. URDF zero is the [calibration pose](glossary.md#calibration-pose). A joint's [standing offset](glossary.md#standing-offset) (`standing_offset_rad` in actuators.yaml) is its URDF angle in the robot's reference standing pose. Controls works in standing-relative angles, `q_URDF - standing_offset_rad`; none of the plant's interfaces use them. [robot-model.md](robot-model.md#joint-coordinates) covers joint travel and the base frame.
 
@@ -221,7 +221,7 @@ In the runtime these stay at identity, except `torque_scale`, which the `power_s
 
 ## Target shaping with constant solver gains
 
-Isaac Lab's articulation has a joint PD inside the solver. MJWarp's `implicitfast` integrator treats its damping implicitly, which keeps the stiff ankle-crank drives stable at a 4 ms step. Changing the solver's gains at run time requires a model update, so they are fixed when the plant is built. The solver gains `k0`, `d0` of a 1:1 joint are its drive's baseline gains (`baseline_position_gains` in actuators.yaml). For the ankle hinges they are `diag(Jᵀ K J)` and `diag(Jᵀ D J)` with the crank gains K, D and J at the standing pose (`DriveJointMap.joint_space_gains`). They are written to the articulation at spawn (`src/humanoid_sim/physics/joint_properties.py`).
+Isaac Lab's articulation has a joint PD inside the solver. MJWarp's `implicitfast` integrator treats its damping implicitly. Changing solver gains requires a model update, so they are fixed when the plant is built. The gains `k0`, `d0` on one-to-one joints and native crank shafts are the drive's baseline gains from `actuators.yaml`; passive ankle hinges have zero drive gains. They are written at spawn (`src/humanoid_sim/physics/joint_properties.py`). The analytical semantic-only map retains standing-pose reflected gains for calculations without native shafts, not for the delivered USD physics.
 
 | Joints | `k0` (Nm/rad) | `d0` (Nm·s/rad) |
 |---|---|---|
@@ -240,60 +240,35 @@ For a 1:1 drive whose demanded gains equal `k0` and `d0` and whose torque is not
 
 `PlantCore.gain_warnings` (`[E, D]` bool) flags demands outside that region. `PlantCore.submit` sets it for every enabled demand whose P gain exceeds twice the drive's baseline stiffness or whose D gain exceeds twice its baseline damping (`outside_stable_region`). It compares the realized gains, the raw gains times the bank's `p_scale` and `d_scale` at submission, so randomized gain scales count. It only flags the envs the demand reaches (`env_mask`). It latches until the env is reset and does not change the demand. A demand put in force through `reset(env_ids, demand)` does not pass through `submit` and is not checked. In training check `plant.core.gain_warnings.any()`.
 
-The solver's own joint effort limit is the drive peak for 1:1 joints and, for each ankle hinge, `Σ |J| · peak` over its two cranks at standing, so the solver's clamp does not bind before the drive envelope does.
+The solver's effort limit is the drive peak on each directly driven coordinate, including native crank shafts. Passive ankle hinges have no extra drive-effort clamp; their torque comes through the closed mechanism. This avoids imposing a standing-pose torque limit on a configuration-dependent transmission.
 
 ## The ankle transmission
 
-Each ankle has two HEJ50 drives stacked 75 mm apart on the back of the shin: the upper crank (`ANK1`, rod 269.0 mm) and the lower crank (`ANK2`, rod 194.1 mm). Each drive turns a crank; rods from the two cranks to the foot set pitch and roll together. Near standing, a pitch moves the two cranks in opposite directions and a roll moves them in the same direction, each by about 1.03 to 1.07 rad per rad of foot motion.
+The V1 asset uses the delivered `humanoid_V1.usda` and mesh layer. Each ankle retains its two crank shafts, rods, spherical joints and loop closures. Drive torque acts on the crank shafts; the solver transfers it through the linkage. The passive pitch/roll hinges receive no drive PD and no duplicate reflected rotor armature.
 
-The simulated foot is two hinges in the URDF tree: foot_pitch, about the lateral axis (close to base x at standing), then foot_roll, about the axis along the foot (close to base y). Cranks and rods are not bodies in the physics: there is no closed chain. `AnkleTransmission` in `src/humanoid_sim/transmissions/ankle.py` maps between hinge state and crank state, batched in torch:
+`Description.joints` remains the semantic joint inventory used by runtime clients, replay and training observations. `Description.physics_joints` additionally includes the native crank shafts. `NativeDrivePlant` shares the semantic plant's drive bank and maps its torques directly onto those shafts. Feedback comes from their physical positions and velocities.
 
-- `cranks(q)` gives crank angles (upper, lower) relative to the linkage neutral from hinge angles `q` (pitch, roll, URDF coordinates). It solves the circle-sphere intersection analytically on the assembly branch connected to the neutral, as humanoid-urdf's `ankle_model` does. With `return_reach=True` it also returns `|K/R|`; values of 1 or more mean the pose is out of the linkage's reach, where the result is clamped.
-- `jacobian(q)` gives `J = dθ/dq`, `[..., 2 cranks, 2 (pitch, roll)]`, from the rod-length constraints.
-- Crank velocity is `J q̇` and hinge torque is `Jᵀ τ_cranks` (`AnkleTransmission.joint_torque`), so power is conserved through the transmission.
-- `joints_from_cranks(theta, q0)` inverts the map with 8 Newton iterations from `q0`. It is used for initial states and replays, never in the step loop.
+The description's `ankle_model` extracts geometry and joint names from USD. `AnkleTransmission` implements its analytic map in batched torch for semantic command conversion, initialization and model checks:
 
-`DriveJointMap` in `src/humanoid_sim/transmissions/drive_map.py` combines the 1:1 signs and both ankle transmissions into the drive-frame state and the joint torques of the whole robot.
+- `cranks(q)` maps USD/URDF pitch and roll angles to absolute CAD crank angles.
+- `jacobian(q)` is `dθ/dq`; it converts hinge velocities to crank velocities.
+- `joints_from_cranks(theta, q0)` reconstructs semantic poses for replay initialization.
+- `NativeState` also closes the rods at reset by setting their ball-joint orientations and angular velocities. Host visualization uses the same construction.
 
-The geometry comes from `ankle_model` in actuators.yaml: measured points and rod length for the right side (`P_shaft`, `n_shaft`, `P_crank_0`, `P_anchor_0`, `L` for the upper and the lower crank), mirrored across the sagittal plane for the left side (`mirror_right`). The linkage model has its own frame, with pitch about its y axis and roll about its x axis (`pitch_axis`, `roll_axis`); `semantic_to_kinematic_sign` maps URDF hinge angles into it. Nothing about the linkage is typed into this repo.
-
-The ankle drives' rotor inertia reaches the hinges as reflected inertia. actuators.yaml provides it as `armature_joint`, the diagonal of `Jᵀ diag(a, a) J` at the neutral with `a` = 0.0056 kg·m² per HEJ50, and the plant uses it as the ankle hinges' armature: 0.0104 kg·m² in pitch and 0.0126 kg·m² in roll. It is constant (taken at the neutral) and diagonal only.
-
-Golden tests in `tests/test_ankle_transmission.py` check the torch transmission on 256 random poses (pitch 0 to 0.7 rad, roll -0.35 to 0.35 rad) against humanoid-urdf's numpy reference:
-
-| Test | Reference | Tolerance |
-|---|---|---|
-| `test_jacobian_matches_finite_difference` | central differences of `cranks` | 1e-7 |
-| `test_cranks_match_humanoid_urdf_ankle_model` | humanoid-urdf `ankle_model` | 1e-12 rad |
-| `test_float32_batched_and_power_consistent` | power through the transmission | 1e-4 W |
-| `test_joints_from_cranks_inverts` | round trip through `cranks` | 1e-10 rad |
-
-They run without Isaac Lab: `uv run pytest tests/test_ankle_transmission.py` (needs the submodules).
+Rotor armature is attached to each native crank shaft. The linkage supplies its configuration-dependent reflection and coupling through the solver; the constant semantic `armature_joint` approximation is not added to the hinges. Rod and crank body inertias remain those delivered in USD. Friction, drive delay, compliance and stop stiffness remain modeled until robot traces establish them.
 
 ### The crank stops
 
-Each crank's stop interval (`position_limit` of `maxonHEJ50L_ANK1` and the other three in actuators.yaml, measured by hand sweep) is the ankle's only limit; every joint-space bound derives from it through the linkage. The hinges' joint ranges are the axis hull of that set (`ankle_model.bounds`), so a box corner can need a crank past its stop: driven there with the hinge stops alone, the cranks run 0.5 rad past.
+Each crank's `position_limit` in `actuators.yaml` becomes the corresponding USD revolute joint's physical limits. The semantic hinge bounds remain the axis hull computed by the description's ankle model. Both MJWarp and Kamino receive the explicit crank stops and closed mechanism.
 
-With `physics.mjwarp.ankle_stops: cranks` (the default) the solver enforces the crank stops themselves. A crank pressed on a stop holds its rod's crank-side ball at a fixed point on the shank, and the rigid rod keeps the foot-side ball at the rod's length from it. So "this crank is within this stop" is a one-sided limit on the distance between two points: a spatial tendon from a site at the stopped crank's tip (on the shank body) to a site at the rod's foot-side ball (on the foot body), limited to the rod length from the stop's inner side. There are four tendons per ankle, one per crank and stop. `src/humanoid_sim/physics/crank_stops.py` builds them from the description: the URDF chain from shank to foot, `ankle_model`'s geometry and frame signs, and the drives' stops.
+The delivered-USD path does not add the reduced model's spatial stop tendons. `robot_build` remains the scene-construction entry point, and startup checks that the native crank joints and their limits reached Newton.
 
-| Setting | What stops the ankle |
-|---|---|
-| `ankle_stops: cranks` | The four crank-stop tendons and the hinges' box |
-| `ankle_stops: hinges` | The hinges' box alone |
+### Validation
 
-The tendons are MuJoCo limit constraints, solved with the contacts and joint stops in the same step. Nothing writes the joint state between steps, so the feet stay on the ground. Their stiffness is `ankle_stop_solref` (time constant, damping ratio), at 8 ms the stiffest MuJoCo's solver keeps stable at the 4 ms period. A crank pushed by its baseline spring a radian past a stop rests about 13 mrad past it. The real stops' stiffness has not been measured.
+`tests/test_description_delivery.py` compares crank angles and Jacobians over the reachable workspace with the description's USD-derived reference. `tests/test_native_usd.py` checks preserved masses and loop closures, native torque/feedback mapping, base-joint assets, and rod closure under Newton forward kinematics. `tests/test_native_physics.py` exercises native actuation on CUDA with MJWarp and Kamino, in eager and CUDA-graph modes.
 
-Kamino has no tendons and bounds the ankle by the hinges' box. Newton imports spatial tendons only from MJCF, so the sites and tendons are added to each world while Newton replicates the scene. A training environment must be built inside `robot_build` (see [training.md](training.md)); `RobotPlant` refuses a model whose crank stops do not match the profile. `SimCore` and the runtime build theirs that way already.
+Run the CPU checks with `uv run pytest -m "not physics"`. Run the CUDA lane in the Isaac Lab environment, or use `sky/native-usd.sky.yaml`; a skipped CUDA test is not physics validation.
 
-Tests in `tests/test_crank_stops.py`:
-
-| Test | Oracle |
-|---|---|
-| `test_tendons_admit_exactly_the_poses_the_ankle_model_admits` | humanoid-urdf `ankle_model.feasible` on a 161 x 161 grid over the hinges' travel widened by 0.5 rad, tendon lengths from the URDF chain |
-| `test_a_crank_at_its_stop_puts_its_tendon_at_the_rod_length` | poses from the transmission's inverse with one crank at its stop |
-| `test_cranks_driven_past_their_stops_stop_at_them` (physics) | crank angles from the hinge state through the transmission: at rest within 20 mrad of the stop, never past it by more than that plus the crank's speed times the time constant |
-| `test_standing_feet_stay_on_the_ground_inside_their_stops` (physics) | sole box corners within 10 mm of the ground while up (20 mm on a foot rolled onto its edge) |
-| `test_a_robot_falling_onto_its_ankle_stops_gains_no_energy` (physics) | centre-of-mass energy never above its start plus 1 cm of the robot's weight; cranks at most 0.15 rad past a stop on landing with the drives off |
 
 ## Dynamic friction
 
@@ -342,7 +317,7 @@ The runtime publishes its known gaps in the segment descriptor (`fidelity_gaps` 
 
 - There are no drive current, thermal or backlash models. The applied torque is the envelope-clipped control law.
 - The passive joint parameters of the upper body (waist, shoulders, elbows) are the description's values and have not been identified from captures.
-- The ankle is two hinges, pitch and roll, driven through the crank transmission. There is no closed chain. The crank stops are soft constraints of unmeasured stiffness (see [The crank stops](#the-crank-stops)).
+- The native USD ankle includes its closed chain. Stop stiffness, joint friction and compliance are modeled rather than verified against hardware traces.
 - IMU errors are the rig's model's: white noise, a turn-on bias and a slow drift (`SET_FIDELITY` ideal turns them off). See [sensors.md](sensors.md#sampling-and-errors).
 - Each drive's delay is its family's fixed figure, with no per-cycle jitter. A family whose description records no delay (the G1's) has none, and the gap names it.
 - Angular momentum is not conserved under fast joint motion at the 4 ms MJWarp step. A hung robot whose waist and hips move fast picks up a spin about the vertical; the gantry's spreader bar turns it back and damps it ([world.md](world.md#suspended-the-lab-gantry)).

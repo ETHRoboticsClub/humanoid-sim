@@ -192,7 +192,7 @@ def _crank_signs(desc: Description, joints: list[str], perm: list[int], sign: li
     import torch
 
     left, right = desc.ankle_transmission("l", dtype=torch.float64), desc.ankle_transmission("r", dtype=torch.float64)
-    names = ("foot_pitch_l", "foot_roll_l")
+    names = next(linkage.joints for linkage in desc.linkages if linkage.side == "l")
     s = torch.tensor([sign[joints.index(n)] for n in names], dtype=torch.float64)
     offsets_l = torch.tensor([desc.joints[n].standing_offset_rad for n in names], dtype=torch.float64)
     offsets_r = torch.tensor([desc.joints[joints[perm[joints.index(n)]]].standing_offset_rad for n in names],
