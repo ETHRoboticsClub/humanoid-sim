@@ -48,5 +48,5 @@ if __name__ == "__main__":
     root = Path(__file__).parent / "patches"
     apply_sequence(Path(newton.__file__).parent, [
         (root / f"newton-1.6.1-{name}.patch", json.loads((root / f"newton-1.6.1-{name}.json").read_text()))
-        for name in ("active-worlds", "active-preconditioner", "register-budget")
+        for name in ("active-worlds", "active-preconditioner", "register-budget", "body-assembly")
     ])

@@ -400,6 +400,8 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `physics.<solver>.collapse_fixed_joints` | `model_build` | Optional Newton fixed-joint collapse, shared by training and runtime. Accumulates rigid-assembly mass and inertia and retains collision shapes and moving joints. Body selectors and randomization address surviving assemblies; removed fixed-link names are unavailable. Unsupported with surrogate crank tendons. |
 | `solver_gains` | nothing | Records that the solver PD is the description's baseline gains. |
 
+With a sparse Jacobian and dense dynamics, Kamino assembles `J M⁻¹ Jᵀ` by grouping Jacobian blocks by body. It rebuilds the groups on the device each step as contacts change, avoiding pairs of blocks that cannot contribute to the matrix. Armature, effort regularization and preconditioning are applied afterward as before. The image's hash-checked Newton patch installer supplies this implementation; incompatible dependency sources are rejected. `tests/test_kamino_body_assembly.py` checks the matrix against an independent FP64 calculation and exercises changing contacts, CUDA graph replay and workspace replacement.
+
 Only the `model` block is part of the asset key. The `physics` block is described in more detail in [world.md](world.md) and [testing-and-gpu.md](testing-and-gpu.md).
 
 ### Robot facts kept in the profile
