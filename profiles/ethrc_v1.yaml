@@ -64,6 +64,11 @@ physics:
   # Resolve the light native rods and their closed-loop constraints at 1 kHz.
   # Policy/control periods are configured independently by the caller.
   period_ns: 1000000
+  # Armature (kg m^2) on every coordinate of the ankle rods' ball joints (physics/crank_stops.py). A rod between two
+  # balls spins freely about its axis on about 1e-5 kg m^2. At a 4 ms implicitfast step that mode grew without bound
+  # once robots thrashed on the ground (755 of 4096 non-finite in 120 s, self-collision on or off; none with 1e-4).
+  # Below the rods' 1e-3 kg m^2 about their other axes. Numerical, not measured (modeled).
+  ball_joint_armature: 1.0e-4
   mjwarp:
     # Contact can spin a rod about its long axis. RK4 resolves that rotational
     # motion without the energy growth of the single-step integrators.

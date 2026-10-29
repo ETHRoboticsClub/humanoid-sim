@@ -294,3 +294,29 @@ def test_native_host_publishes_feedback_before_the_first_step(desc, tmp_path):
             record[1]["drive"]["position_rad"][:len(host.drives)], expected[0].cpu().numpy())
     finally:
         host.close()
+
+
+def test_ball_joint_armature_reaches_every_ball_coordinate(desc):
+    """The build hook gives each ball joint coordinate the profile's armature and leaves every other joint's alone
+    (Newton's USD import reads none for spherical joints)."""
+    pytest.importorskip("newton")
+    import newton
+    from conftest import built_usd
+
+    from humanoid_sim.physics.crank_stops import _BallArmature
+
+    builder = newton.ModelBuilder()
+    builder.add_usd(str(built_usd(desc.robot)))
+    before = list(builder.joint_armature)
+    hook = _BallArmature(2.5e-4)
+    hook(builder, 0, None, None)
+    hook.apply()
+    model = builder.finalize(device="cpu")
+    kinds, starts = model.joint_type.numpy(), list(model.joint_qd_start.numpy()) + [model.joint_dof_count]
+    arm = model.joint_armature.numpy()
+    balls = [j for j, k in enumerate(kinds) if k == int(newton.JointType.BALL)]
+    assert hook.joints == len(balls) == len([j for j in desc.usd_model.joints.values()
+                                             if j.GetPrim().GetTypeName() == "PhysicsSphericalJoint"])
+    ball_dofs = {k for j in balls for k in range(starts[j], starts[j + 1])}
+    for k in range(model.joint_dof_count):
+        assert arm[k] == pytest.approx(2.5e-4 if k in ball_dofs else before[k])
