@@ -419,11 +419,15 @@ def _gantry(args):
 def cmd_serve(args) -> int:
     from humanoid_sim.runtime.host import EXIT_CLIENT_LOST, EXIT_DETACHED, RuntimeHost
 
+    if args.truth_every is not None and (args.truth_every < 1 or (args.trajectory and args.truth_every != 1)):
+        raise SystemExit("--truth-every must be at least 1, and 1 with --trajectory (it records every step)")
     host = RuntimeHost(args.segment, _usd(args), device=args.device, robot=args.robot, solver=args.solver,
                        support=args.support, pose=args.pose, scene=_scene(args), gantry=_gantry(args),
                        bus_period_ns=int(args.bus_period_us * 1000),
                        client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
-                       sim_revision=_revision(), truth_every=args.truth_every)
+                       sim_revision=_revision(),
+                       truth_every=args.truth_every or (1 if args.trajectory else 5), trajectory=args.trajectory,
+                       extra_rig=args.sensors)
     try:
         while True:
             print(json.dumps({"segment": str(args.segment), "session_id": host.session_id, "ready": True}),
@@ -448,6 +452,36 @@ def cmd_render_runtime(args) -> int:
                      device=args.device, assets=args.assets)
     render_runtime(args.segment, cfg, seconds=args.seconds, wait_s=args.wait, summary=args.summary,
                    window=args.window)
+    return 0
+
+
+def cmd_render_trajectory(args) -> int:
+    from humanoid_sim.runtime.offline import render_trajectory
+    from humanoid_sim.runtime.trajectory import read_header
+    from humanoid_sim.sensors.session import SessionCfg
+
+    cfg = SessionCfg(robot=read_header(args.trajectory)["robot"], sensors=args.sensors, scene=args.scene,
+                     spawn_m=tuple(args.spawn or (0.0, 0.0)), splat=args.splat, splat_intensity=args.splat_intensity,
+                     scan_mesh=args.scan_mesh, lights=args.lights, cameras=not args.no_cameras,
+                     lidar=not args.no_lidar, device=args.device, assets=args.assets)
+    render_trajectory(args.trajectory, cfg, args.out, start_s=args.start, end_s=args.end, window=args.window)
+    return 0
+
+
+def cmd_export_truth(args) -> int:
+    from humanoid_sim.model.description import Description
+    from humanoid_sim.model.frames import frame_poses, write_tum
+    from humanoid_sim.runtime.trajectory import Trajectory
+
+    traj = Trajectory.load(args.trajectory)
+    desc = Description.load(traj.robot)
+    if traj.header["description_digest"] != desc.digest:
+        raise SystemExit(f"the trajectory was recorded on another description of {desc.robot} than this one")
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    for frame in args.frames:
+        write_tum(frame_poses(traj, desc.urdf_path, frame), out / f"{frame}.tum")
+    print(json.dumps({"frames": args.frames, "out": str(out), "records": len(traj.records)}))
     return 0
 
 
@@ -560,6 +594,33 @@ def main(argv: list[str] | None = None) -> int:
                      help="show Kit's window and viewport on $DISPLAY (e.g. a VNC display) instead of headless")
     rr_.set_defaults(func=cmd_render_runtime)
 
+    rt = sub.add_parser("render-trajectory", help="render the rig's RTX cameras and lidars along a `serve --trajectory` "
+                        "recording at their nominal rates, stamped in plant time, into a dataset directory "
+                        "(Isaac Sim image, RTX GPU)")
+    rt.add_argument("trajectory", help="the file `serve --trajectory` wrote")
+    rt.add_argument("--out", required=True, help="the dataset directory")
+    rt.add_argument("--sensors", default=None, help="an extra rig whose sensors join the robot's (e.g. g1-cameras)")
+    _add_scene_args(rt)
+    rt.add_argument("--splat", default=None, help="the room's Gaussian splat as USD (`splat-usd`), for the cameras")
+    rt.add_argument("--splat-intensity", type=float, default=1.0)
+    rt.add_argument("--scan-mesh", default=None, help="the room's scan (OBJ) for the lidar (default: the host's)")
+    rt.add_argument("--lights", default=None, help="the room's ceiling lights (JSON)")
+    rt.add_argument("--no-cameras", action="store_true")
+    rt.add_argument("--no-lidar", action="store_true")
+    rt.add_argument("--start", type=float, default=None, help="first plant time to render (s)")
+    rt.add_argument("--end", type=float, default=None, help="last plant time to render (s)")
+    rt.add_argument("--device", default="cuda:0")
+    rt.add_argument("--window", action="store_true", help="show Kit's window instead of headless")
+    rt.set_defaults(func=cmd_render_trajectory)
+
+    et = sub.add_parser("export-truth", help="ground-truth world poses of description frames along a recording, one "
+                        "TUM file (t x y z qx qy qz qw) per frame")
+    et.add_argument("trajectory")
+    et.add_argument("--frames", nargs="+", required=True, metavar="LINK",
+                    help="description links, e.g. the rig's sensor frames")
+    et.add_argument("--out", required=True)
+    et.set_defaults(func=cmd_export_truth)
+
     be = sub.add_parser("bench")
     be.add_argument("--num-envs", type=int, default=1)
     be.add_argument("--steps", type=int, default=1000)
@@ -666,8 +727,14 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--bus-period-us", type=float, default=1500.0, help="the client's bus cycle (informational)")
     sv.add_argument("--client-timeout-ms", type=float, default=500.0,
                     help="end the session when an attached client's demands are this old")
-    sv.add_argument("--truth-every", type=int, default=5, help="publish the truth every this many steps (and after "
-                    "every command); 1 for test oracles that track maxima")
+    sv.add_argument("--truth-every", type=int, default=None, help="publish the truth every this many steps (and after "
+                    "every command); default 5, or 1 with --trajectory; 1 for test oracles that track maxima")
+    sv.add_argument("--trajectory", default=None, metavar="FILE", help="record the truth of every step to FILE (base "
+                    "pose and twist, joints, gantry hook; plant time in ns): the run's ground truth and what "
+                    "`render-trajectory` renders the sensors from")
+    sv.add_argument("--sensors", default=None, help="an extra rig (e.g. g1-cameras) whose IMUs are simulated besides "
+                    "the body IMU: declared in the descriptor's extra_imus and, with --trajectory, recorded as "
+                    "FILE.<name>.imu")
     sv.add_argument("--persist", action="store_true", help="when a client detaches or is lost, reset the robot "
                     "and serve the next client on a new session, until stopped")
     sv.add_argument("--max-steps", type=int, default=None, help="periods per session")

@@ -65,13 +65,36 @@ rsync -avz hsim-rtx:sky_workdir/outputs/rtx/ outputs/rtx/
 
 The robot is welded at the spawn point in its home pose, feet just above the floor (a G1 cannot stand on a fixed-gain hold). `--splat-intensity` scales the splat's emission.
 
+### Rendering a recorded run
+
+`render-runtime` draws from the host's latest truth and skips frames when the GPU falls behind, so its rates depend on the machine. For a benchmark that needs the cameras and the lidar at their nominal rates, record the run and render it afterwards in lockstep with plant time:
+
+```bash
+humanoid-sim serve --segment /run/hsim/plant --trajectory /data/run1.traj --gantry hangar_gantry.json --scene ... # the live run
+humanoid-sim render-trajectory /data/run1.traj --out /data/run1-sensors --sensors g1-cameras \
+    --no-cameras                                                    # the lidar pass, no splat; the robot, scene,
+humanoid-sim render-trajectory /data/run1.traj --out /data/run1-sensors --sensors g1-cameras \
+    --no-lidar --splat outputs/rtx/hangar_splat.usdc                # spawn, scan and crane are the recording's
+humanoid-sim export-truth /data/run1.traj --frames mid360_link camera0_camera imu_link --out /data/run1-truth
+```
+
+`render-trajectory` poses the robot at each render time (the recording interpolated to it), renders every camera period (33.3 ms at 30 Hz) and lets the lidar complete its sweeps (10 Hz), however long the GPU takes. Every stream is rendered at the render period, the fastest stream's; a slower stream gets the first render at or after each of its periods. Each frame is stamped with the plant time it was rendered at, a sweep with the plant time its first ray fired, so stamps, ground truth and the runtime's feedback and IMU samples share one clock. The dataset it writes (`humanoid-sim-sensor-dataset/v1`, `sensors/dataset.py`) holds `manifest.json` (the camera calibrations as the feed descriptor has them, each sensor's mount on its body, nominal rates, counts, and `passes`: each render's sensors and summary, `complete` only if it finished), `cameras/<camera_id>/<stream>/` (8-bit grey, RGB or 16-bit millimetre PNGs and `index.csv`: `seq,stamp_ns,file`) and `lidars/<name>/` (one `.npz` per sweep with `points_m`, `hit`, `time_s`, `start_ns` and the sensor's world pose, and `index.csv`; `start_ns` and `time_s` are the sweep's start and each ray's firing time after it, but `origin_w` and `rotation_w` are the sensor's pose at the render that completed the sweep, about one sweep period after `start_ns`: to place a ray in the world at its firing time, take the sensor's pose at that time from the trajectory). A dataset holds one lidar's sweeps. The IMU is not rendered (the render never steps physics): the live run records it next to the trajectory (`FILE.imu`, [runtime.md](runtime.md#recording-a-run)), on the same plant clock.
+
+### Two passes: the lidar must not trace the splat
+
+RTX hides the splat from camera rays only (`SPLAT_PRIM`): a lidar ray hits its Gaussians wherever it meets one, low-opacity and large ones included, so a lidar rendered with a splat returns points in mid-air. `render-trajectory` refuses a lidar with `--splat`: the lidar and the cameras are rendered in two runs into one `--out`, the lidar without the splat (`--no-cameras`), the cameras with it (`--no-lidar`). A dataset directory that holds a manifest of the same run (robot, description digest, trajectory, time range) is added to, each pass keeping the other's sensors and counts; a manifest of another run is refused, and a render that fails leaves its pass `complete: false`. Each sensor's manifest `stage` records `splat` (whether it was on the stage for that sensor) and `robot_links_traced`. The recording's scene files must be readable where it is rendered (same paths), or be given with `--scene`.
+
+### The robot occludes its own sensors
+
+The rays also hit the robot's visual meshes: the G1's Mid-360 sits inside the head's shell with the shoulders and arms below it, so the head's ribs and the shoulders block parts of its field. That is what the meshes in the description do; whether the real unit's head has an opening at the lidar, and what Unitree's driver filters, is not known here (the sensor's 0.1 m minimum range is applied, `nearRangeM`). Compare a recorded cloud of the real unit before hiding any link from the lidar.
+
 ### What each sensor sees of a scanned room
 
 A scanned room has up to three surfaces: its boxes (`--scene`), its scan's mesh (`--scan-mesh`, added only when a lidar is simulated) and its splat (`--splat`, made by `humanoid-sim splat-usd`, [world.md](world.md)). The physics collides with every box whatever the sensors see. Each sensor sees the most faithful surface it has (`sensors/room_rays.py`, applied by `SensorSession`):
 
 | Surface | Lidar | Cameras with a splat | Cameras without a splat |
 |---|---|---|---|
-| Splat | no | yes | |
+| Splat | no: it must not be on the stage (below) | yes | |
 | Scan mesh | yes | no | yes |
 | Wall boxes (the file's `wall` flags) | yes | no | yes |
 | Furniture boxes | only without a scan mesh | no | only without a scan mesh |
