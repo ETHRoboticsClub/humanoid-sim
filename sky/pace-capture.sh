@@ -123,9 +123,8 @@ for s in sorted(Path(sys.argv[1]).glob("*/summary.json")):
 EOF
 
 step "report"
-held=$(ls -d "$out"/fits/fit-* | grep -v -e '\.log$' -e 'fit-all$' | while read -r d; do
-  [ -f "$d/fit-pace.json" ] && echo "$d"; done)
-[ -n "$held" ] || { echo "[pace] no fit finished"; exit 1; }
+fits=$(for d in "$out"/fits/fit-*/; do [ -f "$d/fit-pace.json" ] && echo "${d%/}"; done)
+[ -n "$fits" ] || { echo "[pace] no fit finished"; exit 1; }
 # shellcheck disable=SC2086
-humanoid-sim --robot "$ROBOT" pace-report $held --out "$out/report" || exit 1
+humanoid-sim --robot "$ROBOT" pace-report $fits --out "$out/report" || exit 1
 status=DONE

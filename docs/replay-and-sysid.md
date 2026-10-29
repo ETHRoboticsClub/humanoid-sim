@@ -370,6 +370,49 @@ Judge a fit as for `fit-passive`: `holdout.objective_fit` clearly below `holdout
 
 `pace-selftest` checks the model and the fit without the robot. It draws parameters uniformly within ± `--spread` of the box, plants them in every env, and runs a chirp of command frames on a fixed base: every joint sweeps `--f0` to `--f1` Hz about the standing pose with amplitude `--amplitude-rad` (half on the ankle hinges), after one second at rest. It records the drives' readings as a capture, prints the objective at the planted values (near zero) and at the start values, then fits from the start values. `fit-pace.json` adds `planted`, `objective_planted` and `recovery_median_error`: the median absolute log error of armature, damping and friction, the median absolute error of bias and ratio, and the delay error in ns per family. `tests/test_physics.py::test_pace_objective_is_zero_at_planted_parameters` runs the same round trip briefly on the CPU.
 
+## A PACE run on new captures
+
+```bash
+sky/pace-launch.sh ~/ETHRC/data/pace/<date>-<who>/exc-<id> [more captures] [--ankles cranks|hold] [--no-fit-ankles]
+                   [--description-root <humanoid-urdf checkout>] [--generations 40] [--num-envs 256] [--dry]
+```
+
+One command takes captures from the robot to a holdout report. It stages the captures in `~/ETHRC/runs/<date>-pace/input/` (with `inputs.json`: the captures, this checkout's revision and the description's), runs `sky/pace-capture.sky.yaml` on cluster `sim-pace` (L40S, else A10G, else L4; down after 15 idle minutes), copies the node's `outputs/pace-run/` to `~/ETHRC/runs/<date>-pace/out/` and takes the cluster down. The node also mirrors that folder to `s3://ethrc-rc-humanoid-ckpts/amoec/pace/<date>/` itself, so the result does not depend on the launching machine staying connected. `--dry` runs the same chain with 2 generations of 16 envs into `<date>-pace-dry`, after the replay and PACE physics tests.
+
+On the node (`sky/pace-capture.sh`):
+
+1. `build-asset` for the robot, from the description in the checkout, or from `--description-root`'s `ethrc_v1/` when given (`HUMANOID_SIM_DESCRIPTION_ROOT`). `asset.txt` names the USD; every `fit-pace.json` and replay summary records the description digest, its root, the USD, the asset key and the delivered USD's sha256.
+2. `convert-capture` for each capture whose commands name joints this description does not have (below).
+3. `check-bag` on the converted captures, fixed base, with `--frame-stamps` (`check-bag.txt`).
+4. `segment-capture` into windows (`windows.jsonl`).
+5. A fit per window with the other windows held out, and one on all windows together (`fits/fit-<id>-<window>/`, `fits/fit-all/`), three at a time. With `--no-fit-ankles` the ankle cranks are left out of every objective, so their parameters stay the description's.
+6. The first window replayed at the description's values with the profile's self-collision and without it (`selfcol/summary.txt`), so a plant that is unstable with self-collision shows in numbers instead of being switched off.
+7. `pace-report` over every fit (`report/pace-report.md` and `.json`); the holdout figures come from the per-window fits, `fit-all` adds its values. `STATUS` ends as `DONE` or `FAILED`; `run.log` has everything.
+
+### Captures on an older description
+
+```bash
+humanoid-sim convert-capture <exc-dir>... --out <dir> [--from urdf6-b14158e] [--ankles cranks|hold]
+```
+
+The robot's Controls may run an older description than the one simulated here; while it pins humanoid-urdf URDF_6 (b14158e), its captures name URDF_6's joints. `convert-capture` rewrites `commands.csv` into this description's names and copies everything else unchanged (`convert_capture` in `src/humanoid_sim/replay/convert.py`; `src/humanoid_sim/replay/legacy/urdf6-b14158e-actuators.yaml` is that revision's `actuators.yaml`, byte for byte). The drive targets the robot's master sent are what is kept: a 1:1 joint is matched to the new one by its drive (`torso_axial_rotation` is URDF_6's `waist_upperbody_yaw` with the sign flipped), and an ankle's hinge angles go through URDF_6's crank transmission to the crank targets, then back through this description's transmission. The crank targets therefore survive exactly, whatever the two transmissions' conventions; this description's transmission is only the inverse of the one the replay uses to rebuild them. `--ankles hold` instead holds both ankles at their first frame, so the simulated feet stay still while the real ones moved: use it with `--no-fit-ankles` when the simulated ankle is in question. `conversion.json` beside the capture records the map, the old and new descriptions, and per drive the largest difference between the targets rebuilt from the converted capture and the old master's (zero for every drive with `cranks`).
+
+### Windows
+
+```bash
+humanoid-sim segment-capture <exc-dir>... --out <dir> [--bands 3] [--window NAME:START:END ...] [--min-s 8]
+```
+
+A fit that has seen one excitation can trade parameters against each other and still match it, so each fit is scored on excitation it has not seen. `segment-capture` cuts a capture into windows, in seconds from its first command frame (`plan_windows` in `src/humanoid_sim/replay/segments.py`): explicit `--window`s; else the capture's pieces, where its command frames pause for more than `--gap-s` or its signal clock starts over (a slow segment, a second band); else, for one log chirp, `--bands` windows covering equal shares of its octaves; else equal lengths. Windows shorter than `--min-s` are dropped. Each window is a capture of its own, `<id>-<window>`, its manifest's `segment` naming the window.
+
+### The holdout report
+
+```bash
+humanoid-sim pace-report <fit-dir>... --out <dir>
+```
+
+`pace-report` (`src/humanoid_sim/sysid/pace_report.py`) reads the `fit-pace.json` of fits made on one window each with the others held out. Per joint group (a joint without its side; the ankle cranks together) it gives the holdout position RMS at the description's values and at the fit's, averaged over every fit and window, and how many fits improved it; per fit, the same per held-out window; every searched entry within 2% of its bound; and each armature, damping and friction next to the description's value, the drive family's datasheet armature (`DATASHEET_ARMATURE`) and its spread across fits. A value that only helps the window it was fitted on, that sits at a bound, or that the fits disagree on is not identified by the captures.
+
 ## Running on a GPU with SkyPilot
 
 `sky/replay.sky.yaml` and `sky/sysid.sky.yaml` run the replays and the passive fit on one L40S on AWS (8 or more CPUs, 32 GB or more of memory, 200 GB of disk). `sky/setup.sh` installs Isaac Lab release 3.0.0 at `ISAACLAB_COMMIT` and humanoid-sim in editable mode. The repository is synced to `~/sky_workdir` on the node, and the three captures are mounted from `../datasets/humanoid-v1/` (beside the repository) at `/data/exc-<id>`. To use another capture, add it to `file_mounts`.
