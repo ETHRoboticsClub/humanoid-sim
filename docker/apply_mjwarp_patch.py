@@ -15,7 +15,10 @@ FORWARD_AFTER = "6f4220103cbb0605bb9f1201d22da9e0c2f3fb3ac985fa5c4666e77f24acdc1
 
 def apply(package: Path, patch: Path, *, source_name="solver.py", before=BEFORE, after=AFTER) -> None:
     source = package / "_src" / source_name
-    if sha256(source.read_bytes()).hexdigest() != before:
+    digest = sha256(source.read_bytes()).hexdigest()
+    if digest == after:
+        return  # Cached environments can rerun setup; only the verified result is reusable.
+    if digest != before:
         raise RuntimeError(f"MJWarp {source_name} differs from the validated 3.12.0 source; revalidate the patch")
     subprocess.run(["git", "apply", "--check", str(patch.resolve())], cwd=package, check=True)
     subprocess.run(["git", "apply", str(patch.resolve())], cwd=package, check=True)
