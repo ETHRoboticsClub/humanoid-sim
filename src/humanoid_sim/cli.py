@@ -22,6 +22,14 @@
     humanoid-sim check-bag <capture>... [--base yaw|orientation|fixed]
                                                    check captures or rosbags against what a PACE fit needs
                                                    (no physics); fit-pace runs the same checks first
+    humanoid-sim convert-capture <exc-dir>... --out DIR [--from urdf6-b14158e] [--ankles cranks|hold]
+                                                   a capture recorded on an older description (Controls' URDF_6)
+                                                   in this description's joint names, checked at the drive level
+    humanoid-sim segment-capture <exc-dir>... --out DIR [--bands 3] [--window NAME:START:END ...]
+                                                   cut captures into windows (pieces, chirp bands) to fit on one
+                                                   and score on the others
+    humanoid-sim pace-report <fit-dir>... --out DIR  holdout error per joint group before/after, entries at a
+                                                   bound, values against the description and the datasheets
     humanoid-sim pace-selftest --num-envs N --generations G
                                                    plant known PACE parameters, record a chirp on a fixed base and
                                                    fit it back: checks the model is identifiable and the fit wired
@@ -289,7 +297,7 @@ def cmd_fit_pace(args) -> int:
 
     from humanoid_sim.replay.replay import fit_commands
     from humanoid_sim.sim import SimCore
-    from humanoid_sim.sysid.pace import PaceSpace, evaluate, fit, save, start_values, structural_fixed
+    from humanoid_sim.sysid.pace import PaceSpace, blocks, evaluate, fit, save, start_values, structural_fixed
 
     captures = [open_capture(c, frame_stamps=args.frame_stamps) for c in args.captures]
     held = [open_capture(c, frame_stamps=args.frame_stamps) for c in args.holdout]
@@ -331,7 +339,18 @@ def cmd_fit_pace(args) -> int:
     result = fit(sim, captures, space, scored, generations=args.generations, base_motion=base,
                  duration_s=args.duration, seed=args.seed, search=args.search)
     best = {k: v[0] for k, v in space.decode(np.asarray(result["x"])[None]).items()}
+    x0 = {k: v[0] for k, v in space.decode(space.x0()[None]).items()}
+    if args.search == "blocks":
+        free = sorted({int(i) for idx, _ in blocks(space, plant, scored) for i in idx})
+    else:
+        mask = np.zeros(space.dim, dtype=bool)
+        for name, m in space.fixed.items():
+            mask[np.arange(space.dim)[space.slices()[name]][np.asarray(m, dtype=bool)]] = True
+        free = np.flatnonzero(~mask).tolist()
     meta = result | {"captures": [c.dataset_id for c in captures], "base": args.base, "num_envs": args.num_envs,
+                     "free": [space.names[i] for i in free], "search": args.search,
+                     "start": {j: {p: float(x0[p][i]) for p in ("armature", "damping", "friction", "friction_ratio")}
+                               for i, j in enumerate(joints)},
                      "generations": args.generations, "duration_s": args.duration, "seed": args.seed,
                      "scored": [drives[i] for i in scored], "fixed": sorted(args.fix), "wall_s": time.time() - t,
                      "command_rebuild": rebuild, "delay_reference": reference, **_plant_identity(sim, usd),
@@ -503,6 +522,50 @@ def cmd_splat_usd(args) -> int:
     return 0
 
 
+def cmd_convert_capture(args) -> int:
+    from humanoid_sim.model.description import Description
+    from humanoid_sim.replay.convert import convert_capture, is_legacy
+
+    desc = Description.load(args.robot)
+    for c in args.captures:
+        if not is_legacy(Path(c), desc) and not args.force:
+            raise SystemExit(f"{c}: its commands already name {args.robot}'s joints (--force converts anyway)")
+        out = convert_capture(Path(c), Path(args.out), desc, args.source, ankles=args.ankles)
+        report = json.loads((out / "conversion.json").read_text())
+        worst = max(report["drive_targets"]["max_abs_rad"].items(), key=lambda kv: kv[1] or 0.0)
+        print(json.dumps({"capture": str(out), "ankles": args.ankles, "frames": report["drive_targets"]["frames"],
+                          "worst_drive_target_rad": worst, "ankle_residual_rad": report["ankle_residual_rad"]}))
+    return 0
+
+
+def cmd_segment_capture(args) -> int:
+    from humanoid_sim.replay.segments import cut_window, parse_window, plan_windows
+
+    explicit = [parse_window(w) for w in args.window]
+    for c in args.captures:
+        windows = plan_windows(Path(c), explicit=explicit, bands=args.bands, gap_s=args.gap_s, min_s=args.min_s)
+        if not windows:
+            raise SystemExit(f"{c}: no window of at least {args.min_s} s")
+        for w in windows:
+            out = cut_window(Path(c), Path(args.out), w)
+            print(json.dumps({"capture": str(out), "window": w.name, "start_s": w.start_s, "end_s": w.end_s,
+                              "note": w.note}))
+    return 0
+
+
+def cmd_pace_report(args) -> int:
+    from humanoid_sim.model.description import Description
+    from humanoid_sim.sysid.pace_report import render, summarize
+
+    summary = summarize([Path(f) for f in args.fits], Description.load(args.robot))
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "pace-report.json").write_text(json.dumps(summary, indent=1))
+    (out / "pace-report.md").write_text(render(summary))
+    print(out / "pace-report.md")
+    return 0
+
+
 def cmd_fit_delay(args) -> int:
     import numpy as np
 
@@ -658,6 +721,34 @@ def main(argv: list[str] | None = None) -> int:
     cb.add_argument("--skip-drives", nargs="*", default=[], help="drives the fit leaves out")
     cb.add_argument("--frame-stamps", action="store_true", help="as fit-pace's")
     cb.set_defaults(func=cmd_check_bag)
+
+    cc = sub.add_parser("convert-capture", help="a capture recorded on an older description in this one's joint "
+                        "names, checked at the drive level (replay/convert.py)")
+    cc.add_argument("captures", nargs="+")
+    cc.add_argument("--out", required=True, help="parent directory of the converted captures")
+    cc.add_argument("--from", dest="source", default="urdf6-b14158e",
+                    help="the description the capture was recorded on: a bundled name or an actuators.yaml path")
+    cc.add_argument("--ankles", choices=("cranks", "hold"), default="cranks",
+                    help="cranks: through the old transmission's crank targets (exact at the drives); hold: both "
+                         "ankles held at the first frame (leave the ankle drives out of a fit)")
+    cc.add_argument("--force", action="store_true", help="convert even when the joint names already match")
+    cc.set_defaults(func=cmd_convert_capture)
+
+    sc = sub.add_parser("segment-capture", help="cut captures into windows to fit on one and score on the others")
+    sc.add_argument("captures", nargs="+")
+    sc.add_argument("--out", required=True)
+    sc.add_argument("--window", action="append", default=[], metavar="NAME:START:END",
+                    help="an explicit window, seconds from the first command frame (repeatable; replaces the plan)")
+    sc.add_argument("--bands", type=int, default=3, help="windows of a single chirp (equal octaves each)")
+    sc.add_argument("--gap-s", type=float, default=0.5, help="a pause in the command frames that separates pieces")
+    sc.add_argument("--min-s", type=float, default=8.0, help="shorter windows are dropped")
+    sc.set_defaults(func=cmd_segment_capture)
+
+    pr = sub.add_parser("pace-report", help="holdout report of fit-pace results: per group before/after, entries "
+                        "at a bound, values against the description and datasheets")
+    pr.add_argument("fits", nargs="+", help="fit-pace output directories")
+    pr.add_argument("--out", required=True)
+    pr.set_defaults(func=cmd_pace_report)
 
     fpc = sub.add_parser("fit-pace", help="fit PACE 0.2.0's actuator model to captures or rosbags, from their "
                                           "command frames")
