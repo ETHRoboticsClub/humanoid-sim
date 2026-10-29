@@ -55,6 +55,7 @@ class TrainPlantCfg:
     cuda_graph: bool = False  # capture drive math and IMU delivery; CUDA only
     compile: bool = False  # fuse drive and IMU math before capture; requires cuda_graph
     queue_capacity: int = 8  # demands in flight per env: ≥ (max latency + drive delay) / demand period + 1
+    physics_overrides: dict = field(default_factory=dict)  # explicit profile overrides, shared with scene construction
 
 
 @dataclass
@@ -85,7 +86,7 @@ class RobotPlant:
             raise ValueError("TrainPlantCfg.compile requires cuda_graph")
         self.robot, self.imu_sensor, self.contacts = robot, imu, contacts
         self.desc = Description.load(cfg.robot)
-        self.profile = load_profile(cfg.robot)
+        self.profile = load_profile(cfg.robot, physics_overrides=cfg.physics_overrides)
         self.num_envs = e = robot.num_instances
         self.device = torch.device(robot.device)
         self.period_ns = int(self.profile["physics"]["period_ns"])

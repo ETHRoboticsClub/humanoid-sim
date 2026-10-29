@@ -53,6 +53,12 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `cuda_graph` | `False` | Capture drive feedback, target shaping and IMU delivery on CUDA |
 | `compile` | `False` | Fuse the captured drive and IMU math with `torch.compile`; requires `cuda_graph` |
 | `queue_capacity` | `8` | Demands in flight per env; needs at least (max latency + drive delay) / demand period + 1 |
+| `physics_overrides` | `{}` | Explicit nested overrides of the profile's physics settings |
+
+Pass the same `physics_overrides` to `robot_scene_cfg`, `robot_sim_cfg`, `robot_build` and `TrainPlantCfg`.
+They merge into the profile without editing its files, so simulation timing, model transformations,
+contact-capacity checks and the plant use the same configuration. Use
+`load_profile(robot, physics_overrides=overrides)` to record the resolved settings in experiment metadata.
 
 For GPU training, `TrainPlantCfg(cuda_graph=True, compile=True)` compiles and captures the drive and IMU calculations during construction. The graph reads a device nanosecond clock and persistent parameter and queue buffers, so demands, partial resets and randomization continue to take effect. The drive graph snapshots the preceding step's torques for feedback history before advancing the bank. A separate IMU graph registers the sensor's random generator and preserves its sampling and burst-delivery schedule. Capture warmup restores sensor buffers and RNG state. The first boundary and irregular intervals use the ordinary sensor path. Physics stepping and task rewards retain their own update schedules. Compilation adds startup work; measure throughput after warmup. Leave both options false for eager execution, or enable only `cuda_graph` to capture without compiler fusion.
 
