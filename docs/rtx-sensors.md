@@ -87,8 +87,8 @@ For URDF-backed descriptions, the dataset also contains `robot.urdf`,
 recorded IMU side files. The manifest's `replay` block identifies these by SHA-256
 and names the base frame; `trajectory_sha256` identifies the source recording.
 Trajectory and IMU headers share a unique `recording_id`, so an IMU file from a
-different run is refused even when the robot and description match. Render older
-recordings again when this identity is absent.
+different run is refused even when the robot and description match. Record a new run
+when this identity is absent.
 
 Kinematics contains no base/world pose. A downstream converter supplies local
 mount TF and measured joints to SLAM; the original trajectory is a separate
