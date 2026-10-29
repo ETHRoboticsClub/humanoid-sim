@@ -27,8 +27,9 @@ if __name__ == "__main__":
     if version("newton") != "1.6.1":
         raise RuntimeError("The Kamino optimization requires Newton 1.6.1")
     root = Path(__file__).parent / "patches"
-    apply(
-        Path(newton.__file__).parent,
-        root / "newton-1.6.1-active-worlds.patch",
-        json.loads((root / "newton-1.6.1-active-worlds.json").read_text()),
-    )
+    for name in ("active-worlds", "active-preconditioner"):
+        apply(
+            Path(newton.__file__).parent,
+            root / f"newton-1.6.1-{name}.patch",
+            json.loads((root / f"newton-1.6.1-{name}.json").read_text()),
+        )

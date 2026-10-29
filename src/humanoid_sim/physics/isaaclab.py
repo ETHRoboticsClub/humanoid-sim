@@ -303,11 +303,22 @@ def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None):
                 max_alternating_iterations=settings["iterations"], **settings.get("dvi", {})))
         if method != "padmm":
             raise ValueError(f"Kamino dynamics solver {method!r}: padmm or dvi")
+        dynamics_type = KaminoDynamicsCfg
+        execution = {}
+        if "matrix_preconditioner_stride" in settings:
+            from isaaclab.utils import configclass
+
+            @configclass
+            class KaminoExecutionDynamicsCfg(KaminoDynamicsCfg):
+                matrix_preconditioner_stride: int = 0
+
+            dynamics_type = KaminoExecutionDynamicsCfg
+            execution["matrix_preconditioner_stride"] = settings["matrix_preconditioner_stride"]
         return KaminoPADMMSolverCfg(**common, dynamics_solver_cfg=KaminoPADMMCfg(
             max_iterations=settings["iterations"],
             use_graph_conditionals=settings.get("use_graph_conditionals", False), **settings.get("padmm", {})),
-            dynamics=KaminoDynamicsCfg(linear_solver_type=settings.get("linear_solver", "LLTB"),
-                                      linear_solver_kwargs=dict(settings.get("linear_solver_kwargs", {}))))
+            dynamics=dynamics_type(linear_solver_type=settings.get("linear_solver", "LLTB"),
+                                   linear_solver_kwargs=dict(settings.get("linear_solver_kwargs", {})), **execution))
     raise ValueError(f"physics solver {solver!r}: one of {', '.join(SOLVERS)}")
 
 
