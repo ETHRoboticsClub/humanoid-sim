@@ -15,8 +15,8 @@ robot is welded at its spawn point in its home pose (a G1 topples on a fixed-gai
 unless ``fixed_base`` is off.
 
 With ``physics`` off the session never steps: the caller poses the robot (:meth:`SensorSession.pose`, the
-runtime's truth) and renders at plant times it chooses (:meth:`SensorSession.render_at`), telling the session where
-the plant is now (``clock_ns``) so stamps map onto the realtime clock (``runtime/render.py``).
+runtime's truth) and renders at plant times it chooses (:meth:`SensorSession.render_at`), providing the host's
+plant-to-monotonic mapping (``clock``) so capture stamps survive render delays (``runtime/render.py``).
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from humanoid_sim.sensors.feeds import ClockMapping
 from humanoid_sim.sensors.models import RTX_KINDS
 from humanoid_sim.sensors.room_rays import RoomRays, room_rays
 from humanoid_sim.sensors.rtx import DOME_INTENSITY
@@ -152,7 +153,7 @@ class SensorSession:
         self.ms = {"physics": [], "render": [], "camera_read": [], "lidar_read": [], "publish": []}
         self._saved: dict[str, bool] = {}  # every image stream seen: whether it is depth
         self._last_sweep: dict[str, tuple] = {}
-        self.clock_ns: int | None = None  # where the plant is now, when something else steps it
+        self.clock: ClockMapping | None = None  # supplied by a host that steps physics separately
         self.render_ns = min([int(round(1e9 / s.rate_hz)) for c in self.camera_specs for s in c.streams]
                              or [lidar.period_ns for lidar in self.lidars] or [0])
 
@@ -188,7 +189,7 @@ class SensorSession:
 
     @property
     def now_ns(self) -> int:
-        return self.sim.t_ns if self.clock_ns is None else self.clock_ns
+        return self.sim.t_ns if self.clock is None else self.clock.plant_at(time.monotonic_ns())
 
     def pose(self, t_ns: int, q: torch.Tensor, base_pose: torch.Tensor) -> None:
         """Put the robot at joint positions ``q`` ``[1, J]`` (the description's joint order) and base pose
