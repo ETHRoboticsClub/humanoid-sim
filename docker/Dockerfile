@@ -32,6 +32,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && python -c "import torch, warp, newton, mujoco_warp, isaaclab, isaaclab_newton, rerun, pxr" \
     && rm -rf /opt/isaaclab/.git
 
+# Preserve full constraint capacity while scheduling only active rows in MJWarp's
+# constraint update and sparse force assembly. Fail the build if the pin drifts.
+COPY docker/apply_mjwarp_patch.py docker/verify_mjwarp_active_rows.py /opt/humanoid-sim-build/
+COPY docker/patches/ /opt/humanoid-sim-build/patches/
+RUN python /opt/humanoid-sim-build/apply_mjwarp_patch.py
+LABEL org.ethrc.mjwarp.solver.sha256=c737461c682ec74fcd9fcd4714f63b063d22bbac1f1c1e71470e1249d11e355f
+
 # humanoid-sim: dependencies already satisfied by the Isaac Lab environment (torch, numpy, PyYAML).
 # The dev entrypoint swaps this copy for an editable install from /workspace/humanoid-sim.
 COPY pyproject.toml README.md /opt/humanoid-sim/
