@@ -98,15 +98,18 @@ for w in "${windows[@]}"; do
 done
 [ "$FULL_FIT" = 1 ] && jobs_+=("fit-all|${windows[*]}")
 running=0
+fit_pids=()
 for job in "${jobs_[@]}"; do
   name=${job%%|*}
   # shellcheck disable=SC2086
   (humanoid-sim --robot "$ROBOT" fit-pace ${job#*|} "${common[@]}" --out "$out/fits/$name" \
      > "$out/fits/$name.log" 2>&1; echo "$name exit $?" >> "$out/fits/exits.txt") &
+  fit_pids+=("$!")
   running=$((running + 1))
   if [ "$running" -ge "$PARALLEL" ]; then wait -n; running=$((running - 1)); fi
 done
-wait
+# A bare `wait` also waits for the tee behind `exec > >(...)`, which lives as long as this script.
+wait "${fit_pids[@]}"
 cat "$out/fits/exits.txt"
 wait "$p_on" "$p_off" 2>/dev/null
 for f in on off; do echo "selfcol $f: $(tail -c 2000 "$out/selfcol/$f.log" | grep -E '^\{' | tail -1)"; done
