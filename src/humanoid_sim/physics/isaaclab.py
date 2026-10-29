@@ -304,16 +304,17 @@ def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None):
         if method != "padmm":
             raise ValueError(f"Kamino dynamics solver {method!r}: padmm or dvi")
         dynamics_type = KaminoDynamicsCfg
-        execution = {}
-        if "matrix_preconditioner_stride" in settings:
+        execution = {name: settings[name] for name in ("matrix_preconditioner_stride", "tracked_active_clear")
+                     if name in settings}
+        if execution:
             from isaaclab.utils import configclass
 
             @configclass
             class KaminoExecutionDynamicsCfg(KaminoDynamicsCfg):
                 matrix_preconditioner_stride: int = 0
+                tracked_active_clear: bool = False
 
             dynamics_type = KaminoExecutionDynamicsCfg
-            execution["matrix_preconditioner_stride"] = settings["matrix_preconditioner_stride"]
         return KaminoPADMMSolverCfg(**common, dynamics_solver_cfg=KaminoPADMMCfg(
             max_iterations=settings["iterations"],
             use_graph_conditionals=settings.get("use_graph_conditionals", False), **settings.get("padmm", {})),

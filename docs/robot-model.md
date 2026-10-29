@@ -402,6 +402,9 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 
 With a sparse Jacobian and dense dynamics, Kamino assembles `J M⁻¹ Jᵀ` by grouping Jacobian blocks by body. It rebuilds the groups on the device each step as contacts change, avoiding pairs of blocks that cannot contribute to the matrix. Armature, effort regularization and preconditioning are applied afterward as before. The image's hash-checked Newton patch installer supplies this implementation; incompatible dependency sources are rejected. `tests/test_kamino_body_assembly.py` checks the matrix against an independent FP64 calculation and exercises changing contacts, CUDA graph replay and workspace replacement.
 
+`physics.kamino.tracked_active_clear: true` avoids clearing unused dense Delassus capacity. It tracks the largest active prefix written since the previous clear, including additive builds and regularization, so changing contact counts cannot leave stale entries. The default remains full clearing. Direct callers that write outside the active prefix must call `invalidate_tracked_clear()`; public `zero()` always clears the entire allocation. `tests/test_kamino_tracked_clear.py` checks whole-allocation equality, graph replay and configuration forwarding.
+
+
 Only the `model` block is part of the asset key. The `physics` block is described in more detail in [world.md](world.md) and [testing-and-gpu.md](testing-and-gpu.md).
 
 ### Robot facts kept in the profile
