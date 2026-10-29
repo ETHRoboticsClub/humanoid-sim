@@ -99,7 +99,8 @@ class RobotPlant:
             from humanoid_sim.transmissions.drive_map import native_joint_names
 
             physical = native_joint_names(self.desc)
-            self.native_state = NativeState(self.desc, device=self.device)
+            self.native_state = NativeState(self.desc, device=self.device,
+                                            compile_batch_size=e if cfg.compile else None)
         self.core = PlantCore(self.desc, self.joints, e, PlantCfg(robot=cfg.robot, physics_period_ns=self.period_ns,
                                                                   queue_capacity=cfg.queue_capacity,
                                                                   device=str(self.device)), solver_joint_names=physical)

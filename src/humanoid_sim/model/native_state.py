@@ -44,7 +44,7 @@ def _relative_quat(a, b):
 
 
 class NativeState:
-    def __init__(self, desc, *, device="cpu", dtype=torch.float64):
+    def __init__(self, desc, *, device="cpu", dtype=torch.float64, compile_batch_size: int | None = None):
         from pxr import UsdPhysics
 
         self.names = list(desc.joints)
@@ -122,6 +122,11 @@ class NativeState:
             rods.append(rod)
         self.closure_trees = [(root, [row for row in self.tree if row[2] in children], rods)
                               for root, (children, rods) in groups.items()]
+        if compile_batch_size is not None and compile_batch_size <= 0:
+            raise ValueError("compile_batch_size must be positive")
+        self.compile_batch_size = compile_batch_size
+        self._dofs_run = (torch.compile(self._dofs, fullgraph=True, dynamic=False)
+                          if compile_batch_size is not None else self._dofs)
 
     def _values(self, q):
         values = {name: q[:, i] for i, name in enumerate(self.names)}
@@ -179,6 +184,20 @@ class NativeState:
 
     def dofs(self, q: torch.Tensor, qd: torch.Tensor) -> tuple[dict, dict]:
         """Isaac Lab DOF-space positions and velocities, including each ball's three axes."""
+        if self.compile_batch_size is None:
+            return self._dofs_run(q, qd)
+        rows = q.shape[0]
+        if rows > self.compile_batch_size:
+            raise ValueError("reset batch exceeds compile_batch_size")
+        # JVP specializes on batch size even with dynamic compilation. Pad to the
+        # plant's fixed capacity so changing reset subsets reuse the same graph.
+        padding = (0, 0, 0, self.compile_batch_size - rows)
+        values, rates = self._dofs_run(torch.nn.functional.pad(q, padding),
+                                       torch.nn.functional.pad(qd, padding))
+        return ({name: value[:rows] for name, value in values.items()},
+                {name: rate[:rows] for name, rate in rates.items()})
+
+    def _dofs(self, q: torch.Tensor, qd: torch.Tensor) -> tuple[dict, dict]:
         q = q.to(device=self.device, dtype=self.dtype)
         qd = qd.to(device=self.device, dtype=self.dtype)
         # JVP supplies the primal coordinates as well as every scalar/ball rate;
