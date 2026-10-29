@@ -17,15 +17,15 @@ Drive facts (family, sign, gains, torque-speed curves, ankle geometry) come from
 
 ## One physics step
 
-`PlantCore` in `src/humanoid_sim/core.py` sits between the demands and the solver. For each physics step `[t0, t0 + 4 ms)` it does the following:
+`PlantCore` in `src/humanoid_sim/core.py` sits between the demands and the solver. For each physics step `[t0, t0 + physics_period_ns)` it does the following:
 
-1. Reads drive-frame state (`DriveJointMap.drive_state`): signed joint coordinates for one-to-one drives and actual native shaft coordinates for USD ankles.
+1. Reads drive-frame state (`PlantCore.solver_map.drive_state`): signed joint coordinates for one-to-one drives and actual native shaft coordinates for USD ankles.
 2. Runs the drive bank (`DriveBank.compute`) over every demand in force during the step, giving demanded and applied drive torque.
 3. Applies drive torque to the driven coordinates, including native crank shafts, and adds external joint torque. The closed mechanism transfers crank torque to the passive ankle hinges; the analytical semantic-only map uses Jᵀ when no native shafts are present.
 4. Turns the joint torque into a position target for the solver's constant PD ([target shaping](glossary.md#target-shaping)).
 5. After the solver step, `PlantCore.feedback` returns drive-frame feedback.
 
-The physics period is 4 ms (`physics.period_ns` in `profiles/ethrc_v1.yaml`). All times are integer nanoseconds on the plant clock.
+The native V1 physics period is 1 ms (`physics.period_ns` in `profiles/ethrc_v1.yaml`). All times are integer nanoseconds on the plant clock.
 
 ## Frames
 
@@ -246,7 +246,7 @@ The solver's effort limit is the drive peak on each directly driven coordinate, 
 
 The V1 asset uses the delivered `humanoid_V1.usda` and mesh layer. Each ankle retains its two crank shafts, rods, spherical joints and loop closures. Drive torque acts on the crank shafts; the solver transfers it through the linkage. The passive pitch/roll hinges receive no drive PD and no duplicate reflected rotor armature.
 
-`Description.joints` remains the semantic joint inventory used by runtime clients, replay and training observations. `Description.physics_joints` additionally includes the native crank shafts. `NativeDrivePlant` shares the semantic plant's drive bank and maps its torques directly onto those shafts. Feedback comes from their physical positions and velocities.
+`Description.joints` remains the semantic joint inventory used by runtime clients, replay and training observations. `PlantCore.solver_map.joint_names` additionally includes the native crank shafts. The plant's solver map applies drive torques directly to those shafts and reads feedback from their physical positions and velocities.
 
 The description's `ankle_model` extracts geometry and joint names from USD. `AnkleTransmission` implements its analytic map in batched torch for semantic command conversion, initialization and model checks:
 
@@ -265,7 +265,7 @@ The delivered-USD path does not add the reduced model's spatial stop tendons. `r
 
 ### Validation
 
-`tests/test_description_delivery.py` compares crank angles and Jacobians over the reachable workspace with the description's USD-derived reference. `tests/test_native_usd.py` checks preserved masses and loop closures, native torque/feedback mapping, base-joint assets, and rod closure under Newton forward kinematics. `tests/test_native_physics.py` exercises native actuation on CUDA with MJWarp and Kamino, in eager and CUDA-graph modes.
+`tests/test_description_delivery.py` compares crank angles and Jacobians over the reachable workspace with the description's USD-derived reference. `tests/test_native_usd.py` and `tests/test_native_integration.py` check preserved masses and loop closures, native torque/feedback mapping, base-joint assets, and rod closure under Newton forward kinematics. `tests/test_native_physics.py` exercises native actuation on CUDA with MJWarp and Kamino, in eager and CUDA-graph modes.
 
 Run the CPU checks with `uv run pytest -m "not physics"`. Run the CUDA lane in the Isaac Lab environment, or use `sky/native-usd.sky.yaml`; a skipped CUDA test is not physics validation.
 

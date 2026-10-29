@@ -18,13 +18,13 @@ import importlib.util
 import math
 import os
 import subprocess
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 
 import yaml
 
-from humanoid_sim.transmissions.ankle import AnkleTransmission
+from humanoid_sim.transmissions.ankle import AnkleTransmission, mirror_right
 
 ACTUATORS_SCHEMA = "ethrc-actuators/v1"
 
@@ -109,8 +109,22 @@ class Description:
 
     @cached_property
     def usd_path(self) -> Path | None:
-        path = self.package_dir / "usd" / self.urdf_path.with_suffix(".usda").name
-        return path if path.is_file() else None
+        """Delivered USD selected explicitly by this robot's model profile, if any."""
+        from humanoid_sim.model.asset import load_profile
+
+        relative = load_profile(self.robot)["model"].get("usd")
+        if relative is None:
+            return None
+        path = self.package_dir / relative
+        if not path.is_file():
+            raise ValueError(f"profile selects missing USD description {path}")
+        return path
+
+    @cached_property
+    def usd_model(self):
+        from humanoid_sim.model.usd import UsdDescription
+
+        return None if self.usd_path is None else UsdDescription(self.usd_path)
 
     @staticmethod
     def default_root() -> Path:
@@ -192,34 +206,6 @@ class Description:
         return {n: float(preset["positions_rad"].get(n, 0.0)) for n in self.joints}
 
     @cached_property
-    def physics_joints(self) -> dict[str, Joint]:
-        """Semantic joints and native crank shafts, with rotor inertia on the shafts."""
-        if self.usd_path is None or not self.linkages:
-            return self.joints
-        import torch
-
-        out = dict(self.joints)
-        for linkage in self.linkages:
-            spec = self.ankle_model.payload["sides"][linkage.side]
-            pose = torch.tensor([self.joints[name].standing_offset_rad for name in linkage.joints],
-                                dtype=torch.float64)
-            angles = self.ankle_transmission(linkage.side, dtype=torch.float64).cranks(pose)
-            entries = [self.table["joints"][name] for name in linkage.joints]
-            armatures = {float(entry["armature"]) for entry in entries}
-            if len(armatures) != 1:
-                raise ValueError(f"{linkage.side}: ambiguous crank rotor armature")
-            armature = next(iter(armatures))
-            for name in linkage.joints:
-                out[name] = replace(out[name], armature=0.0)
-            for index, (crank, drive_name) in enumerate((("upper", linkage.upper), ("lower", linkage.lower))):
-                name = spec["usd_joints"][crank]
-                drive = self.drives[drive_name]
-                out[name] = Joint(name, self.joints[linkage.joints[0]].region, drive_name, 1,
-                                 float(angles[index]), armature, 0.0, 0.0,
-                                 drive.effort_peak, drive.velocity, 0.0)
-        return out
-
-    @cached_property
     def drives(self) -> dict[str, Drive]:
         """All drives: the 1:1 joint drives in joint order, then the linkage cranks (description order).
 
@@ -237,25 +223,25 @@ class Description:
 
         out = {}
         for name, j in self.table["joints"].items():
+            j = self.actuator_values(j)
             device = j.get("device", name)
             if device is None:
                 continue
             k, d = gain(device, j)
-            ratings = self.table.get("families", {}).get(j["family"], {}) | j
             out[device] = Drive(
                 name=device, family=j["family"], joints=(name,), sign=int(j["sign"]), crank=None,
-                effort_peak=float(ratings["effort"]),
-                effort_nominal=float(ratings["effort_nominal"]) if "effort_nominal" in ratings else None,
+                effort_peak=float(j["effort"]),
+                effort_nominal=float(j["effort_nominal"]) if "effort_nominal" in j else None,
                 velocity=float(j["velocity"]), position_limit_device=None, baseline_stiffness=k, baseline_damping=d,
                 motor_index=int(j["motor_index"]) if "motor_index" in j else None,
             )
         for device, d in self.table.get("drives", {}).items():
+            d = self.actuator_values(d)
             k, dmp = gain(device, d)
-            ratings = self.table.get("families", {}).get(d["family"], {}) | d
             out[device] = Drive(
                 name=device, family=d["family"], joints=tuple(d["joints"]), sign=1, crank=d["crank"],
-                effort_peak=float(ratings["effort"]),
-                effort_nominal=float(ratings["effort_nominal"]) if "effort_nominal" in ratings else None,
+                effort_peak=float(d["effort"]),
+                effort_nominal=float(d["effort_nominal"]) if "effort_nominal" in d else None,
                 velocity=float(d["velocity"]), position_limit_device=tuple(d["position_limit"]),
                 baseline_stiffness=k, baseline_damping=dmp,
             )
@@ -268,10 +254,9 @@ class Description:
     def linkages(self) -> list[Linkage]:
         """The crank linkages, one per pair of hinges: the ETHRC ankles (left first); empty for a robot without."""
         out = []
-        if not any(d.crank for d in self.drives.values()):
-            return out
         for side in ("l", "r"):
-            joints = tuple(self.ankle_model.payload["sides"][side]["joint_names"])
+            joints = (tuple(self.ankle_model.payload["sides"][side]["joint_names"]) if self.usd_path else
+                      (f"foot_pitch_{side}", f"foot_roll_{side}"))
             by_crank = {d.crank: d.name for d in self.drives.values() if d.crank and set(d.joints) == set(joints)}
             if by_crank:
                 if set(by_crank) != {"upper", "lower"}:
@@ -305,6 +290,11 @@ class Description:
         """A motor family's ``key``, or ``default`` when the family does not record it."""
         return self.table.get("families", {}).get(family, {}).get(key, default)
 
+    def actuator_values(self, entry: dict) -> dict:
+        """Resolve torque ratings from the family, keeping an actuator's explicit overrides."""
+        family = self.table.get("families", {}).get(entry.get("family"), {})
+        return {**{key: family[key] for key in ("effort", "effort_nominal") if key in family}, **entry}
+
     def calibration_travel(self, name: str) -> tuple[float, float]:
         """Simulated travel in URDF (calibration) radians: the recorded mechanical stop where there is one,
         else the position limit. Same rule as Controls ``ethrc_ssot/joint_travel.py``. An ankle hinge has no limit
@@ -313,7 +303,7 @@ class Description:
         linkage = next((lk for lk in self.linkages if name in lk.joints), None)
         if linkage is not None:
             return self._ankle_bounds(linkage.side)[linkage.joints.index(name)]
-        offset = self.joints[name].standing_offset_rad
+        offset = float(entry.get("standing_offset_rad", 0.0))
         lo, hi = (float(b) + offset for b in entry["position_limit"])
         stop = entry.get("mechanical_stop_calibration_rad")
         if stop is None:
@@ -327,6 +317,9 @@ class Description:
     def link_names(self) -> set[str]:
         import xml.etree.ElementTree as ET
 
+        if self.usd_model is not None:
+            return set(self.usd_model.bodies) | {p.GetName() for p in self.usd_model.stage.Traverse()
+                                                if p.GetCustomDataByKey("fusion2usd:sensor")}
         return {link.get("name") for link in ET.parse(self.urdf_path).getroot().findall("link")}
 
     def _imu_joint(self):
@@ -340,6 +333,8 @@ class Description:
 
     def imu_link(self) -> str:
         """The IMU's own link: the child of the URDF's ``imu_joint``."""
+        if self.usd_model is not None:
+            return self.usd_model.imu_frame()
         child = self._imu_joint().find("child")
         if child is None:
             raise ValueError(f"{self.urdf_path.name}: imu_joint has no child")
@@ -347,6 +342,8 @@ class Description:
 
     def imu_mount(self) -> tuple[str, tuple[float, ...], tuple[float, ...]]:
         """The IMU's parent link and its pose there (xyz in m, URDF rpy in rad): the URDF's ``imu_joint``."""
+        if self.usd_model is not None:
+            return self.usd_model.imu_mount()
         joint = self._imu_joint()
         origin = joint.find("origin")
         xyz = tuple(float(v) for v in origin.get("xyz", "0 0 0").split())
@@ -362,22 +359,30 @@ class Description:
     # -- ankle ------------------------------------------------------------------------------------
 
     def ankle_geometry(self, side: str) -> dict:
-        return self.ankle_model.payload["sides"][side]["geometry"] | {
-            "pitch_axis": [0, 1, 0], "roll_axis": [1, 0, 0]}
+        if self.usd_path is not None:
+            return {**self.ankle_model.payload["sides"][side]["geometry"],
+                    "pitch_axis": [0, 1, 0], "roll_axis": [1, 0, 0]}
+        right = self.table["ankle_model"]["right_geometry"]
+        return right if side == "r" else mirror_right(right)
 
     def ankle_kinematic_sign(self, side: str) -> list[int]:
-        self.ankle_model.payload["sides"][side]
-        return [1, 1]
+        if self.usd_path is not None:
+            return [1, 1]
+        return [int(s) for s in self.table["ankle_model"]["semantic_to_kinematic_sign"][side]]
 
     def ankle_neutral(self, side: str) -> list[float]:
         """Joint angles (pitch, roll) of the linkage neutral, where both cranks read zero."""
-        return self.ankle_model.neutral(side).tolist()
+        if self.usd_path is not None:
+            return self.ankle_model.neutral(side).tolist()
+        return [float(v) for v in self.table["ankle_model"]["semantic_neutral_rad"][side]]
 
     def ankle_transmission(self, side: str, *, device="cpu", dtype=None) -> AnkleTransmission:
         import torch
 
+        native = self.usd_path is not None
         return AnkleTransmission(self.ankle_geometry(side), self.ankle_kinematic_sign(side),
-                                 device=device, dtype=dtype or torch.float32, absolute_cranks=True)
+                                 (0.0, 0.0) if native else self.ankle_neutral(side),
+                                 native_angles=native, device=device, dtype=dtype or torch.float32)
 
     def ankle_cranks(self, side: str) -> tuple[str, str]:
         """(upper, lower) crank drive names of one side."""
@@ -395,9 +400,9 @@ class Description:
     @cached_property
     def ankle_model(self):
         """humanoid-urdf's ``AnkleModel`` for this description: the cranks' stops and what they allow."""
-        if self.usd_path is None:
-            raise ValueError(f"{self.robot}: ankle geometry requires the delivered USD")
-        return self.ankle_model_module().load(self.actuators_path, self.usd_path)
+        if self.usd_path is not None:
+            return self.ankle_model_module().load(self.actuators_path, self.usd_path)
+        return self.ankle_model_module().load(self.actuators_path)
 
     def ankle_model_module(self):
         """humanoid-urdf's own ``ankle_model`` module (numpy reference), loaded from the submodule."""

@@ -23,8 +23,9 @@ import torch
 
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.urdf import BASE_JOINTS
-from humanoid_sim.physics.crank_stops import check_crank_stops, crank_stop_hook
+from humanoid_sim.physics.crank_stops import check_crank_stops
 from humanoid_sim.physics.joint_properties import JointProperties
+from humanoid_sim.physics.model_build import model_build
 from humanoid_sim.world.boxes import StaticBoxes
 
 # Base-joint PD. Each joint carries the whole robot (a few kg m² about yaw, ~10 about pitch and roll at the
@@ -117,6 +118,40 @@ def apply_joint_limits(physics: dict) -> None:
     NewtonManager.add_model_change(ModelFlags.JOINT_DOF_PROPERTIES)
 
 
+def apply_loop_closure(physics: dict) -> None:
+    """Set MJWarp's response time and damping for joint-synthesized loop constraints.
+
+    Newton synthesizes USD ball/hinge closures with MuJoCo's default 20 ms
+    response time. This numerical compliance is independent of actuator gains.
+    Only synthesized loop rows are changed; other equalities retain their values.
+    Call after solver construction, before stepping.
+    """
+    if running_solver() != "mjwarp":
+        return
+    solref = physics["mjwarp"].get("loop_closure_solref")
+    solimp = physics["mjwarp"].get("loop_closure_solimp")
+    if solref is None and solimp is None:
+        return
+    if solref is not None and (len(solref) != 2 or not all(math.isfinite(v) and v > 0 for v in solref)):
+        raise ValueError("loop_closure_solref requires positive finite time constant and damping ratio")
+    if solimp is not None and (len(solimp) != 5 or not all(math.isfinite(v) for v in solimp)
+                              or not 0 < solimp[0] <= solimp[1] < 1 or solimp[2] <= 0
+                              or not 0 < solimp[3] < 1 or solimp[4] < 1):
+        raise ValueError("invalid loop_closure_solimp impedance parameters")
+    from isaaclab_newton.physics import NewtonManager
+
+    solver = NewtonManager._solver
+    if solver is None or getattr(solver, "mjw_model", None) is None:
+        raise RuntimeError("apply loop closure settings after the simulation is reset")
+    rows = (solver.mjc_eq_to_newton_jnt.numpy() >= 0).any(axis=0)
+    for name, setting in (("eq_solref", solref), ("eq_solimp", solimp)):
+        if setting is not None:
+            target = getattr(solver.mjw_model, name)
+            values = target.numpy()
+            values[:, rows] = setting
+            target.assign(values)
+
+
 def apply_heightfield_base(physics: dict) -> None:
     """Give every heightfield of the running MJWarp model a solid base ``heightfield_base_m`` deep below its lowest
     point (the block's setting). Newton exports a heightfield to MuJoCo with a 0.1 mm base, and MuJoCo pushes a
@@ -177,21 +212,6 @@ def articulation_cfg(usd_path: Path, props: JointProperties, *, fixed_base: bool
         joint_effort_limit=_per_joint(joints, props.effort_limit),
     )}
     joint_pos = _per_joint(joints, props.standing if joint_pos is None else joint_pos)
-    from humanoid_sim.model.asset import asset_meta
-
-    try:
-        meta = asset_meta(usd_path)
-    except FileNotFoundError:
-        meta = {}
-    if meta.get("crank_joints"):
-        from humanoid_sim.model.native_state import NativeState
-
-        desc = Description.load(meta["robot"])
-        semantic = list(desc.joints)
-        positions = torch.tensor([[joint_pos[f"^{name}$"] for name in semantic]], dtype=torch.float64)
-        native = NativeState(desc, semantic, dtype=torch.float64)
-        joint_pos.update({f"^{name}$": float(position[0])
-                          for name, (position, _) in native.state(positions, torch.zeros_like(positions)).items()})
     if base_joints:
         names = [name for name, _ in BASE_JOINTS]
         actuators["base"] = ImplicitActuatorCfg(
@@ -223,20 +243,8 @@ def imu_sensor_cfg(robot: str = "ethrc_v1"):
     """Isaac Lab's IMU sensor at the description's mount (``imu_joint``): raw sensor-frame values."""
     from isaaclab.sensors import ImuCfg
 
-    desc = Description.load(robot)
-    parent, xyz, rpy = desc.imu_mount()
-    parent_path = f"{ROBOT_PRIM}/Geometry/{parent}"
-    if desc.usd_path is not None:
-        from pxr import Usd, UsdPhysics
-
-        stage = Usd.Stage.Open(str(desc.usd_path))
-        matches = [prim for prim in stage.Traverse()
-                   if prim.GetName() == parent and prim.HasAPI(UsdPhysics.RigidBodyAPI)]
-        if len(matches) != 1:
-            raise ValueError(f"USD must contain one IMU parent body named {parent}")
-        relative = matches[0].GetPath().MakeRelativePath(stage.GetDefaultPrim().GetPath())
-        parent_path = f"{ROBOT_PRIM}/{relative}"
-    return ImuCfg(prim_path=parent_path,
+    parent, xyz, rpy = Description.load(robot).imu_mount()
+    return ImuCfg(prim_path=f"{ROBOT_PRIM}/Geometry/{parent}",
                   offset=ImuCfg.OffsetCfg(pos=tuple(xyz), rot=_quat_xyzw(*rpy)))
 
 
@@ -244,7 +252,7 @@ def contact_sensor_cfg(history: int = 3, air_time: bool = True):
     """Contact sensor on every body: net forces with history, air time."""
     from isaaclab.sensors import ContactSensorCfg
 
-    return ContactSensorCfg(prim_path=f"{ROBOT_PRIM}/.*", history_length=history, track_air_time=air_time)
+    return ContactSensorCfg(prim_path=f"{ROBOT_PRIM}/Geometry/.*", history_length=history, track_air_time=air_time)
 
 
 def ground_cfg(friction: float):
@@ -271,16 +279,35 @@ def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None):
                                njmax=settings["njmax"], nconmax=settings["nconmax"],
                                use_mujoco_contacts=contacts == "mujoco")
     if solver == "kamino":
-        from isaaclab_newton.physics import KaminoMaterialsCfg, KaminoPADMMCfg, KaminoPADMMSolverCfg
+        from isaaclab_newton.physics import (
+            KaminoDVICfg,
+            KaminoDVISolverCfg,
+            KaminoDynamicsCfg,
+            KaminoMaterialsCfg,
+            KaminoPADMMCfg,
+            KaminoPADMMSolverCfg,
+        )
 
         if integrator != "euler":
             # Newton would fall back to euler: moreau needs Kamino's own collision detector, not used here.
             raise ValueError(f"Kamino integrator {integrator!r}: euler (contacts come from Newton's pipeline)")
 
-        return KaminoPADMMSolverCfg(integrator=integrator,
-                                    dynamics_solver_cfg=KaminoPADMMCfg(max_iterations=settings["iterations"]),
-                                    max_contacts_per_world=settings["max_contacts_per_world"],
-                                    materials=KaminoMaterialsCfg(friction_mix_mode="max"))
+        common = dict(integrator=integrator, use_fk_solver=settings.get("use_fk_solver"),
+                      sparse_jacobian=settings.get("sparse_jacobian"),
+                      sparse_dynamics=settings.get("sparse_dynamics", False),
+                      max_contacts_per_world=settings["max_contacts_per_world"],
+                      materials=KaminoMaterialsCfg(friction_mix_mode="max"))
+        method = settings.get("dynamics_solver", "padmm")
+        if method == "dvi":
+            return KaminoDVISolverCfg(**common, dynamics_solver_cfg=KaminoDVICfg(
+                max_alternating_iterations=settings["iterations"], **settings.get("dvi", {})))
+        if method != "padmm":
+            raise ValueError(f"Kamino dynamics solver {method!r}: padmm or dvi")
+        return KaminoPADMMSolverCfg(**common, dynamics_solver_cfg=KaminoPADMMCfg(
+            max_iterations=settings["iterations"],
+            use_graph_conditionals=settings.get("use_graph_conditionals", False), **settings.get("padmm", {})),
+            dynamics=KaminoDynamicsCfg(linear_solver_type=settings.get("linear_solver", "LLTB"),
+                                      linear_solver_kwargs=dict(settings.get("linear_solver_kwargs", {}))))
     raise ValueError(f"physics solver {solver!r}: one of {', '.join(SOLVERS)}")
 
 
@@ -340,11 +367,15 @@ class IsaacLabRobot:
         physics = {"solver": cfg.solver, cfg.solver: cfg.settings}
         self.sim = sim_utils.SimulationContext(simulation_cfg(physics, device=cfg.device, period_s=cfg.period_s,
                                                               integrator=cfg.integrator, visualizers=visualizers))
-        with crank_stop_hook(desc.robot, physics):
+        with model_build(desc.robot, physics):
             self.scene = instantiate(scene_cfg)
             self.sim.reset()
         check_crank_stops(desc.robot, physics)
         apply_joint_limits(physics)
+        apply_loop_closure(physics)
+        from humanoid_sim.physics.contact_capacity import contact_capacity_guard
+
+        self._contact_capacity = contact_capacity_guard(physics, cfg.num_envs, cfg.device)
         self.robot = self.scene["robot"]
         self.imu = self.scene["imu"] if cfg.imu else None
         self.contacts = self.scene["contacts"] if cfg.contacts else None
@@ -377,6 +408,8 @@ class IsaacLabRobot:
     def step(self) -> None:
         self.scene.write_data_to_sim()
         self.sim.step(render=self.cfg.render_each_step)
+        if self._contact_capacity is not None:
+            self._contact_capacity.check()
         self.scene.update(self.cfg.period_s)
 
     def close(self) -> None:

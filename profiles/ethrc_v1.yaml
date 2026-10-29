@@ -4,48 +4,38 @@
 schema: humanoid-sim-profile/v1
 robot: ethrc_v1
 
-# Named poses (model/poses.py). home: the URDF's zero, which is the pose the CAD is exported in.
+# Named poses (model/poses.py). Zero is the delivered CAD pose, not a balanced stance.
 poses:
   home: zero
-  # The standing pose is where Controls' MuJoCo plant starts the robot (ethrc_sim/plant.py with
-  # ethrc_ssot/neutral_pose.py). The standing offsets are 0, so it is the home pose: zero, arms down, legs straight.
+  # Standing uses the description offsets; training chooses its own starting pose.
   start: standing
 
 model:
-  # Movable URDF joints without an actuators.yaml entry are welded at zero (Controls --fixed-orca-hands).
+  # The CAD delivery is imported directly; the URDF is only a Controls identity artifact.
+  usd: usd/humanoid_V1.usda
   weld_unlisted_joints: true
-  sole:
-    joints: {l: ankle_inversion_l, r: ankle_inversion_r}
-    fit: bounds
-    box_thickness_m: 0.005
-    face_depth_m: 0.001
-  # Self-contact excludes (Controls build_mjcf.py REST_EXCLUDES + ORCA_REST_EXCLUDES @ 447b4acb), as
-  # merged-body names. Bodies overlapping at rest by construction of convex-hull collision.
+  # Preserve the delivered crank/rod loops; only uncommanded hand joints are welded.
+  ankle_representation: native
+  collision_hulls: per_mesh
+  # Hand joints are welded above: shapes within each resulting rigid assembly
+  # must not generate self-contacts between its non-adjacent component bodies.
+  exclude_fixed_cluster_contacts: true
+  # Convex hulls fill the interlocking housings across these compound joints.
+  # Exclude their internal assembly contacts, retaining contacts with other bodies.
   contact_excludes:
+    # Waist axial rotation + lateral bending.
     - [base_link, hej90_hip_abduction_1]
+    # Ankle universal joints (the delivered CAD body names are not side labels).
+    - [bottom_universal_joint_l_1, universal_joint_connector_l_1]
+    - [WB71803_Kugelzapfen_WB71802_C16_ST_1, universal_joint_connector_l_Mirror_1]
+    # Hip flexion + abduction housings.
     - [hej90_hip_abduction_1, hej90_leg_abduction_l_1]
     - [hej90_hip_abduction_1, hej90_leg_abduction_r_1]
-    - [hej50_arm_rotation_l_1, shoulder_connector_l_1]
-    - [hej50_arm_rotation_r_1, shoulder_connector_r_1]
-  collision_hulls: per_mesh
-  usd_collision_approximation: convexHull
-  # Which bodies collide with each other. A set is every body at or below its joint; the bodies in no
-  # set (base, hip carrier, torso) are `rest`. `pairs` lists the set pairs that collide, or `all`.
-  # Every pair collides: on an L40S at 4096-16384 envs, colliding only legs with legs and arms with the
-  # trunk and their own leg ran no faster.
-  self_collision:
-    sets: {leg_l: hip_flexion_l, leg_r: hip_flexion_r, arm_l: shoulder_flexion_l, arm_r: shoulder_flexion_r}
-    rest: trunk
-    pairs: all
-  # Ground contact (Controls urdf/scene.xml floor: friction 1, condim 3).
+  sole:
+    joints: {l: ankle_inversion_l, r: ankle_inversion_r}
+    box_thickness_m: 0.005
+    face_depth_m: 0.001
   ground_friction: 1.0
-
-physics:
-  mjwarp:
-    nconmax: 1024
-    njmax: 4096
-  kamino:
-    max_contacts_per_world: 1024
 
 devices:
   # Output encoder resolution per drive family: the counts every reported position is in (Controls
@@ -56,7 +46,42 @@ devices:
     HEJ70-48-50: {counts_per_revolution: 16384}
     HEJ50-48-30: {counts_per_revolution: 16384}
 
-solver_gains: baseline        # constant per-episode PD = humanoid-urdf baseline_position_gains (ankles via J at standing)
+solver_gains: baseline        # constant per-episode PD = humanoid-urdf baseline_position_gains (native ankle shafts use crank gains)
+
+physics:
+  # Resolve the light native rods and their closed-loop constraints at 1 kHz.
+  # Policy/control periods are configured independently by the caller.
+  period_ns: 1000000
+  mjwarp:
+    # Contact can spin a rod about its long axis. RK4 resolves that rotational
+    # motion without the energy growth of the single-step integrators.
+    integrator: rk4
+    # Numerical loop compliance, separate from the measured actuator gains.
+    loop_closure_solref: [0.002, 1.0]
+    loop_closure_solimp: [0.99, 0.999, 0.001, 0.5, 2.0]
+    # Allow headroom for native per-mesh contacts when environments fall;
+    # the legacy per-body hull budget is too small for this geometry.
+    # Reserve 512 contacts/world on average and four pyramidal friction rows per
+    # contact, plus 256 rows for native loops, joint limits and uneven contact load.
+    nconmax: 512
+    njmax: 2304
+  kamino:
+    # NativeState supplies every crank and ball coordinate consistently. Preserve
+    # that state through tree FK rather than re-solving it with regularized FK.
+    use_fk_solver: false
+    collapse_fixed_joints: true
+    # Keep the direct operator within int32 indexing at 4096 worlds. The plant
+    # checks actual contacts on device and stops rather than silently dropping any.
+    max_contacts_per_world: 144
+    sparse_jacobian: true
+    sparse_dynamics: false
+    dynamics_solver: padmm
+    linear_solver: LLTB
+    linear_solver_kwargs: {}
+    padmm: {rho_0: 0.05}
+    # Keep PADMM iterations as CUDA graph loops instead of unrolling
+    # every iteration into a graph too large for the native 4096-world batch.
+    use_graph_conditionals: true
 
 support:
   harness: {body: base_link, shoulders: [shoulder_connector_l_1, shoulder_connector_r_1]}

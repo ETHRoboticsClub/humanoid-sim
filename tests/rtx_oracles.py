@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 
 G1 = "g1_29dof_with_hand_rev_1_0"
-CAMERAS = "g1-cameras"  # sensors/rigs.py EXTRAS
+CAMERAS = "g1-cameras-d435"  # sensors/rigs.py EXTRAS
 SETTLE_S = 1.0  # the welded robot's arms and waist settle on their hold within this; images and sweeps after it
 
 # The URDF joints that fix the sensors on torso_link.

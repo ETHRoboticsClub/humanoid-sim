@@ -45,7 +45,11 @@ class FitSpace:
             raise ValueError(f"start values for unknown group parameters {sorted(set(self.start) - names)}")
 
     def start_value(self, desc, group: Group, joint: str, param: str) -> float:
-        return float(self.start.get(f"{group.name}.{param}", getattr(desc.physics_joints[joint], param)))
+        from humanoid_sim.physics.joint_properties import joint_dynamics
+
+        dynamics = joint_dynamics(desc)
+        nominal = dynamics["viscous_damping" if param == "damping" else param][dynamics["joint_names"].index(joint)]
+        return float(self.start.get(f"{group.name}.{param}", nominal))
 
     @property
     def names(self) -> list[str]:

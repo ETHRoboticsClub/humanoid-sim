@@ -27,17 +27,11 @@ def test_kinematic_model_mass_and_bodies(robot):
     usd = built_usd(robot)
     desc = Description.load(robot)
     kin = RobotKinematics(usd, list(desc.joints))
-    if desc.usd_path is not None:
-        from pxr import Usd, UsdPhysics
-
-        stage = Usd.Stage.Open(str(desc.usd_path))
-        bodies = [prim for prim in stage.Traverse() if prim.HasAPI(UsdPhysics.RigidBodyAPI)]
-        mass = sum(UsdPhysics.MassAPI(prim).GetMassAttr().Get() for prim in bodies)
-        assert float(kin.model.body_mass.numpy().sum()) == pytest.approx(mass, abs=0.01)
-        assert kin.model.body_count == len(bodies)
+    assert float(kin.model.body_mass.numpy().sum()) == pytest.approx(urdf_mass_kg(robot), abs=0.01)
+    if desc.usd_model is not None:
+        assert {n.rsplit("/", 1)[-1] for n in kin.model.body_label} == set(desc.usd_model.bodies)
     else:
-        assert float(kin.model.body_mass.numpy().sum()) == pytest.approx(urdf_mass_kg(robot), abs=0.01)
-        assert kin.model.body_count == len(desc.joints) + 1
+        assert kin.model.body_count == len(desc.joints) + 1  # a tree: one body per movable joint, plus the base
 
 
 @pytest.mark.parametrize("robot", PHYSICS_ROBOTS)

@@ -29,7 +29,15 @@ def test_the_harness_hooks_on_kept_bodies_with_the_shoulders_fixed_on_it(robot):
     behind moving joints; each shoulder's joint hangs off the harness body through fixed joints only, so the hook
     between them stays put on the harness whatever the other joints do."""
     harness = load_profile(robot)["support"]["harness"]
-    urdf = ET.parse(Description.load(robot).urdf_path).getroot()
+    desc = Description.load(robot)
+    if desc.usd_model is not None:
+        source = desc.usd_model
+        assert harness["body"] in source.bodies
+        for shoulder in harness["shoulders"]:
+            parents = [source.joint_bodies(n)[0] for n in source.joints if source.joint_bodies(n)[1] == shoulder]
+            assert parents == [harness["body"]]
+        return
+    urdf = ET.parse(desc.urdf_path).getroot()
     joint_of = {j.find("child").get("link"): j for j in urdf.iter("joint") if j.find("child") is not None}
 
     def moving(link):
@@ -40,7 +48,7 @@ def test_the_harness_hooks_on_kept_bodies_with_the_shoulders_fixed_on_it(robot):
             link = joint_of[link].find("parent").get("link")
         return link
 
-    assert body_of(harness["body"]) == harness["body"]
+    assert moving(harness["body"])
     assert len(harness["shoulders"]) == 2
     for shoulder in harness["shoulders"]:
         assert moving(shoulder)

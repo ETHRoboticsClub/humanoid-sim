@@ -28,13 +28,13 @@ def test_native_ankle_drives_step_on_cuda(request, solver, cuda_graph):
     sim = SimCore(built_usd("ethrc_v1"), device="cuda:0", num_envs=2,
                   fixed_base=True, solver=solver, cuda_graph=cuda_graph)
     request.addfinalizer(sim.close)
-    assert sim.native is not None
+    assert sim.native_state is not None
     positions, velocities = sim.joint_state()
     for linkage in sim.desc.linkages:
         ids = [sim.plant.map.joint_names.index(name) for name in linkage.joints]
         positions[1, ids] += 0.02
     sim.write_joint_state(positions, torch.zeros_like(velocities))
-    feedback = sim.drive_feedback()
+    feedback = sim.plant.feedback(*sim.solver_state())
     targets = feedback.position_rad.clone()
     sim.plant.submit(DriveDemand.pd(targets, sim.plant.drive_stiffness, sim.plant.drive_damping),
                      torch.zeros(2, dtype=torch.int64, device="cuda:0"))
@@ -78,7 +78,7 @@ def test_native_training_reset_randomization_and_feedback(request, solver):
     actual, _ = plant.joint_state()
     torch.testing.assert_close(actual[0], untouched)
     torch.testing.assert_close(actual[1:], reset)
-    physical = sim.backend.robot.data.joint_armature.torch[:, plant.native_ids]
+    physical = sim.backend.robot.data.joint_armature.torch[:, plant.solver_joint_ids]
     torch.testing.assert_close(physical, plant.params()["joint_armature"])
     feedback = plant.truth().drive
     plant.submit(DriveDemand.pd(feedback.position_rad, plant.core.drive_stiffness, plant.core.drive_damping),
@@ -121,7 +121,7 @@ def test_native_prescribed_base_replay_variant(request, solver):
     request.addfinalizer(sim.close)
     angles = torch.full((2, 3), 0.02, device="cuda:0")
     sim.set_base(angles, torch.zeros_like(angles), write_state=True)
-    feedback = sim.drive_feedback()
+    feedback = sim.plant.feedback(*sim.solver_state())
     sim.plant.submit(DriveDemand.pd(feedback.position_rad, sim.plant.drive_stiffness, sim.plant.drive_damping),
                      torch.zeros(2, dtype=torch.int64, device="cuda:0"))
     for _ in range(20):

@@ -34,6 +34,8 @@ The sim stops where Controls starts. It takes what the robot's host sends each d
   </tr>
 </table>
 
+V1 uses the delivered `usd/humanoid_V1.usda` directly. `build-asset` composes it with simulator overrides in a separate layer: native ankle shafts and rod loops, welded uncommanded hand joints, per-mesh collision hulls, and fitted sole boxes. The 22-joint policy interface remains semantic; physics also carries the four crank shafts and the rod ball joints. Existing throughput figures above describe the former analytical-ankle model, not this native articulation. See [the native USD path](docs/robot-model.md#native-usd-v1).
+
 ## Where it fits
 
 ```mermaid
@@ -111,7 +113,7 @@ class Drives(PlantAction):
 
 cfg.scene = robot_scene_cfg(4096, usd, terrain=terrain)  # spawns in the home pose; terrain: the task's
 cfg.sim = robot_sim_cfg(device="cuda:0")
-cfg.decimation = 5  # 4 ms physics, 20 ms policy period
+cfg.decimation = 20_000_000 // round(cfg.sim.dt * 1_000_000_000)  # 20 ms policy period
 cfg.actions.drives = PlantActionCfg(class_type=Drives, action_dim=22, plant=TrainPlantCfg(randomization=[
     {"param": "latency", "dist": "uniform", "range": [0.010, 0.020], "op": "set", "per_target": False},
     {"param": "friction", "dist": "uniform", "range": [0.3, 1.0], "op": "set"},

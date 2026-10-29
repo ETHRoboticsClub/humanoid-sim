@@ -7,14 +7,15 @@ and :class:`BagCapture` serves it through the same interface as :class:`~humanoi
   position, velocity and torque, and its position demand 0x6062 (``position_demand_rad``), as ``pdo_feedback.csv``;
 * ``/drive_gains/state`` (``msg_ethrc/msg/DriveGains``, latched, every 250 ms and on a change): the gains in force;
 * ``/rt/imu`` (``sensor_msgs/msg/Imu``): orientation and angular velocity in ``base_link``, stamped on receipt;
-* ``/rt/body_control/device`` (``msg_ethrc/msg/BodyControlFrame``, 50 Hz while commanding): the router's
-  COMMAND frames to the EtherCAT master, every drive's joint reference in semantic radians, stamped by the loop
-  host when it sent them. No topic carries the per-drive targets the master writes to the bus; the replay rebuilds
+* ``/rt/body_control`` (``msg_ethrc/msg/BodyControlFrame``, 50 Hz while commanding): the
+  COMMAND frames to the Joint Host, every drive's joint reference in semantic radians, stamped by the loop
+  host when it sent them. No topic carries the per-drive targets the driver writes to the bus; the replay rebuilds
   them from these frames as the master does (:func:`humanoid_sim.replay.replay.drive_targets`).
 
 Times are the messages' own stamps (``source_stamp_ns``, ``header.stamp``: ROS time, integer ns), never the bag's
 receipt times. Message definitions come from the bag when it carries them (MCAP, and sqlite3 from ROS Iron on);
-otherwise from the copies in ``msgs/`` (Controls ``ros2_ws/src/contracts/msg_ethrc/msg`` @ d35a2fa99).
+otherwise from the copies in ``msgs/``. Keep them byte-identical to Controls
+``ros2_ws/src/contracts/msg_ethrc/msg`` when its wire contract changes.
 
 A bag has no ``complete`` flag or gantry declaration, so the reader checks what it can: every drive streams and
 the gains hold still and are applied. ``sensor_msgs/Imu`` carries no sample counter, so a dropped IMU sample goes
@@ -34,7 +35,7 @@ from humanoid_sim.replay.exc import CommandTrace, DriveGains, DriveTrace, ImuTra
 FEEDBACK_TOPIC = "/ethrc/drive_feedback"
 GAINS_TOPIC = "/drive_gains/state"
 IMU_TOPIC = "/rt/imu"
-COMMAND_TOPIC = "/rt/body_control/device"
+COMMAND_TOPIC = "/rt/body_control"
 KIND_COMMAND = 2  # BodyControlFrame.KIND_COMMAND
 MSGS = Path(__file__).with_name("msgs")
 FEEDBACK_FIELDS = {"native_position_rad": "position_rad", "velocity_rad_s": "velocity_rad_s",

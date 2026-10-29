@@ -172,9 +172,8 @@ def write(sim, space: PaceSpace, values: dict[str, np.ndarray]) -> None:
     """Write every env's candidate (``decode`` output, ``[E, ...]``) to the solver and the plant. The delay is the
     replay's to apply (:func:`humanoid_sim.replay.replay.replay_position_rms` ``latency_ns``)."""
     robot = sim.backend.robot
-    native = getattr(sim, "native", None)
-    plant = native.core if native else sim.plant
-    if list(plant.map.joint_names) != space.joints or list(plant.map.drive_names) != space.drives:
+    plant = sim.plant
+    if list(plant.solver_map.joint_names) != space.joints or list(plant.map.drive_names) != space.drives:
         raise ValueError("the space's joints and drives are not the plant's")
     dev = robot.device
     ids = torch.tensor([robot.joint_names.index(j) for j in space.joints], device=dev)
@@ -188,16 +187,18 @@ def write(sim, space: PaceSpace, values: dict[str, np.ndarray]) -> None:
     robot.write_joint_friction_coefficient_to_sim_index(joint_friction_coeff=t(values["friction"]), joint_ids=ids)
     relief = values["friction"] * (1.0 - values["friction_ratio"])
     plant.friction_relief.copy_(torch.as_tensor(relief, dtype=plant.cfg.dtype, device=plant.cfg.device))
-    if native:
-        sim.plant.friction_relief.copy_(plant.friction_relief[:, native.semantic_ids])
     plant.bank.position_offset.copy_(torch.as_tensor(-values["bias"], dtype=plant.cfg.dtype, device=plant.cfg.device))
 
 
 def start_values(desc, joints: list[str]) -> dict[str, np.ndarray]:
     """The description's armature, damping, static friction and friction ratio (dynamic over static)."""
-    inventory = desc.physics_joints if any(j not in desc.joints for j in joints) else desc.joints
-    out = {p: np.array([getattr(inventory[j], p) for j in joints]) for p in JOINT_PARAMS}
-    dynamic = np.array([inventory[j].dynamic_friction for j in joints])
+    from humanoid_sim.physics.joint_properties import joint_dynamics
+
+    dynamics = joint_dynamics(desc, native=any(name not in desc.joints for name in joints))
+    indices = [dynamics["joint_names"].index(name) for name in joints]
+    out = {param: np.asarray(dynamics["viscous_damping" if param == "damping" else param])[indices]
+           for param in JOINT_PARAMS}
+    dynamic = np.asarray(dynamics["dynamic_friction"])[indices]
     out["friction_ratio"] = np.where(out["friction"] > 0, dynamic / np.maximum(out["friction"], 1e-12), 1.0)
     return out
 

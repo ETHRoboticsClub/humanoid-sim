@@ -31,8 +31,8 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `RobotPlant` | `src/humanoid_sim/train/plant.py` | The batched plant for every env of a scene: `submit`, `pre_physics`, `measured`, `truth`, `params`, `reset`, `set_level`, `attach_log`, `log` |
 | `Measured`, `Truth` | `src/humanoid_sim/train/plant.py` | What `measured()` and `truth()` return |
 | `PlantAction`, `PlantActionCfg` | `src/humanoid_sim/train/isaaclab.py` | An Isaac Lab action term that owns a `RobotPlant`; you subclass it and implement `demands()` |
-| `robot_scene_cfg`, `robot_sim_cfg` | `src/humanoid_sim/train/scene.py` | The `InteractiveSceneCfg` (robot, IMU, contact sensor, ground or terrain, static boxes) and the `SimulationCfg` (one 4 ms step on MJWarp) |
-| `robot_build` | `src/humanoid_sim/train/scene.py` | Scene-construction context. The delivered V1 USD carries its native crank stops and loop closures; startup verifies the imported crank limits |
+| `robot_scene_cfg`, `robot_sim_cfg` | `src/humanoid_sim/train/scene.py` | The `InteractiveSceneCfg` (robot, IMU, contact sensor, ground or terrain, static boxes) and the `SimulationCfg` (the profile's physics period and Newton solver) |
+| `robot_build` | `src/humanoid_sim/train/scene.py` | The context to build the environment in: native USD carries physical crank limits and closed loops; legacy reduced models receive surrogate crank-stop tendons. `RobotPlant` checks the imported native limits and enabled closures |
 | `StaticBoxes` | `src/humanoid_sim/world/boxes.py` | A room's walls and furniture as static boxes, read from a file, described in [world.md](world.md#static-boxes) |
 | `initial_pose`, `POSES` | `src/humanoid_sim/model/poses.py`, re-exported by `humanoid_sim.train.scene` | The joint positions and base height of a named initial pose |
 | `heightfield_terrain_cfg` | `src/humanoid_sim/world/terrain.py` | The terrain-importer config for a heightfield terrain the caller lays out, described in [world.md](world.md#heightfield-terrain) |
@@ -221,7 +221,7 @@ class Events:
 
 @configclass
 class StandCfg(ManagerBasedRLEnvCfg):
-    decimation = 5  # 20 ms policy period at the plant's 4 ms physics period
+    decimation = 20  # 20 ms policy period at native V1's 1 ms physics period
     episode_length_s = 10.0
     actions = Actions()
     observations = Observations()
@@ -240,7 +240,7 @@ with robot_build():  # the ankle cranks' stops (docs/drives.md, The crank stops)
 
 The observation groups come out as `policy` `[E, 50]` and `critic` `[E, 77]`.
 
-The [physics period](glossary.md#physics-period) comes from the profile (`physics.period_ns: 4000000`, 4 ms or 250 Hz), and `robot_sim_cfg` sets the simulation `dt` from it. With `decimation = 5` the policy runs every 20 ms (50 Hz). The plant does not depend on the decimation: it runs once per physics step and stamps everything on its own clock.
+The [physics period](glossary.md#physics-period) comes from the profile (`physics.period_ns`: 1000000 for native V1, 4000000 for G1), and `robot_sim_cfg` sets the simulation `dt` from it. Set decimation to `20_000_000 // physics_period_ns` for a 20 ms policy period (50 Hz). The plant does not depend on the decimation: it runs once per physics step and stamps everything on its own clock.
 
 Other terms reach the plant through the action term, `env.action_manager.get_term("drives").plant`; the term can have any name.
 
@@ -354,11 +354,6 @@ class HeldPoseOffsets(PoseOffsets):  # PoseOffsets from the minimal environment
 ```
 
 ## Randomization
-
-For native USD ankles, joint-parameter selectors use `plant.physics_names`: semantic joints plus crank
-shafts. Rotor armature is randomized on shafts, not duplicated on passive ankle hinges. Friction relief is
-mapped back to the semantic API where needed. `plant.joints` and truth joint arrays remain semantic-only.
-Kamino requires randomization to preserve each parameter's nominal zero/nonzero structure.
 
 The plant draws its own [randomization](glossary.md#domain-randomization) (`src/humanoid_sim/randomization/`), batched on the device and seeded by `TrainPlantCfg.seed`. Each entry of `TrainPlantCfg.randomization` is a dict (parsed by `ParamSpec.from_dict`) or a `ParamSpec`:
 
@@ -515,7 +510,7 @@ The plant's steady-state work (`submit`, `pre_physics`, `measured`, `truth`, `re
 - The solver uses the larger friction of the two shapes in contact (MJWarp always, Kamino as the profile configures it). When `friction` is randomized on the robot, give the ground zero friction (`robot_scene_cfg(..., ground_friction=0.0)` or `heightfield_terrain_cfg(..., friction=0.0)`); with the profile's ground friction of 1.0 every robot value below 1 has no effect.
 - Take targets and action offsets from `data.default_joint_pos`, not from `standing_offset_rad`: the scene spawns in the home pose, and the standing pose is only used when a scene asks for it. See [The initial pose](#the-initial-pose).
 - The encoder jitter is drawn on every `measured()` call, for `drive` and for `history`. Two observation terms that each call `measured()` see different jitter in the same step; read it once in one term, as `actor_obs` does.
-- `history[:, 0]` is one physics step older than `drive`. The history and the IMU are sampled at the start of each physics step, so after an env step their newest entries are from `plant.t_ns - 4 ms`, while `drive` is the state now. Use `history_ns` for the times.
+- `history[:, 0]` is one physics step older than `drive`. The history and the IMU are sampled at the start of each physics step, so after an env step their newest entries are from `plant.t_ns - plant.period_ns`, while `drive` is the state now. Use `history_ns` for the times.
 - After a reset, the history and IMU buffers keep the previous episode's values until they are overwritten; only `history_ns`, `sample_ns`, `stamp_ns`, `seq` and `count` mark them empty. The observation computed right after a reset, in the same env step, always has `count == 0`, and the first burst can take more than one policy period to arrive. Mask on `history_ns >= 0` and `stamp_ns >= 0` where it matters.
 - `measured().imu` is the delivery model's buffer, updated in place every physics step. Clone it to keep it.
 - Joint order differs. `truth()`, `reset(joint_pos=...)` and the plant use the description's joint order; `env.scene["robot"].data.joint_pos` and `data.default_joint_pos` use the articulation's order. `plant.joint_ids` maps one to the other.
@@ -524,3 +519,23 @@ The plant's steady-state work (`submit`, `pre_physics`, `measured`, `truth`, `re
 - Keep the articulation's actuators implicit, as `robot_scene_cfg` builds them. If explicit actuator configs are added, Isaac Lab's Newton backend can run the whole decimation loop in one physics call, and `apply_actions` (the plant) would run once per policy step instead of once per physics step.
 - Drives are off after a reset until a demand arrives; see [Resets](#resets).
 - Training keeps each joint's Coulomb friction at its enabled-drive value from the description while a drive is off. The runtime host switches the joints of disabled 1:1 drives to the family's [back-drive](glossary.md#back-drive) torque (`src/humanoid_sim/runtime/host.py`), which is larger: 1.5 Nm on an HEJ 90 joint where the knee's enabled friction is 0.31 Nm. An unpowered robot in training therefore folds more easily than the same robot in the runtime. The ankle joints keep their friction in both.
+
+For a discrete delay distribution, use `dist: discrete_uniform`, an inclusive
+`range` in seconds, and a positive `quantum` in seconds; the range width must be
+an integer multiple of the quantum. `per_target: false` shares one draw across
+an environment's selected drives. As with continuous draws, a curriculum level
+interpolates the realized value toward the operation's identity.
+
+`shape_friction` randomizes each robot collision shape's Coulomb coefficient;
+`friction` assigns one coefficient to every shape in an environment. Choose one
+of these parameters per configuration. Shape names are the articulation view's
+local `shape_0`, `shape_1`, ... order. A physics spec's optional positive integer
+`buckets` draws a shared table and independently assigns one table entry to each
+selected environment/target. MJWarp exposes one contact friction coefficient,
+not independent PhysX static and dynamic coefficients.
+
+`world.disturbances.VelocityPush` sets root horizontal velocity periodically while
+preserving vertical and angular velocity. Call `reset(ids, t_ns)` at episode
+reset and `step(t_ns)` at the desired cadence. The caller supplies the interval
+in integer nanoseconds and the velocity range in m/s. Unlike `ForcePush`, this
+is an instantaneous state perturbation, not a force integrated over a duration.

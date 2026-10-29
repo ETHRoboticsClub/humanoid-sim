@@ -1,7 +1,7 @@
 """Each robot's sensors, as on the robot (read from the running stacks, 2026-10-20), and extra rigs that add sensors a
 robot's rig does not declare (``EXTRAS``, by name: ``examples/rtx_sensors.py --sensors NAME``). Sensors Controls does not
 read are left out of a robot's rig: the G1's torso IMU, its Mid-360's own IMU and its head D435 (on the lab unit the
-camera service finds no camera)."""
+camera service finds no camera; ``g1-cameras-d435`` adds it)."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def ethrc_v1() -> Rig:
         # As Controls' camera service opens it, with the unit's calibration (camera_info on the V1, 2026-10-20) for
         # rgb and mono_left. mono_right (the same OV9282 sensor) and depth (aligned to the rectified left image) are
         # modeled with mono_left's pinhole until the unit's are read.
-        camera0=OakDW("camera0_link", width=640, height=400, frame_period_ns=33_333_333,
+        camera0=OakDW("camera1_link", width=640, height=400, frame_period_ns=33_333_333,
                       intrinsics={"rgb": (283.087462, 282.805448, 325.969479, 198.375709),
                                   "mono_left": V1_MONO_LEFT, "mono_right": V1_MONO_LEFT, "depth": V1_MONO_LEFT}),
     )
@@ -43,7 +43,7 @@ def g1() -> Rig:
 
 
 def g1_cameras() -> Rig:
-    """The cameras the lab G1 is reported to carry, at the description's camera links, until its rig declares them."""
+    """The camera the lab G1 carries, at the description's camera link, until its rig declares it: the ZED Mini."""
     return Rig(
         # The helmet mount: the left eye's optical centre (the G1 URDF's camera0_camera). HD720 at 30 Hz as Controls'
         # zed backend opens it, with the factory calibration of the lab's unit (SN19945568, as Controls'
@@ -56,6 +56,12 @@ def g1_cameras() -> Rig:
                         "right": ("equidistant", (-0.0368591, 0.0234426, -0.0128113, 0.00625172))},
             stream_offsets_m={"right": (0.000233734, -0.0628272, 0.000181381)},
         ),
+    )
+
+
+def g1_cameras_d435() -> Rig:
+    """:func:`g1_cameras` and the G1's head D435, which the lab unit's camera service does not find."""
+    return g1_cameras().extended(Rig(
         # Unitree's d435_joint on the torso. 640 x 480 at 30 Hz as Controls' realsense adapter opens it. No unit's
         # calibration: centred pinholes with the datasheet's fields of view, colour 69 deg across
         # (fx = 320 / tan(34.5 deg)), the infrared imagers and depth 87 x 58 deg (fx = 320 / tan(43.5 deg),
@@ -67,11 +73,11 @@ def g1_cameras() -> Rig:
                         "mono_right": (337.2096, 432.9715, 320.0, 240.0),
                         "depth": (337.2096, 432.9715, 320.0, 240.0)},
         ),
-    )
+    ))
 
 
 RIGS = {"ethrc_v1": ethrc_v1, "g1_29dof_rev_1_0": g1, "g1_29dof_with_hand_rev_1_0": g1}
-EXTRAS = {"g1-cameras": g1_cameras}
+EXTRAS = {"g1-cameras": g1_cameras, "g1-cameras-d435": g1_cameras_d435}
 
 
 def rig(robot: str) -> Rig:

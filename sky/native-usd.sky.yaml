@@ -21,4 +21,4 @@ run: |
   python -c 'import torch; assert torch.cuda.is_available(), "CUDA is required for native physics checks"'
   humanoid-sim build-asset
   humanoid-sim build-asset --base-joints
-  pytest -v -s tests/test_native_usd.py tests/test_description_delivery.py tests/test_native_parameters.py tests/test_native_physics.py
+  pytest -v -s tests/test_native_usd.py tests/test_native_integration.py tests/test_description_delivery.py tests/test_native_parameters.py tests/test_native_physics.py

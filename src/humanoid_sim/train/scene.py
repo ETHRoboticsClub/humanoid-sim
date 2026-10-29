@@ -35,8 +35,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import torch
-
 from humanoid_sim.model.asset import check_asset_robot, load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.poses import POSES, STANDING_CLEARANCE_M, initial_pose
@@ -54,8 +52,27 @@ def plant_joint_properties(robot: str = "ethrc_v1") -> JointProperties:
     from humanoid_sim.physics.joint_properties import joint_properties
 
     desc = Description.load(robot)
-    joints = list(desc.physics_joints)
+    joints = list(desc.joints)
+    if load_profile(robot)["model"].get("ankle_representation") == "native":
+        from humanoid_sim.transmissions.drive_map import native_joint_names
+
+        physical = native_joint_names(desc)
+        return joint_properties(PlantCore(desc, joints, 1, PlantCfg(robot=robot), solver_joint_names=physical),
+                                physical)
     return joint_properties(PlantCore(desc, joints, 1, PlantCfg(robot=robot)), joints)
+
+
+def initial_joint_positions(desc, pose: dict[str, float]) -> dict[str, float]:
+    """Complete semantic defaults with native crank and ball DOFs, if present."""
+    if desc.usd_path is None:
+        return dict(pose)
+    import torch
+
+    from humanoid_sim.model.native_state import NativeState
+
+    q = torch.tensor([[pose[n] for n in desc.joints]], dtype=torch.float64)
+    values, _ = NativeState(desc).dofs(q, torch.zeros_like(q))
+    return {name: float(value[0]) for name, value in values.items()}
 
 
 def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_spacing: float | None = None,
@@ -81,26 +98,18 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
     q, height = initial_pose(usd, robot, pose)
     props = plant_joint_properties(robot)
     names = list(Description.load(robot).joints)
+    initial = initial_joint_positions(Description.load(robot), {name: float(q[i]) for i, name in enumerate(names)})
 
     @configclass
     class RobotSceneCfg(InteractiveSceneCfg):
         pass
 
     cfg = RobotSceneCfg(num_envs=num_envs, env_spacing=env_spacing, replicate_physics=True)
-    if Description.load(robot).usd_path is not None:
-        from humanoid_sim.core import PlantCfg, PlantCore
-        from humanoid_sim.physics.native import NativeDrivePlant
-
-        desc = Description.load(robot)
-        native = NativeDrivePlant(PlantCore(desc, names, 1, PlantCfg(robot=robot)))
-        full, _ = native.complete_state(q.unsqueeze(0), torch.zeros_like(q).unsqueeze(0))
-        positions = full[0].tolist()
-    else:
-        positions = [float(q[names.index(n)]) for n in props.names]
     cfg.robot = articulation_cfg(
         usd, props, base_height_m=height + STANDING_CLEARANCE_M, contact_sensors=contacts,
         self_collision=profile["physics"]["self_collision"] if self_collision is None else self_collision,
-        joint_pos=positions)
+        joint_pos=[initial[n] for n in props.names])
+    cfg.robot.init_state.joint_pos = {f"^{name}$": value for name, value in initial.items()}
     friction = profile["model"]["ground_friction"] if ground_friction is None else ground_friction
     if terrain is not None:
         cfg.terrain = terrain
@@ -128,8 +137,9 @@ def robot_sim_cfg(robot: str = "ethrc_v1", *, device: str = "cuda:0", solver: st
 
 def robot_build(robot: str = "ethrc_v1", *, solver: str | None = None):
     """Context to build the environment or scene in: the solver model gets the ankle cranks' stops when the profile
-    asks for them (:func:`~humanoid_sim.physics.crank_stops.crank_stop_hook`). ``solver``: as for
+    asks for them, and optionally collapses fixed joints
+    (:func:`~humanoid_sim.physics.model_build.model_build`). ``solver``: as for
     :func:`robot_sim_cfg`."""
-    from humanoid_sim.physics.crank_stops import crank_stop_hook
+    from humanoid_sim.physics.model_build import model_build
 
-    return crank_stop_hook(robot, load_profile(robot)["physics"], solver)
+    return model_build(robot, load_profile(robot)["physics"], solver)

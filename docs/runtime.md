@@ -155,7 +155,7 @@ The header is written when the file is created; afterwards only `state` and `hea
 | `sim_revision` | char[48] | Git `HEAD` of the humanoid-sim checkout, or `unknown` when the package is not in a checkout |
 | `offsets` | u64[6] | Offsets of the descriptor, demands, feedback, mailbox, ack and truth regions |
 
-Strings are NUL-padded and not NUL-terminated when full: `description_digest` uses all 64 bytes. A client watches `state` and `heartbeat_mono_ns`; Controls' plant host treats a heartbeat older than 500 ms as a lost sim.
+Strings are NUL-padded and not NUL-terminated when full: `description_digest` uses all 64 bytes. A client watches `state` and `heartbeat_mono_ns`; Controls' plant host and the renderer treat a heartbeat older than 500 ms (`HEARTBEAT_TIMEOUT_NS`) or from the future as a lost sim. Read the shared heartbeat before sampling the local monotonic clock so a concurrent publish cannot produce a negative age.
 
 ### Reading and writing a region
 
@@ -190,6 +190,8 @@ A reader repeats three steps, up to 1000 times (`attempts`):
 | `state` | Ready |
 
 While the file is missing or one of these fails it retries every 10 ms until `wait_s` has passed, then raises `FileNotFoundError` or `AbiError`. Once the segment is ready it compares `robot_id` and `description_digest` with the values given and raises `AbiError` on a mismatch. A different `abi_minor` is accepted.
+
+`Segment.open(max_heartbeat_age_ns=...)` also requires a heartbeat age between zero and that bound, inclusive, and waits out stale files within the same `wait_s` deadline. The renderer uses `HEARTBEAT_TIMEOUT_NS` both on initial attachment and when following a session, so a dead host's leftover ready file cannot be mistaken for a running host. Omitting the bound preserves the structural attachment check; callers must then enforce freshness while using the segment.
 
 The layout hash (`layout_hash()`) is the first 8 bytes, little-endian, of a SHA-256 over every field's name, offset, type and shape and the region offsets. Any change to the layout changes it. `plant_abi.h` carries the same value as `HSIM_PLANT_LAYOUT_HASH` (`0x31f7d253854e2509`), and `tests/test_runtime_abi.py` compiles the header and checks every struct size, field offset, region offset and the hash against the Python layout.
 
@@ -501,7 +503,7 @@ class Client:
     def bus_cycle(self):
         """Write this cycle's demands, read the latest feedback, return the IMU samples not seen yet."""
         seg = self.seg
-        if seg.state != abi.STATE_READY or seg.heartbeat_age_ns() > SIM_STALE_NS:
+        if seg.state != abi.STATE_READY or not 0 <= seg.heartbeat_age_ns() <= SIM_STALE_NS:
             raise RuntimeError("the sim ended the session or stopped")
         self.cycle += 1
         seg.write_demands(self.demand, cycle=self.cycle)

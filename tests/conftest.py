@@ -45,16 +45,25 @@ def built_usd(robot: str, *, base_joints: bool = False) -> Path:
 
 
 def urdf_mass_kg(robot: str) -> float:
-    """Total link mass read straight from the description's URDF (welded links included)."""
-    root = ET.parse(Description.load(robot).urdf_path).getroot()
+    """Total delivered body mass (including welded links), from USD when available."""
+    desc = Description.load(robot)
+    if desc.usd_model is not None:
+        return sum(m for m, _ in desc.usd_model.mass_properties().values())
+    root = ET.parse(desc.urdf_path).getroot()
     return sum(float(m.get("value")) for m in root.findall("link/inertial/mass"))
 
 
 def joints_below(robot: str, link: str) -> set[str]:
     """The URDF joints whose chain to the root passes through ``link``: the ones it carries."""
-    root = ET.parse(Description.load(robot).urdf_path).getroot()
-    joints = [j for j in root.iter("joint") if j.find("child") is not None]
-    parent = {j.find("child").get("link"): j.find("parent").get("link") for j in joints}
+    desc = Description.load(robot)
+    if desc.usd_model is not None:
+        joints = {n: desc.usd_model.joint_bodies(n) for n, j in desc.usd_model.joints.items()
+                  if not j.GetExcludeFromArticulationAttr().Get()}
+    else:
+        root = ET.parse(desc.urdf_path).getroot()
+        joints = {j.get("name"): (j.find("parent").get("link"), j.find("child").get("link"))
+                  for j in root.iter("joint") if j.find("child") is not None}
+    parent = {child: parent for parent, child in joints.values()}
 
     def carried(name):
         while name in parent:
@@ -63,7 +72,7 @@ def joints_below(robot: str, link: str) -> set[str]:
             name = parent[name]
         return name == link
 
-    return {j.get("name") for j in joints if carried(j.find("parent").get("link"))}
+    return {name for name, (parent, _) in joints.items() if carried(parent)}
 
 
 def imu_samples_per_s(robot: str) -> float:

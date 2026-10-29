@@ -1,188 +1,203 @@
-import math
-from types import SimpleNamespace
-
+"""The native plant preserves CAD loops and measures the physical shafts."""
 import numpy as np
 import pytest
 import torch
-from pxr import Usd, UsdPhysics
 
 from humanoid_sim.core import PlantCfg, PlantCore
-from humanoid_sim.devices.demand import DriveDemand
-from humanoid_sim.model.asset import asset_dir, asset_meta, build_asset, load_profile
+from humanoid_sim.model.asset import build_asset, load_profile
 from humanoid_sim.model.description import Description
-from humanoid_sim.model.urdf import BASE_JOINTS
-from humanoid_sim.model.usd import crank_joints
+from humanoid_sim.model.native_state import NativeState
 from humanoid_sim.physics.joint_properties import joint_properties
+from humanoid_sim.transmissions.drive_map import native_joint_names
+
+
+def test_fixed_body_contacts_are_excluded_transitively_without_excluding_movable_neighbors():
+    from humanoid_sim.model.usd import fixed_body_excludes
+
+    assert fixed_body_excludes([('palm', 'finger'), ('finger', 'tip'), ('wrist', 'bracket')]) == [
+        ('bracket', 'wrist'), ('finger', 'palm'), ('finger', 'tip'), ('palm', 'tip')]
+
+
+def test_fixed_joint_collapse_preserves_native_mass_geometry_and_moving_joints(desc, tmp_path):
+    newton = pytest.importorskip("newton")
+    import warp as wp
+
+    from humanoid_sim.physics.model_build import _FixedJointCollapse
+
+    asset = build_asset(desc, load_profile(desc.robot), tmp_path)
+    builder = newton.ModelBuilder()
+    builder.add_usd(str(asset), floating=True)
+
+    def snapshot():
+        total_mass = sum(builder.body_mass)
+        first_moment = np.zeros(3)
+        world_inertia = np.zeros((3, 3))
+        for pose, mass, com, inertia in zip(builder.body_q, builder.body_mass, builder.body_com,
+                                           builder.body_inertia, strict=True):
+            p = np.asarray(wp.transform_point(pose, wp.vec3(com)), dtype=float)
+            rotation = np.asarray(wp.quat_to_matrix(wp.transform_get_rotation(pose)), dtype=float).reshape(3, 3)
+            first_moment += mass * p
+            world_inertia += rotation @ np.asarray(inertia).reshape(3, 3) @ rotation.T
+            world_inertia += mass * (np.dot(p, p) * np.eye(3) - np.outer(p, p))
+        shapes = {label: np.asarray(wp.transform_multiply(builder.body_q[body], local))
+                  for label, body, local in zip(builder.shape_label, builder.shape_body,
+                                                builder.shape_transform, strict=True) if body >= 0}
+        joints = {label: (int(kind), np.asarray(wp.transform_multiply(builder.body_q[child], frame)))
+                  for label, kind, child, frame in zip(builder.joint_label, builder.joint_type,
+                                                       builder.joint_child, builder.joint_X_c, strict=True)
+                  if kind != newton.JointType.FIXED}
+        return total_mass, first_moment, world_inertia, shapes, joints
+
+    before = snapshot()
+    original_bodies = builder.body_count
+    has_fixed_joints = any(kind == newton.JointType.FIXED for kind in builder.joint_type)
+    hook = _FixedJointCollapse()
+    hook.world(builder, 0, None, None)
+    hook.finalize(None)
+    after = snapshot()
+    assert builder.body_count <= original_bodies
+    if has_fixed_joints:
+        assert builder.body_count < original_bodies
+    for a, b in zip(before[:3], after[:3], strict=True):
+        np.testing.assert_allclose(a, b, atol=2e-5, rtol=2e-6)
+    assert before[3].keys() == after[3].keys()
+    def assert_pose(a, b):
+        a = a.copy()
+        if np.dot(a[3:], b[3:]) < 0:
+            a[3:] *= -1  # q and -q encode the same rotation
+        np.testing.assert_allclose(a, b, atol=2e-6, rtol=0)
+
+    for label, pose in before[3].items():
+        assert_pose(after[3][label], pose)
+    assert before[4].keys() == after[4].keys()
+    for label, (kind, pose) in before[4].items():
+        assert after[4][label][0] == kind
+        assert_pose(after[4][label][1], pose)
 
 
 @pytest.fixture(scope="module")
-def native(tmp_path_factory):
-    desc = Description.load()
-    root = tmp_path_factory.mktemp("native-usd")
+def desc():
+    return Description.load("ethrc_v1")
+
+
+def test_reset_closes_every_delivered_loop_and_velocity(desc):
+    source, state = desc.usd_model, NativeState(desc)
+    q = torch.zeros(3, len(desc.joints), dtype=torch.float64)
+    for lk in desc.linkages:
+        cols = [list(desc.joints).index(n) for n in lk.joints]
+        q[:, cols] = torch.tensor([[0, 0], [-.15, .05], [-.1, -.06]], dtype=q.dtype)
+        assert desc.ankle_model.feasible(q[:, cols].numpy(), lk.side).all()
+    poses = state.body_transforms(q)
+    for name, joint in source.joints.items():
+        if joint.GetExcludeFromArticulationAttr().Get():
+            a, b = source.joint_bodies(name)
+            fa, fb = source.joint_frames(name)
+            pa = poses[a] @ torch.tensor(fa)
+            pb = poses[b] @ torch.tensor(fb)
+            torch.testing.assert_close(pa[:, :3, 3], pb[:, :3, 3], atol=2e-6, rtol=0)
+    qd = torch.full_like(q, .07)
+    values, rates = state.dofs(q, qd)
+    assert all(torch.isfinite(v).all() for v in [*values.values(), *rates.values()])
+    h = 10_000 * 1e-9
+    ahead, _ = state.coordinates(q + h * qd)
+    behind, _ = state.coordinates(q - h * qd)
+    for n in native_joint_names(desc):
+        torch.testing.assert_close(rates[n], (ahead[n] - behind[n]) / (2 * h), atol=1e-8, rtol=1e-6)
+
+
+def test_physical_crank_feedback_does_not_reconstruct_from_hinges(desc):
+    names = native_joint_names(desc)
+    core = PlantCore(desc, list(desc.joints), 2, PlantCfg(), solver_joint_names=names)
+    q = torch.zeros(2, len(names))
+    for spec in desc.ankle_model.payload["sides"].values():
+        for role, drive in zip(("upper", "lower"), spec["motor_names"], strict=True):
+            q[:, names.index(spec["usd_joints"][role])] = .123
+            i = core.map.drive_names.index(drive)
+            assert torch.all(core.feedback(q, q * 0).position_rad[:, i] == .123)
+    props = joint_properties(core, names)
+    for lk in desc.linkages:
+        assert all(props.stiffness[names.index(n)] == props.armature[names.index(n)] == 0 for n in lk.joints)
+    hinge = names.index(desc.linkages[0].joints[0])
+    core.external_torque[:, hinge] = 1.25
+    assert torch.isfinite(core.pre_physics(0, q, q * 0)).all()
+    assert torch.all(core.passive_effort[:, hinge] == 1.25)
+    assert torch.all(core.passive_effort[:, core.actuated] == 0)
+
+
+def test_native_asset_preserves_closures_and_authors_shaft_limits(desc, tmp_path):
+    from pxr import Usd, UsdPhysics
+
+    source_hash = desc.usd_model.digest()
     profile = load_profile(desc.robot)
-    path = build_asset(desc, profile, root)
-    return desc, profile, root, path
-
-
-def test_build_preserves_closed_chain_and_inertias(native):
-    desc, _, _, path = native
-    source = Usd.Stage.Open(str(desc.usd_path))
-    built = Usd.Stage.Open(str(path))
-    closures = []
-    for prim in source.Traverse():
-        other = built.GetPrimAtPath(prim.GetPath())
-        if prim.HasAPI(UsdPhysics.MassAPI):
-            for name in ("mass", "centerOfMass", "diagonalInertia", "principalAxes"):
-                assert other.GetAttribute(f"physics:{name}").Get() == prim.GetAttribute(f"physics:{name}").Get()
-        if prim.IsA(UsdPhysics.SphericalJoint):
-            assert other.IsA(UsdPhysics.SphericalJoint)
-            for name in ("localPos0", "localPos1", "localRot0", "localRot1", "excludeFromArticulation"):
-                assert other.GetAttribute(f"physics:{name}").Get() == prim.GetAttribute(f"physics:{name}").Get()
-            if UsdPhysics.Joint(prim).GetExcludeFromArticulationAttr().Get():
-                closures.append(str(prim.GetPath()))
-    assert closures
-    assert asset_meta(path)["loop_closures"] == closures
-
-
-def test_native_cranks_have_drive_stops_and_no_authored_controller(native):
-    desc, _, _, path = native
+    path = build_asset(desc, profile, tmp_path)
     stage = Usd.Stage.Open(str(path))
-    joints = {prim.GetName(): prim for prim in stage.Traverse() if prim.IsA(UsdPhysics.RevoluteJoint)}
-    cranks = crank_joints(desc)
-    assert set(joints) == set(desc.joints) | set(cranks.values())
-    for drive, name in cranks.items():
-        joint = UsdPhysics.RevoluteJoint(joints[name])
-        actual = (joint.GetLowerLimitAttr().Get(), joint.GetUpperLimitAttr().Get())
-        assert actual == pytest.approx([math.degrees(value) for value in desc.drives[drive].position_limit_device])
-        assert not joints[name].HasAPI(UsdPhysics.DriveAPI, "angular")
+    source = desc.usd_model
+    source_closures = {n for n, j in source.joints.items() if j.GetExcludeFromArticulationAttr().Get()}
+    closures = {p.GetName() for p in stage.Traverse() if p.IsA(UsdPhysics.Joint)
+                and UsdPhysics.Joint(p).GetExcludeFromArticulationAttr().Get()}
+    assert closures == source_closures and closures
+    bodies = {p.GetName(): p for p in stage.Traverse() if p.HasAPI(UsdPhysics.RigidBodyAPI)}
+    for pair in profile["model"].get("contact_excludes", []):
+        a, b = sorted(pair)
+        targets = UsdPhysics.FilteredPairsAPI(bodies[a]).GetFilteredPairsRel().GetTargets()
+        assert bodies[b].GetPath() in targets
+    for spec in desc.ankle_model.payload["sides"].values():
+        for role, drive in zip(("upper", "lower"), spec["motor_names"], strict=True):
+            name = spec["usd_joints"][role]
+            p = next(p for p in stage.Traverse() if p.GetName() == name)
+            joint = UsdPhysics.RevoluteJoint(p)
+            assert np.radians([joint.GetLowerLimitAttr().Get(), joint.GetUpperLimitAttr().Get()]) == pytest.approx(
+                desc.drives[drive].position_limit_device)
+    assert source.digest() == source_hash
 
 
-def test_native_sole_metadata_is_usable_by_runtime(native):
+@pytest.mark.physics
+@pytest.mark.parametrize("cuda_graph", [False, True])
+def test_native_runtime_steps_and_reads_physical_shafts(desc, tmp_path, cuda_graph):
+    pytest.importorskip("isaaclab_newton")
+    if not torch.cuda.is_available():
+        pytest.skip("native runtime smoke requires CUDA")
+    from humanoid_sim.devices.demand import DriveDemand
+    from humanoid_sim.sim import SimCore
+
+    path = build_asset(desc, load_profile(desc.robot), tmp_path)
+    sim = SimCore(path, device="cuda:0", fixed_base=True, cuda_graph=cuda_graph)
+    try:
+        core = sim.plant
+        q, qd = sim.joint_state()
+        sim.write_joint_state(q, torch.zeros_like(qd))
+        physical, velocity = sim.solver_state()
+        held, _, _ = core.solver_map.drive_state(physical, velocity)
+        core.submit(DriveDemand.pd(held, core.drive_stiffness[None], core.drive_damping[None]),
+                    torch.zeros(1, device="cuda:0", dtype=torch.long))
+        for _ in range(8):
+            feedback = sim.step()
+        assert torch.isfinite(feedback.applied_torque_nm).all()
+        physical, velocity = sim.solver_state()
+        expected, _, _ = core.solver_map.drive_state(physical, velocity)
+        torch.testing.assert_close(feedback.position_rad, expected)
+        assert sim.t_ns == 8 * sim.period_ns
+    finally:
+        sim.close()
+
+
+@pytest.mark.physics
+def test_native_host_publishes_feedback_before_the_first_step(desc, tmp_path):
+    pytest.importorskip("isaaclab_newton")
+    if not torch.cuda.is_available():
+        pytest.skip("native runtime smoke requires CUDA")
     from humanoid_sim.runtime.host import RuntimeHost
 
-    _, _, _, path = native
-    boxes = asset_meta(path)["sole_boxes"]
-    assert {box["side"] for box in boxes} == {"l", "r"}
-    stage = Usd.Stage.Open(str(path))
-    names = [prim.GetName() for prim in stage.Traverse() if prim.HasAPI(UsdPhysics.RigidBodyAPI)]
-    host = SimpleNamespace(robot=SimpleNamespace(body_names=names), device="cpu")
-    soles = RuntimeHost._sole_geometry(host, boxes)
-    assert len(soles) == len(boxes)
-    for sole, box in zip(soles, boxes, strict=True):
-        assert torch.isfinite(sole["corners"]).all()
-        assert (sole["half"] > 0).all()
-        assert box["replaces_mesh"] is None
-
-
-def test_native_asset_applies_profile_contact_excludes(native):
-    _, profile, _, path = native
-    stage = Usd.Stage.Open(str(path))
-    bodies = {prim.GetName(): prim for prim in stage.Traverse() if prim.HasAPI(UsdPhysics.RigidBodyAPI)}
-    for first, second in profile["model"]["contact_excludes"]:
-        targets = UsdPhysics.FilteredPairsAPI(bodies[first]).GetFilteredPairsRel().GetTargets()
-        assert bodies[second].GetPath() in targets
-    assert asset_meta(path)["contact_excludes"] == [
-        [str(bodies[name].GetPath()) for name in pair] for pair in profile["model"]["contact_excludes"]]
-
-
-def test_base_variant_keeps_the_same_mechanism(native):
-    desc, profile, root, path = native
-    base_path = build_asset(desc, profile, root, base_joints=True)
-    assert base_path != path
-    stage = Usd.Stage.Open(str(base_path))
-    names = {prim.GetName() for prim in stage.Traverse() if prim.IsA(UsdPhysics.RevoluteJoint)}
-    assert {name for name, _ in BASE_JOINTS} <= names
-    assert asset_meta(base_path)["loop_closures"] == asset_meta(path)["loop_closures"]
-    for prim in stage.Traverse():
-        if not prim.HasAPI(UsdPhysics.MassAPI):
-            continue
-        mass = UsdPhysics.MassAPI(prim)
-        assert np.isfinite(mass.GetCenterOfMassAttr().Get()).all()
-        assert mass.GetPrincipalAxesAttr().Get().GetLength() == pytest.approx(1)
-    assert path.parent == asset_dir(desc, profile, root)
-
-
-def test_native_drive_torque_and_feedback_use_the_crank_shafts(native):
-    desc, _, _, _ = native
-    names = list(desc.physics_joints)
-    plant = PlantCore(desc, names, 1, PlantCfg(dtype=torch.float64))
-    assert not plant.map.ankles
-    positions = torch.zeros(1, len(names), dtype=torch.float64)
-    velocities = torch.zeros_like(positions)
-    cranks = crank_joints(desc)
-    for drive, joint in cranks.items():
-        positions[0, names.index(joint)] = 0.12
-        velocities[0, names.index(joint)] = 0.23
-    feedback = plant.feedback(positions, velocities)
-    for drive in cranks:
-        index = plant.map.drive_names.index(drive)
-        assert feedback.position_rad[0, index] == pytest.approx(0.12)
-        assert feedback.velocity_rad_s[0, index] == pytest.approx(0.23)
-    demand = DriveDemand.pd(torch.zeros_like(feedback.position_rad), plant.drive_stiffness,
-                           plant.drive_damping)
-    plant.submit(demand, torch.tensor([0]))
-    plant.pre_physics(0, positions, velocities)
-    torque = plant.map.joint_torque(plant.last.applied, [])
-    props = joint_properties(plant, names)
-    for linkage in desc.linkages:
-        for name in linkage.joints:
-            index = names.index(name)
-            assert torque[0, index] == 0
-            assert props.stiffness[index] == 0
-            assert props.armature[index] == 0
-        for drive in (linkage.upper, linkage.lower):
-            index = names.index(cranks[drive])
-            assert torque[0, index] == plant.last.applied[0, plant.map.drive_names.index(drive)]
-            assert props.armature[index] > 0
-            assert props.effort_limit[index] == desc.drives[drive].effort_peak
-
-
-def test_native_reset_closes_rods_in_newton_forward_kinematics(native):
-    pytest.importorskip("newton")
-    from humanoid_sim.model.kinematics import RobotKinematics, _rotate
-
-    desc, _, _, path = native
-    names = list(desc.joints)
-    kin = RobotKinematics(path, names)
-    model = kin.model
-    labels = [label.rsplit("/", 1)[-1] for label in model.joint_label]
-    parents, children = model.joint_parent.numpy(), model.joint_child.numpy()
-    parent_frames, child_frames = model.joint_X_p.numpy(), model.joint_X_c.numpy()
-    generator = torch.Generator().manual_seed(10)
-    for _ in range(5):
-        positions = torch.zeros(1, len(names))
-        for linkage in desc.linkages:
-            indices = [names.index(name) for name in linkage.joints]
-            positions[:, indices] = (torch.rand(1, 2, generator=generator) - 0.5) * 0.1
-        poses = kin.body_poses(positions)
-        for closure in asset_meta(path)["loop_closures"]:
-            index = labels.index(closure.rsplit("/", 1)[-1])
-            parent, child = poses[parents[index]], poses[children[index]]
-            start = parent[:3] + _rotate(parent[3:], parent_frames[index, :3])
-            end = child[:3] + _rotate(child[3:], child_frames[index, :3])
-            assert np.linalg.norm(start - end) < 2e-6
-
-
-def test_native_reset_velocities_follow_pose_derivatives(native):
-    from humanoid_sim.model.native_state import NativeState
-
-    desc, _, _, _ = native
-    names = list(desc.joints)
-    state = NativeState(desc, names, dtype=torch.float64)
-    positions = torch.full((2, len(names)), 0.02, dtype=torch.float64)
-    velocities = torch.full_like(positions, 0.1)
-    values = state.state(positions, velocities)
-    assert all(torch.isfinite(position).all() and torch.isfinite(velocity).all()
-               for position, velocity in values.values())
-    before = state.coordinates(positions - 1e-6 * velocities)
-    after = state.coordinates(positions + 1e-6 * velocities)
-    for _, crank_names, _ in state.transmissions.values():
-        for name in crank_names:
-            torch.testing.assert_close(values[name][1], (after[name] - before[name]) / 2e-6, atol=1e-8, rtol=0)
-    for name, *_ in state.rods:
-        previous, following = before[name].numpy(), after[name].numpy()
-        relative_vector = (previous[:, 3:] * following[:, :3] - following[:, 3:] * previous[:, :3]
-                           + np.cross(previous[:, :3], following[:, :3]))
-        angular = torch.as_tensor(relative_vector / 1e-6)
-        reported = torch.stack([values[f"{name}:{axis}"][1] for axis in range(3)], dim=-1)
-        torch.testing.assert_close(reported, angular, atol=1e-8, rtol=0)
+    path = build_asset(desc, load_profile(desc.robot), tmp_path / "asset")
+    host = RuntimeHost(tmp_path / "plant", path, device="cuda:0", support="free", compile=False)
+    try:
+        host.sim.feedback = None
+        host._publish()
+        record = host.seg.regions["feedback"].read()
+        assert record is not None
+        physical, velocity = host.sim.solver_state()
+        expected, _, _ = host.sim.plant.solver_map.drive_state(physical, velocity)
+        np.testing.assert_allclose(
+            record[1]["drive"]["position_rad"][:len(host.drives)], expected[0].cpu().numpy())
+    finally:
+        host.close()

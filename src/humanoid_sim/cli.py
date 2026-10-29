@@ -276,7 +276,7 @@ def cmd_fit_pace(args) -> int:
               delay_bounds_ns=tuple(int(round(v * 1e6)) for v in args.delay_ms),
               separate_dynamic_friction=not args.no_dynamic_friction,
               delay_groups=None if args.one_delay else [sim.desc.drives[d].family for d in drives])
-    joints = sim.native.names if sim.native else joints
+    joints = list(plant.solver_map.joint_names)
     start = start_values(sim.desc, joints)
     fixed = structural_fixed(start)
     sizes = PaceSpace(joints, drives, start, fixed=fixed, **kw).sizes
@@ -336,7 +336,7 @@ def cmd_pace_selftest(args) -> int:
                   solver=args.solver)
     plant = sim.plant
     joints, drives = list(plant.map.joint_names), list(plant.map.drive_names)
-    physics_joints = sim.native.names if sim.native else joints
+    physics_joints = list(plant.solver_map.joint_names)
     start = start_values(sim.desc, physics_joints)
     space = PaceSpace(physics_joints, drives, start, fixed=structural_fixed(start), log_bound=math.log(args.bound),
                       separate_dynamic_friction=not args.no_dynamic_friction,

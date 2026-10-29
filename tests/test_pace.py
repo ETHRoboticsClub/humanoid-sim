@@ -96,7 +96,7 @@ def test_drive_targets_as_the_master_builds_them(plant):
     joints = list(desc.joints)
     q = np.zeros((2, len(joints)))
     q[1, joints.index("knee_flexion_l")] = 0.1
-    q[1, joints.index(desc.linkages[0].joints[0])] = 0.05
+    q[1, joints.index("ankle_dorsiflexion_l")] = 0.05
     targets, t = drive_targets(plant, CommandTrace(np.array([0, 20]), joints, q))
     drives = plant.map.drive_names
     knee = desc.joints["knee_flexion_l"]
@@ -144,7 +144,7 @@ def test_excitation_capture_reads_its_commands(tmp_path):
     (tmp_path / "manifest.json").write_text(json.dumps({"format": FORMAT, "complete": True, "dataset_id": "exc-x"}))
     (tmp_path / "commands.csv").write_text(
         "seq,t_frame_ros_ns,t_signal_s,joint_id,q_nominal_rad,q_mirror_rad\n"
-        "1,100,0.0,knee_l,0.1,0.1\n1,100,0.0,knee_r,0.2,0.2\n2,120,0.02,knee_l,0.3,0.3\n")
+        "1,100,0.0,knee_flexion_l,0.1,0.1\n1,100,0.0,knee_flexion_r,0.2,0.2\n2,120,0.02,knee_flexion_l,0.3,0.3\n")
     c = ExcitationCapture(tmp_path).commands()
     assert c.t_ns.tolist() == [100, 120] and c.positions_rad.tolist() == [[0.1, 0.2], [0.3, 0.2]]
 
@@ -158,7 +158,7 @@ def test_a_fit_replays_frames_from_the_controllers_applied_acknowledgements(tmp_
     (tmp_path / "manifest.json").write_text(json.dumps({"format": FORMAT, "complete": True, "dataset_id": "exc-x"}))
     (tmp_path / "commands.csv").write_text(
         "seq,t_frame_ros_ns,t_signal_s,joint_id,q_nominal_rad,q_mirror_rad\n"
-        "1,100,0.0,knee_l,0.1,0.1\n2,120,0.02,knee_l,0.3,0.3\n3,140,0.04,knee_l,0.5,0.5\n")
+        "1,100,0.0,knee_flexion_l,0.1,0.1\n2,120,0.02,knee_flexion_l,0.3,0.3\n3,140,0.04,knee_flexion_l,0.5,0.5\n")
     cap = ExcitationCapture(tmp_path)
     frames, reference = fit_commands(cap)
     assert reference == "frame" and frames.t_ns.tolist() == [100, 120, 140]

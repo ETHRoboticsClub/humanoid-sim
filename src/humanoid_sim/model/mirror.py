@@ -141,7 +141,7 @@ def _joint_frames(urdf_path) -> dict[str, tuple[np.ndarray, np.ndarray]]:
 
 
 def mirror_map(desc: Description) -> MirrorMap:
-    frames = _joint_frames(desc.urdf_path)
+    frames = _joint_frames(desc.urdf_path) if desc.usd_model is None else _usd_joint_frames(desc)
     joints = list(desc.joints)
     first = next((n for n in joints if _partner(n) in desc.joints and _is_left(n)), None)
     if first is None:
@@ -164,7 +164,8 @@ def mirror_map(desc: Description) -> MirrorMap:
         perm.append(joints.index(partner))
         sign.append(1 if c > 0 else -1)
     standing = [desc.joints[j].standing_offset_rad for j in joints]
-    at_standing = _joint_positions(desc.urdf_path, dict(zip(joints, standing, strict=True)))
+    at_standing = (_joint_positions(desc.urdf_path, dict(zip(joints, standing, strict=True)))
+                   if desc.usd_model is None else {n: value[0] for n, value in _usd_joint_frames(desc, standing).items()})
     asymmetry = max(float(np.abs(at_standing[joints[perm[i]]] - reflect @ at_standing[name]).max())
                     for i, name in enumerate(joints))
 
@@ -192,7 +193,7 @@ def _crank_signs(desc: Description, joints: list[str], perm: list[int], sign: li
     import torch
 
     left, right = desc.ankle_transmission("l", dtype=torch.float64), desc.ankle_transmission("r", dtype=torch.float64)
-    names = next(linkage.joints for linkage in desc.linkages if linkage.side == "l")
+    names = next(lk.joints for lk in desc.linkages if lk.side == "l")
     s = torch.tensor([sign[joints.index(n)] for n in names], dtype=torch.float64)
     offsets_l = torch.tensor([desc.joints[n].standing_offset_rad for n in names], dtype=torch.float64)
     offsets_r = torch.tensor([desc.joints[joints[perm[joints.index(n)]]].standing_offset_rad for n in names],
@@ -208,4 +209,20 @@ def _crank_signs(desc: Description, joints: list[str], perm: list[int], sign: li
         if abs(c) < 0.99:
             raise ValueError(f"ankle crank {k}: left and mirrored right cranks do not correspond (r = {c:.3f})")
         out.append(1 if c > 0 else -1)
+    return out
+
+
+def _usd_joint_frames(desc: Description, positions=None):
+    import torch
+
+    from humanoid_sim.model.native_state import NativeState
+
+    model = desc.usd_model
+    q = torch.tensor([positions if positions is not None else [0.0] * len(desc.joints)], dtype=torch.float64)
+    _, poses = NativeState(desc).forward(q)
+    out = {}
+    for name in desc.joints:
+        parent, _ = model.joint_bodies(name)
+        frame = poses[parent][0].numpy() @ model.joint_frames(name)[0]
+        out[name] = (frame[:3, 3], frame[:3, :3] @ model.joint_axis(name))
     return out

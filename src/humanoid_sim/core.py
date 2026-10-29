@@ -34,7 +34,7 @@ from humanoid_sim.devices.feedback import DriveFeedback
 from humanoid_sim.devices.shaping import outside_stable_region, shaped_position_target
 from humanoid_sim.model.description import Description
 from humanoid_sim.timing.clock import NS_PER_MS, check_period
-from humanoid_sim.transmissions.drive_map import DriveJointMap
+from humanoid_sim.transmissions.drive_map import DriveJointMap, NativeDriveJointMap
 
 # Speed below which the solver's static friction takes over from the relief (tanh scale). Modeled: the drives'
 # breakaway speed is not measured.
@@ -51,12 +51,16 @@ class PlantCfg:
 
 
 class PlantCore:
-    def __init__(self, desc: Description, joint_names: list[str], num_envs: int, cfg: PlantCfg | None = None):
+    def __init__(self, desc: Description, joint_names: list[str], num_envs: int, cfg: PlantCfg | None = None, *,
+                 solver_joint_names: list[str] | None = None):
         self.cfg = cfg = cfg or PlantCfg()
         check_period("physics_period_ns", cfg.physics_period_ns)
         self.desc, self.num_envs = desc, num_envs
         dev, dt = cfg.device, cfg.dtype
         self.map = DriveJointMap(desc, joint_names, device=dev, dtype=dt)
+        self.solver_map = (self.map if solver_joint_names is None else
+                           NativeDriveJointMap(desc, solver_joint_names, device=dev, dtype=dt))
+        physical_joints = self.solver_map.joint_names
         drives = [desc.drives[n] for n in self.map.drive_names]
         self.envelope = TorqueSpeedEnvelope([desc.torque_speed(d.family) for d in drives],
                                             braking=[desc.braking_limit(d.name) for d in drives], device=dev, dtype=dt)
@@ -64,24 +68,24 @@ class PlantCore:
                               device=dev, dtype=dt)
         self.drive_stiffness = torch.tensor([d.baseline_stiffness for d in drives], device=dev, dtype=dt)
         self.drive_damping = torch.tensor([d.baseline_damping for d in drives], device=dev, dtype=dt)
-        properties = desc.physics_joints if any(n not in desc.joints for n in joint_names) else desc.joints
-        standing = torch.tensor([properties[n].standing_offset_rad if n in properties else 0.0
-                                 for n in joint_names], device=dev, dtype=dt)
-        k0, d0 = self.map.joint_space_gains(self.drive_stiffness, self.drive_damping, standing)
+        standing = torch.tensor([desc.joints[n].standing_offset_rad if n in desc.joints else 0.0
+                                 for n in physical_joints], device=dev, dtype=dt)
+        k0, d0 = self.solver_map.joint_space_gains(self.drive_stiffness, self.drive_damping, standing)
         # Constant per-episode solver gains [E, J], written at reset only.
         self.k0 = k0.expand(num_envs, -1).clone()
         self.d0 = d0.expand(num_envs, -1).clone()
-        self.actuated = self.map.actuated_joints
+        self.actuated = self.solver_map.actuated_joints
         self._jacs: list[torch.Tensor] = []
         self.post_state: tuple | None = None
         self.last: DriveOutput | None = None
         self.gain_warnings = torch.zeros(num_envs, self.map.num_drives, device=dev, dtype=torch.bool)
         # External torque on each joint [E, J] (a test's disturbance), on top of the drives' and outside their
         # feedback. Written in place.
-        self.external_torque = torch.zeros(num_envs, len(joint_names), device=dev, dtype=dt)
+        self.external_torque = torch.zeros(num_envs, len(physical_joints), device=dev, dtype=dt)
+        self.passive_effort = torch.zeros_like(self.external_torque)
         # Static minus dynamic Coulomb friction [E, J] (Nm), returned to a sliding joint. Written in place.
-        relief = [properties[n].friction - properties[n].dynamic_friction if n in properties else 0.0
-                  for n in joint_names]
+        relief = [desc.joints[n].friction - desc.joints[n].dynamic_friction if n in desc.joints else 0.0
+                  for n in physical_joints]
         self.friction_relief = torch.tensor(relief, device=dev, dtype=dt).expand(num_envs, -1).clone()
 
     # -- demands ----------------------------------------------------------------------------------
@@ -90,6 +94,7 @@ class PlantCore:
         self.bank.reset(env_ids, demand)
         self.gain_warnings.index_fill_(0, env_ids, False)
         self.external_torque.index_fill_(0, env_ids, 0.0)
+        self.passive_effort.index_fill_(0, env_ids, 0.0)
 
     def submit(self, demand: DriveDemand, arrival_ns: torch.Tensor, env_mask: torch.Tensor | None = None):
         # The solver gains are the baseline drive gains, so shaping is stable up to twice those. The check uses
@@ -109,9 +114,11 @@ class PlantCore:
                     state: tuple | None = None) -> torch.Tensor:
         """Joint position targets ``[E, J]`` for the step starting at ``t0_ns`` (velocity target 0). ``state``: the
         drive-frame state of ``q, qd`` if already computed (``DriveJointMap.drive_state``)."""
-        qdrv, vdrv, self._jacs = state if state is not None else self.map.drive_state(q, qd)
+        qdrv, vdrv, self._jacs = state if state is not None else self.solver_map.drive_state(q, qd)
         out = self._keep("last", self.bank.compute(t0_ns, t0_ns + self.cfg.physics_period_ns, qdrv, vdrv))
-        tau = self.map.joint_torque(out.applied, self._jacs) + self.external_torque + self._relief(qd, out)
+        tau = self.solver_map.joint_torque(out.applied, self._jacs) + self.external_torque + self._relief(qd, out)
+        self.passive_effort.copy_(tau)
+        self.passive_effort.index_fill_(1, self.actuated, 0.0)
         target = q.clone()
         a = self.actuated
         target[:, a] = shaped_position_target(q[:, a], qd[:, a], tau[:, a], self.k0[:, a], self.d0[:, a])
@@ -120,13 +127,13 @@ class PlantCore:
     def _relief(self, qd: torch.Tensor, out: DriveOutput) -> torch.Tensor:
         """Sliding-friction relief ``[E, J]`` at joint velocity ``qd``; none on joints whose 1:1 drive is off."""
         on = torch.ones_like(qd)
-        on[:, self.map._lin_j] = out.enabled_fraction[:, self.map._lin_d].to(qd.dtype)
+        on[:, self.solver_map._lin_j] = out.enabled_fraction[:, self.solver_map._lin_d].to(qd.dtype)
         return self.friction_relief * torch.tanh(qd / SLIDING_VELOCITY_RAD_S) * on
 
     def feedback(self, q: torch.Tensor, qd: torch.Tensor) -> DriveFeedback:
         """Drive-frame feedback after the step (state ``q, q̇``; torques of the step just taken). The drive-frame
         state is kept as :attr:`post_state` for the next :meth:`pre_physics`."""
-        qdrv, vdrv, jacs = self.map.drive_state(q, qd)
+        qdrv, vdrv, jacs = self.solver_map.drive_state(q, qd)
         self._keep("post_state", (qdrv, vdrv, tuple(jacs)))
         qdrv, vdrv, _ = self.post_state
         z = torch.zeros_like(qdrv)
