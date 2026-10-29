@@ -378,16 +378,47 @@ def test_pace_objective_is_zero_at_planted_parameters(request):
     import numpy as np
 
     from humanoid_sim.sim import SimCore
-    from humanoid_sim.sysid.pace import PaceSpace, chirp_commands, evaluate, start_values, synthetic_capture
+    from humanoid_sim.sysid.pace import (
+        PaceSpace,
+        chirp_commands,
+        evaluate,
+        start_values,
+        structural_fixed,
+        synthetic_capture,
+    )
 
     sim = SimCore(built_usd("ethrc_v1"), device="cpu", robot="ethrc_v1", num_envs=2, fixed_base=True)
     request.addfinalizer(sim.close)
-    joints, drives = list(sim.plant.map.joint_names), list(sim.plant.map.drive_names)
-    space = PaceSpace(joints, drives, start_values(sim.desc, joints))
+    plant = sim.plant
+    joints, drives = list(plant.solver_map.joint_names), list(plant.map.drive_names)
+    start = start_values(sim.desc, joints)
+    space = PaceSpace(joints, drives, start, fixed=structural_fixed(start))
     x_true = np.random.default_rng(0).uniform(-0.5, 0.5, space.dim)
-    amp = {j: 0.05 for j in joints}
-    commands = chirp_commands(joints, duration_s=3.0, f0_hz=0.5, f1_hz=3.0, amplitude_rad=amp)
+    amp = {j: 0.05 for j in plant.map.joint_names}
+    commands = chirp_commands(list(plant.map.joint_names), duration_s=3.0, f0_hz=0.5, f1_hz=3.0, amplitude_rad=amp)
     capture = synthetic_capture(sim, space, space.decode(np.tile(x_true, (2, 1))), commands)
     f, _ = evaluate(sim, [capture], space, np.stack([x_true, space.x0()]), list(range(len(drives))),
                     base_motion=None, duration_s=None)
     assert f[0] < 1e-4 and f[1] > 10 * f[0]
+
+
+@pytest.mark.physics
+def test_a_replay_runs_the_solver_pd_at_the_captures_gains(request):
+    """Gains above twice the baseline would leave target shaping's stable region: the replay puts the solver PD at
+    the capture's gains instead, in the plant and in the articulation."""
+    pytest.importorskip("isaaclab_newton")
+    import torch
+
+    from humanoid_sim.replay.replay import solver_gains_of
+    from humanoid_sim.sim import SimCore
+
+    sim = SimCore(built_usd("ethrc_v1"), device="cpu", robot="ethrc_v1", num_envs=2, fixed_base=True)
+    request.addfinalizer(sim.close)
+    plant = sim.plant
+    kp, kd = 4.5 * plant.drive_stiffness.clone(), 2.5 * plant.drive_damping.clone()
+    solver_gains_of(sim, kp, kd)
+    lin_j, lin_d = plant.solver_map._lin_j, plant.solver_map._lin_d
+    ids = [sim.backend.robot.joint_names.index(plant.solver_map.joint_names[i]) for i in lin_j.tolist()]
+    stiffness = sim.backend.robot.data.joint_stiffness.torch[:, ids].to(plant.k0.dtype)
+    assert torch.allclose(plant.k0[:, lin_j], kp[lin_d].expand(2, -1))
+    assert torch.allclose(stiffness, kp[lin_d].expand(2, -1), rtol=1e-5)

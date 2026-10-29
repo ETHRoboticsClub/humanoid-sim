@@ -44,6 +44,20 @@ def test_fixed_entries_stay_at_the_start():
     assert np.allclose(v["damping"][0], [START["damping"][0], START["damping"][1] / 10])
 
 
+def test_structural_zeros_and_their_friction_ratio_are_fixed():
+    """A multiplier cannot move zero; a joint without friction has no ratio to fit either."""
+    from humanoid_sim.sysid.pace import structural_fixed
+
+    start = START | {"armature": np.array([0.0, 0.2]), "friction": np.array([0.3, 0.0])}
+    fixed = structural_fixed(start)
+    assert fixed["armature"].tolist() == [True, False] and fixed["friction_ratio"].tolist() == [False, True]
+    assert "friction_ratio" not in structural_fixed(start, ratio=False)
+    s = PaceSpace(J, D, start, fixed=fixed)
+    v = s.decode(np.ones((1, s.dim)))
+    assert v["armature"][0].tolist() == [0.0, pytest.approx(2.0)] and v["friction"][0, 1] == 0.0
+    PaceSpace(J, D, start, fixed=structural_fixed(start, ratio=False), separate_dynamic_friction=False)
+
+
 def test_pace_bounds_and_params_put_the_delay_in_steps():
     s = PaceSpace(J, D, START, delay_bounds_ns=(0, 20_000_000))
     b = s.bounds(4_000_000)

@@ -57,6 +57,20 @@ def _usd(args, *, base_joints: bool = False) -> Path:
     return out / json.loads(meta.read_text())["usd"]
 
 
+def _plant_identity(sim, usd: Path) -> dict:
+    """What a replay or fit ran on: the description (robot, digest, revision, its root) and the USD (path, the
+    delivered source's sha256 from the built asset), so a result names the model it belongs to."""
+    from humanoid_sim.model.asset import asset_meta
+
+    try:
+        meta = asset_meta(usd)
+    except FileNotFoundError:
+        meta = {}
+    return {**sim.desc.identity(), "description_root": str(sim.desc.root.resolve()), "usd": str(usd.resolve()),
+            "asset_key": meta.get("key"), "source_usd_sha256": meta.get("source_usd_sha256"),
+            "source_usd": None if sim.desc.usd_path is None else str(sim.desc.usd_path.resolve())}
+
+
 def cmd_build_asset(args) -> int:
     from humanoid_sim.model.asset import build_asset, load_profile
     from humanoid_sim.model.description import Description
@@ -75,22 +89,29 @@ def cmd_replay(args) -> int:
     from humanoid_sim.sim import SimCore
 
     cap = ExcitationCapture(Path(args.capture))
-    period_ns = int(round(args.period_ms * 1e6))
     moving = args.base != "fixed"
-    sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, period_ns=period_ns,
-                  fixed_base=not moving, base_joints=moving, solver=args.solver, integrator=args.integrator)
+    usd = _usd(args, base_joints=moving)
+    sim = SimCore(usd, device=args.device, robot=args.robot,
+                  period_ns=None if args.period_ms is None else int(round(args.period_ms * 1e6)),
+                  fixed_base=not moving, base_joints=moving, solver=args.solver, integrator=args.integrator,
+                  self_collision=False if args.no_self_collision else None)
+    period_ns = sim.period_ns
     t = time.time()
     res = replay(cap, sim, duration_s=args.duration, base_motion=args.base if moving else None,
                  demand_delay_ns=int(round(args.demand_delay_ms * 1e6)))
     wall = time.time() - t
     integrator = sim.integrator
     delay = f"_demand{args.demand_delay_ms:+g}ms" if args.demand_delay_ms else ""
-    out = Path(args.out) / f"{cap.dataset_id}_{sim.solver}_{integrator}_{period_ns // 1000}us_base-{args.base}{delay}"
+    selfcol = "_noselfcol" if args.no_self_collision else ""
+    out = Path(args.out) / (f"{cap.dataset_id}_{sim.solver}_{integrator}_{period_ns // 1000}us_base-{args.base}"
+                            f"{delay}{selfcol}")
     out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out / "trace.npz", t_ns=res.t_ns, demand=res.demand,
                         **{f"sim_{k}": v for k, v in res.sim.items()}, **{f"real_{k}": v for k, v in res.real.items()})
     summary = {"dataset_id": cap.dataset_id, "name": cap.name, "period_ns": period_ns,
                "physics": f"isaaclab/{sim.solver}", "device": args.device, "integrator": integrator, "base": args.base,
+               "self_collision": not args.no_self_collision and bool(sim.profile["physics"]["self_collision"]),
+               **_plant_identity(sim, usd),
                "wall_s": wall,
                "sim_s": len(res.t_ns) * period_ns / 1e9, "drives": res.drives,
                "rms_position_rad": res.rms("position"), "rms_velocity_rad_s": res.rms("velocity"),
@@ -204,16 +225,31 @@ def cmd_fit_passive(args) -> int:
     return 0
 
 
-def open_capture(path: str):
-    """An ``exc-*`` capture directory or a rosbag2 directory."""
+class FrameStamped:
+    """A capture whose command frames are replayed from their own stamps, its controller acknowledgements unread."""
+
+    def __init__(self, capture):
+        self._capture = capture
+
+    def __getattr__(self, name):
+        return getattr(self._capture, name)
+
+    def applied_commands(self):
+        return None
+
+
+def open_capture(path: str, *, frame_stamps: bool = False):
+    """An ``exc-*`` capture directory or a rosbag2 directory; ``frame_stamps``: ignore its acknowledgements."""
     p = Path(path)
     if (p / "metadata.yaml").is_file():
         from humanoid_sim.replay.bag import BagCapture
 
-        return BagCapture(p)
-    from humanoid_sim.replay.exc import ExcitationCapture
+        capture = BagCapture(p)
+    else:
+        from humanoid_sim.replay.exc import ExcitationCapture
 
-    return ExcitationCapture(p)
+        capture = ExcitationCapture(p)
+    return FrameStamped(capture) if frame_stamps else capture
 
 
 def _check_captures(args, captures: list) -> dict:
@@ -242,7 +278,7 @@ def _check_captures(args, captures: list) -> dict:
 
 
 def cmd_check_bag(args) -> int:
-    checks = _check_captures(args, [open_capture(c) for c in args.captures])
+    checks = _check_captures(args, [open_capture(c, frame_stamps=args.frame_stamps) for c in args.captures])
     return 0 if all(c.ok for c in checks.values()) else 1
 
 
@@ -255,8 +291,8 @@ def cmd_fit_pace(args) -> int:
     from humanoid_sim.sim import SimCore
     from humanoid_sim.sysid.pace import PaceSpace, evaluate, fit, save, start_values, structural_fixed
 
-    captures = [open_capture(c) for c in args.captures]
-    held = [open_capture(c) for c in args.holdout]
+    captures = [open_capture(c, frame_stamps=args.frame_stamps) for c in args.captures]
+    held = [open_capture(c, frame_stamps=args.frame_stamps) for c in args.holdout]
     checks = _check_captures(args, captures + held)
     refused = [cid for cid, chk in checks.items() if not chk.ok]
     if refused:
@@ -268,17 +304,19 @@ def cmd_fit_pace(args) -> int:
                          "different things, fit them separately")
     reference = references.pop()
     moving = args.base != "fixed"
-    sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, num_envs=args.num_envs,
-                  fixed_base=not moving, base_joints=moving, solver=args.solver)
+    period_ns = None if args.period_ms is None else int(round(args.period_ms * 1e6))
+    usd = _usd(args, base_joints=moving)
+    sim = SimCore(usd, device=args.device, robot=args.robot, num_envs=args.num_envs,
+                  fixed_base=not moving, base_joints=moving, solver=args.solver, period_ns=period_ns,
+                  self_collision=False if args.no_self_collision else None)
     plant = sim.plant
-    joints, drives = list(plant.map.joint_names), list(plant.map.drive_names)
+    joints, drives = list(plant.solver_map.joint_names), list(plant.map.drive_names)
     kw = dict(log_bound=math.log(args.bound), bias_bound_rad=args.bias_bound_mrad / 1e3,
               delay_bounds_ns=tuple(int(round(v * 1e6)) for v in args.delay_ms),
               separate_dynamic_friction=not args.no_dynamic_friction,
               delay_groups=None if args.one_delay else [sim.desc.drives[d].family for d in drives])
-    joints = list(plant.solver_map.joint_names)
     start = start_values(sim.desc, joints)
-    fixed = structural_fixed(start)
+    fixed = structural_fixed(start, ratio=not args.no_dynamic_friction)
     sizes = PaceSpace(joints, drives, start, fixed=fixed, **kw).sizes
     for item in args.fix:
         param, _, name = item.partition(".")
@@ -286,7 +324,7 @@ def cmd_fit_pace(args) -> int:
         if param not in sizes or param == "delay" or name not in names:
             raise SystemExit(f"--fix {item}: PARAM.NAME, PARAM one of {sorted(set(sizes) - {'delay'})}")
         fixed.setdefault(param, np.zeros(sizes[param], dtype=bool))[names.index(name)] = True
-    space = PaceSpace(joints, drives, start_values(sim.desc, joints), fixed=fixed, **kw)
+    space = PaceSpace(joints, drives, start, fixed=fixed, **kw)
     scored = [i for i, d in enumerate(drives) if d not in set(args.skip_drives)]
     base = args.base if moving else None
     t = time.time()
@@ -296,7 +334,9 @@ def cmd_fit_pace(args) -> int:
     meta = result | {"captures": [c.dataset_id for c in captures], "base": args.base, "num_envs": args.num_envs,
                      "generations": args.generations, "duration_s": args.duration, "seed": args.seed,
                      "scored": [drives[i] for i in scored], "fixed": sorted(args.fix), "wall_s": time.time() - t,
-                     "command_rebuild": rebuild, "delay_reference": reference, **sim.desc.identity()}
+                     "command_rebuild": rebuild, "delay_reference": reference, **_plant_identity(sim, usd),
+                     "self_collision": not args.no_self_collision and bool(sim.profile["physics"]["self_collision"]),
+                     "frame_stamps": args.frame_stamps, "solver": sim.solver, "integrator": sim.integrator}
     if reference == "applied" and not args.one_delay:
         # Ready for actuators.yaml: each family's drive_delay_s, controller APPLIED to the drive acting.
         meta["drive_delay_s"] = {g: int(v) / 1e9 for g, v in zip(space.groups, best["delay"], strict=True)}
@@ -335,17 +375,19 @@ def cmd_pace_selftest(args) -> int:
     sim = SimCore(_usd(args), device=args.device, robot=args.robot, num_envs=args.num_envs, fixed_base=True,
                   solver=args.solver)
     plant = sim.plant
-    joints, drives = list(plant.map.joint_names), list(plant.map.drive_names)
+    drives = list(plant.map.drive_names)
     physics_joints = list(plant.solver_map.joint_names)
     start = start_values(sim.desc, physics_joints)
-    space = PaceSpace(physics_joints, drives, start, fixed=structural_fixed(start), log_bound=math.log(args.bound),
+    space = PaceSpace(physics_joints, drives, start, fixed=structural_fixed(start, ratio=not args.no_dynamic_friction),
+                      log_bound=math.log(args.bound),
                       separate_dynamic_friction=not args.no_dynamic_friction,
                       delay_groups=None if args.one_delay else [sim.desc.drives[d].family for d in drives])
     rng = np.random.default_rng(args.seed)
     x_true = rng.uniform(-args.spread, args.spread, space.dim)
     planted = space.decode(np.tile(x_true, (args.num_envs, 1)))
-    amp = {j: args.amplitude_rad / (2 if sim.desc.joints[j].device is None else 1) for j in joints}
-    commands = chirp_commands(joints, duration_s=args.duration, f0_hz=args.f0, f1_hz=args.f1, amplitude_rad=amp,
+    commanded = list(plant.map.joint_names)  # the body joints; the solver's crank shafts follow the ankles
+    amp = {j: args.amplitude_rad / (2 if sim.desc.joints[j].device is None else 1) for j in commanded}
+    commands = chirp_commands(commanded, duration_s=args.duration, f0_hz=args.f0, f1_hz=args.f1, amplitude_rad=amp,
                               seed=args.seed)
     t = time.time()
     capture = synthetic_capture(sim, space, planted, commands)
@@ -358,7 +400,8 @@ def cmd_pace_selftest(args) -> int:
                  seed=args.seed, search=args.search)
     best = {k: v[0] for k, v in space.decode(np.asarray(result["x"])[None]).items()}
     truth = {k: v[0] for k, v in planted.items()}
-    recovery = {p: float(np.median(np.abs(np.log(best[p] / truth[p])))) for p in JOINT_PARAMS}
+    recovery = {p: float(np.median(np.abs(np.log(best[p][truth[p] > 0] / truth[p][truth[p] > 0]))))
+                for p in JOINT_PARAMS}  # zero starts are held at zero
     recovery |= {"bias_rad": float(np.median(np.abs(best["bias"] - truth["bias"]))),
                  "delay_ns": dict(zip(space.groups, map(int, best["delay"] - truth["delay"]), strict=True)),
                  "friction_ratio": float(np.median(np.abs(best["friction_ratio"] - truth["friction_ratio"])))}
@@ -501,7 +544,10 @@ def main(argv: list[str] | None = None) -> int:
 
     r = sub.add_parser("replay")
     r.add_argument("capture")
-    r.add_argument("--period-ms", type=float, default=4.0)
+    r.add_argument("--period-ms", type=float, default=None, help="physics period (default: the profile's)")
+    r.add_argument("--no-self-collision", action="store_true",
+                   help="no collisions between the robot's own bodies (a diagnostic: the profile's setting is what a "
+                        "deployable plant runs)")
     r.add_argument("--integrator", default=None)
     r.add_argument("--device", default="cuda:0", help="cuda:N, or cpu (Warp's CPU device: slow)")
     r.add_argument("--duration", type=float, default=None)
@@ -610,6 +656,7 @@ def main(argv: list[str] | None = None) -> int:
     cb.add_argument("--bias-bound-mrad", type=float, default=20.0, help="as fit-pace's")
     cb.add_argument("--delay-ms", nargs=2, type=float, default=[0.0, 20.0], metavar=("FROM", "TO"), help="as fit-pace's")
     cb.add_argument("--skip-drives", nargs="*", default=[], help="drives the fit leaves out")
+    cb.add_argument("--frame-stamps", action="store_true", help="as fit-pace's")
     cb.set_defaults(func=cmd_check_bag)
 
     fpc = sub.add_parser("fit-pace", help="fit PACE 0.2.0's actuator model to captures or rosbags, from their "
@@ -634,6 +681,12 @@ def main(argv: list[str] | None = None) -> int:
                      help="hold entries at their start, e.g. bias.maxonHEJ50L_ANK1 friction_ratio.knee_l")
     fpc.add_argument("--skip-drives", nargs="*", default=[], help="drives left out of the objective")
     fpc.add_argument("--one-delay", action="store_true", help="one delay for every drive, not one per family")
+    fpc.add_argument("--period-ms", type=float, default=None, help="physics period (default: the profile's)")
+    fpc.add_argument("--no-self-collision", action="store_true",
+                     help="no collisions between the robot's own bodies (a diagnostic: the profile's setting is what a "
+                          "deployable plant runs)")
+    fpc.add_argument("--frame-stamps", action="store_true",
+                     help="replay command frames from their own stamps, not the controller's APPLIED acknowledgements (the delay then includes the software path)")
     fpc.add_argument("--search", choices=("blocks", "joint"), default="blocks",
                      help="a CMA-ES per drive (ankle) on its own error, or one over every parameter as PACE does")
     fpc.add_argument("--out", default="outputs/sysid/pace")

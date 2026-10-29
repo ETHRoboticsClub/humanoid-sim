@@ -1,6 +1,7 @@
 """PACE's actuator model (leggedrobotics/pace-sim2real 0.2.0), fitted on this plant by batched replay.
 
-The parameters, in PACE's order with ``separate_dynamic_friction``:
+The parameters, in PACE's order with ``separate_dynamic_friction``, per solver joint (the plant's
+``solver_map.joint_names``: on V1's native USD the body joints and the four ankle crank shafts):
 
 * ``armature`` [J], kg m²: reflected rotor inertia;
 * ``damping`` [J], N m s/rad: viscous joint friction;
@@ -16,7 +17,10 @@ The parameters, in PACE's order with ``separate_dynamic_friction``:
 * ``friction_ratio`` [J]: dynamic over static friction, in [0, 1] (:attr:`~humanoid_sim.core.PlantCore.friction_relief`).
 
 A candidate is a point of ``[-1, 1]^dim``: ``start · bound^x`` for armature, damping and friction (start values
-from the description), linear between its bounds for the others. The search starts at :meth:`PaceSpace.x0`: the
+from the description's solver dynamics, :func:`start_values`), linear between its bounds for the others. An entry
+whose start is zero cannot be scaled and is fixed there (:func:`structural_fixed`), with its friction ratio when its
+friction is zero: on the native USD that is the ankle hinges' armature (the rotor inertia is on the crank shafts) and the shafts' damping and
+friction (the description puts the ankles' on the hinges). The search starts at :meth:`PaceSpace.x0`: the
 description's values (its friction ratio, 1 where it states no dynamic friction), zero bias and the middle of the
 delay range; a fixed entry stays there. A candidate outside the box is evaluated at its edge and
 penalized by its squared distance from it, as in :mod:`humanoid_sim.sysid.passive`.
@@ -39,7 +43,7 @@ LOG_PARAMS = JOINT_PARAMS
 
 @dataclass
 class PaceSpace:
-    joints: list[str]  # the plant's joint order
+    joints: list[str]  # the plant's solver joint order (``solver_map.joint_names``)
     drives: list[str]  # the plant's drive order
     start: dict[str, np.ndarray]  # armature, damping, friction [J]; friction_ratio [J] (default 1)
     log_bound: float = math.log(10.0)  # multipliers on the start values in [1/10, 10]
@@ -203,8 +207,13 @@ def start_values(desc, joints: list[str]) -> dict[str, np.ndarray]:
     return out
 
 
-def structural_fixed(start: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    return {name: np.asarray(start[name]) == 0 for name in JOINT_PARAMS}
+def structural_fixed(start: dict[str, np.ndarray], *, ratio: bool = True) -> dict[str, np.ndarray]:
+    """The entries a multiplier cannot move: zero starts, and (``ratio``, with ``separate_dynamic_friction``) the
+    friction ratio of a joint without friction, which scales nothing there and would only wander in the search."""
+    fixed = {name: np.asarray(start[name]) == 0 for name in JOINT_PARAMS}
+    if ratio:
+        fixed["friction_ratio"] = fixed["friction"].copy()
+    return fixed
 
 
 def evaluate(sim, captures, space: PaceSpace, x: np.ndarray, scored: list[int], *, base_motion: str | None,
@@ -225,9 +234,9 @@ SEARCHES = ("blocks", "joint")
 
 def blocks(space: PaceSpace, plant, scored: list[int]) -> list[tuple[np.ndarray, list[int]]]:
     """The search's blocks: ``(entries of x, drives scoring them)``. A 1:1 drive's block is its joint's armature,
-    damping, friction and ratio and its own bias, scored on that drive; an ankle's, both hinges' and both cranks',
-    scored on the two cranks; each delay group's, scored on the group's scored drives. Fixed entries and blocks
-    without a scored drive are left out."""
+    damping, friction and ratio and its own bias, scored on that drive; an ankle's, both hinges' and both cranks'
+    (with the crank shafts' joints on the native USD), scored on the two cranks; each delay group's, scored on the
+    group's scored drives. Fixed entries and blocks without a scored drive are left out."""
     s = space.slices()
     per_joint = [p for p in (*JOINT_PARAMS, "friction_ratio") if p in s]
     fixed = np.zeros(space.dim, dtype=bool)
