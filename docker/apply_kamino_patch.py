@@ -21,15 +21,32 @@ def apply(package: Path, patch: Path, hashes: dict[str, dict[str, str]]) -> None
             raise RuntimeError(f"Kamino patch produced an unexpected source hash: {name}")
 
 
+def apply_sequence(package: Path, patches: list[tuple[Path, dict]]) -> None:
+    """Validate cached prefixes and the final tree before applying overlapping patches."""
+    names = {name for _, hashes in patches for name in hashes}
+    actual = {name: sha256((package / name).read_bytes()).hexdigest() for name in names}
+    final = {name: values["after"] for _, hashes in patches for name, values in hashes.items()}
+    if actual == final:
+        return
+    pending = []
+    for patch, hashes in patches:
+        if all(actual[name] == values["after"] for name, values in hashes.items()):
+            continue
+        if not all(actual[name] == values["before"] for name, values in hashes.items()):
+            raise RuntimeError("Kamino source is not a validated patch prefix; revalidate the patch")
+        pending.append((patch, hashes))
+        actual.update({name: values["after"] for name, values in hashes.items()})
+    for patch, hashes in pending:
+        apply(package, patch, hashes)
+
+
 if __name__ == "__main__":
     import newton
 
     if version("newton") != "1.6.1":
         raise RuntimeError("The Kamino optimization requires Newton 1.6.1")
     root = Path(__file__).parent / "patches"
-    for name in ("active-worlds", "active-preconditioner"):
-        apply(
-            Path(newton.__file__).parent,
-            root / f"newton-1.6.1-{name}.patch",
-            json.loads((root / f"newton-1.6.1-{name}.json").read_text()),
-        )
+    apply_sequence(Path(newton.__file__).parent, [
+        (root / f"newton-1.6.1-{name}.patch", json.loads((root / f"newton-1.6.1-{name}.json").read_text()))
+        for name in ("active-worlds", "active-preconditioner", "register-budget")
+    ])

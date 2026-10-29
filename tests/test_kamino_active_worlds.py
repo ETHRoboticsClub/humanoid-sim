@@ -5,7 +5,8 @@ import pytest
 pytestmark = pytest.mark.physics
 
 
-def test_masked_solves_preserve_inactive_outputs_and_graph_updates():
+@pytest.mark.parametrize("register_budget", [None, 48])
+def test_masked_solves_preserve_inactive_outputs_and_graph_updates(register_budget=None):
     import numpy as np
     import warp as wp
     from newton._src.solvers.kamino._src.linalg.factorize.llt_blocked import (
@@ -35,7 +36,7 @@ def test_masked_solves_preserve_inactive_outputs_and_graph_updates():
     y = wp.full(int(dims.sum()), -99.0, device=device)
     x = wp.full(int(dims.sum()), -77.0, device=device)
     mask = wp.array(np.array([False, True, False, True, False]), dtype=wp.bool, device=device)
-    kernel = make_llt_blocked_solve_kernel(32)
+    kernel = make_llt_blocked_solve_kernel(32, cuda_max_registers=register_budget)
 
     def solve(active):
         llt_blocked_solve(kernel, dim, mio, vio, factor, b, y, x, num_blocks=len(dims), active_mask=active)
