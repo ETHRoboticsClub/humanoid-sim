@@ -12,6 +12,19 @@ The delivered ankle crank shafts and spherical rod closures remain physical join
 
 The native path supports floating/fixed-base training, runtime sessions and prescribed Euler base-joint replay assets (`--base-joints`). PACE fits use `PlantCore.solver_map.joint_names`: physical crank rotor armatures, zero hinge rotor armatures, and fixed structural zeros. Legacy reflected-hinge fits cannot be applied to that physical inventory. Older policies and captures also need the matching semantic frame and description revision. The Controls ABI description digest remains the URDF/actuator digest; built assets additionally verify their USD source digest on load.
 
+For native assets, `model.prune_contained_hulls: true` enables cached collision
+pruning during `build-asset` (requires Newton). A hull is disabled only when it is
+strictly enclosed by a hull on the same rigid body with matching contact settings
+and external collision filters. Visual meshes, joints and authored mass/inertia
+are retained. The option changes the asset key; `asset.json` records each removed
+collider and its enclosing hull. It does not merge hulls or fill gaps between
+parts. Keep the default `false` when comparing the original contact model.
+
+Headless Newton import can omit visual-only shapes; collision shapes remain
+independent of camera visibility. Pruning changes the number of contact candidates
+and may change contacts after deep interpenetration, so qualify contact behavior
+on the intended solver before using a pruned asset for training.
+
 ## URDF build path
 
 The converter path below remains available for profiles that name `model.urdf`, including the Unitree robots. V1's native USD path bypasses `PreparedUrdf` and the URDF converter. The detailed URDF_6 examples below describe the former V1 plant; its joint names, forward axis, standing pose and reflected ankle properties do not apply to the native USD plant described above.
