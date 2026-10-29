@@ -16,12 +16,24 @@ model:
   weld_unlisted_joints: true
   # Preserve the delivered crank/rod loops; only uncommanded hand joints are welded.
   ankle_representation: native
-  collision_hulls: per_mesh
+  # One convex hull per rigid assembly (a body and the hand links welded to it; model/usd.py), as the URDF_6 plant
+  # had: 21 hulls and the two sole boxes instead of 177 per-mesh hulls. The per-mesh hulls of the delivery's CAD
+  # parts touch across every compound joint and inside each welded hand, which gave a standing robot about 230
+  # self contacts.
+  collision_hulls: per_body
+  # The ankle linkages' cranks, rods and universal-joint crosses carry no collision shapes: they sit inside the
+  # shank's and foot's hulls, and a contact on a rod (0.2 kg, 1e-5 kg m^2 about its axis) spins it about that axis.
+  linkage_collisions: false
+  # Bodies at most two moving joints apart never collide (on top of the delivery's joint pairs): the housings of the
+  # compound waist, hip and shoulder joints and each foot with its shank, which overlap by construction. Feet against the
+  # other leg, hands and arms against the trunk and legs, and the two legs collide.
+  self_collision_hops: 2
   # Hand joints are welded above: shapes within each resulting rigid assembly
   # must not generate self-contacts between its non-adjacent component bodies.
   exclude_fixed_cluster_contacts: true
   # Convex hulls fill the interlocking housings across these compound joints.
   # Exclude their internal assembly contacts, retaining contacts with other bodies.
+  # All lie within self_collision_hops; listed so per_mesh hulls stay filtered too.
   contact_excludes:
     # Waist axial rotation + lateral bending.
     - [base_link, hej90_hip_abduction_1]

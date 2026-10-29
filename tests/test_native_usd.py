@@ -125,6 +125,7 @@ def test_physical_crank_feedback_does_not_reconstruct_from_hinges(desc):
 
 
 def test_native_asset_preserves_closures_and_authors_shaft_limits(desc, tmp_path):
+    pytest.importorskip("scipy")
     from pxr import Usd, UsdPhysics
 
     source_hash = desc.usd_model.digest()
@@ -150,6 +151,98 @@ def test_native_asset_preserves_closures_and_authors_shaft_limits(desc, tmp_path
                 desc.drives[drive].position_limit_device)
     assert source.digest() == source_hash
 
+
+
+def test_graph_neighbours_counts_joints_between_nodes():
+    from humanoid_sim.model.usd import graph_neighbours
+
+    chain = {"a": {"b"}, "b": {"a", "c"}, "c": {"b", "d"}, "d": {"c"}}
+    assert graph_neighbours(chain, 1) == {frozenset(p) for p in ("ab", "bc", "cd")}
+    assert graph_neighbours(chain, 2) == {frozenset(p) for p in ("ab", "bc", "cd", "ac", "bd")}
+
+
+def _enabled_colliders(stage):
+    from pxr import UsdPhysics
+
+    out = {}
+    for prim in stage.Traverse():
+        if prim.HasAPI(UsdPhysics.CollisionAPI) and UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get() \
+                is not False:
+            body = prim.GetParent()
+            while not body.HasAPI(UsdPhysics.RigidBodyAPI):
+                body = body.GetParent()
+            out.setdefault(body.GetName(), []).append(prim)
+    return out
+
+
+def test_per_body_hulls_one_shape_per_rigid_assembly_and_none_in_the_linkages(desc, tmp_path):
+    """per_body: every rigid assembly with delivered collision meshes collides through one convex hull on its root
+    body (the feet also through their sole boxes); welded bodies and the ankle linkages' internal bodies carry no
+    enabled collider."""
+    pytest.importorskip("scipy")
+    import json
+
+    from pxr import Usd, UsdGeom, UsdPhysics
+
+    from humanoid_sim.model.usd import linkage_internal_bodies, rigid_assemblies
+
+    profile = load_profile(desc.robot)
+    profile["model"] |= {"collision_hulls": "per_body", "linkage_collisions": False}
+    path = build_asset(desc, profile, tmp_path)
+    meta = json.loads((path.parent / "asset.json").read_text())
+    stage = Usd.Stage.Open(str(path))
+    assembly = rigid_assemblies(desc.usd_model, meta["welded_joints"])
+    linkage = linkage_internal_bodies(desc.usd_model, desc.ankle_model.payload)
+    assert set(meta["collision_free_bodies"]) == linkage and linkage
+    colliders = _enabled_colliders(stage)
+    assert set(colliders) == set(meta["merged_collision_bodies"])
+    assert not set(colliders) & linkage
+    assert all(assembly[b] == b for b in colliders)
+    soles = {s["body"] for s in meta["sole_boxes"]}
+    for body, prims in colliders.items():
+        hulls = [p for p in prims if p.IsA(UsdGeom.Mesh)]
+        assert [p.GetName() for p in hulls] == ["collision_hull"]
+        assert UsdPhysics.MeshCollisionAPI(hulls[0]).GetApproximationAttr().Get() == "convexHull"
+        assert len(prims) == 1 + (body in soles)
+
+
+def test_self_collision_filters_near_joints_and_keeps_the_legs_apart(desc, tmp_path):
+    """Bodies at most ``self_collision_hops`` moving joints apart are filtered (on top of each joint's own pair);
+    each foot still collides with the other foot and with the other leg's shank and thigh."""
+    pytest.importorskip("scipy")
+    import json
+
+    from pxr import Usd, UsdPhysics
+
+    from humanoid_sim.model.usd import graph_neighbours, joint_graph, rigid_assemblies
+
+    profile = load_profile(desc.robot)
+    profile["model"] |= {"collision_hulls": "per_body", "linkage_collisions": False, "self_collision_hops": 2}
+    path = build_asset(desc, profile, tmp_path)
+    meta = json.loads((path.parent / "asset.json").read_text())
+    stage = Usd.Stage.Open(str(path))
+    source = desc.usd_model
+    filtered = set()
+    for prim in stage.Traverse():
+        if prim.HasAPI(UsdPhysics.FilteredPairsAPI):
+            for target in UsdPhysics.FilteredPairsAPI(prim).GetFilteredPairsRel().GetTargets():
+                filtered.add(frozenset((prim.GetName(), target.name)))
+    for name in source.joints:
+        filtered.add(frozenset(source.joint_bodies(name)))
+    colliding = set(meta["merged_collision_bodies"])
+    assembly = rigid_assemblies(source, meta["welded_joints"])
+    near = graph_neighbours(joint_graph(source, assembly), 2)
+    for pair in near:
+        if pair <= colliding:
+            assert pair in filtered, sorted(pair)
+    legs = {}
+    for side, spec in desc.ankle_model.payload["sides"].items():
+        shank = source.joint_bodies(spec["usd_joints"]["pitch"])[0]
+        thigh = next(source.joint_bodies(n)[0] for n in source.joints if source.joint_bodies(n)[1] == shank)
+        legs[side] = (source.joint_bodies(spec["usd_joints"]["roll"])[1], shank, thigh)
+    (foot_l, *leg_l), (foot_r, *leg_r) = legs["l"], legs["r"]
+    for pair in [(foot_l, foot_r), *((foot_l, b) for b in leg_r), *((foot_r, b) for b in leg_l)]:
+        assert set(pair) <= colliding and frozenset(pair) not in filtered, pair
 
 @pytest.mark.physics
 @pytest.mark.parametrize("cuda_graph", [False, True])

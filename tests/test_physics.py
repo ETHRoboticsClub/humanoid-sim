@@ -80,7 +80,7 @@ def test_home_and_start_poses_have_no_self_contact(robot):
 
     desc, profile = Description.load(robot), load_profile(robot)
     joints = list(desc.joints)
-    kin = RobotKinematics(built_usd(robot), joints)
+    kin = RobotKinematics(built_usd(robot), joints, self_collision=True)
     body = {s: name for name, shapes in _body_shapes(kin.model).items() for s in shapes}
     pipeline = newton.CollisionPipeline(kin.model)
     contacts = pipeline.contacts()
