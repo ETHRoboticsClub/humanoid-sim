@@ -38,6 +38,7 @@ LINES = 100  # the RTX model's emitter banks: rows of rays, a sweep's rays split
 CORE = "omni:sensor:Core:"
 RTX_EXTENSION = "isaacsim.sensors.experimental.rtx"  # Isaac Sim's RTX lidar; Isaac Lab's Kit app leaves it off
 VALID = 64  # GenericModelOutput ElementFlags.VALID: the ray returned
+RETURN_INTENSITY = 100.0  # Modeled constant; surface reflectance is not simulated.
 
 
 @dataclass(frozen=True)

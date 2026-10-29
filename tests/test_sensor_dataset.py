@@ -86,8 +86,11 @@ def fake_session(camera_name="zed", mounts=None):
     stream = SimpleNamespace(name="left", rate_hz=30.0)
     spec = SimpleNamespace(camera_id=f"sim-{camera_name}", streams=(stream,), product="p", calibration_id="c",
                            sensor_link="l")
-    lidar = SimpleNamespace(sensor=SimpleNamespace(name="mid360", model="m", product="p", frame="f", range_min_m=0.1),
-                            period_ns=100_000_000)
+    from humanoid_sim.sensors.models import LivoxMid360
+
+    sensor = LivoxMid360("f")
+    sensor.name = "mid360"
+    lidar = SimpleNamespace(sensor=sensor, period_ns=sensor.frame_period_ns)
     mount = SimpleNamespace(link="torso_link", sensor_link="camera0_camera", translation_m=(0.1, 0.0, 0.2),
                             rotation=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
     return SimpleNamespace(camera_specs=[spec], lidars=[lidar], cfg=SimpleNamespace(splat="room.usdc"),
@@ -159,3 +162,50 @@ def test_a_lidar_with_a_splat_and_an_unreadable_recorded_scene_are_refused(tmp_p
 
     session = fake_session()
     assert offline.expected_sensors(session) == ["sim-zed/left", "mid360"]
+
+
+def test_replay_exports_joint_measurements_but_no_world_pose_and_rejects_other_run_imu(tmp_path):
+    from humanoid_sim.runtime.offline import file_sha256, write_replay_inputs
+    from humanoid_sim.runtime.trajectory import ImuWriter, Trajectory, TrajectoryWriter
+
+    source = tmp_path / 'run.traj'
+    urdf = tmp_path / 'source.urdf'
+    urdf.write_text('<robot name="fixture"><link name="base"/></robot>')
+    writer = TrajectoryWriter(source, robot='fixture', description_digest='d', joints=['joint'],
+                              period_ns=4_000_000, base_frame='base')
+    dtype = writer.dtype
+    writer.close()
+    records = np.zeros(2, dtype)
+    records['sim_time_ns'] = [0, 4_000_000]
+    records['joint_pos_rad'][:, 0] = [.1, .2]
+    records['base_position_m'] = 999.0
+    trajectory = Trajectory(writer.header, records)
+    desc = SimpleNamespace(robot='fixture', digest='d', urdf_path=urdf, usd_model=None)
+    imu = ImuWriter(str(source) + '.imu', writer.header, {'frame': 'base'})
+    imu.close()
+    target = DatasetWriter(tmp_path / 'dataset', {})
+    write_replay_inputs(target, trajectory, desc, source)
+    replay = target.manifest['replay']
+    assert replay['base_frame'] == 'base'
+    assert replay['urdf']['sha256'] == file_sha256(target.root / 'robot.urdf')
+    with np.load(target.root / 'kinematics.npz') as data:
+        assert set(data.files) == {'sim_time_ns', 'joint_pos_rad', 'joint_names'}
+        np.testing.assert_allclose(data['joint_pos_rad'][:, 0], [.1, .2])
+    other = {**writer.header, 'recording_id': 'other-recording'}
+    imu = ImuWriter(str(source) + '.imu', other, {'frame': 'base'})
+    imu.close()
+    with pytest.raises(ValueError, match='identity'):
+        write_replay_inputs(target, trajectory, desc, source)
+
+
+def test_starting_a_rerender_immediately_invalidates_previous_complete_pass(tmp_path):
+    w = DatasetWriter(tmp_path, {'robot': 'fixture', 'trajectory_sha256': 'a'})
+    w.begin_pass({'sensors': ['camera/left']})
+    w.finish_pass({})
+    w.close()
+    second = DatasetWriter(tmp_path, {'robot': 'fixture', 'trajectory_sha256': 'a'})
+    second.begin_pass({'sensors': ['camera/left']})
+    persisted = json.loads((tmp_path / 'manifest.json').read_text())
+    assert persisted['passes'][-1]['complete'] is False
+    with pytest.raises(ValueError, match='trajectory_sha256'):
+        DatasetWriter(tmp_path, {'robot': 'fixture', 'trajectory_sha256': 'b'})

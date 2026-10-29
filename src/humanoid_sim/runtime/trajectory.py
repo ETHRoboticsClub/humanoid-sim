@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -38,7 +39,8 @@ class TrajectoryWriter:
         self.path = Path(path)
         self.dtype = record_dtype(len(joints))
         header = self.header = {
-                  "schema": SCHEMA, "robot": robot, "description_digest": description_digest, "joints": list(joints),
+                  "schema": SCHEMA, "recording_id": uuid.uuid4().hex,
+                  "robot": robot, "description_digest": description_digest, "joints": list(joints),
                   "period_ns": int(period_ns), "base_frame": base_frame, "scene": scene, "gantry": gantry,
                   "frame": "world: the host's scene frame, z up", "quaternion": "x y z w",
                   "units": {"time": "ns, plant time", "position": "m", "velocity": "m/s, rad/s",

@@ -10,7 +10,9 @@ change what the sensors see. Needs the Isaac Sim image (``docker/Dockerfile.kit`
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -64,7 +66,8 @@ def render_trajectory(trajectory: str | Path, cfg, out: str | Path, *, start_s: 
     host_gantry = traj.header.get("gantry")
     gantry = GantryRig.from_dict(host_gantry) if host_gantry else None
     with start_kit(cfg.device, window=window):
-        return _render(traj, Path(trajectory).name, desc, order, cfg, out, start_s, end_s, gantry, log)
+        return _render(traj, Path(trajectory).name, desc, order, cfg, out, start_s, end_s, gantry, log,
+                       trajectory_file=Path(trajectory))
 
 
 def visual_links(urdf: str | Path) -> list[str]:
@@ -94,6 +97,9 @@ def describe_sensors(writer, session, robot_links: list[str] | None = None) -> N
         writer.describe_lidar(lidar.sensor.name, {
             "model": lidar.sensor.model, "product": lidar.sensor.product, "frame": lidar.sensor.frame,
             "period_ns": int(lidar.period_ns), "range_min_m": lidar.sensor.range_min_m,
+            "range_max_m": lidar.sensor.range_max_m, "horizontal_fov_rad": lidar.sensor.horizontal_fov_rad,
+            "elevation_min_rad": lidar.sensor.elevation_min_rad, "elevation_max_rad": lidar.sensor.elevation_max_rad,
+            "range_noise_m": lidar.sensor.range_sigma_m, "angular_noise_rad": lidar.sensor.angular_sigma_rad,
             "mount": _mount(session, lidar.sensor.name), "stage": stage})
 
 
@@ -108,7 +114,7 @@ def missing_data(session, counts: dict[str, int]) -> list[str]:
     return [name for name in expected_sensors(session) if not counts.get(name)]
 
 
-def _render(traj, name, desc, order, cfg, out, start_s, end_s, gantry, log) -> dict:
+def _render(traj, name, desc, order, cfg, out, start_s, end_s, gantry, log, *, trajectory_file: Path) -> dict:
     import torch
 
     from humanoid_sim.runtime.render import crane_parts, move_crane
@@ -135,8 +141,11 @@ def _render(traj, name, desc, order, cfg, out, start_s, end_s, gantry, log) -> d
                              f"{traj.start_ns}..{traj.end_ns} ns")
         times = render_times(t0, t1, session.render_ns)
         writer = DatasetWriter(out, {
-            "robot": desc.robot, "description_digest": desc.digest, "trajectory": name, "start_ns": int(t0), "end_ns": int(t1), "stamps": "plant time, ns"})
+            "robot": desc.robot, "description_digest": desc.digest, "trajectory": name,
+            "trajectory_sha256": file_sha256(trajectory_file), "start_ns": int(t0), "end_ns": int(t1),
+            "stamps": "plant time, ns"})
         describe_sensors(writer, session, visual_links(desc.urdf_path))
+        write_replay_inputs(writer, traj, desc, trajectory_file)
         writer.begin_pass({"sensors": expected_sensors(session), "render_period_ns": int(session.render_ns),
                            "unsimulated": session.unsimulated})
         device = session.sim.plant.cfg.device
@@ -190,3 +199,50 @@ def _mount(session, name: str) -> dict:
     m = session.mounts[name]
     return {"body": m.link, "sensor_link": m.sensor_link, "translation_m": list(m.translation_m),
             "rotation": [list(row) for row in m.rotation]}
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def write_replay_inputs(writer, trajectory, desc, trajectory_file: Path) -> None:
+    """Export measured joint positions and the description for input-only ROS replay.
+
+    Base/world truth is deliberately absent. The evaluator reads the original
+    trajectory separately; publishing it into SLAM would leak the answer.
+    """
+    if desc.usd_model is not None:
+        raise ValueError("sensor replay metadata currently requires a URDF-backed description")
+    urdf = writer.root / "robot.urdf"
+    shutil.copyfile(desc.urdf_path, urdf)
+    kinematics = writer.root / "kinematics.npz"
+    np.savez_compressed(kinematics, sim_time_ns=trajectory.records["sim_time_ns"],
+                        joint_pos_rad=trajectory.records["joint_pos_rad"],
+                        joint_names=np.asarray(trajectory.joints, dtype=str))
+    imus = {}
+    from humanoid_sim.runtime.trajectory import read_imu
+
+    sources = [trajectory_file.with_name(trajectory_file.name + ".imu")]
+    sources += sorted(trajectory_file.parent.glob(trajectory_file.name + ".*.imu"))
+    for source in sources:
+        if not source.exists():
+            continue
+        header, _ = read_imu(source)
+        if (header["description_digest"] != desc.digest or header["robot"] != desc.robot
+                or header["joints"] != trajectory.joints
+                or not trajectory.header.get("recording_id")
+                or header.get("recording_id") != trajectory.header["recording_id"]):
+            raise ValueError(f"{source}: IMU identity does not match the trajectory")
+        target = writer.root / source.name
+        shutil.copyfile(source, target)
+        imus[source.name] = {"file": source.name, "sha256": file_sha256(target), "sensor": header["imu"]}
+    writer.manifest["replay"] = {
+        "base_frame": trajectory.base_frame,
+        "urdf": {"file": urdf.name, "sha256": file_sha256(urdf)},
+        "kinematics": {"file": kinematics.name, "sha256": file_sha256(kinematics)},
+        "imus": imus,
+    }

@@ -87,7 +87,7 @@ class DatasetWriter:
         path = self.root / "manifest.json"
         if path.exists():
             old = json.loads(path.read_text())
-            same = ("schema", "robot", "description_digest", "trajectory", "start_ns", "end_ns")
+            same = ("schema", "robot", "description_digest", "trajectory", "trajectory_sha256", "start_ns", "end_ns")
             differing = [k for k in same if old.get(k) != self.manifest.get(k)]
             if differing:
                 raise ValueError(f"{path} is a dataset of another run (differs in {differing}): use a new directory")
@@ -106,6 +106,7 @@ class DatasetWriter:
         """Start this render's entry in the manifest's ``passes``: the sensors it renders, its render period and what it
         did not simulate. It stays ``complete: false``, with whatever was written, unless :meth:`finish_pass` runs."""
         self.manifest["passes"].append({**record, "complete": False})
+        self._write_manifest()
 
     def finish_pass(self, summary: dict) -> None:
         self.manifest["passes"][-1].update(complete=True, summary=summary)
@@ -122,8 +123,11 @@ class DatasetWriter:
     def lidar_sweep(self, name: str, sweep) -> None:
         import io
 
+        from humanoid_sim.sensors.lidar import RETURN_INTENSITY
+
         buf = io.BytesIO()
         np.savez_compressed(buf, points_m=sweep.points_m.astype(np.float32), hit=sweep.hit,
+                            intensity=np.where(sweep.hit, RETURN_INTENSITY, 0.0).astype(np.float32),
                             time_s=sweep.time_s.astype(np.float32), start_ns=np.int64(sweep.start_ns),
                             origin_w=np.asarray(sweep.origin_w, dtype=np.float64),
                             rotation_w=np.asarray(sweep.rotation_w, dtype=np.float64))
@@ -136,4 +140,9 @@ class DatasetWriter:
         for idx in self._indexes.values():
             idx.close()
         self.manifest["counts"] = {**self._previous_counts, **self.counts()}
-        (self.root / "manifest.json").write_text(json.dumps(self.manifest, indent=1))
+        self._write_manifest()
+
+    def _write_manifest(self) -> None:
+        pending = self.root / "manifest.json.tmp"
+        pending.write_text(json.dumps(self.manifest, indent=1))
+        pending.replace(self.root / "manifest.json")
