@@ -4,8 +4,11 @@ import math
 
 import pytest
 
+from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description, robots
+from humanoid_sim.model.urdf import PreparedUrdf
 from humanoid_sim.sensors import rigs
+from humanoid_sim.sensors.geometry import Mount
 from humanoid_sim.sensors.models import (
     Camera,
     Imu,
@@ -16,6 +19,7 @@ from humanoid_sim.sensors.models import (
     Rig,
     UnitreeG1Imu,
     ZedMini,
+    ZedMiniImu,
 )
 
 ROBOTS = robots()
@@ -63,10 +67,11 @@ def test_the_g1_carries_its_body_imu_and_a_mid360(robot):
 def test_an_extra_rig_adds_sensors_and_unknown_or_clashing_ones_are_refused():
     desc = Description.load("g1_29dof_with_hand_rev_1_0")
     rig = rigs.load(desc.robot, desc, "g1-cameras")
-    assert {n: type(s) for n, s in rig.sensors.items()} == {"imu": UnitreeG1Imu, "mid360": LivoxMid360, "zed": ZedMini}
+    assert {n: type(s) for n, s in rig.sensors.items()} == {
+        "imu": UnitreeG1Imu, "mid360": LivoxMid360, "zed": ZedMini, "zed_imu": ZedMiniImu}
     rig = rigs.load(desc.robot, desc, "g1-cameras-d435")
     assert {n: type(s) for n, s in rig.sensors.items()} == {
-        "imu": UnitreeG1Imu, "mid360": LivoxMid360, "zed": ZedMini, "d435": RealSenseD435i}
+        "imu": UnitreeG1Imu, "mid360": LivoxMid360, "zed": ZedMini, "zed_imu": ZedMiniImu, "d435": RealSenseD435i}
     with pytest.raises(ValueError, match="g1-cameras"):
         rigs.load(desc.robot, desc, "g1-lidars")
     with pytest.raises(ValueError, match="already in the rig"):
@@ -149,3 +154,62 @@ def test_review_regressions_integer_ns_shapes_frozen_defaults_and_names():
     with pytest.raises(ValueError, match="two names"):
         Rig(imu=a, mid360=b, spare=a)
     assert (a.name, b.name) == ("", "")  # nothing named before the rig is accepted
+
+
+def test_the_zed_imu_declares_measured_noise_at_a_guessed_mount():
+    desc = Description.load("g1_29dof_with_hand_rev_1_0")
+    zed_imu = rigs.load(desc.robot, desc, "g1-cameras").sensors["zed_imu"]
+    assert zed_imu.frame == rigs.load(desc.robot, desc, "g1-cameras").sensors["zed"].frame
+    assert "MODELED GUESS" in ZedMiniImu.source  # the mount
+    assert ZedMiniImu.noise_basis == "measured" and ZedMiniImu.gyro_noise_density_rad_s_sqrt_hz > 0
+    cfg = zed_imu.delivery_cfg()
+    assert cfg.sample_period_ns == 1_250_000  # 800 Hz, the datasheet's
+    assert cfg.gyro_noise_density > 0 and cfg.accel_noise_density > 0
+    assert cfg.gyro_bias_instability > 0 and cfg.accel_bias_instability > 0
+    assert rigs.imu(desc).frame == desc.imu_link()  # the plant's own IMU stays the body one
+
+
+def test_the_zed_imu_mounts_on_the_body_the_physics_keeps_its_frame_on():
+    desc = Description.load("g1_29dof_with_hand_rev_1_0")
+    mount = Mount.from_urdf(desc.urdf_path, "camera0_camera")
+    bodies = PreparedUrdf(desc, load_profile(desc.robot)).build().body_tree()
+    assert mount.link in bodies and mount.link != desc.imu_link()
+
+
+@pytest.mark.parametrize("robot", ROBOTS)
+def test_the_runtime_descriptor_declares_whether_the_imu_has_errors(robot):
+    from humanoid_sim.runtime.host import imu_descriptor
+
+    desc = Description.load(robot)
+    noise = imu_descriptor(desc)["noise"]
+    cfg = rigs.imu(desc).delivery_cfg()
+    figures = (cfg.gyro_noise_density, cfg.accel_noise_density, cfg.gyro_turn_on_bias, cfg.accel_turn_on_bias,
+               cfg.gyro_bias_instability, cfg.accel_bias_instability)
+    assert noise["kind"] == ("modeled" if any(figures) else "ideal")
+    assert noise["gyro_noise_density_rad_s_sqrt_hz"] == cfg.gyro_noise_density
+
+
+def test_the_descriptor_declares_the_extra_rigs_imus_with_a_rigid_mount():
+    from humanoid_sim.runtime.host import extra_imu_descriptors
+
+    desc = Description.load("g1_29dof_with_hand_rev_1_0")
+    assert extra_imu_descriptors(desc, None) == {}
+    block = extra_imu_descriptors(desc, "g1-cameras")["zed_imu"]
+    cfg = rigs.load(desc.robot, desc, "g1-cameras").sensors["zed_imu"].delivery_cfg()
+    assert block["noise"]["gyro_noise_density_rad_s_sqrt_hz"] == cfg.gyro_noise_density
+    assert block["noise"]["bias_model"] == "gauss_markov" and block["noise"]["kind"] in ("modeled", "measured")
+    assert block["frame"] == "camera0_camera" and block["sample_period_ns"] == cfg.sample_period_ns
+    assert block["mount"]["body"] in desc.link_names() and len(block["mount"]["rotation"]) == 3
+
+
+def test_a_feedback_transfer_parses_into_the_delivered_samples_newest_first():
+    import numpy as np
+
+    from humanoid_sim.runtime.host import imu_samples
+
+    h = 4
+    gyro, accel = np.arange(12.0).reshape(h, 3), np.arange(12.0).reshape(h, 3) + 100
+    ints = np.array([7, 6, 5, 0, 70, 60, 50, 0, 71, 61, 51, 0, 3], dtype=np.int64)  # seq, sample_ns, stamp_ns, count
+    out = imu_samples(gyro, accel, ints, h)
+    assert list(out["seq"]) == [7, 6, 5] and list(out["sample_ns"]) == [70, 60, 50] and list(out["stamp_ns"]) == [71, 61, 51]
+    assert out["gyro_rad_s"][2].tolist() == [6.0, 7.0, 8.0] and out["specific_force_m_s2"][0].tolist() == [100.0, 101.0, 102.0]

@@ -31,6 +31,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from humanoid_sim.sensors.lidar import RETURN_INTENSITY
 from humanoid_sim.sensors.models import LivoxMid360
 
 UNITREE_MODEL = LivoxMid360.model  # the lidar Unitree's service publishes
@@ -47,7 +48,7 @@ POINT_DTYPE = np.dtype({"names": ["x", "y", "z", "intensity", "ring", "time"],
                         "formats": ["<f4", "<f4", "<f4", "<f4", "<u2", "<f4"],
                         "offsets": [0, 4, 8, 12, 16, 18], "itemsize": POINT_STEP})
 RINGS = 4  # the Mid-360's four laser lines
-INTENSITY = 100.0  # a constant reflectivity for every return
+INTENSITY = RETURN_INTENSITY
 
 
 @dataclass(frozen=True)

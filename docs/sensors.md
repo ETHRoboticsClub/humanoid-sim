@@ -15,6 +15,7 @@ Drive feedback and IMU samples are measured signals, the ones the real robot has
 | `OakDW` | `camera` | Luxonis OAK-D-W | V1 |
 | `RealSenseD435i` | `camera` | Intel RealSense D435i | the `g1-cameras-d435` extra rig (the lab G1's camera service finds no D435) |
 | `ZedMini` | `camera` | Stereolabs ZED Mini | the `g1-cameras` extra rig |
+| `ZedMiniImu` | `imu` | The ZED Mini's built-in IMU (**a modeled guess**: rate from the datasheet, noise and mount not published) | the `g1-cameras` extra rig, as `zed_imu` |
 | `LivoxMid360` | `lidar` | Livox Mid-360 | G1 |
 
 A camera class lists its streams as Controls' backend for the product publishes them, and may give each stream's kind (`stream_kinds`: `color`, `mono` or `depth`), its nominal optical centre in the camera frame (`nominal_offsets_m`) and the depth range (`depth_range_m`).
@@ -119,6 +120,24 @@ gyro = m.imu.gyro[:, 0]           # [E, 3] rad/s, newest delivered sample
 ```
 
 ## IMU
+
+### The ZED Mini's IMU
+
+Stereolabs publishes only the ZED Mini's rate (800 Hz) for its gyroscope and accelerometer; the chip, noise and bias figures and the mount are "Not published", and `camera_imu_transform` (IMU to left camera) is read per unit from the ZED SDK. `ZedMiniImu`'s noise is measured on one unit and its mount is a guess:
+
+| Figure | Value | Basis |
+|---|---|---|
+| Gyro noise density | 1.0e-4 rad/s/√Hz | measured: Allan deviation at 1 s, the three axes 0.95 to 1.09e-4 |
+| Accel noise density | 1.4e-3 m/s²/√Hz | measured: the axes 1.2 to 1.5e-3 |
+| Gyro bias instability | 3.0e-5 rad/s | measured, unresolved: the Allan minimum sits at the longest averaging time with quiet data (100 s), so a lower bound |
+| Accel bias instability | 9.4e-4 m/s² | measured, unresolved; the y axis is 3 to 4 times the others |
+| Gyro turn-on bias | 7.2e-3 rad/s | modeled from that unit's gyro axis means |
+| Accel turn-on bias, bias correlation time | 0, 100 s | not separable from gravity and the uncalibrated scale; modeled |
+| Mount | the camera frame `camera0_camera`, its axes, no offset | guess |
+
+The capture is 55 minutes of the camera lying still on a desk (with a person typing and standing up nearby; the disturbed seconds are masked, and Allan deviation is taken only over windows that lie wholly in quiet data), logged raw with zed-open-capture. Its accelerometer is uncalibrated (about 4 % high) and its axes are the sensor's, not the camera frame's, so the mount is the weakest figure; replace it with the unit's `camera_imu_transform`. The bias is a first-order Gauss-Markov process (its stationary sigma is the bias instability), not a random walk. `SimCore(..., imu=True, extra_rig="g1-cameras")` simulates the IMU: `SimCore.extra_imus["zed_imu"]` is an `ImuDelivery` like `SimCore.imu`, stepped with it, inside the CUDA graphs too (training's `RobotPlant` has only the body IMU). The 800 Hz samples are linear interpolations between physics-step boundaries with fresh noise per sample (see below), so a 4 ms physics step carries no motion detail above 250 Hz.
+
+### Body IMU
 
 The plant simulates the rig's `imu`: on the V1 an MTi-610, on the G1 its body IMU. `ImuDelivery` in `src/humanoid_sim/sensors/imu.py` turns the ideal readings of Isaac Lab's IMU sensor into raw samples as the robot's host receives them.
 
