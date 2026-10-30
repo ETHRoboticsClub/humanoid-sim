@@ -105,6 +105,8 @@ class ExcitationCapture:
         start, end = g["start"]["actuators"], g["end"]["actuators"]
         out = {}
         for dev, a in start.items():
+            if a["stiffness_nm_per_rad"] is None:  # no position gains, e.g. the hands' actuators
+                continue
             if (a["raw_p_gain"], a["raw_d_gain"]) != (end[dev]["raw_p_gain"], end[dev]["raw_d_gain"]):
                 raise ValueError(f"{self.dataset_id}: gains of {dev} changed during the capture")
             out[dev] = DriveGains(float(a["stiffness_nm_per_rad"]), float(a["damping_nm_s_per_rad"]),
