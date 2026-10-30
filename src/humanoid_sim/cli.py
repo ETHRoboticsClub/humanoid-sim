@@ -577,6 +577,8 @@ def main(argv: list[str] | None = None) -> int:
     be.add_argument("--steps", type=int, default=1000)
     be.add_argument("--device", default="cuda:0")
     be.add_argument("--integrator", default=None)
+    be.add_argument("--period-ms", type=float, default=None,
+                    help="physics period for --train (default: the profile's); must divide the 20 ms policy period")
     be.add_argument("--no-self-collision", action="store_true")
     be.add_argument("--train", action="store_true", help="Train-Time API scene: RobotPlant, IMU, contacts")
     be.add_argument("--runtime", action="store_true", help="the real-time host's whole step, unpaced")

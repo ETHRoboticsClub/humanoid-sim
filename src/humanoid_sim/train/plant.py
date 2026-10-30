@@ -93,6 +93,7 @@ class RobotPlant:
         self.joints = list(self.desc.joints)
         self.joint_ids = torch.tensor([robot.joint_names.index(n) for n in self.joints], device=self.device)
         self.native_state = None
+        self._native_ids = None  # solver joint ids of the native DOFs, built on the first write
         physical = None
         if self.profile["model"].get("ankle_representation") == "native":
             from humanoid_sim.model.native_state import NativeState
@@ -322,7 +323,9 @@ class RobotPlant:
             return
         values, rates = self.native_state.dofs(q, qd)
         names = list(values)
-        ids = torch.tensor([self.robot.joint_names.index(n) for n in names], device=self.device)
+        if self._native_ids is None:  # a host-to-device copy, kept out of the steady-state reset
+            self._native_ids = torch.tensor([self.robot.joint_names.index(n) for n in names], device=self.device)
+        ids = self._native_ids
         self.robot.write_joint_state_to_sim_index(
             position=torch.stack([values[n] for n in names], -1).to(q.dtype),
             velocity=torch.stack([rates[n] for n in names], -1).to(qd.dtype), joint_ids=ids, env_ids=env_ids)
