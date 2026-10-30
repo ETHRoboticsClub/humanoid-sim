@@ -253,7 +253,15 @@ def cmd_fit_pace(args) -> int:
 
     from humanoid_sim.replay.replay import fit_commands
     from humanoid_sim.sim import SimCore
-    from humanoid_sim.sysid.pace import PaceSpace, evaluate, fit, save, start_values, structural_fixed
+    from humanoid_sim.sysid.pace import (
+        PaceSpace,
+        evaluate,
+        fit,
+        ranged_start,
+        save,
+        start_values,
+        structural_fixed,
+    )
 
     captures = [open_capture(c) for c in args.captures]
     held = [open_capture(c) for c in args.holdout]
@@ -272,12 +280,16 @@ def cmd_fit_pace(args) -> int:
                   fixed_base=not moving, base_joints=moving, solver=args.solver)
     plant = sim.plant
     joints, drives = list(plant.map.joint_names), list(plant.map.drive_names)
-    kw = dict(log_bound=math.log(args.bound), bias_bound_rad=args.bias_bound_mrad / 1e3,
+    joints = list(plant.solver_map.joint_names)
+    ranges = {p: (float(lo), float(hi)) for p, lo, hi in args.range}
+    try:
+        start, log_bound = ranged_start(start_values(sim.desc, joints), ranges, math.log(args.bound))
+    except ValueError as e:
+        raise SystemExit(f"--range: {e}") from None
+    kw = dict(log_bound=log_bound, bias_bound_rad=args.bias_bound_mrad / 1e3,
               delay_bounds_ns=tuple(int(round(v * 1e6)) for v in args.delay_ms),
               separate_dynamic_friction=not args.no_dynamic_friction,
               delay_groups=None if args.one_delay else [sim.desc.drives[d].family for d in drives])
-    joints = list(plant.solver_map.joint_names)
-    start = start_values(sim.desc, joints)
     fixed = structural_fixed(start)
     sizes = PaceSpace(joints, drives, start, fixed=fixed, **kw).sizes
     for item in args.fix:
@@ -286,7 +298,7 @@ def cmd_fit_pace(args) -> int:
         if param not in sizes or param == "delay" or name not in names:
             raise SystemExit(f"--fix {item}: PARAM.NAME, PARAM one of {sorted(set(sizes) - {'delay'})}")
         fixed.setdefault(param, np.zeros(sizes[param], dtype=bool))[names.index(name)] = True
-    space = PaceSpace(joints, drives, start_values(sim.desc, joints), fixed=fixed, **kw)
+    space = PaceSpace(joints, drives, start, fixed=fixed, **kw)
     scored = [i for i, d in enumerate(drives) if d not in set(args.skip_drives)]
     base = args.base if moving else None
     t = time.time()
@@ -295,8 +307,8 @@ def cmd_fit_pace(args) -> int:
     best = {k: v[0] for k, v in space.decode(np.asarray(result["x"])[None]).items()}
     meta = result | {"captures": [c.dataset_id for c in captures], "base": args.base, "num_envs": args.num_envs,
                      "generations": args.generations, "duration_s": args.duration, "seed": args.seed,
-                     "scored": [drives[i] for i in scored], "fixed": sorted(args.fix), "wall_s": time.time() - t,
-                     "command_rebuild": rebuild, "delay_reference": reference, **sim.desc.identity()}
+                     "scored": [drives[i] for i in scored], "fixed": sorted(args.fix), "ranges": ranges,
+                     "wall_s": time.time() - t, "command_rebuild": rebuild, "delay_reference": reference, **sim.desc.identity()}
     if reference == "applied" and not args.one_delay:
         # Ready for actuators.yaml: each family's drive_delay_s, controller APPLIED to the drive acting.
         meta["drive_delay_s"] = {g: int(v) / 1e9 for g, v in zip(space.groups, best["delay"], strict=True)}
@@ -625,6 +637,9 @@ def main(argv: list[str] | None = None) -> int:
     fpc.add_argument("--seed", type=int, default=0)
     fpc.add_argument("--bound", type=float, default=10.0,
                      help="armature, damping and friction stay within [1/bound, bound] of the description's")
+    fpc.add_argument("--range", nargs=3, action="append", default=[], metavar=("PARAM", "LOW", "HIGH"),
+                     help="search armature, damping or friction in this absolute box from its geometric middle, "
+                          "not around the description's value (which may be an earlier fit's)")
     fpc.add_argument("--bias-bound-mrad", type=float, default=20.0, help="encoder bias within ± this")
     fpc.add_argument("--delay-ms", nargs=2, type=float, default=[0.0, 20.0], metavar=("FROM", "TO"),
                      help="command delay range")
