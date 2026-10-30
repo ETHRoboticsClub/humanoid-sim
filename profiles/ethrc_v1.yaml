@@ -16,12 +16,17 @@ model:
   weld_unlisted_joints: true
   # Preserve the delivered crank/rod loops; only uncommanded hand joints are welded.
   ankle_representation: native
-  collision_hulls: per_mesh
+  # The delivery's colliders and filtered pairs as delivered (model/usd.py): one convex hull per link, the fingers in
+  # their palm's hull, the feet's sole plates on their own, none on the ankle linkages' cranks, rods and crosses, and
+  # links up to two joints apart filtered. per_body (with linkage_collisions: false and self_collision_hops: 2) builds
+  # an equivalent set (one hull per welded assembly) from a delivery with per-mesh colliders.
+  collision_hulls: delivered
   # Hand joints are welded above: shapes within each resulting rigid assembly
   # must not generate self-contacts between its non-adjacent component bodies.
   exclude_fixed_cluster_contacts: true
   # Convex hulls fill the interlocking housings across these compound joints.
   # Exclude their internal assembly contacts, retaining contacts with other bodies.
+  # The delivery filters them too; listed so per_mesh hulls stay filtered.
   contact_excludes:
     # Waist axial rotation + lateral bending.
     - [base_link, hej90_hip_abduction_1]

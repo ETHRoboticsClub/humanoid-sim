@@ -168,6 +168,86 @@ def fixed_body_excludes(edges: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return sorted(pair for names in groups.values() for pair in combinations(names, 2))
 
 
+def rigid_assemblies(source: UsdDescription, welded: list[str]) -> dict[str, str]:
+    """Body → the root body of its rigid assembly: bodies joined by welded or fixed joints move as one."""
+    from pxr import UsdPhysics
+
+    parent = {}
+    for name, joint in source.joints.items():
+        if name in welded or joint.GetPrim().IsA(UsdPhysics.FixedJoint):
+            a, b = source.joint_bodies(name)
+            parent[b] = a
+    out = {}
+    for body in source.bodies:
+        root = body
+        while root in parent:
+            root = parent[root]
+        out[body] = root
+    return out
+
+
+def joint_graph(source: UsdDescription, assembly: dict[str, str]) -> dict[str, set[str]]:
+    """Assembly root → the assembly roots it shares a moving joint with, loop-closing joints included."""
+    graph = {root: set() for root in assembly.values()}
+    for name in source.joints:
+        a, b = (assembly[x] for x in source.joint_bodies(name))
+        if a != b:
+            graph[a].add(b)
+            graph[b].add(a)
+    return graph
+
+
+def graph_neighbours(graph: dict[str, set[str]], hops: int) -> set[frozenset[str]]:
+    """Pairs of nodes at most ``hops`` joints apart (breadth-first from each node)."""
+    pairs = set()
+    for start in graph:
+        frontier, seen = {start}, {start}
+        for _ in range(hops):
+            frontier = {n for f in frontier for n in graph[f]} - seen
+            seen |= frontier
+        pairs |= {frozenset((start, n)) for n in seen if n != start}
+    return pairs
+
+
+def linkage_internal_bodies(source: UsdDescription, ankle_payload: dict) -> set[str]:
+    """Bodies inside each ankle linkage: cranks, rods and the universal-joint cross, everything the crank and pitch
+    joints reach without passing through the shank (their parent) or the foot (the roll joint's child)."""
+    graph = {body: set() for body in source.bodies}
+    for name in source.joints:
+        a, b = source.joint_bodies(name)
+        graph[a].add(b)
+        graph[b].add(a)
+    out = set()
+    for spec in ankle_payload["sides"].values():
+        joints = spec["usd_joints"]
+        shank = source.joint_bodies(joints["pitch"])[0]
+        foot = source.joint_bodies(joints["roll"])[1]
+        frontier = {source.joint_bodies(joints[role])[1] for role in ("pitch", "upper", "lower")}
+        seen = set(frontier)
+        while frontier:
+            frontier = {n for f in frontier for n in graph[f]} - seen - {shank, foot}
+            seen |= frontier
+        out |= seen
+    return out
+
+
+def convex_hull(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Vertices and outward-facing triangles of the convex hull of ``points`` [N, 3]."""
+    from scipy.spatial import ConvexHull
+
+    hull = ConvexHull(points)
+    index = {int(v): i for i, v in enumerate(hull.vertices)}
+    vertices = points[hull.vertices]
+    centre = vertices.mean(axis=0)
+    faces = []
+    for tri in hull.simplices:
+        a, b, c = (points[int(i)] for i in tri)
+        if np.dot(np.cross(b - a, c - a), a - centre) < 0:
+            tri = tri[[0, 2, 1]]
+        faces.append([index[int(i)] for i in tri])
+    return vertices, np.asarray(faces, dtype=np.int64)
+
+
 def asset_key(desc, profile: dict, *, base_joints: bool = False) -> str:
     record = {"schema": "humanoid-sim-native-usd/v5", "source": desc.usd_model.digest(),
               "description": desc.digest, "base_joints": base_joints,
@@ -186,8 +266,9 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 
     from humanoid_sim.model.asset import ASSET_SCHEMA
-    if profile["model"].get("collision_hulls") != "per_mesh":
-        raise ValueError("native USD collision_hulls must be per_mesh")
+    hulls = profile["model"].get("collision_hulls")
+    if hulls not in ("delivered", "per_mesh", "per_body"):
+        raise ValueError(f"native USD collision_hulls must be delivered, per_mesh or per_body, not {hulls!r}")
     key = asset_key(desc, profile, base_joints=base_joints)
     out = Path(out_root) / desc.robot / key
     meta_path = out / "asset.json"
@@ -243,30 +324,80 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
         revolute.CreateLowerLimitAttr(math.degrees(bounds[0]))
         revolute.CreateUpperLimitAttr(math.degrees(bounds[1]))
 
-    excluded = []
-    fixed_pairs = []
-    if profile["model"].get("exclude_fixed_cluster_contacts", False):
-        fixed = [source.joint_bodies(name) for name, joint in source.joints.items()
-                 if name in welded or joint.GetPrim().IsA(UsdPhysics.FixedJoint)]
-        fixed_pairs = fixed_body_excludes(fixed)
-    contact_excludes = profile["model"].get("contact_excludes", [])
-    for a, b in sorted({tuple(sorted(pair)) for pair in [*fixed_pairs, *contact_excludes]}):
+    sole_cfg = profile["model"].get("sole")
+    soles = source.sole_geometry(sole_cfg) if sole_cfg else []
+    replaced = {sole["replaces_mesh"] for sole in soles}
+    assembly = rigid_assemblies(source, welded)
+    silent = (linkage_internal_bodies(source, desc.ankle_model.payload)
+              if not profile["model"].get("linkage_collisions", True) else set())
+    colliders = {}  # body → its delivered collision meshes, in traversal order
+    for prim in source.stage.Traverse():
+        if prim.IsA(UsdGeom.Mesh) and prim.HasAPI(UsdPhysics.CollisionAPI):
+            body = prim.GetParent()
+            while not body.HasAPI(UsdPhysics.RigidBodyAPI):
+                body = body.GetParent()
+            colliders.setdefault(body.GetName(), []).append(prim)
+
+    # delivered: the delivery's colliders and filtered pairs as they are; it must give convex hulls (an import-time
+    # decomposition needs optional external tools). Otherwise convex hulls are a choice made here. per_mesh: each
+    # delivered mesh becomes its own hull. per_body: every remaining collision mesh of a rigid
+    # assembly (a body and the bodies welded to it) becomes one hull on the assembly's root body, as the URDF path's
+    # per_body does. Against the ground the hull of the union reaches as far as the separate hulls did; between
+    # bodies it fills the gaps between parts, and it gives the solver one shape pair per pair of bodies.
+    merged = {}
+    for body, prims in colliders.items():
+        for prim in prims:
+            target = stage.GetPrimAtPath(mapped(prim))
+            if hulls == "delivered":
+                approx = UsdPhysics.MeshCollisionAPI(prim).GetApproximationAttr().Get()
+                if approx != "convexHull" and UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get() is not False:
+                    raise ValueError(f"collision_hulls: delivered needs convexHull colliders; {prim.GetPath()} is "
+                                     f"{approx!r} (use per_mesh or per_body for this delivery)")
+                if body in silent:
+                    UsdPhysics.CollisionAPI(target).CreateCollisionEnabledAttr(False)
+                continue
+            if hulls == "per_body" or body in silent:
+                UsdPhysics.CollisionAPI(target).CreateCollisionEnabledAttr(False)
+            elif str(prim.GetPath()) not in replaced:
+                UsdPhysics.MeshCollisionAPI.Apply(target).CreateApproximationAttr("convexHull")
+            if hulls == "per_body" and body not in silent and str(prim.GetPath()) not in replaced:
+                tf = np.asarray(UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())).T
+                points = np.asarray(UsdGeom.Mesh(prim).GetPointsAttr().Get(), dtype=np.float64)
+                merged.setdefault(assembly[body], []).append(points @ tf[:3, :3].T + tf[:3, 3])
+    for owner, parts in sorted(merged.items()):
+        world = np.concatenate(parts)
+        frame = source.body_transform(owner)
+        local = (world - frame[:3, 3]) @ frame[:3, :3]
+        vertices, faces = convex_hull(local)
+        mesh = UsdGeom.Mesh.Define(stage, mapped(source.bodies[owner]).AppendChild("collision_hull"))
+        mesh.CreatePointsAttr([Gf.Vec3f(*v) for v in vertices])
+        mesh.CreateFaceVertexCountsAttr([3] * len(faces))
+        mesh.CreateFaceVertexIndicesAttr(faces.ravel().tolist())
+        mesh.CreatePurposeAttr("guide")
+        UsdPhysics.CollisionAPI.Apply(mesh.GetPrim())
+        UsdPhysics.MeshCollisionAPI.Apply(mesh.GetPrim()).CreateApproximationAttr("convexHull")
+
+    # Filtered pairs, on top of the delivery's (each joint's two bodies): bodies of one rigid assembly; bodies whose
+    # assemblies are at most `self_collision_hops` moving joints apart (loop-closing joints included), which on a
+    # humanoid are the compound joints' housings that touch by construction; and the profile's contact_excludes.
+    hops = int(profile["model"].get("self_collision_hops", 1))
+    near = graph_neighbours(joint_graph(source, assembly), hops)
+    # Bodies of one rigid assembly (welded hand links; profile exclude_fixed_cluster_contacts, as fixed_body_excludes).
+    fixed_clusters = hulls == "per_body" or profile["model"].get("exclude_fixed_cluster_contacts", False)
+    colliding = sorted(merged) if hulls == "per_body" else sorted(b for b in colliders if b not in silent)
+    pairs = {frozenset((a, b)) for i, a in enumerate(colliding) for b in colliding[i + 1:]
+             if (assembly[a] == assembly[b] and fixed_clusters) or frozenset((assembly[a], assembly[b])) in near}
+    contact_excludes = [sorted(pair) for pair in profile["model"].get("contact_excludes", [])]
+    for a, b in contact_excludes:
         if a not in source.bodies or b not in source.bodies:
-            raise ValueError(f"unknown native collision-exclusion bodies: {a}, {b}")
+            raise ValueError(f"contact_excludes names unknown bodies: {a}, {b}")
+    pairs |= {frozenset(pair) for pair in contact_excludes}
+    excluded = []
+    for a, b in sorted(tuple(sorted(pair)) for pair in pairs):
         pa, pb = mapped(source.bodies[a]), mapped(source.bodies[b])
         UsdPhysics.FilteredPairsAPI.Apply(stage.GetPrimAtPath(pa)).CreateFilteredPairsRel().AddTarget(pb)
         excluded.append((str(pa), str(pb)))
 
-    # Keep each delivered mesh separate. Convex hulls are an explicit simulation
-    # choice, avoiding an import-time decomposition with optional external tools.
-    if profile["model"].get("collision_hulls") == "per_mesh":
-        for prim in source.stage.Traverse():
-            if prim.IsA(UsdGeom.Mesh) and prim.HasAPI(UsdPhysics.CollisionAPI):
-                UsdPhysics.MeshCollisionAPI.Apply(stage.GetPrimAtPath(mapped(prim))).CreateApproximationAttr(
-                    "convexHull")
-
-    sole_cfg = profile["model"].get("sole")
-    soles = source.sole_geometry(sole_cfg) if sole_cfg else []
     for sole in soles:
         mesh = source.stage.GetPrimAtPath(sole["replaces_mesh"])
         UsdPhysics.CollisionAPI(stage.GetPrimAtPath(mapped(mesh))).CreateCollisionEnabledAttr(False)
@@ -289,8 +420,9 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
             "source_usd_sha256": source.digest(), "ankle_representation": "native",
             "base_joints": [name for name, _ in BASE_JOINTS] if base_joints else [],
             "loop_closures": closures, "crank_joints": crank_joints(desc),
-            "welded_joints": welded, "sole_boxes": soles, "merged_collision_bodies": [],
-            "contact_excludes": contact_excludes, "self_collision_sets": None, "self_collision_excludes": excluded}
+            "welded_joints": welded, "sole_boxes": soles, "merged_collision_bodies": sorted(merged),
+            "collision_free_bodies": sorted(silent), "contact_excludes": contact_excludes,
+            "self_collision_sets": None, "self_collision_excludes": excluded}
     meta_path.write_text(json.dumps(meta, indent=1))
     return path
 

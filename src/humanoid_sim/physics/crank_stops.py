@@ -248,6 +248,73 @@ class _WorldHook:
                 self.tendons += 1
 
 
+class _BallArmature:
+    """Captures the replicated scene builder, then gives every ball joint coordinate its armature before the model is
+    finalized: the delivery's ``newton:armature`` on that joint (Newton's USD import reads none for spherical joints),
+    else ``default``."""
+
+    def __init__(self, default: float, delivered: dict[str, float] | None = None):
+        self.default = default
+        self.delivered = dict(delivered or {})
+        self.builder = None
+        self.joints = 0
+
+    def __call__(self, builder, world: int, position, quaternion) -> None:
+        self.builder = builder
+
+    def apply(self) -> None:
+        import newton
+
+        b = self.builder
+        if b is None:
+            raise RuntimeError("ball-joint armature received no Newton scene builder")
+        starts = list(b.joint_qd_start) + [len(b.joint_armature)]
+        for j, kind in enumerate(b.joint_type):
+            if int(kind) == int(newton.JointType.BALL):
+                value = self.delivered.get(str(b.joint_label[j]).rsplit("/", 1)[-1], self.default)
+                for k in range(starts[j], starts[j + 1]):
+                    b.joint_armature[k] = value
+                self.joints += 1
+
+
+def delivered_ball_armature(desc) -> dict[str, float]:
+    """``newton:armature`` (kg m^2) authored on the delivery's spherical joints, by joint name."""
+    from pxr import UsdPhysics
+
+    out = {}
+    for name, joint in desc.usd_model.joints.items():
+        prim = joint.GetPrim()
+        if prim.IsA(UsdPhysics.SphericalJoint) and prim.HasAttribute("newton:armature"):
+            value = prim.GetAttribute("newton:armature").Get()
+            if value is not None:
+                out[name] = float(value)
+    return out
+
+
+@contextlib.contextmanager
+def ball_joint_armature(default: float, delivered: dict[str, float] | None = None):
+    """Build a scene inside this to give every ball joint coordinate its armature (kg m^2): the delivery's, else
+    ``default`` (profile ``physics.ball_joint_armature``). A rod between two ball joints spins freely about its own
+    axis on a tiny inertia; armature keeps that mode within what the step resolves. A no-op when all are 0."""
+    if default < 0 or any(v < 0 for v in (delivered or {}).values()):
+        raise ValueError("ball-joint armature must be non-negative")
+    if not default and not any((delivered or {}).values()):
+        yield None
+        return
+    from isaaclab.physics import PhysicsEvent
+    from isaaclab_newton.cloner import newton_builder_world_hook
+    from isaaclab_newton.physics import NewtonManager
+
+    hook = _BallArmature(default, delivered)
+    init = NewtonManager.register_callback(lambda _: hook.apply(), PhysicsEvent.MODEL_INIT,
+                                           name="ball_joint_armature", wrap_weak_ref=False)
+    try:
+        with newton_builder_world_hook(hook):
+            yield hook
+    finally:
+        init.deregister()
+
+
 @contextlib.contextmanager
 def crank_stop_hook(robot: str, physics: dict, solver: str | None = None):
     """Build an Isaac Lab scene and reset its simulation inside this to give the MJWarp model the crank stops the
@@ -261,8 +328,13 @@ def crank_stop_hook(robot: str, physics: dict, solver: str | None = None):
     (``PHYSICS_READY``, ahead of the assets' order) their owner is cleared."""
     solver = solver or physics["solver"]
     desc = Description.load(robot)
-    if desc.usd_path is not None:
-        yield None  # native crank joints carry their own stops in the built USD
+    if desc.usd_path is not None:  # native crank joints carry their own stops in the built USD
+        from humanoid_sim.model.asset import load_profile
+
+        # The robot's profile, as callers may pass only the solver's block of it.
+        with ball_joint_armature(float(load_profile(robot)["physics"]["ball_joint_armature"]),
+                                 delivered_ball_armature(desc)):
+            yield None
         return
     if ankle_stops_setting(physics, solver) != "cranks" or not desc.linkages:
         yield None
