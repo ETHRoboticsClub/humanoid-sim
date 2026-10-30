@@ -267,8 +267,8 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
 
     from humanoid_sim.model.asset import ASSET_SCHEMA
     hulls = profile["model"].get("collision_hulls")
-    if hulls not in ("delivered", "per_mesh", "per_body"):
-        raise ValueError(f"native USD collision_hulls must be delivered, per_mesh or per_body, not {hulls!r}")
+    if hulls not in ("per_mesh", "per_body"):
+        raise ValueError(f"native USD collision_hulls must be per_mesh or per_body, not {hulls!r}")
     key = asset_key(desc, profile, base_joints=base_joints)
     out = Path(out_root) / desc.robot / key
     meta_path = out / "asset.json"
@@ -338,9 +338,8 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
                 body = body.GetParent()
             colliders.setdefault(body.GetName(), []).append(prim)
 
-    # delivered: the delivery's colliders and filtered pairs as they are; it must give convex hulls (an import-time
-    # decomposition needs optional external tools). Otherwise convex hulls are a choice made here. per_mesh: each
-    # delivered mesh becomes its own hull. per_body: every remaining collision mesh of a rigid
+    # Convex hulls are an explicit simulation choice, avoiding an import-time decomposition with optional external
+    # tools. per_mesh: each delivered mesh becomes its own hull. per_body: every remaining collision mesh of a rigid
     # assembly (a body and the bodies welded to it) becomes one hull on the assembly's root body, as the URDF path's
     # per_body does. Against the ground the hull of the union reaches as far as the separate hulls did; between
     # bodies it fills the gaps between parts, and it gives the solver one shape pair per pair of bodies.
@@ -348,14 +347,6 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     for body, prims in colliders.items():
         for prim in prims:
             target = stage.GetPrimAtPath(mapped(prim))
-            if hulls == "delivered":
-                approx = UsdPhysics.MeshCollisionAPI(prim).GetApproximationAttr().Get()
-                if approx != "convexHull" and UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get() is not False:
-                    raise ValueError(f"collision_hulls: delivered needs convexHull colliders; {prim.GetPath()} is "
-                                     f"{approx!r} (use per_mesh or per_body for this delivery)")
-                if body in silent:
-                    UsdPhysics.CollisionAPI(target).CreateCollisionEnabledAttr(False)
-                continue
             if hulls == "per_body" or body in silent:
                 UsdPhysics.CollisionAPI(target).CreateCollisionEnabledAttr(False)
             elif str(prim.GetPath()) not in replaced:

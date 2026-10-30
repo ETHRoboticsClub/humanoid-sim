@@ -46,7 +46,7 @@ class SoleBox:
     half_extents: np.ndarray  # (m)
 
 
-COLLISION_HULLS = ("per_mesh", "per_body", "delivered")  # delivered: the description's own meshes, as per_mesh
+COLLISION_HULLS = ("per_mesh", "per_body")
 MERGED_DIR = "collision"  # merged meshes, written next to the prepared URDF
 # World → robot root through these, in order: R = Rz(yaw) Ry(pitch) Rx(roll).
 BASE_JOINTS = (("base_yaw", (0, 0, 1)), ("base_pitch", (0, 1, 0)), ("base_roll", (1, 0, 0)))
