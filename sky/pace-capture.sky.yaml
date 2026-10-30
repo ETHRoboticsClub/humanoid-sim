@@ -33,6 +33,12 @@ envs:
   NUM_ENVS: "256"
   GENERATIONS: "40"
   PARALLEL: "3"  # fits at once on the GPU
+  ONLY: ""  # only the fits whose names match these patterns (fit-<id>-b0, fit-all-<id>, fit-all); empty: all
+  BOUND: "10"  # armature, damping and friction within [1/BOUND, BOUND] of the description's
+  BIAS_BOUND_MRAD: "20"
+  DELAY_MS: "0 20"  # the delay range
+  DELAY_START_MS: ""  # where the delay search starts; empty: the middle of DELAY_MS
+  RATIO_MAX: "1"  # dynamic over static friction within [0, RATIO_MAX]
   PHYSICS_TESTS: "0"  # 1: the replay and PACE physics tests first (physics-tests.log; the run goes on either way)
 
 file_mounts:

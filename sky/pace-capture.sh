@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # The PACE run of sky/pace-capture.sky.yaml, on the node: every capture under $PACE_IN/captures checked, converted
 # from the description it was recorded on when its joint names are not this one's, cut into windows, fitted on each
-# window with the others held out (and once on all of them), and reported. Writes outputs/pace-run/ and mirrors it
-# to /ckpt/$S3_PREFIX (the club bucket). Exit status: 0 when the report was written.
+# window with the capture's other windows held out, and reported. With FULL_FIT=1 also once on all of a capture's
+# windows: with several captures, each capture's fit is scored on the others (fit-all-<id>) and one more fit takes
+# every window of every capture (fit-all). ONLY limits the fits to the names matching its patterns (fit-<id>-b0,
+# fit-all-<id>, fit-all), to spread one run over several nodes. Writes outputs/pace-run/ and mirrors it to
+# /ckpt/$S3_PREFIX (the club bucket). Exit status: 0 when the report was written.
 set -uo pipefail
 export PATH="$HOME/.local/bin:$HOME/il-venv/bin:$PATH"
 cd "$HOME/sky_workdir"
@@ -48,6 +51,11 @@ skip=()
 [ "$FIT_ANKLES" = 1 ] || skip=(--skip-drives $ankles)
 stamps=()
 [ "$FRAME_STAMPS" = 1 ] && stamps=(--frame-stamps)
+# The search box (fit-pace's defaults when unset).
+box=(--bound "${BOUND:-10}" --bias-bound-mrad "${BIAS_BOUND_MRAD:-20}" --delay-ms ${DELAY_MS:-0 20})
+[ -n "${DELAY_START_MS:-}" ] && box+=(--delay-start-ms "$DELAY_START_MS")
+fit_box=("${box[@]}" --ratio-max "${RATIO_MAX:-1}")
+check_box=(--bias-bound-mrad "${BIAS_BOUND_MRAD:-20}" --delay-ms ${DELAY_MS:-0 20})
 
 step "convert ($ANKLES ankles)"
 mkdir -p "$out/captures"
@@ -67,7 +75,7 @@ sys.exit(0 if is_legacy(Path('$cap'), Description.load('$ROBOT')) else 1)"; then
 done
 
 step "check-bag"
-humanoid-sim --robot "$ROBOT" check-bag "$out"/captures/exc-* --base fixed "${stamps[@]}" "${skip[@]}" \
+humanoid-sim --robot "$ROBOT" check-bag "$out"/captures/exc-* --base fixed "${stamps[@]}" "${skip[@]}" "${check_box[@]}" \
   | tee "$out/check-bag.txt" || { echo "[pace] a capture fails the contract"; exit 1; }
 
 step "windows"
@@ -78,7 +86,8 @@ humanoid-sim segment-capture "$out"/captures/exc-* --out "$out/windows" --bands 
 mapfile -t windows < <(ls -d "$out"/windows/exc-*)
 [ "${#windows[@]}" -ge 2 ] || { echo "[pace] fewer than two windows: nothing to hold out"; exit 1; }
 
-common=(--base fixed --num-envs "$NUM_ENVS" --generations "$GENERATIONS" --device cuda:0 "${stamps[@]}" "${skip[@]}")
+common=(--base fixed --num-envs "$NUM_ENVS" --generations "$GENERATIONS" --device cuda:0 "${stamps[@]}" "${skip[@]}"
+        "${fit_box[@]}")
 
 step "self-collision: the first window replayed at the description's values, with and without"
 mkdir -p "$out/selfcol"
@@ -88,15 +97,38 @@ humanoid-sim --robot "$ROBOT" replay "${windows[0]}" --base fixed --no-self-coll
   > "$out/selfcol/off.log" 2>&1 &
 p_off=$!
 
-step "fits: each window with the others held out$([ "$FULL_FIT" = 1 ] && echo ', and all windows together')"
+step "fits: each window with its capture's others held out$([ "$FULL_FIT" = 1 ] && echo ', and all windows together')"
 mkdir -p "$out/fits"
+cap_of() { basename "$1" | sed 's/^exc-\([0-9a-f]\{8\}\)[0-9a-f]*-.*/\1/'; }
+mapfile -t caps < <(for w in "${windows[@]}"; do cap_of "$w"; done | awk '!seen[$0]++')
 jobs_=()
 for w in "${windows[@]}"; do
   held=()
-  for o in "${windows[@]}"; do [ "$o" = "$w" ] || held+=("$o"); done
-  jobs_+=("fit-$(basename "$w" | sed 's/^exc-\([0-9a-f]\{8\}\)[0-9a-f]*-/\1-/')|$w --holdout ${held[*]}")
+  for o in "${windows[@]}"; do [ "$o" = "$w" ] || [ "$(cap_of "$o")" != "$(cap_of "$w")" ] || held+=("$o"); done
+  hold=()
+  [ ${#held[@]} -gt 0 ] && hold=(--holdout "${held[@]}")
+  jobs_+=("fit-$(basename "$w" | sed 's/^exc-\([0-9a-f]\{8\}\)[0-9a-f]*-/\1-/')|$w ${hold[*]}")
 done
-[ "$FULL_FIT" = 1 ] && jobs_+=("fit-all|${windows[*]}")
+if [ "$FULL_FIT" = 1 ]; then
+  if [ ${#caps[@]} -gt 1 ]; then
+    for c in "${caps[@]}"; do
+      mine=() others=()
+      for w in "${windows[@]}"; do if [ "$(cap_of "$w")" = "$c" ]; then mine+=("$w"); else others+=("$w"); fi; done
+      jobs_+=("fit-all-$c|${mine[*]} --holdout ${others[*]}")
+    done
+  fi
+  jobs_+=("fit-all|${windows[*]}")
+fi
+if [ -n "${ONLY:-}" ]; then
+  kept=()
+  for job in "${jobs_[@]}"; do
+    # shellcheck disable=SC2053
+    for pat in $ONLY; do if [[ ${job%%|*} == $pat ]]; then kept+=("$job"); break; fi; done
+  done
+  jobs_=("${kept[@]}")
+fi
+printf '%s\n' "${jobs_[@]%%|*}" | tee "$out/fits/plan.txt"
+[ ${#jobs_[@]} -gt 0 ] || { echo "[pace] ONLY=$ONLY matches no fit"; exit 1; }
 running=0
 fit_pids=()
 for job in "${jobs_[@]}"; do
