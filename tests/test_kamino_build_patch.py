@@ -79,3 +79,60 @@ def test_sequence_checks_later_inputs_before_mutating_earlier_files(tree):
         patcher("apply_sequence")(root, [(first, hashes), (second, {"later.py": hashes["first.py"]})])
     assert (root / "first.py").read_bytes() == b"original\n"
     assert (root / "second.py").read_bytes() == b"original\n"
+
+
+def test_new_source_is_created_and_unexpected_existing_source_rejected(tmp_path):
+    root = tmp_path / "package"
+    root.mkdir()
+    patch = tmp_path / "new.patch"
+    patch.write_text("--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+added\n")
+    hashes = {"new.py": {"before": None, "after": hashlib.sha256(b"added\n").hexdigest()}}
+    (root / "new.py").write_bytes(b"unexpected\n")
+    with pytest.raises(RuntimeError, match="revalidate"):
+        patcher()(root, patch, hashes)
+    assert (root / "new.py").read_bytes() == b"unexpected\n"
+    (root / "new.py").unlink()
+    for _ in range(2):
+        patcher()(root, patch, hashes)
+        assert (root / "new.py").read_bytes() == b"added\n"
+
+
+@pytest.mark.parametrize("starting_stage", range(4))
+def test_extended_chain_accepts_late_overlapping_prefixes(tmp_path, starting_stage):
+    root = tmp_path / "package"
+    root.mkdir()
+    values = [b"base\n", b"one\n", b"two\n", b"three\n", b"four\n"]
+    (root / "same.py").write_bytes(values[starting_stage])
+    patches = []
+    for stage in range(4):
+        patch = tmp_path / f"stage{stage}.patch"
+        patch.write_text("--- a/same.py\n+++ b/same.py\n@@ -1 +1 @@\n"
+                         f"-{values[stage].decode()}+{values[stage + 1].decode()}")
+        hashes = {"same.py": {key: hashlib.sha256(value).hexdigest() for key, value in
+                              (("before", values[stage]), ("after", values[stage + 1]))}}
+        patches.append((patch, hashes))
+    patcher("apply_sequence")(root, patches)
+    assert (root / "same.py").read_bytes() == values[-1]
+
+
+def test_sequence_rejects_individually_known_but_inconsistent_hashes(tmp_path):
+    root = tmp_path / "package"
+    root.mkdir()
+    hashes = lambda a, b: {"before": hashlib.sha256(a).hexdigest(), "after": hashlib.sha256(b).hexdigest()}
+    # a at stage 2, b at stage 0: each is a known hash, but no complete prefix matches.
+    (root / "a.py").write_bytes(b"two\n")
+    (root / "b.py").write_bytes(b"base\n")
+    patches = [(tmp_path / "unused1", {"a.py": hashes(b"base\n", b"one\n"), "b.py": hashes(b"base\n", b"one\n")}),
+               (tmp_path / "unused2", {"a.py": hashes(b"one\n", b"two\n")})]
+    with pytest.raises(RuntimeError, match="revalidate"):
+        patcher("apply_sequence")(root, patches)
+    assert (root / "a.py").read_bytes() == b"two\n"
+    assert (root / "b.py").read_bytes() == b"base\n"
+
+
+def test_invalid_chain_rejected_before_mutation(tree):
+    root, first, hashes = tree
+    incompatible = {"first.py": {"before": "unrelated source", "after": "unrelated result"}}
+    with pytest.raises(RuntimeError, match="validated chain"):
+        patcher("apply_sequence")(root, [(first, hashes), (first, incompatible)])
+    assert all((root / name).read_bytes() == b"original\n" for name in hashes)
