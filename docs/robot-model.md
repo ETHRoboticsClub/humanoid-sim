@@ -12,6 +12,19 @@ The delivered ankle crank shafts and spherical rod closures remain physical join
 
 The native path supports floating/fixed-base training, runtime sessions and prescribed Euler base-joint replay assets (`--base-joints`). PACE fits use `PlantCore.solver_map.joint_names`: physical crank rotor armatures, zero hinge rotor armatures, and fixed structural zeros. Legacy reflected-hinge fits cannot be applied to that physical inventory. Older policies and captures also need the matching semantic frame and description revision. The Controls ABI description digest remains the URDF/actuator digest; built assets additionally verify their USD source digest on load.
 
+For native assets, `model.prune_contained_hulls: true` enables cached collision
+pruning during `build-asset` (requires Newton). A hull is disabled only when it is
+strictly enclosed by a hull on the same rigid body with matching contact settings
+and external collision filters. Visual meshes, joints and authored mass/inertia
+are retained. The option changes the asset key; `asset.json` records each removed
+collider and its enclosing hull. It does not merge hulls or fill gaps between
+parts. Keep the default `false` when comparing the original contact model.
+
+Headless Newton import can omit visual-only shapes; collision shapes remain
+independent of camera visibility. Pruning changes the number of contact candidates
+and may change contacts after deep interpenetration, so qualify contact behavior
+on the intended solver before using a pruned asset for training.
+
 ## URDF build path
 
 The converter path below remains available for profiles that name `model.urdf`, including the Unitree robots. V1's native USD path bypasses `PreparedUrdf` and the URDF converter. The detailed URDF_6 examples below describe the former V1 plant; its joint names, forward axis, standing pose and reflected ankle properties do not apply to the native USD plant described above.
@@ -386,6 +399,25 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `physics.kamino.use_graph_conditionals` | `solver_cfg` | Capture P-ADMM loops as conditional CUDA graph nodes instead of unrolling every iteration. |
 | `physics.<solver>.collapse_fixed_joints` | `model_build` | Optional Newton fixed-joint collapse, shared by training and runtime. Accumulates rigid-assembly mass and inertia and retains collision shapes and moving joints. Body selectors and randomization address surviving assemblies; removed fixed-link names are unavailable. Unsupported with surrogate crank tendons. |
 | `solver_gains` | nothing | Records that the solver PD is the description's baseline gains. |
+
+With a sparse Jacobian and dense dynamics, Kamino assembles `J M⁻¹ Jᵀ` by grouping Jacobian blocks by body. It rebuilds the groups on the device each step as contacts change, avoiding pairs of blocks that cannot contribute to the matrix. Armature, effort regularization and preconditioning are applied afterward as before. The image's hash-checked Newton patch installer supplies this implementation; incompatible dependency sources are rejected. `tests/test_kamino_body_assembly.py` checks the matrix against an independent FP64 calculation and exercises changing contacts, CUDA graph replay and workspace replacement.
+
+`physics.kamino.tracked_active_clear: true` avoids clearing unused dense Delassus capacity. It tracks the largest active prefix written since the previous clear, including additive builds and regularization, so changing contact counts cannot leave stale entries. The default remains full clearing. Direct callers that write outside the active prefix must call `invalidate_tracked_clear()`; public `zero()` always clears the entire allocation. `tests/test_kamino_tracked_clear.py` checks whole-allocation equality, graph replay and configuration forwarding.
+
+`physics.kamino.padmm.algorithm: bilateral_reduced` selects experimental bilateral elimination; the default `full` keeps the original PADMM iteration path and does not import or allocate the reduced workspace. `padmm.reduced_capacity` reserves 32, 64, 96 (default), or 128 constrained rows per world. The bilateral row count comes from the model. This mode requires dense dynamics, a common positive bilateral prefix, homogeneous fixed-penalty configuration, acceleration, graph conditionals, and disabled per-iteration information collection.
+
+`padmm.reduced_ordering` selects `natural` (default) or `rcm`. RCM orders only the common bilateral prefix; constrained rows retain their original order. `padmm.reduced_dynamic_pattern: true` additionally derives per-world block fill from current sparse Jacobian body connectivity on the device each solve; it requires `rcm` and at most 32 factor tiles. Both static and dynamic RCM schedules skip blocks only inside the simulator’s certified fresh-build-to-solve path, with the matrix and layout arrays still owned by that build. Public `PADMMSolver.solve(problem)` calls use dense factor schedules, including after manual matrix writes or additive builds; a detached matrix or layout also selects the dense schedule. Unsupported pattern metadata uses the conservative dense factor schedule. Captured calls restore their own schedule on every replay. These options do not change the default `full` algorithm.
+
+`padmm.reduced_sparse_diagnostics: true` permits structural matrix-load skipping for original-equation diagnostics only inside the simulator's contiguous fresh-build-to-solve path. It defaults to `false`. Direct `PADMMSolver.solve(problem)` calls always use dense diagnostics, including after manual matrix writes or additive builds. The internal path checks the Delassus array aliases, current sparse Jacobian coordinates, body-count bounds and finite positive preconditioning; unsupported worlds use dense loads. Every arithmetic operation and all four metrics remain, and diagnostics still run every solve. Pre-step and mid-step callbacks stay outside the fresh-build-to-solve sequence.
+
+`padmm.reduced_lazy_preconditioning: true` avoids writing the full preconditioned matrix before the reduced solve. It defaults to `false` and requires `algorithm: bilateral_reduced`, `reduced_ordering: rcm` and `reduced_dynamic_pattern: true`. The internal factor and every-solve diagnostics read the raw matrix through its captured preconditioner, preserving the original FP32 multiplication order. Generic consumers and full-solver fallback materialize the original operator before use.
+
+With this option enabled, first access to `DualProblem.data` or `DelassusOperator.D`, `.operator`, `.solver` or `.info` must occur outside CUDA graph capture. Accessing one of these public objects publishes the matrix and keeps future builds eager for that operator, so a cached array alias remains current even when an older captured graph is replayed. A first access during capture raises before returning an alias; access the object before capturing if the application needs it. This restriction does not apply when the option is disabled. Public object identities are retained, and rebinding a matrix or layout array selects the original eager path instead of redirecting the array.
+
+
+Within reduced execution, capacity 96 uses separate 64-row and 96-row iteration kernels according to each world's active constrained width. Other supported capacities use their matching generic kernel. Recovery shares factor reads across the three free-coordinate vectors. The inverse solve publishes the padded transposed inverse and right-hand side directly, preserving the public scratch arrays. Original-equation diagnostics use bounded work per thread and still run every solve. The stationarity diagnostic's summation association may differ; it remains a diagnostic and does not select acceptance or termination. Free-coordinate reordering can change finite-precision iterates relative to natural ordering, so compare RCM variants against the same ordering.
+
+Elimination preserves the converged complementarity problem, but finite PADMM iterates, acceleration restarts and stopping residuals differ from the full algorithm. Reduced-world status uses constrained-coordinate residuals; `residual_scope` identifies reduced (1) or full-fallback (0) results. Separate `original_residuals` report stationarity, feasibility, natural-map and complementarity diagnostics in their original equations; these are diagnostics, not additional convergence tests or solution-error bounds. Invalid layouts, capacity overflow, failed factorization and nonfinite outputs trigger the original full solver on the device and retain its result for rejected worlds. Reaching the iteration cap with finite values remains an unconverged reduced result. No tolerance, timestep or iteration-cap change is implied by selecting this mode.
 
 Only the `model` block is part of the asset key. The `physics` block is described in more detail in [world.md](world.md) and [testing-and-gpu.md](testing-and-gpu.md).
 

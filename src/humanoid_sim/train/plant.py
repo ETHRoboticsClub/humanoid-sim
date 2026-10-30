@@ -52,7 +52,10 @@ class TrainPlantCfg:
     seed: int = 0
     feedback_history: int = 16  # physics steps of drive feedback kept for :meth:`RobotPlant.measured`
     reporting: bool = True  # measured drive feedback quantized as the drive reports it
+    cuda_graph: bool = False  # capture drive math and IMU delivery; CUDA only
+    compile: bool = False  # fuse drive and IMU math before capture; requires cuda_graph
     queue_capacity: int = 8  # demands in flight per env: ≥ (max latency + drive delay) / demand period + 1
+    physics_overrides: dict = field(default_factory=dict)  # explicit profile overrides, shared with scene construction
 
 
 @dataclass
@@ -79,9 +82,11 @@ class RobotPlant:
         """``robot``: the scene's articulation; ``imu`` / ``contacts``: its sensors (optional);
         ``physics_manager``: ``env.sim.physics_manager`` (needed to randomize shape friction)."""
         self.cfg = cfg = cfg or TrainPlantCfg()
+        if cfg.compile and not cfg.cuda_graph:
+            raise ValueError("TrainPlantCfg.compile requires cuda_graph")
         self.robot, self.imu_sensor, self.contacts = robot, imu, contacts
         self.desc = Description.load(cfg.robot)
-        self.profile = load_profile(cfg.robot)
+        self.profile = load_profile(cfg.robot, physics_overrides=cfg.physics_overrides)
         self.num_envs = e = robot.num_instances
         self.device = torch.device(robot.device)
         self.period_ns = int(self.profile["physics"]["period_ns"])
@@ -94,7 +99,8 @@ class RobotPlant:
             from humanoid_sim.transmissions.drive_map import native_joint_names
 
             physical = native_joint_names(self.desc)
-            self.native_state = NativeState(self.desc, device=self.device)
+            self.native_state = NativeState(self.desc, device=self.device,
+                                            compile_batch_size=e if cfg.compile else None)
         self.core = PlantCore(self.desc, self.joints, e, PlantCfg(robot=cfg.robot, physics_period_ns=self.period_ns,
                                                                   queue_capacity=cfg.queue_capacity,
                                                                   device=str(self.device)), solver_joint_names=physical)
@@ -165,6 +171,16 @@ class RobotPlant:
         self._contact_capacity = contact_capacity_guard(self.profile["physics"], e, self.device)
         self._write_physics()
         self._write_device(torch.arange(e, device=self.device))
+        self._drive_graph = None
+        self._imu_graph = None
+        if cfg.cuda_graph:
+            from humanoid_sim.train.drive_step import DriveStepGraph
+
+            self._drive_graph = DriveStepGraph(self.core, *self.solver_state(), compile=cfg.compile)
+            if self.imu is not None:
+                from humanoid_sim.train.imu_step import ImuStepGraph
+
+                self._imu_graph = ImuStepGraph(self.imu, self.period_ns, compile=cfg.compile)
 
     # -- randomization ----------------------------------------------------------------------------
 
@@ -317,12 +333,19 @@ class RobotPlant:
         if self._contact_capacity is not None:
             self._contact_capacity.check()
         q, qd = self.solver_state()
-        fb = self.core.feedback(q, qd)
+        if self._drive_graph is None:
+            fb = self.core.feedback(q, qd)
+        else:
+            # The graph snapshots the preceding drive output before advancing the bank.
+            # Sensor delivery uses a separate graph with its own registered RNG.
+            target, fb = self._drive_graph.step(self.t_ns, q, qd)
         self._push_history(fb)
         if self.imu is not None:
             data = self.imu_sensor.data
-            self.imu.step(self.t_ns, data.ang_vel_b.torch, data.lin_acc_b.torch)
-        target = self.core.pre_physics(self.t_ns, q, qd, self.core.post_state)  # feedback converted q above
+            delivery = self.imu if self._imu_graph is None else self._imu_graph
+            delivery.step(self.t_ns, data.ang_vel_b.torch, data.lin_acc_b.torch)
+        if self._drive_graph is None:
+            target = self.core.pre_physics(self.t_ns, q, qd, self.core.post_state)  # feedback converted q above
         self._targets[:, self.solver_joint_ids] = target.to(self._targets.dtype)
         tc = self.robot.actuators.target_command
         tc.set_position_index(value=self._targets)

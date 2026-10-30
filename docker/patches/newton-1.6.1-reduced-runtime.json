@@ -1,0 +1,46 @@
+{
+  "_src/solvers/kamino/_src/dynamics/dual.py": {
+    "before": "d5f6316c7583e88e718e199ab6fc233571ffe6786b6466c6e3d8b4aca69578f9",
+    "after": "46256c94d7b102fbc0d392128758f0349741043781a208974cb00bf79f493b70"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/recovery3.py": {
+    "before": null,
+    "after": "9102167b7b6cc23908a24bdd25b80339ce9949d733c25ba3b95a138b7d9e9e74"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/reduced_diagnostics.py": {
+    "before": null,
+    "after": "806daea78a17162c42d92a934be7a95c4e295be29404025a8e4e823379734244"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/reduced_dynamic_factor.py": {
+    "before": null,
+    "after": "bc3643dae07da79e74855666db605b170edd75cf9713b9ea78f2b3907991eed1"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/reduced_ordering.py": {
+    "before": null,
+    "after": "7eedaea15ceadf83f8fd1a40be62f7b59a13c8f697645cc8a2e19d3e56f29b22"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/reduced_pattern.py": {
+    "before": null,
+    "after": "3e054ca4468805d400483d3a91b0e64a2a1c7ca9b654e788363699407bb9fe49"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/reduced_rcm_factor.py": {
+    "before": null,
+    "after": "7e2b98f55eb2ff76bc102d1f3ec544ad8efa812941271e3c54b571020c4b1724"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py": {
+    "before": "d60a45536b175588a15113b1015ef5a283c4952a44e8dc58bea653c02c2b4e03",
+    "after": "068b35531927a5c945eb56e7690dd666d84f3427f3f8cc55979cc17e91087312"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/reduced_topology.py": {
+    "before": null,
+    "after": "076a954f5b2799e1c2531a090a9ff7cbbbb5a227694d68c082c98a3c67b09bda"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/width_iteration.py": {
+    "before": null,
+    "after": "0327f323dd4a0ed1a57ebec8756f3bcaedaa7951721258f88a6fe9eac4c7e1d0"
+  },
+  "_src/solvers/kamino/config.py": {
+    "before": "126823bf014f70429bc476957a75df895626cf42067a38eaeffca14162cea031",
+    "after": "aef7a637bbcf63ec35b7df6c82d1224056ba72c7d41b77c4c9dbaac16ebb6832"
+  }
+}

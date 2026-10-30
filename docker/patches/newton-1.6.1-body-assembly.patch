@@ -1,0 +1,208 @@
+--- a/_src/solvers/kamino/_src/dynamics/delassus.py
++++ b/_src/solvers/kamino/_src/dynamics/delassus.py
+@@ -806,6 +806,149 @@
+ ###
+ 
+ 
++@wp.kernel
++def _body_count_bodies(
++    nzb: wp.array[int],
++    start: wp.array[int],
++    coords: wp.array2d[int],
++    bio: wp.array[int],
++    counts: wp.array[int],
++):
++    w, i = wp.tid()
++    if i < nzb[w]:
++        b = bio[w] + coords[start[w] + i, 1] // 6
++        wp.atomic_add(counts, b, 1)
++
++
++@wp.kernel
++def _body_prefix_bodies(
++    bio: wp.array[int],
++    counts: wp.array[int],
++    starts: wp.array[int],
++    cursor: wp.array[int],
++    nzstart: wp.array[int],
++):
++    w = wp.tid()
++    offset = nzstart[w]
++    for b in range(bio[w], bio[w + 1]):
++        starts[b] = offset
++        cursor[b] = 0
++        offset += counts[b]
++
++
++@wp.kernel
++def _body_scatter_blocks(
++    nzb: wp.array[int],
++    start: wp.array[int],
++    coords: wp.array2d[int],
++    bio: wp.array[int],
++    starts: wp.array[int],
++    cursor: wp.array[int],
++    grouped: wp.array[int],
++):
++    w, i = wp.tid()
++    if i < nzb[w]:
++        idx = start[w] + i
++        b = bio[w] + coords[idx, 1] // 6
++        j = wp.atomic_add(cursor, b, 1)
++        grouped[starts[b] + j] = idx
++
++
++@wp.kernel
++def _body_assemble_by_body(
++    bio: wp.array[int],
++    inv_m: wp.array[float],
++    inv_I: wp.array[wp.mat33f],
++    nzb: wp.array[int],
++    nzstart: wp.array[int],
++    coords: wp.array2d[int],
++    values: wp.array[vec6f],
++    dim: wp.array[int],
++    mio: wp.array[int],
++    counts: wp.array[int],
++    starts: wp.array[int],
++    grouped: wp.array[int],
++    D: wp.array[float],
++):
++    w, ii, lane = wp.tid()
++    if ii >= nzb[w] or dim[w] == 0:
++        return
++    i = nzstart[w] + ii
++    b = bio[w] + coords[i, 1] // 6
++    ri = coords[i, 0]
++    vi = values[i]
++    Ji_v = wp.vec3f(vi[0], vi[1], vi[2])
++    Ji_w = wp.vec3f(vi[3], vi[4], vi[5])
++    for pos in range(lane, counts[b], 32):
++        j = grouped[starts[b] + pos]
++        # Original ordering owns each unordered block pair once, independent
++        # of nondeterministic scatter order. Same-row mirror rule is unchanged.
++        if j >= i:
++            rj = coords[j, 0]
++            vj = values[j]
++            Jj_v = wp.vec3f(vj[0], vj[1], vj[2])
++            Jj_w = wp.vec3f(vj[3], vj[4], vj[5])
++            value = inv_m[b] * wp.dot(Ji_v, Jj_v) + wp.dot(Ji_w, inv_I[b] @ Jj_w)
++            wp.atomic_add(D, mio[w] + dim[w] * ri + rj, value)
++            if ri != rj:
++                wp.atomic_add(D, mio[w] + dim[w] * rj + ri, value)
++
++
++class _BodyGroupedDelassus:
++    """Device-only bucket workspace, rebuilt for changing active constraints."""
++
++    def __init__(self, jacobian, num_bodies, device):
++        self.jacobian = jacobian
++        self.device = device
++        self.worlds = jacobian.num_nzb.shape[0]
++        self.counts = wp.zeros(num_bodies, dtype=int, device=device)
++        self.starts = wp.empty_like(self.counts)
++        self.cursor = wp.empty_like(self.counts)
++        self.grouped = wp.empty(jacobian.nzb_values.shape[0], dtype=int, device=device)
++
++    def assemble(self, bio, inv_mass, inv_inertia, dim, mio, matrix):
++        jac = self.jacobian
++        self.counts.zero_()
++        wp.launch(
++            _body_count_bodies,
++            dim=(self.worlds, jac.max_of_num_nzb),
++            inputs=[jac.num_nzb, jac.nzb_start, jac.nzb_coords, bio, self.counts],
++            device=self.device,
++        )
++        wp.launch(
++            _body_prefix_bodies,
++            dim=self.worlds,
++            inputs=[bio, self.counts, self.starts, self.cursor, jac.nzb_start],
++            device=self.device,
++        )
++        wp.launch(
++            _body_scatter_blocks,
++            dim=(self.worlds, jac.max_of_num_nzb),
++            inputs=[jac.num_nzb, jac.nzb_start, jac.nzb_coords, bio, self.starts, self.cursor, self.grouped],
++            device=self.device,
++        )
++        wp.launch(
++            _body_assemble_by_body,
++            dim=(self.worlds, jac.max_of_num_nzb, 32),
++            inputs=[
++                bio,
++                inv_mass,
++                inv_inertia,
++                jac.num_nzb,
++                jac.nzb_start,
++                jac.nzb_coords,
++                jac.nzb_values,
++                dim,
++                mio,
++                self.counts,
++                self.starts,
++                self.grouped,
++                matrix,
++            ],
++            device=self.device,
++        )
++
++
+ class DelassusOperator:
+     """
+     A container to represent the Delassus matrix operator.
+@@ -859,6 +1002,7 @@
+ 
+         # Declare the optional Cholesky factorization
+         self._solver: LinearSolverType | None = None
++        self._body_grouped: _BodyGroupedDelassus | None = None
+ 
+         # Allocate the Delassus operator data if at least the model is provided
+         if model is not None:
+@@ -973,6 +1117,8 @@
+ 
+         # Capture reference to the model size
+         self._size = model.size
++        # Finalization invalidates topology and capacity dependent workspaces.
++        self._body_grouped = None
+ 
+         # Extract required maximum number of constraints for each world
+         maxdims = get_max_constraints_per_world(model, limits, contacts)
+@@ -1092,27 +1238,17 @@
+             )
+         else:
+             jacobian_cts = jacobians._J_cts.bsm
+-            upper_tri_size = jacobian_cts.max_of_num_nzb * (jacobian_cts.max_of_num_nzb + 1) // 2
+-            warp_size = 32
+-            upper_tri_size = ((upper_tri_size + warp_size - 1) // warp_size) * warp_size
+-            wp.launch(
+-                kernel=_build_delassus_elementwise_sparse,
+-                dim=(self._size.num_worlds, upper_tri_size),
+-                inputs=[
+-                    # Inputs:
+-                    model.info.bodies_offset,
+-                    model.bodies.inv_m_i,
+-                    data.bodies.inv_I_i,
+-                    jacobian_cts.num_nzb,
+-                    jacobian_cts.nzb_start,
+-                    jacobian_cts.nzb_coords,
+-                    jacobian_cts.nzb_values,
+-                    self._operator.info.dim,
+-                    self._operator.info.mio,
+-                    # Outputs:
+-                    self._operator.mat,
+-                ],
+-                device=self._device,
++            if self._body_grouped is None or self._body_grouped.jacobian is not jacobian_cts:
++                self._body_grouped = _BodyGroupedDelassus(
++                    jacobian_cts, model.bodies.inv_m_i.shape[0], self._device
++                )
++            self._body_grouped.assemble(
++                model.info.bodies_offset,
++                model.bodies.inv_m_i,
++                data.bodies.inv_I_i,
++                self._operator.info.dim,
++                self._operator.info.mio,
++                self._operator.mat,
+             )
+ 
+         # Add armature regularization to the upper diagonal if dynamic joint constraints are present

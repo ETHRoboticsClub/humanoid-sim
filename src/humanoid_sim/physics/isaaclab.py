@@ -303,11 +303,37 @@ def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None):
                 max_alternating_iterations=settings["iterations"], **settings.get("dvi", {})))
         if method != "padmm":
             raise ValueError(f"Kamino dynamics solver {method!r}: padmm or dvi")
-        return KaminoPADMMSolverCfg(**common, dynamics_solver_cfg=KaminoPADMMCfg(
+        dynamics_type = KaminoDynamicsCfg
+        execution = {name: settings[name] for name in ("matrix_preconditioner_stride", "tracked_active_clear")
+                     if name in settings}
+        if execution:
+            from isaaclab.utils import configclass
+
+            @configclass
+            class KaminoExecutionDynamicsCfg(KaminoDynamicsCfg):
+                matrix_preconditioner_stride: int = 0
+                tracked_active_clear: bool = False
+
+            dynamics_type = KaminoExecutionDynamicsCfg
+        padmm_type = KaminoPADMMCfg
+        if {"algorithm", "reduced_capacity", "reduced_ordering", "reduced_dynamic_pattern", "reduced_sparse_diagnostics", "reduced_lazy_preconditioning"}.intersection(settings.get("padmm", {})):
+            from isaaclab.utils import configclass
+
+            @configclass
+            class KaminoAlgorithmPADMMCfg(KaminoPADMMCfg):
+                algorithm: str = "full"
+                reduced_capacity: int = 96
+                reduced_ordering: str = "natural"
+                reduced_dynamic_pattern: bool = False
+                reduced_sparse_diagnostics: bool = False
+                reduced_lazy_preconditioning: bool = False
+
+            padmm_type = KaminoAlgorithmPADMMCfg
+        return KaminoPADMMSolverCfg(**common, dynamics_solver_cfg=padmm_type(
             max_iterations=settings["iterations"],
             use_graph_conditionals=settings.get("use_graph_conditionals", False), **settings.get("padmm", {})),
-            dynamics=KaminoDynamicsCfg(linear_solver_type=settings.get("linear_solver", "LLTB"),
-                                      linear_solver_kwargs=dict(settings.get("linear_solver_kwargs", {}))))
+            dynamics=dynamics_type(linear_solver_type=settings.get("linear_solver", "LLTB"),
+                                   linear_solver_kwargs=dict(settings.get("linear_solver_kwargs", {})), **execution))
     raise ValueError(f"physics solver {solver!r}: one of {', '.join(SOLVERS)}")
 
 

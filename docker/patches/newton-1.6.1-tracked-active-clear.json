@@ -1,0 +1,14 @@
+{
+  "_src/solvers/kamino/config.py": {
+    "before": "c5cfe76c1f60671bee0366ec6bdb56e881c698d4f9d054062f65706fea2f75e5",
+    "after": "87d2c7d8b82d2795d85152b3ea9531d2f0dcf4e6f731ce3cbe107a27e0c3e154"
+  },
+  "_src/solvers/kamino/_src/dynamics/dual.py": {
+    "before": "8b5be3832e6f35a754cf2a6d09ecfdbbcc193e4158421f3a139620ae00e7b3e1",
+    "after": "d5f6316c7583e88e718e199ab6fc233571ffe6786b6466c6e3d8b4aca69578f9"
+  },
+  "_src/solvers/kamino/_src/dynamics/delassus.py": {
+    "before": "753f89374934d38a70c03ac4f4e79ee5b561e89c281a363ff0d537b068dee675",
+    "after": "c4760a0be5fede374df0e5dea15ecfbdcf38e770662d90eee803f93d8ba2e023"
+  }
+}

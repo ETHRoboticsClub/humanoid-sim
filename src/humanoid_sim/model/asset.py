@@ -16,6 +16,7 @@ profile change rebuilds. Runs in the Isaac Lab image (Linux); imports are lazy.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -28,9 +29,11 @@ from humanoid_sim.model.urdf import BASE_JOINTS, PreparedUrdf
 ASSET_SCHEMA = "humanoid-sim-asset/v1"
 
 
-def load_profile(robot: str, root: Path | None = None) -> dict:
+def load_profile(robot: str, root: Path | None = None, *, physics_overrides: dict | None = None) -> dict:
     """The robot's profile: ``profiles/defaults.yaml`` with ``profiles/<robot>.yaml`` merged over it (mappings merge
-    key by key, anything else is replaced). A robot without a profile file runs on the defaults."""
+    key by key, anything else is replaced). A robot without a profile file runs on the defaults.
+    Explicit ``physics_overrides`` merge last, without changing files or the caller's mapping.
+    Pass the same overrides to model construction, simulation and the training plant."""
     root = root or Path(__file__).resolve().parents[3] / "profiles"
     profile = yaml.safe_load((root / "defaults.yaml").read_text())
     path = root / f"{robot}.yaml"
@@ -40,6 +43,8 @@ def load_profile(robot: str, root: Path | None = None) -> dict:
             raise ValueError(f"profile robot {own.get('robot')!r} != {robot!r}")
         profile = _merged(profile, own)
     profile["robot"] = robot
+    if physics_overrides is not None:
+        profile["physics"] = _merged(profile["physics"], copy.deepcopy(physics_overrides))
     return profile
 
 

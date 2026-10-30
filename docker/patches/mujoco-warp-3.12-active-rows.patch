@@ -1,0 +1,369 @@
+--- a/_src/solver.py
++++ b/_src/solver.py
+@@ -1699,6 +1699,121 @@
+ def _update_constraint_efc(track_changes: bool):
+   TRACK_CHANGES = track_changes
+ 
++  @wp.func
++  def evaluate_row(
++    worldid: int,
++    efcid: int,
++    # Model:
++    opt_impratio_invsqrt: wp.array[float],
++    # Data in:
++    ne_in: wp.array[int],
++    nf_in: wp.array[int],
++    nefc_in: wp.array[int],
++    contact_friction_in: wp.array[types.vec5],
++    contact_dim_in: wp.array[int],
++    contact_efc_address_in: wp.array2d[int],
++    efc_type_in: wp.array2d[int],
++    efc_id_in: wp.array2d[int],
++    efc_D_in: wp.array2d[float],
++    efc_frictionloss_in: wp.array2d[float],
++    nacon_in: wp.array[int],
++    # In:
++    ctx_Jaref_in: wp.array2d[float],
++    ctx_ls_exhausted_in: wp.array[bool],
++    ctx_done_in: wp.array[bool],
++    # Data out:
++    efc_force_out: wp.array2d[float],
++    efc_state_out: wp.array2d[int],
++    # Out:
++    quad_changed_ids_out: wp.array2d[int],
++    quad_changed_count_out: wp.array[int],
++    state_changed_count_out: wp.array[int],
++  ):
++
++    if ctx_done_in[worldid]:
++      return
++
++    if efcid >= nefc_in[worldid]:
++      return
++
++    # Read old state before overwriting
++    if wp.static(TRACK_CHANGES):
++      old_state = efc_state_out[worldid, efcid]
++
++    efc_D = efc_D_in[worldid, efcid]
++    Jaref = ctx_Jaref_in[worldid, efcid]
++
++    ne = ne_in[worldid]
++    nf = nf_in[worldid]
++
++    is_equality = efcid < ne
++    is_friction = (not is_equality) and (efcid < ne + nf)
++    is_elliptic = efc_type_in[worldid, efcid] == types.ConstraintType.CONTACT_ELLIPTIC
++
++    frictionloss = efc_frictionloss_in[worldid, efcid] if is_friction else 0.0
++
++    efcid0 = -1
++    jaref0 = float(0.0)
++    D0 = float(0.0)
++    mu = float(0.0)
++    ufrictionj = float(0.0)
++    TT = float(0.0)
++
++    if is_elliptic:
++      conid = efc_id_in[worldid, efcid]
++      if conid >= nacon_in[0]:
++        return
++      efcid0 = contact_efc_address_in[conid, 0]
++      if efcid0 < 0:
++        return
++
++      dim = contact_dim_in[conid]
++      friction = contact_friction_in[conid]
++      mu = friction[0] * opt_impratio_invsqrt[worldid % opt_impratio_invsqrt.shape[0]]
++      jaref0 = ctx_Jaref_in[worldid, efcid0]
++      D0 = efc_D_in[worldid, efcid0]
++
++      for j in range(1, dim):
++        efcidj = contact_efc_address_in[conid, j]
++        if efcidj < 0:
++          return
++        frictionj = friction[j - 1]
++        uj = ctx_Jaref_in[worldid, efcidj] * frictionj
++        TT += uj * uj
++        if efcid == efcidj:
++          ufrictionj = uj * frictionj
++
++    res = _eval_constraint(
++      is_equality,
++      is_friction,
++      is_elliptic,
++      Jaref,
++      efc_D,
++      frictionloss,
++      efcid,
++      efcid0,
++      jaref0,
++      D0,
++      mu,
++      ufrictionj,
++      TT,
++    )
++
++    new_state = int(res[1])
++    efc_force_out[worldid, efcid] = res[0]
++    efc_state_out[worldid, efcid] = new_state
++
++    if wp.static(TRACK_CHANGES):
++      old_quad = old_state == types.ConstraintState.QUADRATIC.value
++      new_quad = new_state == types.ConstraintState.QUADRATIC.value
++      if old_quad != new_quad:
++        idx = wp.atomic_add(quad_changed_count_out, worldid, 1)
++        quad_changed_ids_out[worldid, idx] = efcid
++      # LINEARNEG <-> LINEARPOS friction transitions change the force without
++      # changing the quadratic flag (or H); the fast path must still see them.
++      if old_state != new_state:
++        wp.atomic_add(state_changed_count_out, worldid, 1)
++
+   @wp.kernel(module="unique", enable_backward=False, grid_stride=False)
+   def kernel(
+     # Model:
+@@ -1727,97 +1842,37 @@
+     quad_changed_count_out: wp.array[int],
+     state_changed_count_out: wp.array[int],
+   ):
+-    worldid, efcid = wp.tid()
+-
++    worldid, lane = wp.tid()
+     if ctx_done_in[worldid]:
+       return
+-
+-    # The linesearch flags worlds whose accepted step was rounding noise (stale
+-    # ray exhausted); count it as a state change so the fast path rebuilds them.
++    # Preserve the stale-ray notification even when a world has no active rows.
+     if wp.static(TRACK_CHANGES):
+-      if efcid == 0 and ctx_ls_exhausted_in[worldid]:
++      if lane == 0 and ctx_ls_exhausted_in[worldid] and efc_D_in.shape[1] > 0:
+         wp.atomic_add(state_changed_count_out, worldid, 1)
+-
+-    if efcid >= nefc_in[worldid]:
+-      return
+-
+-    # Read old state before overwriting
+-    if wp.static(TRACK_CHANGES):
+-      old_state = efc_state_out[worldid, efcid]
+-
+-    efc_D = efc_D_in[worldid, efcid]
+-    Jaref = ctx_Jaref_in[worldid, efcid]
+-
+-    ne = ne_in[worldid]
+-    nf = nf_in[worldid]
+-
+-    is_equality = efcid < ne
+-    is_friction = (not is_equality) and (efcid < ne + nf)
+-    is_elliptic = efc_type_in[worldid, efcid] == types.ConstraintType.CONTACT_ELLIPTIC
+-
+-    frictionloss = efc_frictionloss_in[worldid, efcid] if is_friction else 0.0
+-
+-    efcid0 = -1
+-    jaref0 = float(0.0)
+-    D0 = float(0.0)
+-    mu = float(0.0)
+-    ufrictionj = float(0.0)
+-    TT = float(0.0)
+-
+-    if is_elliptic:
+-      conid = efc_id_in[worldid, efcid]
+-      if conid >= nacon_in[0]:
+-        return
+-      efcid0 = contact_efc_address_in[conid, 0]
+-      if efcid0 < 0:
+-        return
+-
+-      dim = contact_dim_in[conid]
+-      friction = contact_friction_in[conid]
+-      mu = friction[0] * opt_impratio_invsqrt[worldid % opt_impratio_invsqrt.shape[0]]
+-      jaref0 = ctx_Jaref_in[worldid, efcid0]
+-      D0 = efc_D_in[worldid, efcid0]
+-
+-      for j in range(1, dim):
+-        efcidj = contact_efc_address_in[conid, j]
+-        if efcidj < 0:
+-          return
+-        frictionj = friction[j - 1]
+-        uj = ctx_Jaref_in[worldid, efcidj] * frictionj
+-        TT += uj * uj
+-        if efcid == efcidj:
+-          ufrictionj = uj * frictionj
+-
+-    res = _eval_constraint(
+-      is_equality,
+-      is_friction,
+-      is_elliptic,
+-      Jaref,
+-      efc_D,
+-      frictionloss,
+-      efcid,
+-      efcid0,
+-      jaref0,
+-      D0,
+-      mu,
+-      ufrictionj,
+-      TT,
+-    )
+-
+-    new_state = int(res[1])
+-    efc_force_out[worldid, efcid] = res[0]
+-    efc_state_out[worldid, efcid] = new_state
+-
+-    if wp.static(TRACK_CHANGES):
+-      old_quad = old_state == types.ConstraintState.QUADRATIC.value
+-      new_quad = new_state == types.ConstraintState.QUADRATIC.value
+-      if old_quad != new_quad:
+-        idx = wp.atomic_add(quad_changed_count_out, worldid, 1)
+-        quad_changed_ids_out[worldid, idx] = efcid
+-      # LINEARNEG <-> LINEARPOS friction transitions change the force without
+-      # changing the quadratic flag (or H); the fast path must still see them.
+-      if old_state != new_state:
+-        wp.atomic_add(state_changed_count_out, worldid, 1)
++    for efcid in range(lane, wp.min(nefc_in[worldid], efc_D_in.shape[1]), 128):
++      evaluate_row(
++        worldid, efcid,
++        opt_impratio_invsqrt,
++        ne_in,
++        nf_in,
++        nefc_in,
++        contact_friction_in,
++        contact_dim_in,
++        contact_efc_address_in,
++        efc_type_in,
++        efc_id_in,
++        efc_D_in,
++        efc_frictionloss_in,
++        nacon_in,
++        ctx_Jaref_in,
++        ctx_ls_exhausted_in,
++        ctx_done_in,
++        efc_force_out,
++        efc_state_out,
++        quad_changed_ids_out,
++        quad_changed_count_out,
++        state_changed_count_out,
++      )
+ 
+   return kernel
+ 
+@@ -1846,7 +1901,51 @@
+ def _update_constraint_init_qfrc_constraint_sparse(compact: bool):
+   COMPACT = compact
+ 
+-  @wp.kernel(module="unique", enable_backward=False, grid_stride=True)
++  @wp.func
++  def evaluate_row(
++    worldid: int,
++    efcid: int,
++    # Data in:
++    nefc_in: wp.array[int],
++    efc_J_rownnz_in: wp.array2d[int],
++    efc_J_rowadr_in: wp.array2d[int],
++    efc_J_colind_in: wp.array3d[int],
++    efc_J_in: wp.array3d[float],
++    efc_force_in: wp.array2d[float],
++    dof_cdof_in: wp.array2d[int],
++    # In:
++    state_changed_count_in: wp.array[int],
++    ctx_done_in: wp.array[bool],
++    # Data out:
++    qfrc_constraint_out: wp.array2d[float],
++  ):
++
++    if ctx_done_in[worldid]:
++      return
++
++    if state_changed_count_in[worldid] == 0:
++      return
++
++    if efcid >= nefc_in[worldid]:
++      return
++
++    force = efc_force_in[worldid, efcid]
++    if force == 0.0:
++      return
++
++    rownnz = efc_J_rownnz_in[worldid, efcid]
++    rowadr = efc_J_rowadr_in[worldid, efcid]
++    for i in range(rownnz):
++      sparseid = rowadr + i
++      colind = efc_J_colind_in[worldid, 0, sparseid]
++      if wp.static(COMPACT):
++        colind = dof_cdof_in[worldid, colind]
++        if colind < 0:
++          continue
++      efc_J = efc_J_in[worldid, 0, sparseid]
++      wp.atomic_add(qfrc_constraint_out[worldid], colind, efc_J * force)
++
++  @wp.kernel(module="unique", enable_backward=False, grid_stride=False)
+   def kernel(
+     # Data in:
+     nefc_in: wp.array[int],
+@@ -1862,32 +1961,23 @@
+     # Data out:
+     qfrc_constraint_out: wp.array2d[float],
+   ):
+-    worldid, efcid = wp.tid()
+-
+-    if ctx_done_in[worldid]:
++    worldid, lane = wp.tid()
++    if ctx_done_in[worldid] or state_changed_count_in[worldid] == 0:
+       return
+-
+-    if state_changed_count_in[worldid] == 0:
+-      return
+-
+-    if efcid >= nefc_in[worldid]:
+-      return
+-
+-    force = efc_force_in[worldid, efcid]
+-    if force == 0.0:
+-      return
+-
+-    rownnz = efc_J_rownnz_in[worldid, efcid]
+-    rowadr = efc_J_rowadr_in[worldid, efcid]
+-    for i in range(rownnz):
+-      sparseid = rowadr + i
+-      colind = efc_J_colind_in[worldid, 0, sparseid]
+-      if wp.static(COMPACT):
+-        colind = dof_cdof_in[worldid, colind]
+-        if colind < 0:
+-          continue
+-      efc_J = efc_J_in[worldid, 0, sparseid]
+-      wp.atomic_add(qfrc_constraint_out[worldid], colind, efc_J * force)
++    for efcid in range(lane, wp.min(nefc_in[worldid], efc_force_in.shape[1]), 128):
++      evaluate_row(
++        worldid, efcid,
++        nefc_in,
++        efc_J_rownnz_in,
++        efc_J_rowadr_in,
++        efc_J_colind_in,
++        efc_J_in,
++        efc_force_in,
++        dof_cdof_in,
++        state_changed_count_in,
++        ctx_done_in,
++        qfrc_constraint_out,
++      )
+ 
+   return kernel
+ 
+@@ -2084,7 +2174,7 @@
+ 
+   wp.launch(
+     _update_constraint_efc(track_changes),
+-    dim=(d.nworld, d.njmax),
++    dim=(d.nworld, min(128, d.njmax)),
+     inputs=efc_inputs,
+     outputs=[d.efc.force, d.efc.state, ctx.quad_changed_ids, ctx.quad_changed_count, ctx.state_changed_count],
+   )
+@@ -2103,7 +2193,7 @@
+     )
+     wp.launch(
+       _update_constraint_init_qfrc_constraint_sparse(sc),
+-      dim=(d.nworld, d.njmax),
++      dim=(d.nworld, min(128, d.njmax)),
+       inputs=[d.nefc, dj.efc.J_rownnz, dj.efc.J_rowadr, dj.efc.J_colind, dj.efc.J, d.efc.force, dj.dof_cdof, changed, ctx.done],
+       outputs=[d.qfrc_constraint],
+     )

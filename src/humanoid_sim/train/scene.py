@@ -77,7 +77,8 @@ def initial_joint_positions(desc, pose: dict[str, float]) -> dict[str, float]:
 
 def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_spacing: float | None = None,
                     terrain=None, ground_friction: float | None = None, imu: bool = True, contacts: bool = True,
-                    self_collision: bool | None = None, pose: str = "home", scene: StaticBoxes | None = None):
+                    self_collision: bool | None = None, pose: str = "home", scene: StaticBoxes | None = None,
+                    physics_overrides: dict | None = None):
     """Scene config with the robot, its sensors and the ground (or ``terrain``, an Isaac Lab
     ``TerrainImporterCfg``), the robot on its feet in ``pose`` (see :data:`POSES`), and ``scene``'s static boxes.
     With robot friction randomized, pass ``ground_friction=0``: the solver takes the larger friction of the two
@@ -94,7 +95,7 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
     if scene is not None and env_spacing not in (None, 0.0):
         raise ValueError("a scene's robots start at its spawn point, the world origin: env_spacing 0")
     env_spacing = (0.0 if scene is not None else 2.5) if env_spacing is None else env_spacing
-    profile = load_profile(robot)
+    profile = load_profile(robot, physics_overrides=physics_overrides)
     q, height = initial_pose(usd, robot, pose)
     props = plant_joint_properties(robot)
     names = list(Description.load(robot).joints)
@@ -126,20 +127,21 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
     return cfg
 
 
-def robot_sim_cfg(robot: str = "ethrc_v1", *, device: str = "cuda:0", solver: str | None = None, visualizers=None):
+def robot_sim_cfg(robot: str = "ethrc_v1", *, device: str = "cuda:0", solver: str | None = None,
+                  physics_overrides: dict | None = None, visualizers=None):
     """``SimulationCfg`` with the profile's physics period and the settings of ``solver`` (the profile's if None)."""
     from humanoid_sim.physics.isaaclab import simulation_cfg
 
-    physics = load_profile(robot)["physics"]
+    physics = load_profile(robot, physics_overrides=physics_overrides)["physics"]
     return simulation_cfg(physics, device=device, period_s=int(physics["period_ns"]) / 1e9, solver=solver,
                           visualizers=visualizers)
 
 
-def robot_build(robot: str = "ethrc_v1", *, solver: str | None = None):
+def robot_build(robot: str = "ethrc_v1", *, solver: str | None = None, physics_overrides: dict | None = None):
     """Context to build the environment or scene in: the solver model gets the ankle cranks' stops when the profile
     asks for them, and optionally collapses fixed joints
     (:func:`~humanoid_sim.physics.model_build.model_build`). ``solver``: as for
     :func:`robot_sim_cfg`."""
     from humanoid_sim.physics.model_build import model_build
 
-    return model_build(robot, load_profile(robot)["physics"], solver)
+    return model_build(robot, load_profile(robot, physics_overrides=physics_overrides)["physics"], solver)

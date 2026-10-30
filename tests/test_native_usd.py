@@ -201,3 +201,22 @@ def test_native_host_publishes_feedback_before_the_first_step(desc, tmp_path):
             record[1]["drive"]["position_rad"][:len(host.drives)], expected[0].cpu().numpy())
     finally:
         host.close()
+
+
+def test_fixed_joint_collapse_keeps_the_world_anchor_body():
+    newton = pytest.importorskip("newton")
+    import warp as wp
+
+    from humanoid_sim.physics.model_build import collapse_fixed_joints
+
+    builder = newton.ModelBuilder()
+    root = builder.add_link(mass=2.0, inertia=wp.mat33(1.0), label="anchored_root")
+    child = builder.add_link(mass=1.0, inertia=wp.mat33(0.5), label="rigid_child")
+    anchor = builder.add_joint_fixed(-1, root, label="world_anchor")
+    rigid = builder.add_joint_fixed(root, child, label="rigid_assembly")
+    builder.add_articulation([anchor, rigid])
+    collapse_fixed_joints(builder)
+    assert builder.body_label == ["anchored_root"]
+    assert builder.joint_label == ["world_anchor"]
+    assert builder.joint_parent == [-1]
+    assert builder.body_mass == [3.0]

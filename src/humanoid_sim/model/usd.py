@@ -188,6 +188,9 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     from humanoid_sim.model.asset import ASSET_SCHEMA
     if profile["model"].get("collision_hulls") != "per_mesh":
         raise ValueError("native USD collision_hulls must be per_mesh")
+    prune = profile["model"].get("prune_contained_hulls", False)
+    if not isinstance(prune, bool):
+        raise ValueError("prune_contained_hulls must be a boolean")
     key = asset_key(desc, profile, base_joints=base_joints)
     out = Path(out_root) / desc.robot / key
     meta_path = out / "asset.json"
@@ -278,6 +281,11 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
         cube.AddScaleOp().Set(Gf.Vec3f(*sole["half_extents"]))
         UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
         cube.CreatePurposeAttr("guide")
+    pruned = []
+    if prune:
+        from humanoid_sim.model.collision_pruning import prune_stage
+
+        pruned = prune_stage(stage)
     if base_joints:
         _add_base_joints(stage)
     from humanoid_sim.model.urdf import BASE_JOINTS
@@ -290,6 +298,7 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
             "base_joints": [name for name, _ in BASE_JOINTS] if base_joints else [],
             "loop_closures": closures, "crank_joints": crank_joints(desc),
             "welded_joints": welded, "sole_boxes": soles, "merged_collision_bodies": [],
+            "pruned_collision_hulls": pruned,
             "contact_excludes": contact_excludes, "self_collision_sets": None, "self_collision_excludes": excluded}
     meta_path.write_text(json.dumps(meta, indent=1))
     return path
