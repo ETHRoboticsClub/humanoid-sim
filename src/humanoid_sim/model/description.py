@@ -248,6 +248,10 @@ class Description:
         for device, d in self.table.get("drives", {}).items():
             d = self.actuator_values(d)
             k, dmp = gain(device, d)
+            # Native USD cranks are USD shaft joints, read through the device frame; elsewhere the frames coincide.
+            missing = [key for key in ("shaft_sign", "shaft_zero_rad") if key not in d]
+            if self.usd_path is not None and missing:
+                raise ValueError(f"native crank {device} lacks {', '.join(missing)} in actuators.yaml")
             out[device] = Drive(
                 name=device, family=d["family"], joints=tuple(d["joints"]), sign=int(d.get("shaft_sign", 1)),
                 crank=d["crank"], shaft_zero_rad=float(d.get("shaft_zero_rad", 0.0)),
