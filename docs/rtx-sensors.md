@@ -139,6 +139,19 @@ A Lambertian panel of area `A` and luminance `L` puts out `pi L A`; a grid with 
 
 ## On a running runtime: `render-runtime`
 
+Mixed camera/LiDAR rigs use two independent Kit workers. Both read the same live plant
+segment and its clock; neither advances physics. The camera worker loads the Gaussian
+scene and writes camera feeds. The LiDAR worker loads the scan geometry without the
+Gaussian primitives and owns the LiDAR publisher. Camera-only and LiDAR-only rigs
+keep one worker. `--combined` explicitly selects the former shared-render loop for
+comparisons. Two workers need additional GPU memory; this does not guarantee nominal
+rates. Inspect acquisition age and each worker's measured cadence.
+
+SIGINT/SIGTERM stops both workers. A failed worker stops its sibling and makes the
+command fail. `--summary` contains separate worker summaries and exit codes; image
+exports belong to the camera worker and a LiDAR Rerun recording uses `.lidar.rrd`.
+
+
 `humanoid-sim render-runtime <segment>` renders a running `serve`'s robot with the same sensors and outputs (`src/humanoid_sim/runtime/render.py`). It never steps physics and never writes to the segment: each render it takes the latest truth (base pose and joint positions), poses the robot there by forward kinematics (`SensorSession.pose`) and renders at that plant time (`SensorSession.render_at`). It renders as fast as Kit allows, at most once per camera period (the lidar's sweep period without cameras), and a render that falls behind skips to the latest truth; the host keeps real time on its own. Stamps map plant time onto the realtime clock through the host's own mapping (the feedback region's `written_mono_ns` at `sim_time_ns`). The scene is the host's: its boxes and scan from the descriptor when the files are readable here with the same digests, plus `--splat` for the cameras and `--lights` ([Lights](#lights)). It follows a `--persist` host's next session.
 
 ```bash
