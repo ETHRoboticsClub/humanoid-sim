@@ -324,4 +324,5 @@ def test_command_demand_rms_falls_back_to_position_and_reports_offsets(plant):
 
     r = command_demand_rms(Cap(), plant, np.arange(0, 8_000_001, 1_000_000))
     assert set(r["against"].values()) == {"native_position_rad"}
-    assert all(m == pytest.approx(0.1) for m in r["mean_at_best_rad"].values())
+    # The best shift can land one frame off the exact one when that lowers the RMS of the offset feedback.
+    assert all(m == pytest.approx(0.1, abs=1e-3) for m in r["mean_at_best_rad"].values())

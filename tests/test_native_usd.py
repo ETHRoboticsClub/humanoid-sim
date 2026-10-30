@@ -113,7 +113,9 @@ def test_physical_crank_feedback_does_not_reconstruct_from_hinges(desc):
         for role, drive in zip(("upper", "lower"), spec["motor_names"], strict=True):
             q[:, names.index(spec["usd_joints"][role])] = .123
             i = core.map.drive_names.index(drive)
-            assert torch.all(core.feedback(q, q * 0).position_rad[:, i] == .123)
+            d = desc.drives[drive]
+            expected = torch.tensor(d.sign * (.123 - d.shaft_zero_rad), dtype=q.dtype)
+            torch.testing.assert_close(core.feedback(q, q * 0).position_rad[:, i], expected.expand(2))
     props = joint_properties(core, names)
     for lk in desc.linkages:
         assert all(props.stiffness[names.index(n)] == props.armature[names.index(n)] == 0 for n in lk.joints)
@@ -147,7 +149,7 @@ def test_native_asset_preserves_closures_and_authors_shaft_limits(desc, tmp_path
             p = next(p for p in stage.Traverse() if p.GetName() == name)
             joint = UsdPhysics.RevoluteJoint(p)
             assert np.radians([joint.GetLowerLimitAttr().Get(), joint.GetUpperLimitAttr().Get()]) == pytest.approx(
-                desc.drives[drive].position_limit_device)
+                desc.drives[drive].shaft_limits, abs=1e-6)
     assert source.digest() == source_hash
 
 

@@ -25,9 +25,11 @@ def test_transmission_matches_usd_geometry_over_reachable_workspace(side):
     poses = torch.cartesian_prod(*axes)
     poses = poses[torch.from_numpy(model.feasible(poses.numpy(), side))]
     assert len(poses) > 0
-    reference, reach = desc.ankle_model_module()._motor_angles_numpy(poses.numpy(), model.geometries[side])
+    reference, reach = model.cranks(poses.numpy(), side)
     assert (reach < 1).all()
     torch.testing.assert_close(transmission.cranks(poses), torch.from_numpy(reference), atol=1e-12, rtol=0)
+    shafts, _ = desc.ankle_model_module()._motor_angles_numpy(poses.numpy(), model.geometries[side])
+    torch.testing.assert_close(transmission.shafts(poses), torch.from_numpy(shafts), atol=1e-12, rtol=0)
     directions = torch.eye(2, dtype=torch.float64)
     derivative = torch.stack([(transmission.cranks(poses + 1e-6 * direction)
                                - transmission.cranks(poses - 1e-6 * direction)) / 2e-6

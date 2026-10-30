@@ -26,7 +26,7 @@ class WholeTreeState(NativeState):
         values, balls = self.coordinates(q)
         rates = {name: qd[:, i] for i, name in enumerate(self.names)}
         for cols, names, transmission in self.ankles:
-            velocity = (transmission.jacobian(q[:, cols]) @ qd[:, cols, None]).squeeze(-1)
+            velocity = torch.func.jvp(transmission.shafts, (q[:, cols],), (qd[:, cols],))[1]
             rates.update({name: velocity[:, i] for i, name in enumerate(names)})
         _, derivatives = torch.func.jvp(lambda pose: self.coordinates(pose)[1], (q,), (qd,))
         for name, quat in balls.items():
