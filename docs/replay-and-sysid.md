@@ -46,7 +46,101 @@ Each drive is fed its own position demand, object 0x6062 of the drive's CiA 402 
 
 ### What the replay ignores
 
-The ordinary PDO-demand replay does not use `commands.csv` or `acks.csv`; learning reads those streams to resolve inputs for command replay. Neither path uses `joints.csv` or `drives.csv`. From `pdo_feedback.csv`, `current_a`, `current_demand_a` and `motor_position_rad` are loaded but not used, and `status_word` and the publish and receipt stamps are not read. With acceleration off, IMU specific force is unused. Opt-in acceleration loading is described below; it does not reconstruct base translation. The reader does not verify the manifest's digests, and nothing compares the capture's identity and calibration revisions with the robot description in `third_party/humanoid-urdf`.
+The ordinary PDO-demand replay does not use `commands.csv` or `acks.csv`; learning reads those streams to resolve inputs for command replay. Neither path uses `joints.csv` or `drives.csv`. From `pdo_feedback.csv`, current streams are used only by opt-in effort diagnostics below; `motor_position_rad` is loaded but unused, and `status_word` and the publish and receipt stamps are not read. With acceleration off, IMU specific force is unused. Opt-in acceleration loading is described below; it does not reconstruct base translation. Identified captures are checked against the description's identity, or an explicit coordinate artifact, as described below. The reader does not verify the manifest's file digests; callers must verify archive/member integrity separately.
+
+### Recorded-current diagnostics
+
+Add `--effort-comparison raw` to `humanoid-sim replay` to retain actual and
+requested current, original per-drive timestamps and sampled coverage. Missing
+current fields remain NaN; a requested comparison requires finite actual current
+on selected drives. `--effort-comparison current --effort-calibration <file>` also
+compares a fixed current-derived output-equivalent torque estimate with simulated
+applied drive-output torque. These diagnostics never drive the actuator or alter
+position-only fitting. There is no electrical current-loop model or new runtime
+feedback sensor. Demand current is recorded separately but not compared with
+pre-limit sim demand: physical drive current limiting is not validated.
+
+`replay/effort.py` owns preparation and conversion. The recorded signals are the
+Controls publisher's `getActualJointCurrent`/`getDemandedJointCurrent` outputs
+(`standalone.cpp` @ `9930f8e2`, maxon SDK `Reading.cpp` @ `e0753006`), converted
+from mA to A. They are not the SDK's different `getActualCurrent` signal. Native
+drive coordinates apply, including ankle cranks. The fake drive's ideal
+`kt * gearing * current` mapping does not validate real gearbox losses or a
+delivered-torque measurement. No production V1 conversion is bundled.
+
+Calibration JSON requires this schema (placeholder values must be replaced by
+sourced/calibrated facts, never fitted to improve held-out error):
+
+```json
+{
+  "schema": "ethrc-effort-calibration/v1",
+  "description_digest": "<matching description digest>",
+  "current_signal": "current_a",
+  "torque_reference": "drive-output-equivalent",
+  "status": "modeled",
+  "source": "<hardware configuration/calibration identity>",
+  "assumptions": "<gearing, sign, current convention and loss assumptions>",
+  "drives": {
+    "<drive name>": {"gain_nm_per_a": 1.0, "zero_a": 0.0}
+  }
+}
+```
+
+The example gain/zero are illustrative, not robot values. Every selected drive
+requires a finite nonzero gain and finite zero. `tau = gain * (current - zero)`;
+gain includes sign and any justified output conversion. Supported statuses are
+`modeled`, `measured` and `synthetic`; all current-derived results remain labeled
+as estimates, not verified delivered torque. Description mismatch is refused.
+
+Telemetry is sampled linearly at post-step feedback times, preserving exact
+samples and rejecting interpolation across NaNs or gaps beyond
+`--effort-max-gap-ms` (default 50 ms). No extrapolation, filtering, bias fitting or
+telemetry shift is applied. Missing current never changes the position interval.
+After the existing one-second score warmup, zero valid actual samples fail;
+`--effort-min-valid-fraction` optionally requires a fraction in [0, 1] (default 0).
+Coverage reports valid counts/fractions, supported duration and longest valid
+sample gap. Partial coverage is visible and must be considered in comparisons.
+
+Fresh `effort-raw`/`effort-current` subdirectories contain namespaced `effort_*`
+trace arrays and `effort_comparison` metadata/metrics in the summary. Calibration
+and input hashes, source identity, frames, timing, gap policy and coverage are
+recorded. RMS/signed errors compare actual-current-derived torque with sim
+applied torque; an inverse mapping is explicitly `model_equivalent_current_a`.
+Existing `view-replay` adds current, modeled torque and effort-residual tabs.
+The recorded drive torque estimate also comes from current; it is not independent
+evidence for a second loss term. Validate conversion, timing and losses on real
+recordings before interpreting these diagnostics physically.
+
+### Fixed solver references for recorded gains
+
+Replay always applies recorded hardware P/D gains. By default, numerical solver
+references still come from the description's nominal gains. Replay now refuses
+recorded gains outside the documented twice-reference region before stepping,
+rather than leaving the plant's gain warning hidden in the replay summary.
+
+For captures whose gains exceed that region, explicitly select
+`--solver-gain-reference capture`. `replay/gains.py::capture_solver_reference`
+builds one fixed per-drive P/D envelope from the selected captures. The envelope
+is their per-drive maximum (for one capture, its recorded gains), identified by
+capture IDs and a gain fingerprint. It is not a fitted actuator parameter.
+
+`SimCore(..., solver_gains=SolverGainReference(...))` supplies those numerical
+references at construction. `PlantCore` maps them once into joint-space `k0/d0`
+using the existing transmission map; the articulation is constructed with the
+same references. Hardware demands, nominal `drive_stiffness/drive_damping`,
+effort limits, friction, robot facts, training defaults and timestep are unchanged.
+No solver gains are rewritten while stepping. A different envelope requires a
+new context. Arbitrary mutation of `k0/d0` after construction is unsupported.
+
+Explicit-reference replay requires its envelope to dominate realized hardware
+P/D, including drive gain scales. It also records the largest eigenvalue of the
+full local ankle `Jᵀ K J`/`Jᵀ D J`, normalized by the fixed diagonal solver
+references. A ratio above 2 (apart from floating-point roundoff), nonfinite ratio
+or drive gain warning rejects the replay. This local check includes cross-axis
+coupling; it does not prove nonlinear stability or reproduce unmodeled firmware.
+The reference envelope, recorded gains, fixed solver gains and observed ratio
+are saved under `solver_gain_support` in replay summaries. A contact-enabled
+replay without acceleration additionally reports its maximum net contact force.
 
 ### Equivalent translational loading
 
@@ -223,3 +317,36 @@ import is needed. Runtime ABI, drive law and solver defaults are unchanged.
 
 `sky/replay.sky.yaml` remains a simulator fidelity benchmark. Fitting jobs moved
 to learning's `sky/sysid.sky.yaml` and `sky/pace.sky.yaml`.
+
+### Captures from a different joint-zero convention
+
+Identified excitation captures must match the description's robot, unit, model and
+calibration identity. A different model/calibration requires an explicit
+`--capture-coordinates path.json` artifact; no conversion is inferred from motion.
+The artifact uses schema `humanoid-sim-capture-coordinates/v1` and records:
+
+- `source_identity`: `robot_id`, `unit_uuid`, `model_revision`, `calibration_revision`;
+- `target_description_digest`: the exact loaded description digest;
+- `drive_offsets_rad`: every drive, with `model_position = capture_position + offset`;
+- `command_offsets_rad`: every joint, with
+  `model_standing_target = capture_standing_target + offset`;
+- `provenance`: the source revisions, calibration/zero-conversion facts and hashes.
+
+These must be sourced constants, not fitted encoder biases. A position translation
+does not change velocities, torque, current, gains or timestamps. Crank drive offsets
+must be zero: the current ankle transmission already owns its linkage neutral;
+standing ankle commands still require their sourced command-frame translation.
+Actual geometry changes are not repaired by a zero translation.
+
+`CaptureCoordinates.load(path, desc)` checks the target digest and complete finite
+inventories. `ExcitationCapture(path, coordinates=artifact)` checks source identity
+and normalizes both PDO position/demand and command/APPLIED streams before replay.
+`capture.capture_pdo()` exposes the unchanged capture-frame PDO stream. Source files
+are never rewritten. The plant and its fitted encoder offsets are unchanged; the
+latter compose after this fixed coordinate translation.
+
+Replay trace positions, demands and residuals are in the current description's
+native drive frame. `real_capture_position` retains the original recorded position
+when translated. `summary.json` records the complete artifact and its digest under
+`capture_coordinates`. A saved trace is already normalized and must not be shifted
+again by a viewer. Torque/current comparisons keep their existing conventions.

@@ -56,32 +56,56 @@ def cmd_build_asset(args) -> int:
 def cmd_replay(args) -> int:
     import numpy as np
 
+    from humanoid_sim.core import PlantCore
+    from humanoid_sim.model.description import Description
+    from humanoid_sim.replay.coordinates import CaptureCoordinates, validate_capture_coordinates
+    from humanoid_sim.replay.effort import effort_config, prepare_effort
     from humanoid_sim.replay.exc import ExcitationCapture
+    from humanoid_sim.replay.gains import capture_solver_reference, gain_support
     from humanoid_sim.replay.inertial import acceleration_config
     from humanoid_sim.replay.replay import replay
     from humanoid_sim.sim import SimCore
 
     cfg = acceleration_config(args)
-    cap = ExcitationCapture(Path(args.capture))
+    effort_cfg = effort_config(args)
+    desc = Description.load(args.robot)
+    coordinate_path = getattr(args, "capture_coordinates", None)
+    coordinates = CaptureCoordinates.load(coordinate_path, desc) if coordinate_path else None
+    cap = ExcitationCapture(Path(args.capture), coordinates=coordinates)
+    validate_capture_coordinates(cap, desc)
+    solver_reference = capture_solver_reference([cap], desc) if args.solver_gain_reference == "capture" else None
+    gain_support(cap, PlantCore(desc, list(desc.joints), 1, solver_gains=solver_reference))
+    effort = None
+    if effort_cfg is not None:
+        effort = prepare_effort(cap, desc, list(desc.drives), effort_cfg)
     period_ns = int(round(args.period_ms * 1e6))
     moving = args.base != "fixed"
     sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, period_ns=period_ns,
-                  fixed_base=not moving, base_joints=moving, contacts=cfg is not None, solver=args.solver, integrator=args.integrator)
+                  fixed_base=not moving, base_joints=moving, contacts=cfg is not None, solver=args.solver, integrator=args.integrator,
+                  solver_gains=solver_reference)
     t = time.time()
     res = replay(cap, sim, duration_s=args.duration, base_motion=args.base if moving else None,
-                 demand_delay_ns=int(round(args.demand_delay_ms * 1e6)), base_acceleration=cfg)
+                 demand_delay_ns=int(round(args.demand_delay_ms * 1e6)), base_acceleration=cfg, effort=effort)
     wall = time.time() - t
     integrator = sim.integrator
     delay = f"_demand{args.demand_delay_ms:+g}ms" if args.demand_delay_ms else ""
     out = Path(args.out) / f"{cap.dataset_id}_{sim.solver}_{integrator}_{period_ns // 1000}us_base-{args.base}{delay}"
     if cfg is not None:
         out = out / f"accel-imu-w{cfg.window_ns}-g{cfg.max_gap_ns}"
+    if effort_cfg is not None:
+        out = out / f"effort-{effort_cfg.mode}"
+    if coordinates is not None:
+        out = out / f"coordinates-{coordinates.sha256[:12]}"
+    if solver_reference is not None:
+        out = out / "solver-capture"
+    if cfg is not None or effort_cfg is not None or solver_reference is not None or coordinates is not None:
         if out.exists():
-            raise ValueError(f"acceleration output already exists: {out}")
+            raise ValueError(f"replay output already exists: {out}")
     out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out / "trace.npz", t_ns=res.t_ns, demand=res.demand,
                         **{f"sim_{k}": v for k, v in res.sim.items()}, **{f"real_{k}": v for k, v in res.real.items()},
-                        **{f"motion_{k}": v for k, v in res.motion.items()})
+                        **{f"motion_{k}": v for k, v in res.motion.items()},
+                        **{f"effort_{k}": v for k, v in res.effort.items()})
     summary = {"dataset_id": cap.dataset_id, "name": cap.name, "period_ns": period_ns,
                "physics": f"isaaclab/{sim.solver}", "device": args.device, "integrator": integrator, "base": args.base,
                "wall_s": wall,
@@ -252,6 +276,11 @@ def main(argv: list[str] | None = None) -> int:
     from humanoid_sim.replay.inertial import add_acceleration_args
 
     add_acceleration_args(r)
+    from humanoid_sim.replay.effort import add_effort_args
+
+    add_effort_args(r)
+    r.add_argument("--solver-gain-reference", choices=("nominal", "capture"), default="nominal")
+    r.add_argument("--capture-coordinates", default=None, help="explicit sourced capture-to-description coordinate artifact")
     r.set_defaults(func=cmd_replay)
 
     v = sub.add_parser("view-replay", help="Rerun recording of a replay: sim and real robot, all drive signals")

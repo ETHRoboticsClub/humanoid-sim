@@ -6,13 +6,17 @@ Streams used for drive-level replay (``pdo_feedback.csv``, ~200 Hz per drive):
   interpolation, in the drive's native frame (cranks: crank angle). This is what the sim's drive bank
   is fed during replay.
 * ``native_position_rad``, ``velocity_rad_s``, ``torque_nm``, ``current_a``, ``current_demand_a``: what the
-  drive measured. The replay is scored against position, velocity and torque; the currents are read but unused.
+  drive measured. Optional effort diagnostics preserve currents and compare an explicitly
+  calibrated output-equivalent torque estimate. Position-only fitting is unchanged.
 
 ``imu.csv`` is Controls' ``/rt/imu``: the IMU relay's output, already rotated into the ``base_link`` frame
 (orientation from the Madgwick filter, angular velocity, specific force), stamped on host receipt.
 
 Times are ``t_source_ros_ns`` (ROS epoch, integer ns). ``t_recv_runtime_ns`` is a different clock and is
 never mixed in. ``gains.json`` holds the drive gains in force, in SI (the replay uses these) and as the drives' raw JVPT counts.
+
+With an explicit ``CaptureCoordinates`` artifact, replay-facing PDO positions and command targets are
+translated into the target description's frames. ``capture_pdo()`` retains the original native PDO fields.
 """
 
 from __future__ import annotations
@@ -83,7 +87,7 @@ class ImuTrace:
 
 
 class ExcitationCapture:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, coordinates=None):
         self.root = Path(root)
         self.manifest = json.loads((self.root / "manifest.json").read_text())
         if self.manifest.get("format") != FORMAT:
@@ -91,6 +95,10 @@ class ExcitationCapture:
         if not self.manifest.get("complete", False):
             raise ValueError(f"{self.root}: capture is not complete")
         self._pdo: dict[str, DriveTrace] | None = None
+        self.coordinates = coordinates
+        self._model_pdo: dict[str, DriveTrace] | None = None
+        if coordinates is not None:
+            coordinates.validate_source(self.manifest)
 
     @property
     def dataset_id(self) -> str:
@@ -112,6 +120,21 @@ class ExcitationCapture:
         return out
 
     def pdo(self) -> dict[str, DriveTrace]:
+        """Replay-frame feedback. With an explicit artifact, position fields use the target description."""
+        raw = self.capture_pdo()
+        if self.coordinates is None:
+            return raw
+        if self._model_pdo is None:
+            offsets = dict(self.coordinates.drive_offsets)
+            if set(raw) != set(offsets):
+                raise ValueError("capture coordinate feedback drive inventory mismatch")
+            self._model_pdo = {
+                name: DriveTrace(name, tr.t_ns, {
+                    key: value + offsets[name] if key in ("native_position_rad", "position_demand_rad") else value
+                    for key, value in tr.fields.items()}) for name, tr in raw.items()}
+        return self._model_pdo
+
+    def capture_pdo(self) -> dict[str, DriveTrace]:
         """Per-drive PDO feedback traces, sorted by source time, duplicates dropped."""
         if self._pdo is None:
             rows: dict[str, list[list[str]]] = {}
@@ -129,6 +152,9 @@ class ExcitationCapture:
                 keep = np.concatenate([[True], np.diff(t) > 0])
                 fields = {}
                 for name in PDO_FIELDS:
+                    if name in ("current_a", "current_demand_a") and name not in col:
+                        fields[name] = np.full(len(t[keep]), np.nan)
+                        continue
                     v = np.array([float(r[col[name]]) if r[col[name]] != "" else np.nan for r in rs])
                     fields[name] = v[order][keep]
                 traces[dev] = DriveTrace(dev, t[keep], fields)
@@ -160,12 +186,14 @@ class ExcitationCapture:
             col = {name: i for i, name in enumerate(next(reader))}
             for r in reader:
                 frames.setdefault(int(r[col["t_frame_ros_ns"]]), {})[r[col["joint_id"]]] = float(r[col["q_nominal_rad"]])
-        return CommandTrace.from_frames(list(frames.items()))
+        return self._command_coordinates(CommandTrace.from_frames(list(frames.items())))
 
     def applied_commands(self) -> CommandTrace | None:
         """The command frames stamped when the controller applied them (``acks.csv``: receiver ``controller``,
         state ``applied``, ``t_ack_ros_ns``), so a replay of them leaves out the software path before the
-        controller. Frames the controller never applied are left out. None without such acknowledgements."""
+        controller. Frames without a recorded ACK are left out; this does not prove
+        they never executed. None without such acknowledgements. Selection and
+        completeness checks belong to the caller."""
         path = self.root / "acks.csv"
         if not path.is_file():
             return None
@@ -186,7 +214,16 @@ class ExcitationCapture:
                 seq = int(r[col["seq"]])
                 if seq in applied:
                     frames.setdefault(applied[seq], {})[r[col["joint_id"]]] = float(r[col["q_nominal_rad"]])
-        return CommandTrace.from_frames(list(frames.items()))
+        return self._command_coordinates(CommandTrace.from_frames(list(frames.items())))
+
+    def _command_coordinates(self, commands):
+        if self.coordinates is None:
+            return commands
+        offsets = dict(self.coordinates.command_offsets)
+        if set(commands.joints) - set(offsets):
+            raise ValueError("capture coordinate command joint inventory mismatch")
+        return CommandTrace(commands.t_ns, commands.joints,
+                            commands.positions_rad + np.array([offsets[n] for n in commands.joints]))
 
     def time_span_ns(self) -> tuple[int, int]:
         """Interval covered by every drive's PDO trace."""

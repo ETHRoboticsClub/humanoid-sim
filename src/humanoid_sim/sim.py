@@ -33,6 +33,7 @@ import torch
 
 from humanoid_sim.core import PlantCfg, PlantCore
 from humanoid_sim.devices.feedback import DriveFeedback
+from humanoid_sim.devices.shaping import SolverGainReference
 from humanoid_sim.model.asset import check_asset_robot, load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.urdf import BASE_JOINTS
@@ -49,7 +50,7 @@ class SimCore:
                  contacts: bool = False, seed: int = 0, cuda_graph: bool = False, compile: bool = False,
                  imu_history: int | None = None, scene: StaticBoxes | None = None,
                  entities: dict | None = None, render_each_step: bool = True,
-                 queue_capacity: int | None = None):
+                 queue_capacity: int | None = None, solver_gains: SolverGainReference | None = None):
         check_asset_robot(usd_path, robot)
         self.desc = Description.load(robot)
         self.profile = load_profile(robot)
@@ -63,7 +64,8 @@ class SimCore:
         # Description joint order for the plant; the articulation's order is mapped through names.
         self.plant = PlantCore(self.desc, joints, num_envs,
                                PlantCfg(robot=robot, physics_period_ns=self.period_ns, device=device,
-                                        **({} if queue_capacity is None else {"queue_capacity": queue_capacity})))
+                                        **({} if queue_capacity is None else {"queue_capacity": queue_capacity})),
+                               solver_gains=solver_gains)
         props = joint_properties(self.plant, joints)
         period_s = self.period_ns / NS_PER_S
         self.backend = IsaacLabRobot(self.desc, usd_path, IsaacLabCfg(

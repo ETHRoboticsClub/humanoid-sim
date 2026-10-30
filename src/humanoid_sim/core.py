@@ -31,7 +31,7 @@ from humanoid_sim.devices.bank import DriveBank, DriveOutput
 from humanoid_sim.devices.demand import LAW_DISABLED, DriveDemand
 from humanoid_sim.devices.envelope import TorqueSpeedEnvelope
 from humanoid_sim.devices.feedback import DriveFeedback
-from humanoid_sim.devices.shaping import outside_stable_region, shaped_position_target
+from humanoid_sim.devices.shaping import SolverGainReference, outside_stable_region, shaped_position_target
 from humanoid_sim.model.description import Description
 from humanoid_sim.timing.clock import NS_PER_MS, check_period
 from humanoid_sim.transmissions.drive_map import DriveJointMap
@@ -51,7 +51,8 @@ class PlantCfg:
 
 
 class PlantCore:
-    def __init__(self, desc: Description, joint_names: list[str], num_envs: int, cfg: PlantCfg | None = None):
+    def __init__(self, desc: Description, joint_names: list[str], num_envs: int, cfg: PlantCfg | None = None,
+                 *, solver_gains: SolverGainReference | None = None):
         self.cfg = cfg = cfg or PlantCfg()
         check_period("physics_period_ns", cfg.physics_period_ns)
         self.desc, self.num_envs = desc, num_envs
@@ -64,9 +65,13 @@ class PlantCore:
                               device=dev, dtype=dt)
         self.drive_stiffness = torch.tensor([d.baseline_stiffness for d in drives], device=dev, dtype=dt)
         self.drive_damping = torch.tensor([d.baseline_damping for d in drives], device=dev, dtype=dt)
+        self.solver_gains = solver_gains
+        self.solver_drive_stiffness, self.solver_drive_damping = (
+            (self.drive_stiffness, self.drive_damping) if solver_gains is None
+            else solver_gains.tensors(self.map.drive_names, device=dev, dtype=dt))
         standing = torch.tensor([desc.joints[n].standing_offset_rad if n in desc.joints else 0.0
                                  for n in joint_names], device=dev, dtype=dt)
-        k0, d0 = self.map.joint_space_gains(self.drive_stiffness, self.drive_damping, standing)
+        k0, d0 = self.map.joint_space_gains(self.solver_drive_stiffness, self.solver_drive_damping, standing)
         # Constant per-episode solver gains [E, J], written at reset only.
         self.k0 = k0.expand(num_envs, -1).clone()
         self.d0 = d0.expand(num_envs, -1).clone()
@@ -75,6 +80,7 @@ class PlantCore:
         self.post_state: tuple | None = None
         self.last: DriveOutput | None = None
         self.gain_warnings = torch.zeros(num_envs, self.map.num_drives, device=dev, dtype=torch.bool)
+        self.ankle_reference_ratio_peak = torch.zeros(num_envs, device=dev, dtype=dt)
         # External torque on each joint [E, J] (a test's disturbance), on top of the drives' and outside their
         # feedback. Written in place.
         self.external_torque = torch.zeros(num_envs, len(joint_names), device=dev, dtype=dt)
@@ -88,15 +94,16 @@ class PlantCore:
     def reset(self, env_ids: torch.Tensor, demand: DriveDemand | None = None) -> None:
         self.bank.reset(env_ids, demand)
         self.gain_warnings.index_fill_(0, env_ids, False)
+        self.ankle_reference_ratio_peak.index_fill_(0, env_ids, 0.0)
         self.external_torque.index_fill_(0, env_ids, 0.0)
 
     def submit(self, demand: DriveDemand, arrival_ns: torch.Tensor, env_mask: torch.Tensor | None = None):
-        # The solver gains are the baseline drive gains, so shaping is stable up to twice those. The check uses
+        # The solver gains use the fixed numerical references. The check uses
         # the realized gains (randomized scales included) of the envs this demand reaches.
         bank = self.bank
         flagged = outside_stable_region(
             demand.stiffness_nm_per_rad * bank.p_scale, demand.damping_nm_s_per_rad * bank.d_scale,
-            self.drive_stiffness, self.drive_damping) & (demand.law != LAW_DISABLED)
+            self.solver_drive_stiffness, self.solver_drive_damping) & (demand.law != LAW_DISABLED)
         if env_mask is not None:
             flagged &= env_mask.unsqueeze(1)
         self.gain_warnings |= flagged
@@ -109,12 +116,35 @@ class PlantCore:
         """Joint position targets ``[E, J]`` for the step starting at ``t0_ns`` (velocity target 0). ``state``: the
         drive-frame state of ``q, qd`` if already computed (``DriveJointMap.drive_state``)."""
         qdrv, vdrv, self._jacs = state if state is not None else self.map.drive_state(q, qd)
+        if self.solver_gains is not None:
+            self._check_ankle_reference_ratios(self._jacs)
         out = self._keep("last", self.bank.compute(t0_ns, t0_ns + self.cfg.physics_period_ns, qdrv, vdrv))
         tau = self.map.joint_torque(out.applied, self._jacs) + self.external_torque + self._relief(qd, out)
         target = q.clone()
         a = self.actuated
         target[:, a] = shaped_position_target(q[:, a], qd[:, a], tau[:, a], self.k0[:, a], self.d0[:, a])
         return target
+
+    def _check_ankle_reference_ratios(self, jacs):
+        """Track full coupled local J^T K J relative to fixed diagonal solver PD.
+
+        This is a linearized support check, not a proof of nonlinear stability.
+        Captured-envelope replay requires hardware gains no larger than these
+        references. No host sync or backend property writes occur while stepping.
+        """
+        for (_, ds, js, _), jac in zip(self.map.ankles, jacs, strict=True):
+            for drive_ref, joint_ref in ((self.solver_drive_stiffness, self.k0),
+                                         (self.solver_drive_damping, self.d0)):
+                weights = drive_ref[ds]
+                diagonal = (jac.square() * weights[None, :, None]).sum(-2)
+                denom = joint_ref[:, js]
+                # Zero damping in every crank has a zero matrix and zero ratio.
+                safe = torch.where(denom > 0, denom, torch.ones_like(denom))
+                diagonal = torch.where(denom > 0, diagonal / safe,
+                                       torch.where(diagonal > 0, torch.full_like(diagonal, float("inf")), diagonal))
+                cross = (jac[:, :, 0] * jac[:, :, 1] * weights).sum(-1) / (safe[:, 0].sqrt() * safe[:, 1].sqrt())
+                peak = 0.5 * (diagonal.sum(-1) + torch.sqrt((diagonal[:, 0] - diagonal[:, 1]).square() + 4 * cross.square()))
+                self.ankle_reference_ratio_peak.copy_(torch.maximum(self.ankle_reference_ratio_peak, peak))
 
     def _relief(self, qd: torch.Tensor, out: DriveOutput) -> torch.Tensor:
         """Sliding-friction relief ``[E, J]`` at joint velocity ``qd``; none on joints whose 1:1 drive is off."""

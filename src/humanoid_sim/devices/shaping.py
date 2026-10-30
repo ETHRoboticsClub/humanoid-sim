@@ -14,7 +14,39 @@ Otherwise the solver applies ``force − k0 Δq − d0 Δq̇`` over the step, st
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
+
 import torch
+
+
+@dataclass(frozen=True)
+class SolverGainReference:
+    """Explicit fixed numerical references, separate from hardware PD demands.
+
+    Values are in native drive coordinates. The plant maps them to solver joint
+    coordinates once at construction. No controller or robot defaults are edited.
+    """
+
+    drives: tuple[str, ...]
+    stiffness: tuple[float, ...]
+    damping: tuple[float, ...]
+    source: str
+
+    def __post_init__(self):
+        if (not self.drives or len(set(self.drives)) != len(self.drives)
+                or len(self.stiffness) != len(self.drives) or len(self.damping) != len(self.drives)):
+            raise ValueError("solver references require unique drives and one P/D pair per drive")
+        if (any(not math.isfinite(x) or x <= 0 for x in self.stiffness)
+                or any(not math.isfinite(x) or x < 0 for x in self.damping) or not self.source):
+            raise ValueError("solver references require finite positive P, nonnegative D and provenance")
+
+    def tensors(self, drives, *, device, dtype):
+        if set(drives) != set(self.drives):
+            raise ValueError("solver reference drives must match the plant inventory")
+        ids = [self.drives.index(d) for d in drives]
+        return (torch.tensor([self.stiffness[i] for i in ids], device=device, dtype=dtype),
+                torch.tensor([self.damping[i] for i in ids], device=device, dtype=dtype))
 
 
 def shaped_position_target(q: torch.Tensor, qd: torch.Tensor, force: torch.Tensor, k0: torch.Tensor,

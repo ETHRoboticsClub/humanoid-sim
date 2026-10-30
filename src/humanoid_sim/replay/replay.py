@@ -25,6 +25,7 @@ import torch
 from humanoid_sim.core import PlantCore
 from humanoid_sim.devices.demand import DriveDemand
 from humanoid_sim.replay.base import BaseMotion
+from humanoid_sim.replay.coordinates import validate_capture_coordinates
 from humanoid_sim.replay.exc import ExcitationCapture, sample_linear
 from humanoid_sim.replay.inertial import AccelerationCfg, AccelerationSignal, prepare_capture_acceleration
 from humanoid_sim.sim import SimCore
@@ -33,7 +34,7 @@ from humanoid_sim.timing.clock import NS_PER_S
 
 @dataclass(frozen=True)
 class DriveCommands:
-    """Resolved drive-frame position targets [frames, drives], at int64 source-clock ns.
+    """Resolved current-description drive-frame targets [frames, drives], at int64 source-clock ns.
 
     Controller conversion and choosing APPLIED versus frame stamps belong to the
     caller. Replay only schedules the supplied stream with the supplied latency.
@@ -68,6 +69,7 @@ class ReplayResult:
     demand: np.ndarray  # [T, D]
     meta: dict = field(default_factory=dict)
     motion: dict[str, np.ndarray] = field(default_factory=dict)
+    effort: dict[str, np.ndarray] = field(default_factory=dict)
 
     def real_joint_q(self, plant: PlantCore) -> np.ndarray:
         """URDF joint positions of the real robot at each sample (1:1 signs; ankle FK from the cranks)."""
@@ -119,6 +121,7 @@ class _Run:
     latency_ns: torch.Tensor | None = None  # [E]
     acceleration: AccelerationSignal | None = None
     acceleration_w: np.ndarray | None = None
+    gain_support: dict | None = None
 
 
 def _prepare(capture: ExcitationCapture, sim: SimCore, duration_s: float | None, base_motion: str | None,
@@ -131,6 +134,7 @@ def _prepare(capture: ExcitationCapture, sim: SimCore, duration_s: float | None,
     if source not in ("drive", "command"):
         raise ValueError(f"replay source {source!r}: drive or command")
     plant = sim.plant
+    validate_capture_coordinates(capture, plant.desc)
     drives = plant.map.drive_names
     pdo = capture.pdo()
     t_start, t_end = capture.time_span_ns()
@@ -169,6 +173,10 @@ def _prepare(capture: ExcitationCapture, sim: SimCore, duration_s: float | None,
 
     real = {"position": series("native_position_rad", t_meas), "velocity": series("velocity_rad_s", t_meas),
             "torque": series("torque_nm", t_meas)}
+    if getattr(capture, "coordinates", None) is not None:
+        raw = capture.capture_pdo()
+        real["capture_position"] = np.stack([
+            sample_linear(raw[d].t_ns, raw[d]["native_position_rad"], t_meas) for d in drives], axis=1)
     # Base targets at the step start: with the velocity target the base PD lands on the step-end orientation.
     trace = capture.imu() if base_motion else None
     if acceleration is not None:
@@ -205,6 +213,9 @@ def _run_steps(capture: ExcitationCapture, sim: SimCore, run: _Run, on_step) -> 
     plant = sim.plant
     drives, e, dev, dt = plant.map.drive_names, plant.num_envs, plant.cfg.device, plant.cfg.dtype
     gains = capture.gains()
+    from humanoid_sim.replay.gains import gain_support
+
+    run.gain_support = gain_support(capture, plant, gains=gains)
     kp = torch.tensor([[gains[d].stiffness for d in drives]], dtype=dt, device=dev).expand(e, -1)
     kd = torch.tensor([[gains[d].damping for d in drives]], dtype=dt, device=dev).expand(e, -1)
     pdo = capture.pdo()
@@ -255,19 +266,31 @@ def _run_steps(capture: ExcitationCapture, sim: SimCore, run: _Run, on_step) -> 
         raise RuntimeError("contact during acceleration replay: fixed-world contact is unsupported")
     if bool((plant.bank.queue.overflows > 0).any()):
         raise RuntimeError("demands in flight overflowed the drive queue: latency too long for its capacity")
+    from humanoid_sim.replay.gains import check_run_gain_support
+
+    run.gain_support.update(check_run_gain_support(plant))
 
 
 def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None = None,
            base_motion: str | None = None, demand_delay_ns: int = 0, source: str = "drive",
            latency_ns: int = 0, commands: DriveCommands | None = None,
-           base_acceleration: AccelerationCfg | AccelerationSignal | None = None) -> ReplayResult:
+           base_acceleration: AccelerationCfg | AccelerationSignal | None = None,
+           effort=None) -> ReplayResult:
     """Replay on env 0. ``base_motion``: None (fixed base) or a :data:`~humanoid_sim.replay.base.BASE_MODES`
     mode. ``demand_delay_ns`` (``source="drive"``): apply the demand recorded at ``t`` at ``t + delay``;
     ``latency_ns`` (``source="command"``): from a frame's stamp to its targets taking effect."""
     sim.set_base_acceleration(None)  # preparation failures must not retain an earlier setting
     plant = sim.plant
+    if effort is not None:
+        from humanoid_sim.replay.effort import EffortCfg, prepare_effort
+
+        if isinstance(effort, EffortCfg):
+            effort = prepare_effort(capture, sim.desc, plant.map.drive_names, effort)
+        if (effort.capture_id != capture.dataset_id or effort.metadata["description_digest"] != sim.desc.digest
+                or set(effort.drives) - set(plant.map.drive_names)):
+            raise ValueError("prepared effort capture/description/drives do not match replay")
     delays = np.full(plant.num_envs, demand_delay_ns) if demand_delay_ns else None
-    lat = np.full(plant.num_envs, latency_ns) if source == "command" else None
+    lat = (np.full(plant.num_envs, latency_ns) if np.ndim(latency_ns) == 0 else np.asarray(latency_ns)) if source == "command" else None
     run = _prepare(capture, sim, duration_s, base_motion, delays, source, lat, commands, base_acceleration)
     keys = ("position_rad", "velocity_rad_s", "applied_torque_nm", "demanded_torque_nm")
     acc = {k: torch.zeros(len(run.t_grid), plant.map.num_drives, device=plant.cfg.device) for k in keys}
@@ -275,9 +298,12 @@ def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None
 
     actual_base = (torch.zeros((len(run.t_grid), 6), device=plant.cfg.device)
                    if run.acceleration is not None else None)
+    contact_peak = (torch.zeros((), device=plant.cfg.device)
+                    if sim.backend.contacts is not None and run.acceleration is None else None)
     offset0 = plant.bank.position_offset[0]
 
     def record(k, fb):
+        nonlocal contact_peak
         for key in keys:
             acc[key][k] = getattr(fb, key)[0]
         acc["position_rad"][k] += offset0  # what the drive reads, as the capture recorded
@@ -285,6 +311,9 @@ def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None
         if actual_base is not None:
             aq, av = sim.base_state()
             actual_base[k] = torch.cat([aq[0], av[0]])
+        if contact_peak is not None:
+            force = sim.backend.contacts.data.net_forces_w.torch
+            contact_peak = torch.maximum(contact_peak, torch.linalg.vector_norm(force, dim=-1).amax())
 
     _run(capture, sim, run, record)
     out = {name: acc[key].cpu().double().numpy() for name, key in
@@ -297,6 +326,8 @@ def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None
         idx = np.clip(np.searchsorted(run.command_t, run.t_grid - run.t_grid[0], side="right") - 1, 0, None)
         demand = run.demand[idx]
     motion, extra = {}, {}
+    if contact_peak is not None:
+        extra["contact_peak_n"] = float(contact_peak)
     if run.acceleration is not None:
         sig = run.acceleration
         motion = {"source_t_ns": sig.t_ns, "specific_force_b": sig.specific_force_b,
@@ -310,10 +341,16 @@ def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None
         mass = sim.backend.robot.data.body_mass.torch[0, sim.backend._inertial_bodies].sum().item()
         motion["extra_force_sum_w"] = -mass * run.acceleration_w
         extra["base_acceleration"] = sig.metadata | {"replay_span_ns": [int(run.t_grid[0]), int(run.t_meas[-1])]}
+    effort_arrays = {}
+    if effort is not None:
+        ids = [plant.map.drive_names.index(d) for d in effort.drives]
+        effort_arrays, extra["effort_comparison"] = effort.compare(run.t_meas, out["applied"][:, ids])
     return ReplayResult(capture.dataset_id, sim.period_ns, plant.map.drive_names, run.t_meas, out, run.real, demand,
                         meta={"name": capture.name, "base": base_motion or "fixed", "source": source,
-                              "demand_delay_ns": demand_delay_ns, "latency_ns": latency_ns,
-                              **plant.desc.identity(), **extra}, motion=motion)
+                              "demand_delay_ns": demand_delay_ns, "latency_ns": np.asarray(latency_ns).tolist(),
+                              **plant.desc.identity(), "solver_gain_support": run.gain_support,
+                              "capture_coordinates": validate_capture_coordinates(capture, plant.desc), **extra},
+                        motion=motion, effort=effort_arrays)
 
 
 def replay_position_rms(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None = None,

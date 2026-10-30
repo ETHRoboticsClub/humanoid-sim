@@ -113,7 +113,12 @@ class BagCapture:
         rows: dict[str, list[tuple]] = {}
         for m in self._messages[FEEDBACK_TOPIC]:
             n = len(m.device)
-            cols = [np.asarray(getattr(m, f), dtype=np.float64) for f in FEEDBACK_FIELDS.values()]
+            cols = []
+            for field in FEEDBACK_FIELDS.values():
+                values = getattr(m, field, None)
+                if field in ("current_a", "current_demand_a") and (values is None or len(values) == 0):
+                    values = np.full(n, np.nan)
+                cols.append(np.asarray(values, dtype=np.float64))
             if any(len(c) != n for c in cols) or len(m.source_stamp_ns) != n:
                 raise ValueError(f"{self.root}: a DriveFeedback message with sequences of different lengths")
             for i, dev in enumerate(m.device):

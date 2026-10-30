@@ -195,7 +195,7 @@ def test_rotation_and_acceleration_use_same_normalized_orientation(scale):
     cap = SimpleNamespace(dataset_id="quaternion-fixture", imu=lambda: tr, pdo=lambda: pdo,
                           time_span_ns=lambda: (int(tr.t_ns[0]), int(tr.t_ns[-1])))
     sim = SimpleNamespace(desc=desc, period_ns=4_000_000, gantry=SimpleNamespace(active=False),
-                          plant=SimpleNamespace(map=SimpleNamespace(drive_names=["fixture"])),
+                          plant=SimpleNamespace(desc=desc, map=SimpleNamespace(drive_names=["fixture"])),
                           backend=SimpleNamespace(gravity_w=G, contacts=object()))
     run = _prepare(cap, sim, None, "orientation", base_acceleration=AccelerationCfg(0))
     np.testing.assert_allclose(run.acceleration_w, 0, atol=1e-9)
