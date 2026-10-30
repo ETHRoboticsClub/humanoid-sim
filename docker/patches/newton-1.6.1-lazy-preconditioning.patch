@@ -1,0 +1,1745 @@
+--- a/_src/solvers/kamino/_src/dynamics/delassus.py
++++ b/_src/solvers/kamino/_src/dynamics/delassus.py
+@@ -1019,6 +1019,8 @@
+         self._size: SizeKamino | None = None
+ 
+         # Initialize the Delassus data container
++        self._logical_owner = None
++
+         self._operator: DenseLinearOperatorData[wp.float32, wp.int32] | None = None
+ 
+         # Declare the optional Cholesky factorization
+@@ -1068,6 +1070,8 @@
+         """
+         Returns a reference to the flat Delassus matrix array.
+         """
++        if self._logical_owner is not None:
++            self._logical_owner.expose_public()
+         return self._operator
+ 
+     @property
+@@ -1076,6 +1080,8 @@
+         The linear solver object for the Delassus operator.
+         This is used to perform the factorization of the Delassus matrix.
+         """
++        if self._logical_owner is not None:
++            self._logical_owner.expose_public()
+         return self._solver
+ 
+     @property
+@@ -1083,6 +1089,8 @@
+         """
+         Returns a reference to the flat Delassus matrix array.
+         """
++        if self._logical_owner is not None:
++            self._logical_owner.expose_public()
+         return self._operator.info
+ 
+     @property
+@@ -1090,6 +1098,8 @@
+         """
+         Returns a reference to the flat Delassus matrix array.
+         """
++        if self._logical_owner is not None:
++            self._logical_owner.expose_public()
+         return self._operator.mat
+ 
+     def finalize(
+@@ -1141,6 +1151,7 @@
+ 
+         # Capture reference to the model size
+         self._size = model.size
++        self._logical_owner = None
+         # Finalization invalidates topology and capacity dependent workspaces.
+         self._body_grouped = None
+ 
+@@ -1254,6 +1265,8 @@
+         This is useful for resetting the operator before recomputing it.
+         """
+         self._operator.mat.zero_()
++        if self._logical_owner is not None:
++            self._logical_owner.discard_epoch()
+         if self._tracked_clear_highwater is not None:
+             self._tracked_clear_highwater.zero_()
+ 
+@@ -1299,6 +1312,9 @@
+             raise ValueError("Delassus matrix is not allocated. Call finalize() first.")
+ 
+         # Initialize the Delassus matrix to zero
++        if self._logical_owner is not None:
++            self._logical_owner.begin_build(reset_to_zero=reset_to_zero)
++
+         if reset_to_zero:
+             self._clear_for_build()
+         else:
+@@ -1389,6 +1405,9 @@
+             Shape of ``(sum_of_max_total_cts,)``.
+         """
+         self._track_active_write()
++        if self._logical_owner is not None:
++            self._logical_owner.materialize_internal()
++
+         wp.launch(
+             kernel=_regularize_delassus_diagonal_dense,
+             dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+@@ -1408,6 +1427,9 @@
+                 This is useful for ensuring that the matrix is in a clean state before pre-computation.
+         """
+         # Ensure the Delassus matrix is allocated
++        if self._logical_owner is not None:
++            self._logical_owner.materialize_internal()
++
+         if self._operator.mat is None:
+             raise ValueError("Delassus matrix is not allocated. Call finalize() first.")
+ 
+@@ -1440,6 +1462,9 @@
+             ValueError: If a factorizer has not been configured set.
+         """
+         # Ensure the Delassus matrix is allocated
++        if self._logical_owner is not None:
++            self._logical_owner.materialize_internal()
++
+         if self._operator.mat is None:
+             raise ValueError("Delassus matrix is not allocated. Call finalize() first.")
+ 
+@@ -1467,6 +1492,9 @@
+             ValueError: If a factorizer has not been configured set.
+         """
+         # Ensure the Delassus matrix is allocated
++        if self._logical_owner is not None:
++            self._logical_owner.materialize_internal()
++
+         if self._operator.mat is None:
+             raise ValueError("Delassus matrix is not allocated. Call finalize() first.")
+ 
+--- a/_src/solvers/kamino/_src/dynamics/dual.py
++++ b/_src/solvers/kamino/_src/dynamics/dual.py
+@@ -1233,6 +1233,7 @@
+         config: list[DualProblem.Config] | DualProblem.Config | None = None,
+         compute_h: bool = False,
+         sparse: bool = True,
++        defer_preconditioning: bool = False,
+     ):
+         """
+         Constructs a dual problem interface container.
+@@ -1277,6 +1278,11 @@
+ 
+         self._jacobians: SparseSystemJacobians | DenseSystemJacobians | None = None
+         """Current Jacobian container, retaining live topology for optional solvers."""
++
++        if defer_preconditioning and sparse:
++            raise ValueError("Deferred preconditioning requires dense dynamics")
++        self._defer_preconditioning = bool(defer_preconditioning)
++        self._preconditioning_owner = None
+ 
+         self._sparse: bool = sparse
+         """Flag to indicate whether the dual uses a sparse data representation."""
+@@ -1345,7 +1351,37 @@
+         """
+         Returns the dual problem data container.
+         """
++        if self._preconditioning_owner is not None:
++            self._preconditioning_owner.expose_public()
+         return self._data
++
++    def _private_data(self):
++        """Trusted internal view; callers must honor the logical matrix owner."""
++        return self._data
++
++    def _active_preconditioning_owner(self):
++        owner = self._preconditioning_owner
++        if owner is None:
++            return None
++        p = self._data
++        if (p.D is owner.matrix and p.P is owner.P and p.dim is owner.dim
++                and p.mio is owner.mio and p.vio is owner.vio
++                and self._delassus._operator.mat is owner.matrix
++                and self._delassus._operator.info.dim is owner.dim
++                and self._delassus._operator.info.mio is owner.mio
++                and self._delassus._operator.info.vio is owner.vio):
++            return owner
++        # Public rebinding leaves independent original aliases detached. Do not
++        # redirect a new data/operator array back to the old owner allocation.
++        owner.materialize_internal()
++        return None
++
++    def _private_delassus_info(self):
++        return self._delassus.info if self._sparse else self._delassus._operator.info
++
++    def _materialize_matrix(self):
++        if self._preconditioning_owner is not None:
++            self._preconditioning_owner.materialize_internal()
+ 
+     @property
+     def jacobians(self) -> SparseSystemJacobians | DenseSystemJacobians:
+@@ -1489,10 +1525,10 @@
+                     lcgo=data.info.limit_cts_group_offset,
+                     ccgo=data.info.contact_cts_group_offset,
+                     # Capture references to arrays already create by the Delassus operator
+-                    maxdim=self._delassus.info.maxdim,
+-                    dim=self._delassus.info.dim,
++                    maxdim=self._private_delassus_info().maxdim,
++                    dim=self._private_delassus_info().dim,
+                     mio=None,
+-                    vio=self._delassus.info.vio,
++                    vio=self._private_delassus_info().vio,
+                     D=None,
+                     # Allocate new memory for the remaining dual problem quantities
+                     config=wp.array([c.to_struct() for c in self.config], dtype=DualProblemConfigStruct),
+@@ -1528,11 +1564,11 @@
+                     bcgo=model.info.joint_bounded_cts_group_offset,
+                     bcio=model.info.joint_bounded_cts_offset,
+                     # Capture references to arrays already create by the Delassus operator
+-                    maxdim=self._delassus.info.maxdim,
+-                    dim=self._delassus.info.dim,
+-                    mio=self._delassus.info.mio,
+-                    vio=self._delassus.info.vio,
+-                    D=self._delassus.D,
++                    maxdim=self._private_delassus_info().maxdim,
++                    dim=self._private_delassus_info().dim,
++                    mio=self._private_delassus_info().mio,
++                    vio=self._private_delassus_info().vio,
++                    D=self._delassus._operator.mat,
+                     # Allocate new memory for the remaining dual problem quantities
+                     config=wp.array([c.to_struct() for c in self.config], dtype=DualProblemConfigStruct),
+                     h=wp.zeros(shape=(model.size.sum_of_num_bodies,), dtype=wp.spatial_vectorf)
+@@ -1547,6 +1583,16 @@
+                     bound_upper=wp.zeros(shape=(model.size.sum_of_num_bounded_joint_cts,), dtype=wp.float32),
+                     P=wp.ones(shape=(self._delassus.num_maxdims,), dtype=wp.float32),
+                 )
++
++        self._preconditioning_owner = None
++        if self._defer_preconditioning:
++            from .lazy_preconditioning import LazyDenseOwner
++            p = self._data
++            self._preconditioning_owner = LazyDenseOwner(
++                p.D, p.P, p.dim, p.mio, p.vio,
++                self._size.max_of_max_total_cts, enabled=True,
++            )
++            self._delassus._logical_owner = self._preconditioning_owner
+ 
+     def zero(self):
+         if self._compute_h:
+@@ -1976,6 +2022,8 @@
+         if self._sparse:
+             # Preconditioner has already been connected to appropriate array
+             pass
++        elif (logical_owner := self._active_preconditioning_owner()) is not None:
++            logical_owner.finish_preconditioning()
+         elif self._config[0].dynamics.matrix_preconditioner_stride:
+             stride = min(self._config[0].dynamics.matrix_preconditioner_stride,
+                          max(1, self.delassus._max_of_max_total_D_size))
+--- /dev/null
++++ b/_src/solvers/kamino/_src/dynamics/lazy_preconditioning.py
+@@ -0,0 +1,320 @@
++"""Isolated ownership-state prototype; no Newton installation or API is modified.
++
++Representation transitions are device state, including sticky public exposure.
++Trusted scalar consumers must use the descriptor and source lower indices.
++"""
++
++import warp as wp
++from .precondition_rounding import precondition_entry
++from ..solvers.padmm.types import PADMMStatus
++
++
++@wp.kernel(enable_backward=False)
++def zero_matrix(matrix: wp.array[float]):
++    matrix[wp.tid()] = 0.0
++
++
++@wp.kernel(enable_backward=False)
++def expose(flag: wp.array[int]):
++    flag[0] = 1
++
++
++@wp.kernel(enable_backward=False)
++def reset_epoch(phase: wp.array[int]):
++    phase[wp.tid()] = 0
++
++
++@wp.kernel(enable_backward=False)
++def capture_epoch(
++    dim: wp.array[int],
++    mio: wp.array[int],
++    vio: wp.array[int],
++    edim: wp.array[int],
++    emio: wp.array[int],
++    evio: wp.array[int],
++    phase: wp.array[int],
++):
++    w = wp.tid()
++    edim[w] = dim[w]
++    emio[w] = mio[w]
++    evio[w] = vio[w]
++    phase[w] = 1
++
++
++@wp.kernel(enable_backward=False)
++def materialize(
++    matrix: wp.array[float],
++    P: wp.array[float],
++    dim: wp.array[int],
++    mio: wp.array[int],
++    vio: wp.array[int],
++    phase: wp.array[int],
++    delta: wp.array[float],
++    apply: wp.array[int],
++    flag: wp.array[int],
++    exposed_only: int,
++    required_phase: int,
++):
++    w, lane = wp.tid()
++    p = phase[w]
++    if p == 0 or (exposed_only != 0 and flag[0] == 0) or (required_phase != 0 and p != required_phase):
++        return
++    n = dim[w]
++    for k in range(lane, n * n, 1024):
++        i = k // n
++        j = k % n
++        idx = mio[w] + k
++        value = precondition_entry(P[vio[w] + i], P[vio[w] + j], matrix[idx])
++        if p == 2 and apply[w] != 0 and i == j:
++            value = value + delta[w]
++        matrix[idx] = value
++
++
++@wp.kernel(enable_backward=False)
++def finish_materialize(phase: wp.array[int], flag: wp.array[int], exposed_only: int, required_phase: int):
++    w = wp.tid()
++    p = phase[w]
++    if p != 0 and (exposed_only == 0 or flag[0] != 0) and (required_phase == 0 or p == required_phase):
++        phase[w] = 0
++
++
++@wp.kernel(enable_backward=False)
++def mark_changed_layout(
++    phase: wp.array[int],
++    dim: wp.array[int],
++    mio: wp.array[int],
++    vio: wp.array[int],
++    edim: wp.array[int],
++    emio: wp.array[int],
++    evio: wp.array[int],
++):
++    w = wp.tid()
++    if phase[w] == 1 and (dim[w] != edim[w] or mio[w] != emio[w] or vio[w] != evio[w]):
++        phase[w] = 3
++
++
++@wp.kernel(enable_backward=False)
++def source_delta(
++    sigma: wp.array[wp.vec2f], converged: wp.array[PADMMStatus], delta: wp.array[float], apply: wp.array[int]
++):
++    w = wp.tid()
++    delta[w] = sigma[w][0] - sigma[w][1]
++    apply[w] = wp.int32(converged[w].converged <= 0)
++
++
++@wp.kernel(enable_backward=False)
++def add_if_materialized(
++    matrix: wp.array[float],
++    dim: wp.array[int],
++    mio: wp.array[int],
++    phase: wp.array[int],
++    delta: wp.array[float],
++    apply: wp.array[int],
++):
++    w, i = wp.tid()
++    if i < dim[w] and phase[w] == 0 and apply[w] != 0:
++        idx = mio[w] + i * dim[w] + i
++        matrix[idx] = matrix[idx] + delta[w]
++
++
++@wp.kernel(enable_backward=False)
++def record_pending(phase: wp.array[int]):
++    w = wp.tid()
++    if phase[w] == 1:
++        phase[w] = 2
++
++
++@wp.kernel(enable_backward=False)
++def eager_precondition(
++    matrix: wp.array[float], P: wp.array[float], dim: wp.array[int], mio: wp.array[int], vio: wp.array[int]
++):
++    w, lane = wp.tid()
++    n = dim[w]
++    for k in range(lane, n * n, 1024):
++        i = k // n
++        j = k % n
++        idx = mio[w] + k
++        matrix[idx] = P[vio[w] + i] * (P[vio[w] + j] * matrix[idx])
++
++
++@wp.kernel(enable_backward=False)
++def eager_delta(
++    matrix: wp.array[float],
++    dim: wp.array[int],
++    mio: wp.array[int],
++    sigma: wp.array[wp.vec2f],
++    converged: wp.array[PADMMStatus],
++):
++    w, i = wp.tid()
++    if i < dim[w] and converged[w].converged <= 0:
++        idx = mio[w] + i * dim[w] + i
++        matrix[idx] = matrix[idx] + (sigma[w][0] - sigma[w][1])
++
++
++@wp.func
++def read_entry(
++    matrix: wp.array[float],
++    P: wp.array[float],
++    phase: wp.array[int],
++    dim: wp.array[int],
++    mio: wp.array[int],
++    vio: wp.array[int],
++    delta: wp.array[float],
++    apply: wp.array[int],
++    current_dim: wp.array[int],
++    current_mio: wp.array[int],
++    w: int,
++    i: int,
++    j: int,
++):
++    value = wp.float32(0.0)
++    if phase[w] == 0:
++        value = matrix[current_mio[w] + i * current_dim[w] + j]
++    else:
++        value = matrix[mio[w] + i * dim[w] + j]
++    if phase[w] != 0:
++        value = precondition_entry(P[vio[w] + i], P[vio[w] + j], value)
++        if phase[w] == 2 and apply[w] != 0 and i == j:
++            value = value + delta[w]
++    return value
++
++
++class LazyDenseOwner:
++    """Constructor-only opt-in, preserves the supplied array object/pointer.
++
++    Calls assume the caller's normal ordered device stream, like existing Warp
++    arrays. No cross-stream concurrency or arbitrary private-storage mutation is
++    introduced. The eager default allocates no representation buffers.
++    """
++
++    def __init__(self, matrix, P, dim, mio, vio, maxdim, *, enabled=False, stream=None):
++        self.matrix = matrix
++        self.P = P
++        self.dim = dim
++        self.mio = mio
++        self.vio = vio
++        self.count = len(dim)
++        self.maxdim = int(maxdim)
++        self.enabled = bool(enabled)
++        self.device = matrix.device
++        self.stream = stream
++        self.public_exposed = None
++        self.has_public_alias = False
++        if enabled:
++            self.public_exposed = wp.zeros(1, dtype=int, device=self.device)
++            self.phase = wp.zeros(self.count, dtype=int, device=self.device)
++            self.P_epoch = wp.empty_like(P)
++            self.epoch_dim = wp.empty_like(dim)
++            self.epoch_mio = wp.empty_like(mio)
++            self.epoch_vio = wp.empty_like(vio)
++            self.delta = wp.zeros(self.count, dtype=float, device=self.device)
++            self.apply = wp.zeros(self.count, dtype=int, device=self.device)
++
++    def launch(self, kernel, dim, args, block=256):
++        wp.launch(kernel, dim=dim, inputs=args, device=self.device, stream=self.stream, block_dim=block)
++
++    def _materialize(self, exposed_only=0, required_phase=0):
++        if not self.enabled:
++            return
++        self.launch(
++            materialize,
++            (self.count, 1024),
++            [
++                self.matrix,
++                self.P_epoch,
++                self.epoch_dim,
++                self.epoch_mio,
++                self.epoch_vio,
++                self.phase,
++                self.delta,
++                self.apply,
++                self.public_exposed,
++                exposed_only,
++                required_phase,
++            ],
++        )
++        self.launch(
++            finish_materialize, self.count, [self.phase, self.public_exposed, exposed_only, required_phase]
++        )
++
++    def materialize_internal(self):
++        self._materialize()
++
++    def expose_public(self):
++        if self.enabled and not self.has_public_alias:
++            stream = self.stream
++            if self.device.is_cuda and stream is None:
++                stream = wp.get_stream(self.device)
++            capturing = stream.is_capturing if stream is not None else self.device.is_capturing
++            if capturing:
++                raise RuntimeError(
++                    "Lazy Delassus first public exposure must occur outside graph capture; access data/D/operator/solver before capture to retain eager cached-alias publication."
++                )
++            self.launch(expose, 1, [self.public_exposed])
++            self._materialize()
++            self.has_public_alias = True
++        return self.matrix
++
++    def begin_build(self, *, reset_to_zero):
++        if not self.enabled:
++            return
++        if reset_to_zero:
++            self.launch(reset_epoch, self.count, [self.phase])
++        else:
++            self.materialize_internal()
++        # Existing physical builder owns its original clearing/assembly here.
++
++    def finish_preconditioning(self):
++        if not self.enabled:
++            self.launch(
++                eager_precondition, (self.count, 1024), [self.matrix, self.P, self.dim, self.mio, self.vio]
++            )
++            return
++        # Repeated precondition calls are sequential rounded transformations.
++        self.materialize_internal()
++        wp.copy(self.P_epoch, self.P, stream=self.stream)
++        self.launch(
++            capture_epoch,
++            self.count,
++            [self.dim, self.mio, self.vio, self.epoch_dim, self.epoch_mio, self.epoch_vio, self.phase],
++        )
++        self._materialize(exposed_only=1)
++
++    def source_proximal_update(self, sigma, converged):
++        if not self.enabled:
++            self.launch(
++                eager_delta, (self.count, self.maxdim), [self.matrix, self.dim, self.mio, sigma, converged]
++            )
++            return
++        # A proximal write uses CURRENT layout, while pending P owns its old epoch.
++        self.launch(
++            mark_changed_layout,
++            self.count,
++            [self.phase, self.dim, self.mio, self.vio, self.epoch_dim, self.epoch_mio, self.epoch_vio],
++        )
++        self._materialize(required_phase=3)
++        # Never combine two rounded diagonal updates into an algebraic sum.
++        self._materialize(required_phase=2)
++        self.launch(source_delta, self.count, [sigma, converged, self.delta, self.apply])
++        self.launch(
++            add_if_materialized,
++            (self.count, self.maxdim),
++            [self.matrix, self.dim, self.mio, self.phase, self.delta, self.apply],
++        )
++        self.launch(record_pending, self.count, [self.phase])
++        self._materialize(exposed_only=1)
++
++    def zero(self):
++        # Public zero retains full-allocation clearing, including padding.
++        self.launch(zero_matrix, len(self.matrix), [self.matrix])
++        if self.enabled:
++            self.launch(reset_epoch, self.count, [self.phase])
++
++
++    def discard_epoch(self):
++        if self.enabled:
++            self.launch(reset_epoch, self.count, [self.phase])
++
++    def descriptor(self):
++        return [self.P_epoch, self.phase, self.epoch_dim, self.epoch_mio,
++                self.epoch_vio, self.delta, self.apply]
+--- /dev/null
++++ b/_src/solvers/kamino/_src/dynamics/precondition_rounding.py
+@@ -0,0 +1,16 @@
++"""Preserve existing matrix-store FP32 rounding across fused consumer loads."""
++import warp as wp
++
++@wp.func_native('''
++#if defined(__CUDA_ARCH__)
++    return __fmul_rn(a, b);
++#else
++    volatile float result = a * b;
++    return result;
++#endif
++''')
++def multiply_rn(a: wp.float32, b: wp.float32) -> wp.float32: ...
++
++@wp.func
++def precondition_entry(pi: wp.float32, pj: wp.float32, raw: wp.float32) -> wp.float32:
++    return multiply_rn(pi, multiply_rn(pj, raw))
+--- a/_src/solvers/kamino/_src/solver_kamino_impl.py
++++ b/_src/solvers/kamino/_src/solver_kamino_impl.py
+@@ -250,6 +250,7 @@
+             solver=linear_solver_type,
+             solver_kwargs=linear_solver_kwargs,
+             sparse=self._config.sparse_dynamics,
++            defer_preconditioning=(self._config.dynamics_solver == "padmm" and self._config.padmm.reduced_lazy_preconditioning),
+         )
+ 
+         # Allocate the forward dynamics solver on the device
+@@ -1072,7 +1073,7 @@
+             limits=self._limits,
+             contacts=contacts,
+             jacobians=self._jacobians,
+-            lambdas_offsets=self._problem_fd.data.vio,
++            lambdas_offsets=self._problem_fd._private_data().vio,
+             lambdas_data=self._solver_fd.data.solution.lambdas,
+         )
+ 
+--- /dev/null
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_lazy_diagnostics.py
+@@ -0,0 +1,208 @@
++"""Frozen diagnostic candidates; no runtime integration."""
++
++import warp as wp
++from ...dynamics.lazy_preconditioning import read_entry
++from newton._src.solvers.kamino._src.solvers.padmm.math import (
++    compute_box_complementarity_residual,
++    project_to_coulomb_cone,
++)
++
++
++@wp.func_native("""
++float r = value;
++#pragma unroll
++for (int offset = 16; offset > 0; offset >>= 1)
++    r += __shfl_xor_sync(0xffffffffu, r, offset, 32);
++return r;
++""")
++def warp_sum(value: wp.float32) -> wp.float32: ...
++
++
++def make_bounded(threads, reduction="block"):
++    if threads not in (128, 256):
++        raise ValueError("Only qualified block dimensions 128 and 256 are candidates")
++    if reduction not in ("block", "warp"):
++        raise ValueError("Unknown explicit reduction candidate")
++    WARPS = wp.constant(threads // 32)
++
++    @wp.kernel(enable_backward=False)
++    def bounded_block(
++        D: wp.array[float],
++        P_epoch: wp.array[wp.float32],
++        phase: wp.array[wp.int32],
++        epoch_dim: wp.array[wp.int32],
++        epoch_mio: wp.array[wp.int32],
++        epoch_vio: wp.array[wp.int32],
++        pending_delta: wp.array[wp.float32],
++        pending_apply: wp.array[wp.int32],
++        q: wp.array[float],
++        P: wp.array[float],
++        dim: wp.array[int],
++        mio: wp.array[int],
++        vio: wp.array[int],
++        nbc: wp.array[int],
++        nl: wp.array[int],
++        bcgo: wp.array[int],
++        lcgo: wp.array[int],
++        ccgo: wp.array[int],
++        bcio: wp.array[int],
++        cio: wp.array[int],
++        lower: wp.array[float],
++        upper: wp.array[float],
++        mu: wp.array[float],
++        x: wp.array[float],
++        y: wp.array[float],
++        z: wp.array[float],
++        sigma: float,
++        result: wp.array2d[float],
++    ):
++        w, thread = wp.tid()
++        n = dim[w]
++        lane = thread % 32
++        warp = thread // 32
++        stationarity = wp.float32(0.0)
++        feasibility = wp.float32(0.0)
++        natural_map = wp.float32(0.0)
++        complementarity = wp.float32(0.0)
++        for k in range(warp, n, WARPS):
++            partial = wp.float32(0.0)
++            for j in range(lane, n, 32):
++                partial = partial + read_entry(D, P_epoch, phase, epoch_dim, epoch_mio, epoch_vio, pending_delta, pending_apply, dim, mio, w, k, j) * y[vio[w] + j]
++            product = warp_sum(partial)
++            if lane == 0:
++                idx = vio[w] + k
++                pv = P[idx]
++                yv = y[idx]
++                zv = z[idx]
++                correction = wp.float32(0.0)
++                pr = yv
++                natural = yv - zv
++                comp = wp.float32(0.0)
++                if k >= bcgo[w] and k < bcgo[w] + nbc[w]:
++                    j = bcio[w] + k - bcgo[w]
++                    lo = lower[j]
++                    hi = upper[j]
++                    pr = wp.clamp(yv, lo, hi)
++                    natural = wp.clamp(yv - zv, lo, hi)
++                    comp = wp.abs(compute_box_complementarity_residual(yv, zv, lo, hi))
++                elif k >= lcgo[w] and k < lcgo[w] + nl[w]:
++                    pr = wp.max(yv, 0.0)
++                    natural = wp.max(yv - zv, 0.0)
++                    comp = wp.abs(yv * zv)
++                elif k >= ccgo[w]:
++                    component = (k - ccgo[w]) % 3
++                    j = idx - component
++                    m = mu[cio[w] + (k - ccgo[w]) // 3]
++                    yy = wp.vec3f(y[j], y[j + 1], y[j + 2])
++                    zz = wp.vec3f(z[j], z[j + 1], z[j + 2])
++                    pr = project_to_coulomb_cone(yy, m)[component]
++                    natural = project_to_coulomb_cone(yy - zz, m)[component]
++                    if component == 2:
++                        correction = m * wp.sqrt(z[j] * z[j] + z[j + 1] * z[j + 1])
++                    if component == 0:
++                        comp = wp.abs(wp.dot(yy, zz))
++                value = q[idx] + correction - zv - sigma * yv
++                value = value + product
++                stationarity = wp.max(stationarity, wp.abs(value / pv))
++                feasibility = wp.max(feasibility, wp.abs(pv * (yv - pr)))
++                natural_map = wp.max(natural_map, wp.abs(yv - natural))
++                complementarity = wp.max(complementarity, comp)
++        stationarity = wp.tile_max(wp.tile(stationarity))[0]
++        feasibility = wp.tile_max(wp.tile(feasibility))[0]
++        natural_map = wp.tile_max(wp.tile(natural_map))[0]
++        complementarity = wp.tile_max(wp.tile(complementarity))[0]
++        if thread == 0:
++            result[w, 0] = stationarity
++            result[w, 1] = feasibility
++            result[w, 2] = natural_map
++            result[w, 3] = complementarity
++
++    @wp.kernel(enable_backward=False)
++    def bounded_warp(
++        D: wp.array[float],
++        P_epoch: wp.array[wp.float32],
++        phase: wp.array[wp.int32],
++        epoch_dim: wp.array[wp.int32],
++        epoch_mio: wp.array[wp.int32],
++        epoch_vio: wp.array[wp.int32],
++        pending_delta: wp.array[wp.float32],
++        pending_apply: wp.array[wp.int32],
++        q: wp.array[float],
++        P: wp.array[float],
++        dim: wp.array[int],
++        mio: wp.array[int],
++        vio: wp.array[int],
++        nbc: wp.array[int],
++        nl: wp.array[int],
++        bcgo: wp.array[int],
++        lcgo: wp.array[int],
++        ccgo: wp.array[int],
++        bcio: wp.array[int],
++        cio: wp.array[int],
++        lower: wp.array[float],
++        upper: wp.array[float],
++        mu: wp.array[float],
++        x: wp.array[float],
++        y: wp.array[float],
++        z: wp.array[float],
++        sigma: float,
++        result: wp.array2d[float],
++    ):
++        w, thread = wp.tid()
++        n = dim[w]
++        lane = thread % 32
++        warp = thread // 32
++        stationarity = wp.float32(0.0)
++        feasibility = wp.float32(0.0)
++        natural_map = wp.float32(0.0)
++        complementarity = wp.float32(0.0)
++        for k in range(warp, n, WARPS):
++            partial = wp.float32(0.0)
++            for j in range(lane, n, 32):
++                partial = partial + read_entry(D, P_epoch, phase, epoch_dim, epoch_mio, epoch_vio, pending_delta, pending_apply, dim, mio, w, k, j) * y[vio[w] + j]
++            product = warp_sum(partial)
++            if lane == 0:
++                idx = vio[w] + k
++                pv = P[idx]
++                yv = y[idx]
++                zv = z[idx]
++                correction = wp.float32(0.0)
++                pr = yv
++                natural = yv - zv
++                comp = wp.float32(0.0)
++                if k >= bcgo[w] and k < bcgo[w] + nbc[w]:
++                    j = bcio[w] + k - bcgo[w]
++                    lo = lower[j]
++                    hi = upper[j]
++                    pr = wp.clamp(yv, lo, hi)
++                    natural = wp.clamp(yv - zv, lo, hi)
++                    comp = wp.abs(compute_box_complementarity_residual(yv, zv, lo, hi))
++                elif k >= lcgo[w] and k < lcgo[w] + nl[w]:
++                    pr = wp.max(yv, 0.0)
++                    natural = wp.max(yv - zv, 0.0)
++                    comp = wp.abs(yv * zv)
++                elif k >= ccgo[w]:
++                    component = (k - ccgo[w]) % 3
++                    j = idx - component
++                    m = mu[cio[w] + (k - ccgo[w]) // 3]
++                    yy = wp.vec3f(y[j], y[j + 1], y[j + 2])
++                    zz = wp.vec3f(z[j], z[j + 1], z[j + 2])
++                    pr = project_to_coulomb_cone(yy, m)[component]
++                    natural = project_to_coulomb_cone(yy - zz, m)[component]
++                    if component == 2:
++                        correction = m * wp.sqrt(z[j] * z[j] + z[j + 1] * z[j + 1])
++                    if component == 0:
++                        comp = wp.abs(wp.dot(yy, zz))
++                value = q[idx] + correction - zv - sigma * yv
++                value = value + product
++                stationarity = wp.max(stationarity, wp.abs(value / pv))
++                feasibility = wp.max(feasibility, wp.abs(pv * (yv - pr)))
++                natural_map = wp.max(natural_map, wp.abs(yv - natural))
++                complementarity = wp.max(complementarity, comp)
++        if lane == 0:
++            wp.atomic_max(result, w, 0, stationarity)
++            wp.atomic_max(result, w, 1, feasibility)
++            wp.atomic_max(result, w, 2, natural_map)
++            wp.atomic_max(result, w, 3, complementarity)
++
++    return bounded_block if reduction == "block" else bounded_warp
+--- /dev/null
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_lazy_factor.py
+@@ -0,0 +1,193 @@
++# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
++# SPDX-License-Identifier: Apache-2.0
++"""Direct-source RCM LLTB derivative, skipping only symbolic zero blocks.
++
++Gathers authoritative source lower-triangle entries under the free permutation;
++adds the original constrained diagonal shift before factor arithmetic. No K copy.
++
++No elementwise tile write is conditional on lane id. Every skip predicate is
++uniform for the world's cooperative block. Skipped lower output tiles are zeroed.
++"""
++
++from functools import cache
++
++import warp as wp
++from ...dynamics.lazy_preconditioning import read_entry
++
++from ...linalg.factorize._tile_builtins import HAS_TILE_MATMUL_TRANSPOSE_UPDATE
++from ...linalg.factorize.llt_blocked import get_float32_array_offset_ptr
++
++
++@cache
++def make_runtime_lazy_factor(block_size: int, skip_structural_zeros: bool):
++    @wp.kernel(module="unique", enable_backward=False)
++    def llt_blocked_factorize_kernel(
++        # Inputs:
++        dim: wp.array[wp.int32],
++        mio: wp.array[wp.int32],
++        D: wp.array[wp.float32],
++        P_epoch: wp.array[wp.float32],
++        phase: wp.array[wp.int32],
++        epoch_dim: wp.array[wp.int32],
++        epoch_mio: wp.array[wp.int32],
++        epoch_vio: wp.array[wp.int32],
++        pending_delta: wp.array[wp.float32],
++        pending_apply: wp.array[wp.int32],
++        source_dim: wp.array[wp.int32],
++        source_mio: wp.array[wp.int32],
++        bad: wp.array[wp.bool],
++        permutation: wp.array[wp.int32],
++        free: int,
++        sigma: float,
++        occupied: wp.array2d[wp.uint32],
++        # Outputs:
++        L: wp.array[wp.float32],
++    ):
++        # Retrieve the thread index and thread-block configuration
++        tid, tid_block = wp.tid()
++        num_threads_per_block = wp.block_dim()
++
++        # Retrieve the matrix block dimensions and size
++        n_i = dim[tid]
++        A_i_start = mio[tid]
++
++        # Retrieve a pointer to the start of the i-th matrix in A
++        L_i_ptr = get_float32_array_offset_ptr(L, A_i_start)
++
++        # Create a temporary warp array pointing to the i-th matrix
++        L_i = wp.array(ptr=L_i_ptr, shape=(n_i, n_i), dtype=wp.float32)
++
++        # Round up active_matrix_size to next multiple of block_size
++        n_i_padded = ((n_i + block_size - 1) // block_size) * block_size
++
++        # Process the matrix in blocks along its leading dimension.
++        for k in range(0, n_i_padded, block_size):
++            end = k + block_size
++
++            # Load current diagonal block A[k:end, k:end]
++            # and update with contributions from previously computed blocks.
++            A_kk_tile = wp.tile_zeros(shape=(block_size, block_size), dtype=wp.float32, storage="shared")
++            num_tile_elements = block_size * block_size
++            num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
++            for load_index in range(num_iterations):
++                linear_index = (tid_block + load_index * num_threads_per_block) % num_tile_elements
++                row = linear_index // block_size
++                col = linear_index % block_size
++                logical_row = k + row
++                logical_col = k + col
++                value = wp.where(logical_row == logical_col, wp.float32(1), wp.float32(0))
++                if not bad[tid] and logical_row < n_i and logical_col < n_i:
++                    source_row = permutation[logical_row]
++                    source_col = permutation[logical_col]
++                    value = read_entry(D, P_epoch, phase, epoch_dim, epoch_mio, epoch_vio, pending_delta, pending_apply, source_dim, source_mio, tid, wp.max(source_row, source_col), wp.min(source_row, source_col))
++                    if logical_row == logical_col and logical_row >= free:
++                        value = value + sigma
++                A_kk_tile[row, col] = value
++
++            # Update the diagonal block with contributions from previously computed blocks.
++            # ``tile_matmul(..., alpha=-1.0)`` accumulates ``A_kk_tile += -1 * L_block @ L_block_T``
++            # in-place, which avoids the intermediate ``L_L_T_block`` tile allocation that
++            # the ``A_kk_tile -= L_L_T_block`` form required.
++            if k > 0:
++                for j in range(0, k, block_size):
++                    if (
++                        not wp.static(skip_structural_zeros)
++                        or (occupied[tid, k // block_size] & (wp.uint32(1) << wp.uint32(j // block_size))) != wp.uint32(0)
++                    ):
++                        L_block = wp.tile_load(L_i, shape=(block_size, block_size), offset=(k, j))
++                        if wp.static(HAS_TILE_MATMUL_TRANSPOSE_UPDATE):
++                            wp.tile_matmul_transpose_update(A_kk_tile, L_block, L_block, alpha=-1.0)
++                        else:
++                            L_block_T = wp.tile_transpose(L_block)
++                            wp.tile_matmul(L_block, L_block_T, A_kk_tile, alpha=-1.0)
++
++            # Compute the Cholesky factorization for the block in-place (avoids an extra
++            # tile allocation vs. ``wp.tile_cholesky``).
++            wp.tile_cholesky_inplace(A_kk_tile)
++            wp.tile_store(L_i, A_kk_tile, offset=(k, k))
++
++            # Process the blocks below the current block
++            for i in range(end, n_i_padded, block_size):
++                if not wp.static(skip_structural_zeros) or (occupied[tid, i // block_size] & (wp.uint32(1) << wp.uint32(k // block_size))) != wp.uint32(0):
++                    # Load the current block A[i:end, k:end]
++                    A_ik_tile = wp.tile_zeros(
++                        shape=(block_size, block_size), dtype=wp.float32, storage="shared"
++                    )
++                    num_tile_elements = block_size * block_size
++                    num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
++                    for load_index in range(num_iterations):
++                        linear_index = (tid_block + load_index * num_threads_per_block) % num_tile_elements
++                        row = linear_index // block_size
++                        col = linear_index % block_size
++                        logical_row = i + row
++                        logical_col = k + col
++                        value = wp.where(logical_row == logical_col, wp.float32(1), wp.float32(0))
++                        if not bad[tid] and logical_row < n_i and logical_col < n_i:
++                            source_row = permutation[logical_row]
++                            source_col = permutation[logical_col]
++                            value = read_entry(D, P_epoch, phase, epoch_dim, epoch_mio, epoch_vio, pending_delta, pending_apply, source_dim, source_mio, tid, wp.max(source_row, source_col), wp.min(source_row, source_col))
++                            if logical_row == logical_col and logical_row >= free:
++                                value = value + sigma
++                        A_ik_tile[row, col] = value
++
++                    # Update the block with contributions from previously computed blocks
++                    # (in-place negative-accumulating matmul; see the diagonal-block loop above).
++                    if k > 0:
++                        for j in range(0, k, block_size):
++                            if not wp.static(skip_structural_zeros) or (
++                                (occupied[tid, i // block_size] & (wp.uint32(1) << wp.uint32(j // block_size))) != wp.uint32(0)
++                                and (occupied[tid, k // block_size] & (wp.uint32(1) << wp.uint32(j // block_size))) != wp.uint32(0)
++                            ):
++                                L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, j))
++                                L_2_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(k, j))
++                                if wp.static(HAS_TILE_MATMUL_TRANSPOSE_UPDATE):
++                                    wp.tile_matmul_transpose_update(A_ik_tile, L_tile, L_2_tile, alpha=-1.0)
++                                else:
++                                    L_T_tile = wp.tile_transpose(L_2_tile)
++                                    wp.tile_matmul(L_tile, L_T_tile, A_ik_tile, alpha=-1.0)
++
++                    # Solve for the current block using the in-place triangular solve to avoid
++                    # an extra intermediate tile.
++                    t = wp.tile_transpose(A_ik_tile)
++                    wp.tile_lower_solve_inplace(A_kk_tile, t)
++                    sol_tile = wp.tile_transpose(t)
++                    wp.tile_store(L_i, sol_tile, offset=(i, k))
++                else:
++                    # Active strides vary with contacts: never leave stale L.
++                    zeros = wp.tile_zeros(shape=(block_size, block_size), dtype=wp.float32)
++                    wp.tile_store(L_i, zeros, offset=(i, k))
++
++    # Return the kernel function
++    return llt_blocked_factorize_kernel
++
++
++@wp.kernel(enable_backward=False)
++def pack_runtime_permuted_q(
++    q: wp.array[wp.float32],
++    dim: wp.array[wp.int32],
++    vio: wp.array[wp.int32],
++    bad: wp.array[wp.bool],
++    permutation: wp.array[wp.int32],
++    free: int,
++    width: int,
++    qF: wp.array[wp.float32],
++    qdense: wp.array[wp.float32],
++):
++    world, row = wp.tid()
++    value = wp.float32(0.0)
++    if not bad[world] and row < dim[world]:
++        value = q[vio[world] + permutation[row]]
++    qdense[world * width + row] = value
++    if row < free:
++        qF[world * free + row] = value
++
++
++@wp.kernel(enable_backward=False)
++def restore_runtime_free_order(
++    value: wp.array[wp.float32],
++    permutation: wp.array[wp.int32],
++    free: int,
++    output: wp.array[wp.float32],
++):
++    world, row = wp.tid()
++    output[world * free + permutation[row]] = value[world * free + row]
+--- /dev/null
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_lazy_sparse_diagnostics.py
+@@ -0,0 +1,122 @@
++"""Frozen sparse-load diagnostics; all original arithmetic and cadence retained."""
++
++import warp as wp
++from ...dynamics.lazy_preconditioning import read_entry
++from newton._src.solvers.kamino._src.solvers.padmm.math import (
++    compute_box_complementarity_residual,
++    project_to_coulomb_cone,
++)
++
++
++@wp.func_native("""
++float r = value;
++#pragma unroll
++for (int offset = 16; offset > 0; offset >>= 1)
++    r += __shfl_xor_sync(0xffffffffu, r, offset, 32);
++return r;
++""")
++def warp_sum(value: wp.float32) -> wp.float32: ...
++
++
++def make_sparse(capacity):
++    CAPACITY = wp.constant(capacity)
++    WARPS = wp.constant(4)
++
++    @wp.kernel(enable_backward=False)
++    def sparse_warp(
++        D: wp.array[float],
++        P_epoch: wp.array[wp.float32],
++        phase: wp.array[wp.int32],
++        epoch_dim: wp.array[wp.int32],
++        epoch_mio: wp.array[wp.int32],
++        epoch_vio: wp.array[wp.int32],
++        pending_delta: wp.array[wp.float32],
++        pending_apply: wp.array[wp.int32],
++        q: wp.array[float],
++        P: wp.array[float],
++        dim: wp.array[int],
++        mio: wp.array[int],
++        vio: wp.array[int],
++        nbc: wp.array[int],
++        nl: wp.array[int],
++        bcgo: wp.array[int],
++        lcgo: wp.array[int],
++        ccgo: wp.array[int],
++        bcio: wp.array[int],
++        cio: wp.array[int],
++        lower: wp.array[float],
++        upper: wp.array[float],
++        mu: wp.array[float],
++        x: wp.array[float],
++        y: wp.array[float],
++        z: wp.array[float],
++        sigma: float,
++        row_masks: wp.array2d[wp.uint32],
++        dense: wp.array[int],
++        result: wp.array2d[float],
++    ):
++        w, thread = wp.tid()
++        n = dim[w]
++        lane = thread % 32
++        warp = thread // 32
++        masks = wp.tile_load(row_masks, shape=(1, CAPACITY), offset=(w, 0), storage="shared")
++        use_dense = dense[w] != 0
++        stationarity = wp.float32(0.0)
++        feasibility = wp.float32(0.0)
++        natural_map = wp.float32(0.0)
++        complementarity = wp.float32(0.0)
++        for k in range(warp, n, WARPS):
++            partial = wp.float32(0.0)
++            for j in range(lane, n, 32):
++                value = wp.float32(0.0)
++                if use_dense or k == j:
++                    value = read_entry(D, P_epoch, phase, epoch_dim, epoch_mio, epoch_vio, pending_delta, pending_apply, dim, mio, w, k, j)
++                elif (masks[0, k] & masks[0, j]) != wp.uint32(0):
++                    value = read_entry(D, P_epoch, phase, epoch_dim, epoch_mio, epoch_vio, pending_delta, pending_apply, dim, mio, w, k, j)
++                partial = partial + value * y[vio[w] + j]
++            product = warp_sum(partial)
++            if lane == 0:
++                idx = vio[w] + k
++                pv = P[idx]
++                yv = y[idx]
++                zv = z[idx]
++                correction = wp.float32(0.0)
++                pr = yv
++                natural = yv - zv
++                comp = wp.float32(0.0)
++                if k >= bcgo[w] and k < bcgo[w] + nbc[w]:
++                    j = bcio[w] + k - bcgo[w]
++                    lo = lower[j]
++                    hi = upper[j]
++                    pr = wp.clamp(yv, lo, hi)
++                    natural = wp.clamp(yv - zv, lo, hi)
++                    comp = wp.abs(compute_box_complementarity_residual(yv, zv, lo, hi))
++                elif k >= lcgo[w] and k < lcgo[w] + nl[w]:
++                    pr = wp.max(yv, 0.0)
++                    natural = wp.max(yv - zv, 0.0)
++                    comp = wp.abs(yv * zv)
++                elif k >= ccgo[w]:
++                    component = (k - ccgo[w]) % 3
++                    j = idx - component
++                    m = mu[cio[w] + (k - ccgo[w]) // 3]
++                    yy = wp.vec3f(y[j], y[j + 1], y[j + 2])
++                    zz = wp.vec3f(z[j], z[j + 1], z[j + 2])
++                    pr = project_to_coulomb_cone(yy, m)[component]
++                    natural = project_to_coulomb_cone(yy - zz, m)[component]
++                    if component == 2:
++                        correction = m * wp.sqrt(z[j] * z[j] + z[j + 1] * z[j + 1])
++                    if component == 0:
++                        comp = wp.abs(wp.dot(yy, zz))
++                value = q[idx] + correction - zv - sigma * yv
++                value = value + product
++                stationarity = wp.max(stationarity, wp.abs(value / pv))
++                feasibility = wp.max(feasibility, wp.abs(pv * (yv - pr)))
++                natural_map = wp.max(natural_map, wp.abs(yv - natural))
++                complementarity = wp.max(complementarity, comp)
++        if lane == 0:
++            wp.atomic_max(result, w, 0, stationarity)
++            wp.atomic_max(result, w, 1, feasibility)
++            wp.atomic_max(result, w, 2, natural_map)
++            wp.atomic_max(result, w, 3, complementarity)
++
++    return sparse_warp
+--- a/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py
+@@ -9,6 +9,10 @@
+ 
+ import numpy as np
+ import warp as wp
++
++from .reduced_lazy_factor import make_runtime_lazy_factor
++from .reduced_lazy_diagnostics import make_bounded as make_lazy_bounded
++from .reduced_lazy_sparse_diagnostics import make_sparse as make_lazy_sparse
+ 
+ from .kernels import _update_delassus_proximal_regularization
+ from .reduced_direct_factor import make_runtime_direct_factor, pack_runtime_q
+@@ -63,7 +67,9 @@
+         self.count = model.size.num_worlds
+         self.device = model.device
+         self.sigma = float(np.float32(np.float32(cfg.eta) + np.float32(cfg.rho_0)))
++        self.lazy_preconditioning = cfg.reduced_lazy_preconditioning
+         self.diagnostics = make_bounded(128, "warp")
++        self.lazy_diagnostics = make_lazy_bounded(128, "warp") if self.lazy_preconditioning else None
+         self.use_sparse_diagnostics = cfg.reduced_sparse_diagnostics
+         if self.use_sparse_diagnostics:
+             dofs = model.info.num_body_dofs
+@@ -72,6 +78,7 @@
+                 else dofs.numpy().astype(np.int32) // 6
+             )
+             self.sparse_diagnostics = make_sparse(self.width)
++            self.lazy_sparse_diagnostics = make_lazy_sparse(self.width) if self.lazy_preconditioning else None
+         self.owner = owner
+         self.reduced_ordering = cfg.reduced_ordering
+         self.reduced_dynamic_pattern = cfg.reduced_dynamic_pattern
+@@ -168,6 +175,7 @@
+         if self.reduced_dynamic_pattern:
+             self.factor = make_runtime_dynamic_factor(16, True)
+             self.symbolic_fill = make_symbolic_fill(self.pattern_tiles)
++        self.lazy_factor = make_runtime_lazy_factor(16, True) if self.lazy_preconditioning else None
+         self.forward = make_free_solve(False)
+         self.backward3 = make_backward3()
+         self.small_inverse = make_inverse_publication()
+@@ -192,7 +200,12 @@
+     def solve(self, problem, *, _fresh_sparse_build=False):
+         if problem.sparse:
+             raise ValueError("bilateral_reduced prototype only supports dense dynamics")
+-        p = problem.data
++        p = problem._private_data()
++        matrix_owner = problem._active_preconditioning_owner()
++        use_lazy = self.lazy_preconditioning and matrix_owner is not None
++        if matrix_owner is not None and not use_lazy:
++            matrix_owner.materialize_internal()
++        representation = matrix_owner.descriptor() if use_lazy else []
+         if self.reduced_dynamic_pattern:
+             jacobians = problem.jacobians
+             if not isinstance(jacobians, SparseSystemJacobians) or jacobians._J_cts is None:
+@@ -276,12 +289,13 @@
+         )
+         if self.reduced_ordering == "rcm":
+             self.launch(
+-                self.factor,
++                self.lazy_factor if use_lazy else self.factor,
+                 (self.count, 128),
+                 [
+                     self.dim,
+                     self.mio,
+                     p.D,
++                    *representation,
+                     p.dim,
+                     p.mio,
+                     self.bad,
+@@ -384,11 +398,14 @@
+         )
+         # Preserve the public D/sigma contract, without always factoring the
+         # full operator. No reduced status has yet touched source status.
+-        self.launch(
+-            _update_delassus_proximal_regularization,
+-            (self.count, self.owner._size.max_of_max_total_cts),
+-            [p.dim, p.mio, self.owner.data.status, s.sigma, p.D],
+-        )
++        if matrix_owner is not None:
++            matrix_owner.source_proximal_update(s.sigma, self.owner.data.status)
++        else:
++            self.launch(
++                _update_delassus_proximal_regularization,
++                (self.count, self.owner._size.max_of_max_total_cts),
++                [p.dim, p.mio, self.owner.data.status, s.sigma, p.D],
++            )
+         wp.capture_if(self.bad_count, self._full_fallback, problem=problem)
+         self.launch(
+             merge_vectors,
+@@ -428,6 +445,7 @@
+         self.original_residuals.zero_()
+         diagnostic_args = [
+                 p.D,
++                *representation,
+                 p.v_f,
+                 p.P,
+                 p.dim,
+@@ -456,9 +474,9 @@
+             _fresh_sparse_build and self.use_sparse_diagnostics
+             and isinstance(problem.jacobians, SparseSystemJacobians)
+             and problem.jacobians._J_cts is not None
+-            and p.D is problem._delassus.D
+-            and p.dim is problem._delassus.info.dim
+-            and p.mio is problem._delassus.info.mio
++            and p.D is problem._delassus._operator.mat
++            and p.dim is problem._delassus._operator.info.dim
++            and p.mio is problem._delassus._operator.info.mio
+         )
+         if live_sparse:
+             topology = problem.jacobians._J_cts.bsm
+@@ -472,9 +490,9 @@
+             self.launch(guard_preconditioner, (self.count, 128), [
+                 p.P, p.dim, p.vio, self.diagnostic_dense,
+             ])
+-            self.launch(self.sparse_diagnostics, (self.count, 128), [
++            self.launch(self.lazy_sparse_diagnostics if use_lazy else self.sparse_diagnostics, (self.count, 128), [
+                 *diagnostic_args[:-1], self.diagnostic_masks, self.diagnostic_dense,
+                 diagnostic_args[-1],
+             ])
+         else:
+-            self.launch(self.diagnostics, (self.count, 128), diagnostic_args)
++            self.launch(self.lazy_diagnostics if use_lazy else self.diagnostics, (self.count, 128), diagnostic_args)
+--- a/_src/solvers/kamino/_src/solvers/padmm/solver.py
++++ b/_src/solvers/kamino/_src/solvers/padmm/solver.py
+@@ -317,8 +317,8 @@
+                 dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+                 inputs=[
+                     world_mask,
+-                    problem.data.vio,
+-                    problem.data.maxdim,
++                    problem._private_data().vio,
++                    problem._private_data().maxdim,
+                     self._data.solution.lambdas,
+                     self._data.solution.v_plus,
+                 ],
+@@ -385,8 +385,8 @@
+             dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+             inputs=[
+                 # Inputs:
+-                problem.data.dim,
+-                problem.data.vio,
++                problem._private_data().dim,
++                problem._private_data().vio,
+                 self._data.config,
+                 # Outputs:
+                 x_0,
+@@ -524,8 +524,8 @@
+             kernel=_update_delassus_proximal_regularization_sparse,
+             dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+             inputs=[
+-                problem.data.dim,
+-                problem.data.vio,
++                problem._private_data().dim,
++                problem._private_data().vio,
+                 self._data.config,
+                 self._data.penalty,
+                 self._data.status,
+@@ -568,20 +568,26 @@
+             problem._delassus._solver.prepare_solve()
+         else:
+             # Update the proximal regularization term in the Delassus matrix
+-            wp.launch(
+-                kernel=_update_delassus_proximal_regularization,
+-                dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+-                inputs=[
+-                    # Inputs:
+-                    problem.data.dim,
+-                    problem.data.mio,
+-                    self._data.status,
+-                    self._data.state.sigma,
+-                    # Outputs:
+-                    problem.data.D,
+-                ],
+-                device=self.device,
+-            )
++            logical_owner = problem._active_preconditioning_owner()
++            if logical_owner is not None:
++                logical_owner.source_proximal_update(
++                    self._data.state.sigma, self._data.status,
++                )
++            else:
++                wp.launch(
++                    kernel=_update_delassus_proximal_regularization,
++                    dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
++                    inputs=[
++                        # Inputs:
++                        problem._private_data().dim,
++                        problem._private_data().mio,
++                        self._data.status,
++                        self._data.state.sigma,
++                        # Outputs:
++                        problem._private_data().D,
++                    ],
++                    device=self.device,
++                )
+ 
+             # Compute Cholesky/LDLT factorization of the Delassus matrix
+             problem._delassus.compute(reset_to_zero=True)
+@@ -674,11 +680,11 @@
+             dim=(self._size.num_worlds, self._size.max_of_max_contacts),
+             inputs=[
+                 # Inputs:
+-                problem.data.nc,
+-                problem.data.cio,
+-                problem.data.ccgo,
+-                problem.data.vio,
+-                problem.data.mu,
++                problem._private_data().nc,
++                problem._private_data().cio,
++                problem._private_data().ccgo,
++                problem._private_data().vio,
++                problem._private_data().mu,
+                 # Outputs:
+                 z,
+             ],
+@@ -735,7 +741,7 @@
+                 data.joints.dq_j,
+                 data.joints.inv_m_a,
+                 data.joints.dq_b_a,
+-                problem.data.P,
++                problem._private_data().P,
+                 # Outputs:
+                 x_0,
+                 y_0,
+@@ -780,7 +786,7 @@
+                 limits.lid,
+                 limits.reaction,
+                 limits.velocity,
+-                problem.data.P,
++                problem._private_data().P,
+                 # Outputs:
+                 x_0,
+                 y_0,
+@@ -826,7 +832,7 @@
+                 contacts.material,
+                 contacts.reaction,
+                 contacts.velocity,
+-                problem.data.P,
++                problem._private_data().P,
+                 # Outputs:
+                 x_0,
+                 y_0,
+@@ -850,9 +856,9 @@
+             dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+             inputs=[
+                 # Inputs:
+-                problem.data.dim,
+-                problem.data.vio,
+-                problem.data.P,
++                problem._private_data().dim,
++                problem._private_data().vio,
++                problem._private_data().P,
+                 # Outputs:
+                 self._data.solution.lambdas,
+                 self._data.solution.v_plus,
+@@ -933,11 +939,11 @@
+             dim=(self._size.num_worlds, self._size.max_of_max_contacts),
+             inputs=[
+                 # Inputs:
+-                problem.data.nc,
+-                problem.data.cio,
+-                problem.data.ccgo,
+-                problem.data.vio,
+-                problem.data.mu,
++                problem._private_data().nc,
++                problem._private_data().cio,
++                problem._private_data().ccgo,
++                problem._private_data().vio,
++                problem._private_data().mu,
+                 self._data.status,
+                 z,
+                 # Outputs:
+@@ -963,9 +969,9 @@
+             dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+             inputs=[
+                 # Inputs:
+-                problem.data.dim,
+-                problem.data.vio,
+-                problem.data.v_f,
++                problem._private_data().dim,
++                problem._private_data().vio,
++                problem._private_data().v_f,
+                 self._data.config,
+                 self._data.penalty,
+                 self._data.status,
+@@ -1000,13 +1006,13 @@
+             kernel=kernel,
+             dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+             inputs=[
+-                problem.data.dim,
+-                problem.data.nc,
+-                problem.data.cio,
+-                problem.data.ccgo,
+-                problem.data.vio,
+-                problem.data.mu,
+-                problem.data.v_f,
++                problem._private_data().dim,
++                problem._private_data().nc,
++                problem._private_data().cio,
++                problem._private_data().ccgo,
++                problem._private_data().vio,
++                problem._private_data().mu,
++                problem._private_data().v_f,
+                 self._data.config,
+                 self._data.penalty,
+                 self._data.status,
+@@ -1057,8 +1063,8 @@
+             dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+             inputs=[
+                 # Inputs:
+-                problem.data.dim,
+-                problem.data.vio,
++                problem._private_data().dim,
++                problem._private_data().vio,
+                 self._data.penalty,
+                 self._data.status,
+                 z,
+@@ -1086,18 +1092,18 @@
+             dim=(self._size.num_worlds, self._size.max_of_max_inequalities),
+             inputs=[
+                 # Inputs:
+-                problem.data.nbc,
+-                problem.data.nl,
+-                problem.data.nc,
+-                problem.data.bcio,
+-                problem.data.cio,
+-                problem.data.bcgo,
+-                problem.data.lcgo,
+-                problem.data.ccgo,
+-                problem.data.vio,
+-                problem.data.mu,
+-                problem.data.bound_lower,
+-                problem.data.bound_upper,
++                problem._private_data().nbc,
++                problem._private_data().nl,
++                problem._private_data().nc,
++                problem._private_data().bcio,
++                problem._private_data().cio,
++                problem._private_data().bcgo,
++                problem._private_data().lcgo,
++                problem._private_data().ccgo,
++                problem._private_data().vio,
++                problem._private_data().mu,
++                problem._private_data().bound_lower,
++                problem._private_data().bound_upper,
+                 self._data.status,
+                 # Outputs:
+                 self._data.state.y,
+@@ -1119,20 +1125,20 @@
+             dim=(self._size.num_worlds, self._size.max_of_max_inequalities),
+             inputs=[
+                 # Inputs:
+-                problem.data.nbc,
+-                problem.data.nl,
+-                problem.data.nc,
+-                problem.data.vio,
+-                problem.data.bcio,
+-                problem.data.iio,
+-                problem.data.bcgo,
+-                problem.data.lcgo,
+-                problem.data.ccgo,
++                problem._private_data().nbc,
++                problem._private_data().nl,
++                problem._private_data().nc,
++                problem._private_data().vio,
++                problem._private_data().bcio,
++                problem._private_data().iio,
++                problem._private_data().bcgo,
++                problem._private_data().lcgo,
++                problem._private_data().ccgo,
+                 self._data.status,
+                 self._data.state.x,
+                 self._data.state.z,
+-                problem.data.bound_lower,
+-                problem.data.bound_upper,
++                problem._private_data().bound_lower,
++                problem._private_data().bound_upper,
+                 # Outputs:
+                 self._data.residuals.r_compl,
+             ],
+@@ -1156,9 +1162,9 @@
+             dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+             inputs=[
+                 # Inputs:
+-                problem.data.dim,
+-                problem.data.vio,
+-                problem.data.P,
++                problem._private_data().dim,
++                problem._private_data().vio,
++                problem._private_data().P,
+                 self._data.config,
+                 self._data.penalty,
+                 self._data.status,
+@@ -1191,20 +1197,20 @@
+             block_dim=block_dim,
+             inputs=[
+                 # Inputs:
+-                problem.data.dim,
+-                problem.data.nbc,
+-                problem.data.nl,
+-                problem.data.nc,
+-                problem.data.bcio,
+-                problem.data.cio,
+-                problem.data.bcgo,
+-                problem.data.lcgo,
+-                problem.data.ccgo,
+-                problem.data.vio,
+-                problem.data.mu,
+-                problem.data.bound_lower,
+-                problem.data.bound_upper,
+-                problem.data.P,
++                problem._private_data().dim,
++                problem._private_data().nbc,
++                problem._private_data().nl,
++                problem._private_data().nc,
++                problem._private_data().bcio,
++                problem._private_data().cio,
++                problem._private_data().bcgo,
++                problem._private_data().lcgo,
++                problem._private_data().ccgo,
++                problem._private_data().vio,
++                problem._private_data().mu,
++                problem._private_data().bound_lower,
++                problem._private_data().bound_upper,
++                problem._private_data().P,
+                 self._data.config,
+                 self._data.penalty,
+                 self._data.state.a_p,
+@@ -1256,12 +1262,12 @@
+             block_dim=block_dim,
+             inputs=[
+                 # Inputs:
+-                problem.data.nbc,
+-                problem.data.nl,
+-                problem.data.nc,
+-                problem.data.iio,
+-                problem.data.dim,
+-                problem.data.vio,
++                problem._private_data().nbc,
++                problem._private_data().nl,
++                problem._private_data().nc,
++                problem._private_data().iio,
++                problem._private_data().dim,
++                problem._private_data().vio,
+                 self._data.config,
+                 self._data.residuals.r_primal,
+                 self._data.residuals.r_dual,
+@@ -1284,6 +1290,8 @@
+         Args:
+             problem: The dual forward dynamics problem to be solved.
+         """
++        problem._materialize_matrix()
++
+         # First reset the internal buffer arrays to zero
+         # to ensure we do not accumulate values across iterations
+         self.data.info.v_plus.zero_()
+@@ -1293,13 +1301,13 @@
+         # Collect convergence information from the current state
+         if problem.sparse:
+             # Initialize post-event constraint-space velocity from solution: v_plus = v_f + D @ lambda
+-            wp.copy(self._data.info.v_plus, problem.data.v_f)
++            wp.copy(self._data.info.v_plus, problem._private_data().v_f)
+             delassus_reg_prev = problem.delassus._eta
+             problem.delassus.set_regularization(None)
+             problem.delassus.gemv(
+                 x=self._data.state.y,
+                 y=self._data.info.v_plus,
+-                world_mask=wp.ones((problem.data.num_worlds,), dtype=wp.bool, device=self.device),
++                world_mask=wp.ones((problem._private_data().num_worlds,), dtype=wp.bool, device=self.device),
+                 alpha=1.0,
+                 beta=1.0,
+             )
+@@ -1309,21 +1317,21 @@
+                 dim=self._size.num_worlds,
+                 inputs=[
+                     # Inputs:
+-                    problem.data.nbc,
+-                    problem.data.nl,
+-                    problem.data.nc,
+-                    problem.data.bcio,
+-                    problem.data.cio,
+-                    problem.data.bcgo,
+-                    problem.data.lcgo,
+-                    problem.data.ccgo,
+-                    problem.data.dim,
+-                    problem.data.vio,
+-                    problem.data.mu,
+-                    problem.data.v_f,
+-                    problem.data.P,
+-                    problem.data.bound_lower,
+-                    problem.data.bound_upper,
++                    problem._private_data().nbc,
++                    problem._private_data().nl,
++                    problem._private_data().nc,
++                    problem._private_data().bcio,
++                    problem._private_data().cio,
++                    problem._private_data().bcgo,
++                    problem._private_data().lcgo,
++                    problem._private_data().ccgo,
++                    problem._private_data().dim,
++                    problem._private_data().vio,
++                    problem._private_data().mu,
++                    problem._private_data().v_f,
++                    problem._private_data().P,
++                    problem._private_data().bound_lower,
++                    problem._private_data().bound_upper,
+                     self._data.state.s,
+                     self._data.state.x,
+                     self._data.state.x_p,
+@@ -1372,23 +1380,23 @@
+                 dim=self._size.num_worlds,
+                 inputs=[
+                     # Inputs:
+-                    problem.data.nbc,
+-                    problem.data.nl,
+-                    problem.data.nc,
+-                    problem.data.bcio,
+-                    problem.data.cio,
+-                    problem.data.bcgo,
+-                    problem.data.lcgo,
+-                    problem.data.ccgo,
+-                    problem.data.dim,
+-                    problem.data.vio,
+-                    problem.data.mio,
+-                    problem.data.mu,
+-                    problem.data.v_f,
+-                    problem.data.D,
+-                    problem.data.P,
+-                    problem.data.bound_lower,
+-                    problem.data.bound_upper,
++                    problem._private_data().nbc,
++                    problem._private_data().nl,
++                    problem._private_data().nc,
++                    problem._private_data().bcio,
++                    problem._private_data().cio,
++                    problem._private_data().bcgo,
++                    problem._private_data().lcgo,
++                    problem._private_data().ccgo,
++                    problem._private_data().dim,
++                    problem._private_data().vio,
++                    problem._private_data().mio,
++                    problem._private_data().mu,
++                    problem._private_data().v_f,
++                    problem._private_data().D,
++                    problem._private_data().P,
++                    problem._private_data().bound_lower,
++                    problem._private_data().bound_upper,
+                     self._data.state.sigma,
+                     self._data.state.s,
+                     self._data.state.x,
+@@ -1460,9 +1468,9 @@
+             dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+             inputs=[
+                 # Inputs:
+-                problem.data.dim,
+-                problem.data.vio,
+-                problem.data.P,
++                problem._private_data().dim,
++                problem._private_data().vio,
++                problem._private_data().P,
+                 # Outputs:
+                 self._data.state.x,
+                 self._data.state.y,
+@@ -1477,11 +1485,11 @@
+             dim=(self._size.num_worlds, self._size.max_of_max_contacts),
+             inputs=[
+                 # Inputs:
+-                problem.data.nc,
+-                problem.data.cio,
+-                problem.data.ccgo,
+-                problem.data.vio,
+-                problem.data.mu,
++                problem._private_data().nc,
++                problem._private_data().cio,
++                problem._private_data().ccgo,
++                problem._private_data().vio,
++                problem._private_data().mu,
+                 self._data.state.z,
+                 # Outputs:
+                 self._data.state.s,
+@@ -1495,8 +1503,8 @@
+             dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+             inputs=[
+                 # Inputs:
+-                problem.data.dim,
+-                problem.data.vio,
++                problem._private_data().dim,
++                problem._private_data().vio,
+                 self._data.state.s,
+                 self._data.state.y,
+                 self._data.state.z,
+--- a/_src/solvers/kamino/config.py
++++ b/_src/solvers/kamino/config.py
+@@ -489,6 +489,13 @@
+ 
+     algorithm: Literal["full", "bilateral_reduced"] = "full"
+     """Explicit experimental iteration algorithm; full preserves the default path."""
++
++    reduced_lazy_preconditioning: bool = False
++    """Defer dense P scaling internally; public views publish eagerly.
++
++    First public D/data/operator/solver/info access must be outside CUDA capture.
++    Only dense dynamic-RCM bilateral_reduced mode is currently supported.
++    """
+ 
+     reduced_sparse_diagnostics: bool = False
+     """Use topology-based D loads only in the enclosed fresh-build simulation path.
+@@ -781,6 +788,14 @@
+         from ._src.solvers.padmm import PADMMPenaltyUpdate, PADMMWarmStartMode  # noqa: PLC0415
+         from ._src.solvers.warmstart import WarmstarterContacts  # noqa: PLC0415
+ 
++        if type(self.reduced_lazy_preconditioning) is not bool:
++            raise ValueError("reduced_lazy_preconditioning must be bool")
++        if self.reduced_lazy_preconditioning and (
++            self.algorithm != "bilateral_reduced"
++            or self.reduced_ordering != "rcm"
++            or not self.reduced_dynamic_pattern
++        ):
++            raise ValueError("reduced_lazy_preconditioning requires bilateral_reduced dynamic RCM")
+         if self.reduced_ordering not in ("natural", "rcm"):
+             raise ValueError("reduced_ordering must be natural or rcm")
+ 
