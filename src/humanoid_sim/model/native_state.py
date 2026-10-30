@@ -57,7 +57,9 @@ def _relative_quat(a, b):
 
 
 class NativeState:
-    def __init__(self, desc, *, device="cpu", dtype=torch.float64, compile_batch_size: int | None = None):
+    def __init__(self, desc, *, device="cpu", dtype=torch.float64, compile_batch_size: int | None = None,
+                 rod_joints: str | None = None):
+        """``rod_joints``: ``spherical`` or ``universal``; None reads the profile's ``model.rod_joints``."""
         from pxr import UsdPhysics
 
         self.names = list(desc.joints)
@@ -137,7 +139,7 @@ class NativeState:
                               for root, (children, rods) in groups.items()]
         from humanoid_sim.model.asset import load_profile
 
-        kind = load_profile(desc.robot)["model"].get("rod_joints", "spherical")
+        kind = rod_joints or load_profile(desc.robot)["model"].get("rod_joints", "spherical")
         if kind not in ("spherical", "universal"):
             raise ValueError(f"rod_joints {kind!r}: spherical or universal")
         # ball name -> its universal frame within the ball frame; balls not listed stay spherical

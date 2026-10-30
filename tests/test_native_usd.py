@@ -179,6 +179,16 @@ def test_universal_rods_lock_only_the_spin_about_their_own_axis(desc, tmp_path):
     assert len(rods) == len(desc.linkages) * 2
 
 
+def test_universal_rods_near_their_singularity_are_refused(desc, tmp_path, monkeypatch):
+    from humanoid_sim.model import usd
+
+    profile = load_profile(desc.robot)
+    profile["model"]["rod_joints"] = "universal"
+    monkeypatch.setattr(usd, "UNIVERSAL_MARGIN_RAD", 1e-3)
+    with pytest.raises(ValueError, match="second axis"):
+        build_asset(desc, profile, tmp_path)
+
+
 @pytest.mark.physics
 @pytest.mark.parametrize("cuda_graph", [False, True])
 def test_native_runtime_steps_and_reads_physical_shafts(desc, tmp_path, cuda_graph):

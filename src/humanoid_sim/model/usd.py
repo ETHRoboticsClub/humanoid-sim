@@ -321,9 +321,15 @@ def _author_universal_rods(desc, profile: dict, source, stage, mapped) -> list[s
 
     from humanoid_sim.model.native_state import NativeState, universal_rod_frame
 
+    rods = NativeState(desc).rods
+    if len(rods) != 2 * len(desc.linkages):
+        raise ValueError(f"universal rods: found {len(rods)} loop-closing rods, expected two per ankle linkage")
+    _check_universal_margin(desc)
     out = []
-    for name, *_, rod_vector, _ in NativeState(desc).rods:
+    for name, *_, rod_vector, _ in rods:
         joint = source.joints[name]
+        if not joint.GetPrim().IsA(UsdPhysics.SphericalJoint) or joint.GetExcludeFromArticulationAttr().Get():
+            raise ValueError(f"universal rods: {name} is not an articulated ball joint")
         turn = Gf.Matrix3d(*universal_rod_frame(rod_vector.numpy()).T.flatten()).ExtractRotation().GetQuat()
         prim = stage.OverridePrim(mapped(joint.GetPrim()))
         prim.SetTypeName("PhysicsJoint")
@@ -339,6 +345,31 @@ def _author_universal_rods(desc, profile: dict, source, stage, mapped) -> list[s
             limit.CreateHighAttr(float(high))
         out.append(name)
     return out
+
+
+UNIVERSAL_MARGIN_RAD = math.radians(60.0)  # largest second angle allowed; the universal joint is singular at 90 deg
+
+
+def _check_universal_margin(desc, samples: int = 4096) -> None:
+    """Refuse universal rods whose second angle comes near its singularity anywhere in the ankle travel:
+    candidates far past the travel, projected onto it."""
+    import torch
+
+    from humanoid_sim.model.native_state import NativeState
+
+    state = NativeState(desc, rod_joints="universal")
+    generator = torch.Generator().manual_seed(0)
+    q = torch.zeros(samples, len(desc.joints), dtype=torch.float64)
+    for linkage in desc.linkages:
+        neutral = torch.as_tensor(desc.ankle_model.neutral(linkage.side), dtype=q.dtype)
+        candidates = neutral + (torch.rand(samples, 2, generator=generator, dtype=q.dtype) - 0.5) * 3.0
+        projected = desc.ankle_model.project(candidates.numpy(), linkage.side)
+        q[:, [list(desc.joints).index(n) for n in linkage.joints]] = torch.as_tensor(projected, dtype=q.dtype)
+    _, angles = state.coordinates(q)
+    worst = max(float(a[:, 1].abs().max()) for a in angles.values())
+    if worst > UNIVERSAL_MARGIN_RAD:
+        raise ValueError(f"universal rods reach {math.degrees(worst):.1f} deg of their second axis "
+                         f"(limit {math.degrees(UNIVERSAL_MARGIN_RAD):.0f}, singular at 90)")
 
 
 def crank_joints(desc) -> dict[str, str]:
