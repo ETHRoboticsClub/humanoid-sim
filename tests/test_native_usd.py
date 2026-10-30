@@ -153,6 +153,32 @@ def test_native_asset_preserves_closures_and_authors_shaft_limits(desc, tmp_path
     assert source.digest() == source_hash
 
 
+
+def test_universal_rods_lock_only_the_spin_about_their_own_axis(desc, tmp_path):
+    from pxr import Gf, Usd, UsdPhysics
+
+    profile = load_profile(desc.robot)
+    profile["model"]["rod_joints"] = "universal"
+    stage = Usd.Stage.Open(str(build_asset(desc, profile, tmp_path)))
+    rods = NativeState(desc).rods
+    for name, *_, rod_vector, _ in rods:
+        prim = next(p for p in stage.Traverse() if p.GetName() == name)
+        joint = UsdPhysics.Joint(prim)
+        assert prim.GetTypeName() == "PhysicsJoint" and not joint.GetExcludeFromArticulationAttr().Get()
+        limits = {axis: (UsdPhysics.LimitAPI(prim, axis).GetLowAttr().Get(),
+                         UsdPhysics.LimitAPI(prim, axis).GetHighAttr().Get()) for axis in
+                  ("transX", "transY", "transZ", "rotX", "rotY", "rotZ")}
+        assert all(low > high for axis, (low, high) in limits.items() if axis not in ("rotX", "rotY"))
+        assert all(low < high for axis, (low, high) in limits.items() if axis in ("rotX", "rotY"))
+        # The locked Z of the new frame lies along the rod, in the frame the source joint used on the rod.
+        source = desc.usd_model.joints[name]
+        old, new = (np.asarray(Gf.Matrix3d(Gf.Rotation(Gf.Quatd(a.Get()))).GetTranspose())
+                    for a in (source.GetLocalRot1Attr(), joint.GetLocalRot1Attr()))
+        rod = old @ (rod_vector.numpy() / np.linalg.norm(rod_vector.numpy()))
+        assert new[:, 2] == pytest.approx(rod, abs=1e-6)
+    assert len(rods) == len(desc.linkages) * 2
+
+
 @pytest.mark.physics
 @pytest.mark.parametrize("cuda_graph", [False, True])
 def test_native_runtime_steps_and_reads_physical_shafts(desc, tmp_path, cuda_graph):

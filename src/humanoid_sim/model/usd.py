@@ -246,6 +246,8 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
         revolute.CreateLowerLimitAttr(math.degrees(bounds[0]))
         revolute.CreateUpperLimitAttr(math.degrees(bounds[1]))
 
+    universal = _author_universal_rods(desc, profile, source, stage, mapped)
+
     excluded = []
     fixed_pairs = []
     if profile["model"].get("exclude_fixed_cluster_contacts", False):
@@ -296,12 +298,47 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     meta = {"schema": ASSET_SCHEMA, "key": key, "usd": path.name, **desc.identity(),
             "source_usd_sha256": source.digest(), "ankle_representation": "native",
             "base_joints": [name for name, _ in BASE_JOINTS] if base_joints else [],
-            "loop_closures": closures, "crank_joints": crank_joints(desc),
+            "loop_closures": closures, "crank_joints": crank_joints(desc), "universal_rod_joints": universal,
             "welded_joints": welded, "sole_boxes": soles, "merged_collision_bodies": [],
             "pruned_collision_hulls": pruned,
             "contact_excludes": contact_excludes, "self_collision_sets": None, "self_collision_excludes": excluded}
     meta_path.write_text(json.dumps(meta, indent=1))
     return path
+
+
+def _author_universal_rods(desc, profile: dict, source, stage, mapped) -> list[str]:
+    """With ``model.rod_joints: universal``, turn the open (articulated) ball joint of every ankle rod into a
+    universal joint: rotation about the rod's own ball-to-ball axis locked, the two axes across it free. A rod
+    between two balls spins freely about that axis on a tiny inertia; the spin carries no load. The joint frame
+    turns by :func:`~humanoid_sim.model.native_state.universal_rod_frame` on both bodies, so the assembled pose
+    stays the zero pose. Returns the joints changed."""
+    kind = profile["model"].get("rod_joints", "spherical")
+    if kind == "spherical":
+        return []
+    if kind != "universal":
+        raise ValueError(f"rod_joints {kind!r}: spherical or universal")
+    from pxr import Gf, UsdPhysics
+
+    from humanoid_sim.model.native_state import NativeState, universal_rod_frame
+
+    out = []
+    for name, *_, rod_vector, _ in NativeState(desc).rods:
+        joint = source.joints[name]
+        turn = Gf.Matrix3d(*universal_rod_frame(rod_vector.numpy()).T.flatten()).ExtractRotation().GetQuat()
+        prim = stage.OverridePrim(mapped(joint.GetPrim()))
+        prim.SetTypeName("PhysicsJoint")
+        target = UsdPhysics.Joint(prim)
+        for get, create in ((joint.GetLocalRot0Attr, target.CreateLocalRot0Attr),
+                            (joint.GetLocalRot1Attr, target.CreateLocalRot1Attr)):
+            create(Gf.Quatf((Gf.Quatd(get().Get()) * turn).GetNormalized()))
+        # A D6 joint: locked axes have low > high; free axes need a limit to be imported at all.
+        for axis, (low, high) in {"transX": (1, -1), "transY": (1, -1), "transZ": (1, -1), "rotZ": (1, -1),
+                                  "rotX": (-math.inf, math.inf), "rotY": (-math.inf, math.inf)}.items():
+            limit = UsdPhysics.LimitAPI.Apply(prim, axis)
+            limit.CreateLowAttr(float(low))
+            limit.CreateHighAttr(float(high))
+        out.append(name)
+    return out
 
 
 def crank_joints(desc) -> dict[str, str]:

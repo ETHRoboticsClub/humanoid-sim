@@ -16,6 +16,10 @@ model:
   weld_unlisted_joints: true
   # Preserve the delivered crank/rod loops; only uncommanded hand joints are welded.
   ankle_representation: native
+  # Each ankle rod hangs between two balls, which leaves its spin about its own axis free on ~1e-5 kg m^2: an
+  # undamped mode that spun the rods past 1600 rad/s and to NaN at 2 ms. The rod's open ball becomes a universal
+  # joint with that spin locked; it carries no load (model/usd.py).
+  rod_joints: universal
   collision_hulls: per_mesh
   # Hand joints are welded above: shapes within each resulting rigid assembly
   # must not generate self-contacts between its non-adjacent component bodies.

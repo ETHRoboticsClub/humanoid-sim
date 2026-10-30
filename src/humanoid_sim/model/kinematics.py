@@ -50,10 +50,10 @@ class RobotKinematics:
             from humanoid_sim.model.native_state import NativeState
 
             self._native = NativeState(Description.load(meta["robot"]))
+            ends = [*qstart[1:], per_q]
             for i, name in enumerate(labels):
-                width = 4 if robot.joint_type[i] == newton.JointType.BALL else 1
                 self._native_columns[name] = torch.as_tensor(
-                    np.arange(num_envs)[:, None] * per_q + qstart[i] + np.arange(width)[None])
+                    np.arange(num_envs)[:, None] * per_q + np.arange(qstart[i], ends[i])[None])
 
     def body_poses(self, q: torch.Tensor) -> np.ndarray:
         """World poses ``[E * B, 7]`` (position, quaternion xyzw) for joint positions ``q`` ``[E, J]``."""

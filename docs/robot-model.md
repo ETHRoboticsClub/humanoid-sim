@@ -8,7 +8,9 @@ V1's profile names `usd/humanoid_V1.usda`. `UsdDescription` reads its rigid bodi
 
 The delivered ankle crank shafts and spherical rod closures remain physical joints. Each crank receives its drive's torque and rotor armature. The passive ankle hinges carry their described friction and damping, with zero reflected rotor armature and zero drive stiffness. The solver transmits shaft torque through the rods. `PlantCore.map` converts semantic policy targets to motor targets, while `solver_map` reads physical shaft feedback and applies torque to those shafts. Unactuated hinge disturbances and dynamic-friction relief use effort feedforward.
 
-`NativeState` completes semantic reset poses with the crank positions, rod ball orientations and their rates. Both Train-Time API and runtime resets use it; host Newton kinematics uses the same coordinates. During stepping the solver owns the linkage state. Sensor mounts and the mirror map come from USD. `home` is the delivered zero pose; it is not guaranteed to be a balanced or level-foot standing pose. Training chooses and validates its own stance.
+Each rod hangs between two balls, which leaves its spin about its own axis free on a tiny inertia; with the profile's `model.rod_joints: universal` (the V1's) the asset turns the rod's open ball into a universal joint, its frame's Z along the rod and locked, X and Y free. The spin carries no load, so the linkage keeps its kinematics and forces.
+
+`NativeState` completes semantic reset poses with the crank positions, the rods' open-joint coordinates (ball orientations or universal angles) and their rates. Both Train-Time API and runtime resets use it; host Newton kinematics uses the same coordinates. During stepping the solver owns the linkage state. Sensor mounts and the mirror map come from USD. `home` is the delivered zero pose; it is not guaranteed to be a balanced or level-foot standing pose. Training chooses and validates its own stance.
 
 The native path supports floating/fixed-base training, runtime sessions and prescribed Euler base-joint replay assets (`--base-joints`). PACE fits use `PlantCore.solver_map.joint_names`: physical crank rotor armatures, zero hinge rotor armatures, and fixed structural zeros. Legacy reflected-hinge fits cannot be applied to that physical inventory. Older policies and captures also need the matching semantic frame and description revision. The Controls ABI description digest remains the URDF/actuator digest; built assets additionally verify their USD source digest on load.
 
@@ -383,7 +385,7 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `physics.period_ns` | `SimCore`, `RobotPlant`, `robot_sim_cfg` | Physics step: 1000000 ns for native V1, 4000000 ns for G1. `replay --period-ms` sets it for replays. |
 | `physics.solver` | `solver_settings` | The Newton solver that steps the robot: `mjwarp` (the default) or `kamino` (beta). The global option `--solver` and `robot_sim_cfg(solver=...)` override it; the solver needs its own block below. |
 | `physics.self_collision` | `SimCore`, `robot_scene_cfg` | Self-collision on the spawned articulation. |
-| `physics.mjwarp.integrator` | `solver_cfg` | MJWarp integrator: native V1 uses `rk4` for rapidly spinning slender rods; the general default is `implicitfast`. `replay --integrator` overrides it. |
+| `physics.mjwarp.integrator` | `solver_cfg` | MJWarp integrator: native V1 uses `rk4`; the general default is `implicitfast`. `replay --integrator` overrides it. |
 | `physics.mjwarp.cone` | `solver_cfg` | Friction cone model, `pyramidal`. |
 | `physics.mjwarp.iterations`, `.ls_iterations` | `solver_cfg` | Solver and line-search iteration limits. |
 | `physics.mjwarp.njmax`, `.nconmax` | `solver_cfg` | MJWarp buffers: constraint rows per world (a maximum) and contacts per world (an average; the pool is shared by all worlds). |
