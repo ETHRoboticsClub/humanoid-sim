@@ -138,17 +138,28 @@ class Cmaes:
         return self.mean + self.sigma * self._y
 
     def tell(self, x: np.ndarray, f: np.ndarray) -> None:
-        order = np.argsort(f)
-        y = (x[order[: self.mu]] - self.mean) / self.sigma
-        yw = self.w @ y
+        """Rank ``x`` by ``f``. A non-finite objective (a candidate whose replay diverged) is never selected: with
+        fewer finite candidates than ``mu`` the update uses only those, its weights renormalized; with none the
+        step size halves and nothing else changes."""
+        f = np.asarray(f, dtype=float)
+        finite = np.isfinite(f)
+        k = min(self.mu, int(finite.sum()))
+        if k == 0:
+            self.sigma *= 0.5
+            return
+        order = np.argsort(np.where(finite, f, np.inf))
+        w = self.w[:k] / self.w[:k].sum()
+        mueff = 1.0 / (w ** 2).sum()
+        y = (x[order[:k]] - self.mean) / self.sigma
+        yw = w @ y
         self.mean = self.mean + self.sigma * yw
         c_inv_sqrt = self._B @ np.diag(1 / self._D) @ self._B.T
-        self.ps = (1 - self.cs) * self.ps + math.sqrt(self.cs * (2 - self.cs) * self.mueff) * c_inv_sqrt @ yw
+        self.ps = (1 - self.cs) * self.ps + math.sqrt(self.cs * (2 - self.cs) * mueff) * c_inv_sqrt @ yw
         self.gen += 1
         hsig = np.linalg.norm(self.ps) / math.sqrt(1 - (1 - self.cs) ** (2 * self.gen)) / self.chin < 1.4 + 2 / (
             self.n + 1)
-        self.pc = (1 - self.cc) * self.pc + hsig * math.sqrt(self.cc * (2 - self.cc) * self.mueff) * yw
-        rank_mu = (self.w[:, None, None] * y[:, :, None] * y[:, None, :]).sum(0)
+        self.pc = (1 - self.cc) * self.pc + hsig * math.sqrt(self.cc * (2 - self.cc) * mueff) * yw
+        rank_mu = (w[:, None, None] * y[:, :, None] * y[:, None, :]).sum(0)
         self.C = ((1 - self.c1 - self.cmu) * self.C + self.c1 * (np.outer(self.pc, self.pc)
                   + (1 - hsig) * self.cc * (2 - self.cc) * self.C) + self.cmu * rank_mu)
         self.sigma *= math.exp((self.cs / self.damps) * (np.linalg.norm(self.ps) / self.chin - 1))

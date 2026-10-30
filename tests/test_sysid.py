@@ -82,3 +82,18 @@ def test_cmaes_scale_sets_the_first_steps_per_coordinate():
     es = Cmaes(np.zeros(2), 0.5, 4000, seed=0, scale=np.array([1.0, 0.1]))
     xs = es.ask()
     assert xs[:, 0].std() == pytest.approx(0.5, rel=0.05) and xs[:, 1].std() == pytest.approx(0.05, rel=0.05)
+
+
+def test_cmaes_never_selects_a_diverged_candidate():
+    """With most of a population non-finite, the mean moves only toward the finite ones."""
+    es = Cmaes(np.zeros(2), 0.5, 16, seed=0)
+    xs = es.ask()
+    f = np.full(16, np.nan)
+    f[:3] = [1.0, 2.0, 3.0]
+    es.tell(xs, f)
+    lo, hi = xs[:3].min(axis=0), xs[:3].max(axis=0)
+    assert ((lo - 1e-12 <= es.mean) & (es.mean <= hi + 1e-12)).all()
+    sigma = es.sigma
+    es.ask()
+    es.tell(es.ask(), np.full(16, np.nan))
+    assert es.sigma == sigma / 2
