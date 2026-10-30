@@ -321,7 +321,8 @@ def cmd_fit_pace(args) -> int:
     joints, drives = list(plant.solver_map.joint_names), list(plant.map.drive_names)
     kw = dict(log_bound=math.log(args.bound), bias_bound_rad=args.bias_bound_mrad / 1e3,
               delay_bounds_ns=tuple(int(round(v * 1e6)) for v in args.delay_ms),
-              separate_dynamic_friction=not args.no_dynamic_friction,
+              ratio_bounds=(0.0, args.ratio_max), separate_dynamic_friction=not args.no_dynamic_friction,
+              delay_start_ns=None if args.delay_start_ms is None else int(round(args.delay_start_ms * 1e6)),
               delay_groups=None if args.one_delay else [sim.desc.drives[d].family for d in drives])
     start = start_values(sim.desc, joints)
     fixed = structural_fixed(start, ratio=not args.no_dynamic_friction)
@@ -351,6 +352,9 @@ def cmd_fit_pace(args) -> int:
                      "free": [space.names[i] for i in free], "search": args.search,
                      "start": {j: {p: float(x0[p][i]) for p in ("armature", "damping", "friction", "friction_ratio")}
                                for i, j in enumerate(joints)},
+                     "box": {"multiplier": args.bound, "bias_mrad": args.bias_bound_mrad, "delay_ms": list(args.delay_ms),
+                             "delay_start_ms": args.delay_start_ms,
+                             "friction_ratio": [0.0, args.ratio_max]},
                      "generations": args.generations, "duration_s": args.duration, "seed": args.seed,
                      "scored": [drives[i] for i in scored], "fixed": sorted(args.fix), "wall_s": time.time() - t,
                      "command_rebuild": rebuild, "delay_reference": reference, **_plant_identity(sim, usd),
@@ -766,6 +770,12 @@ def main(argv: list[str] | None = None) -> int:
     fpc.add_argument("--bias-bound-mrad", type=float, default=20.0, help="encoder bias within ± this")
     fpc.add_argument("--delay-ms", nargs=2, type=float, default=[0.0, 20.0], metavar=("FROM", "TO"),
                      help="command delay range")
+    fpc.add_argument("--delay-start-ms", type=float, default=None,
+                     help="the delay the search starts from and the holdout's before is scored at (default: the "
+                          "middle of --delay-ms)")
+    fpc.add_argument("--ratio-max", type=float, default=1.0,
+                     help="dynamic over static friction within [0, this]; above 1 the sliding friction may exceed "
+                          "the static one")
     fpc.add_argument("--no-dynamic-friction", action="store_true",
                      help="one Coulomb friction per joint (PACE without separate_dynamic_friction)")
     fpc.add_argument("--fix", nargs="*", default=[], metavar="PARAM.NAME",

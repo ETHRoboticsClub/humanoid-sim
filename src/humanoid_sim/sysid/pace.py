@@ -14,16 +14,19 @@ The parameters, in PACE's order with ``separate_dynamic_friction``, per solver j
   family's ``drive_delay_s``; otherwise from the frame stamps, so it includes the software path. Applied through the
   drive queue at its exact time, never in whole steps; PACE's files take one delay in physics steps
   (``delay_mode="command"``), the drive-weighted mean;
-* ``friction_ratio`` [J]: dynamic over static friction, in [0, 1] (:attr:`~humanoid_sim.core.PlantCore.friction_relief`).
+* ``friction_ratio`` [J]: dynamic over static friction (:attr:`~humanoid_sim.core.PlantCore.friction_relief`), in
+  [0, 1] by default; a wider range lets the sliding friction exceed the static one (negative relief).
 
 A candidate is a point of ``[-1, 1]^dim``: ``start · bound^x`` for armature, damping and friction (start values
 from the description's solver dynamics, :func:`start_values`), linear between its bounds for the others. An entry
 whose start is zero cannot be scaled and is fixed there (:func:`structural_fixed`), with its friction ratio when its
 friction is zero: on the native USD that is the ankle hinges' armature (the rotor inertia is on the crank shafts) and the shafts' damping and
 friction (the description puts the ankles' on the hinges). The search starts at :meth:`PaceSpace.x0`: the
-description's values (its friction ratio, 1 where it states no dynamic friction), zero bias and the middle of the
-delay range; a fixed entry stays there. A candidate outside the box is evaluated at its edge and
-penalized by its squared distance from it, as in :mod:`humanoid_sim.sysid.passive`.
+description's values (its friction ratio, 1 where it states no dynamic friction), zero bias and
+:attr:`PaceSpace.delay_start_ns` (by default the middle of the delay range); a fixed entry stays there. A candidate outside the box is evaluated at its edge and
+penalized by its squared distance from it, as in :mod:`humanoid_sim.sysid.passive`. The search's first steps are
+the same size in physical units whatever the box (:meth:`PaceSpace.step_scale`), so a wider box only moves the
+walls.
 
 Nothing is written back: the values are robot facts and land in humanoid-urdf.
 """
@@ -53,6 +56,7 @@ class PaceSpace:
     separate_dynamic_friction: bool = True  # PACE's flag: without it the ratio is 1 and not a parameter
     fixed: dict[str, np.ndarray] = field(default_factory=dict)  # parameter -> [n] bool: held at its start
     delay_groups: list[str] | None = None  # per drive, the group sharing its delay (a family); None: one group
+    delay_start_ns: int | None = None  # where the search starts; None: the middle of delay_bounds_ns
 
     def __post_init__(self):
         j = len(self.joints)
@@ -66,10 +70,12 @@ class PaceSpace:
         self.start = dict(self.start)
         self.start.setdefault("friction_ratio", np.ones(j))
         lo, hi = self.ratio_bounds
-        if not 0.0 <= lo <= hi <= 1.0:
-            raise ValueError(f"friction ratio bounds {self.ratio_bounds}: need 0 <= low <= high <= 1")
+        if not 0.0 <= lo <= hi:
+            raise ValueError(f"friction ratio bounds {self.ratio_bounds}: need 0 <= low <= high")
         if self.delay_bounds_ns[0] > self.delay_bounds_ns[1]:
             raise ValueError(f"delay bounds {self.delay_bounds_ns}")
+        if self.delay_start_ns is not None and not self.delay_bounds_ns[0] <= self.delay_start_ns <= self.delay_bounds_ns[1]:
+            raise ValueError(f"delay start {self.delay_start_ns} outside {self.delay_bounds_ns}")
         if self.delay_groups is not None and len(self.delay_groups) != len(self.drives):
             raise ValueError(f"delay_groups: one per drive ({len(self.drives)}) expected")
         for name, mask in self.fixed.items():
@@ -112,11 +118,29 @@ class PaceSpace:
 
     def x0(self) -> np.ndarray:
         x = np.zeros(self.dim)
+        lo, hi = self.delay_bounds_ns
+        if self.delay_start_ns is not None and hi > lo:
+            x[self.slices()["delay"]] = 2 * (self.delay_start_ns - lo) / (hi - lo) - 1
         if self.separate_dynamic_friction:
             lo, hi = self.ratio_bounds
             r = np.clip(np.asarray(self.start["friction_ratio"], dtype=np.float64), lo, hi)
             x[self.slices()["friction_ratio"]] = 2 * (r - lo) / (hi - lo) - 1 if hi > lo else 0.0
         return x
+
+    def step_scale(self) -> np.ndarray:
+        """Per entry of ``x``, the default box's width over this one's: a search's step ``sigma · step_scale``
+        moves a value as far as ``sigma`` does in the default box (multipliers in [1/10, 10], bias within 20 mrad,
+        delay 20 ms, ratio [0, 1])."""
+        s, out = self.slices(), np.ones(self.dim)
+        for p in LOG_PARAMS:
+            out[s[p]] = math.log(10.0) / self.log_bound
+        out[s["bias"]] = 0.02 / self.bias_bound_rad
+        lo, hi = self.delay_bounds_ns
+        out[s["delay"]] = 20e6 / (hi - lo) if hi > lo else 1.0
+        if self.separate_dynamic_friction:
+            lo, hi = self.ratio_bounds
+            out[s["friction_ratio"]] = 1.0 / (hi - lo) if hi > lo else 1.0
+        return out
 
     def out_of_bounds(self, x: np.ndarray) -> np.ndarray:
         return ((x - np.clip(x, -1.0, 1.0)) ** 2).sum(axis=-1)
@@ -287,7 +311,7 @@ def fit(sim, captures, space: PaceSpace, scored: list[int], *, generations: int,
     from humanoid_sim.sysid.passive import BOUND_PENALTY, Cmaes
 
     e = sim.plant.num_envs
-    es = Cmaes(space.x0(), sigma, e - 1, seed)
+    es = Cmaes(space.x0(), sigma, e - 1, seed, scale=space.step_scale())
     f0, per0 = evaluate(sim, captures, space, np.tile(space.x0(), (e, 1)), scored, base_motion=base_motion,
                         duration_s=duration_s)
     best_x, best_f, best_per = space.x0(), float(f0[0]), per0[:, 0]
@@ -302,9 +326,9 @@ def fit(sim, captures, space: PaceSpace, scored: list[int], *, generations: int,
         if f[i] < best_f:
             x = best_x if i == 0 else np.clip(xs[i - 1], -1.0, 1.0)
             best_x, best_f, best_per = x.copy(), float(f[i]), per[:, i]
-        history.append({"generation": g, "best": best_f, "median": float(np.median(f[1:])), "sigma": es.sigma})
-        log(f"gen {g}: best {best_f * 1e3:.3f} mrad, median {np.median(f[1:]) * 1e3:.3f}, sigma {es.sigma:.3f}",
-            flush=True)
+        history.append({"generation": g, "best": best_f, "median": float(np.nanmedian(f[1:])), "sigma": es.sigma})
+        log(f"gen {g}: best {best_f * 1e3:.3f} mrad, median {np.nanmedian(f[1:]) * 1e3:.3f}, sigma {es.sigma:.3f}, "
+            f"non-finite {int((~np.isfinite(f)).sum())}", flush=True)
     return {"x": best_x.tolist(), "objective": best_f, "objective_start": float(f0[0]), "history": history,
             "rms_start": per0[:, 0].tolist(), "rms_best": best_per.tolist(), "search": search}
 
@@ -315,7 +339,8 @@ def _fit_blocks(sim, captures, space: PaceSpace, scored: list[int], *, generatio
 
     e = sim.plant.num_envs
     parts = blocks(space, sim.plant, scored)
-    searches = [Cmaes(space.x0()[idx], sigma, e - 1, seed + b) for b, (idx, _) in enumerate(parts)]
+    scale = space.step_scale()
+    searches = [Cmaes(space.x0()[idx], sigma, e - 1, seed + b, scale=scale[idx]) for b, (idx, _) in enumerate(parts)]
 
     def means():
         x = space.x0()
@@ -344,9 +369,9 @@ def _fit_blocks(sim, captures, space: PaceSpace, scored: list[int], *, generatio
             es.tell(xs, fb + BOUND_PENALTY * ((xs - np.clip(xs, -1.0, 1.0)) ** 2).sum(axis=1))
         if f[0] < best_f:
             best_x, best_f, best_per = x[0].copy(), float(f[0]), per[:, 0]
-        history.append({"generation": g, "best": best_f, "means": float(f[0]), "median": float(np.median(f[1:]))})
-        log(f"gen {g}: means {f[0] * 1e3:.3f} mrad, best {best_f * 1e3:.3f}, median {np.median(f[1:]) * 1e3:.3f}",
-            flush=True)
+        history.append({"generation": g, "best": best_f, "means": float(f[0]), "median": float(np.nanmedian(f[1:]))})
+        log(f"gen {g}: means {f[0] * 1e3:.3f} mrad, best {best_f * 1e3:.3f}, median {np.nanmedian(f[1:]) * 1e3:.3f}, "
+            f"non-finite {int((~np.isfinite(f)).sum())}", flush=True)
     f, per = run(np.tile(means(), (e, 1)))
     if f[0] < best_f:
         best_x, best_f, best_per = means(), float(f[0]), per[:, 0]
