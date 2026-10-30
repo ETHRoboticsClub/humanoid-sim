@@ -6,7 +6,7 @@ pytestmark = pytest.mark.physics
 
 
 @pytest.mark.parametrize("register_budget", [None, 48])
-def test_masked_solves_preserve_inactive_outputs_and_graph_updates(register_budget=None):
+def test_masked_solves_preserve_inactive_outputs_and_graph_updates(register_budget):
     import numpy as np
     import warp as wp
     from newton._src.solvers.kamino._src.linalg.factorize.llt_blocked import (
