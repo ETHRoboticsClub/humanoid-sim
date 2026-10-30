@@ -330,6 +330,9 @@ def _author_universal_rods(desc, profile: dict, source, stage, mapped) -> list[s
         joint = source.joints[name]
         if not joint.GetPrim().IsA(UsdPhysics.SphericalJoint) or joint.GetExcludeFromArticulationAttr().Get():
             raise ValueError(f"universal rods: {name} is not an articulated ball joint")
+        if joint.GetPrim().GetAttribute("newton:armature").HasAuthoredValue():
+            # Armature on the ball is the other fix for the same spin; keep one.
+            raise ValueError(f"universal rods: {name} carries an authored newton:armature")
         turn = Gf.Matrix3d(*universal_rod_frame(rod_vector.numpy()).T.flatten()).ExtractRotation().GetQuat()
         prim = stage.OverridePrim(mapped(joint.GetPrim()))
         prim.SetTypeName("PhysicsJoint")

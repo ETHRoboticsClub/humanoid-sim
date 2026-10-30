@@ -179,6 +179,20 @@ def test_universal_rods_lock_only_the_spin_about_their_own_axis(desc, tmp_path):
     assert len(rods) == len(desc.linkages) * 2
 
 
+def test_universal_rods_refuse_a_ball_that_already_carries_armature(tmp_path):
+    from pxr import Sdf, Usd
+
+    desc = Description.load()  # its own stage: the edit stays in this description's session layer
+    profile = load_profile(desc.robot)
+    profile["model"]["rod_joints"] = "universal"
+    name = NativeState(desc).rods[0][0]
+    stage = desc.usd_model.stage
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        desc.usd_model.joints[name].GetPrim().CreateAttribute("newton:armature", Sdf.ValueTypeNames.Float).Set(1e-4)
+    with pytest.raises(ValueError, match="armature"):
+        build_asset(desc, profile, tmp_path)
+
+
 def test_universal_rods_near_their_singularity_are_refused(desc, tmp_path, monkeypatch):
     from humanoid_sim.model import usd
 
