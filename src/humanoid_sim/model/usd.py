@@ -225,7 +225,7 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     crank_limits = {}
     for spec in desc.ankle_model.payload["sides"].values():
         for role, drive in zip(("upper", "lower"), spec["motor_names"], strict=True):
-            crank_limits[spec["usd_joints"][role]] = desc.drives[drive].position_limit_device
+            crank_limits[spec["usd_joints"][role]] = desc.drives[drive].shaft_limits
     welded = []
     for name, joint in source.joints.items():
         prim = joint.GetPrim()

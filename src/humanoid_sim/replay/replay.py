@@ -72,7 +72,7 @@ def initial_joint_state(plant: PlantCore, native: np.ndarray | torch.Tensor) -> 
     nat = nat.unsqueeze(0) if nat.dim() == 1 else nat
     q = torch.tensor([[desc.joints[n].standing_offset_rad for n in plant.map.joint_names]],
                      dtype=torch.float64, device=dev).expand(nat.shape[0], -1).clone()
-    q[:, exact._lin_j] = nat[:, exact._lin_d] * exact._lin_s
+    q[:, exact._lin_j] = nat[:, exact._lin_d] * exact._lin_s + exact._lin_z
     for _, d_idx, j_idx, tr in exact.ankles:  # solved in float64, whatever the plant's dtype
         q[:, j_idx] = tr.joints_from_cranks(nat[:, d_idx], q[:, j_idx])
         resid = (tr.cranks(q[:, j_idx]) - nat[:, d_idx]).abs().max().item()

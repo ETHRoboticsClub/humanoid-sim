@@ -131,7 +131,7 @@ class NativeState:
     def _values(self, q):
         values = {name: q[:, i] for i, name in enumerate(self.names)}
         for cols, names, tr in self.ankles:
-            cranks = tr.cranks(q[:, cols])
+            cranks = tr.shafts(q[:, cols])
             values.update({name: cranks[:, i] for i, name in enumerate(names)})
         return values
 

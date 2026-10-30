@@ -20,7 +20,7 @@ def check_native_cranks(desc):
         counts.add(len(indices))
         for index in indices:
             actual = [lower[starts[index]], upper[starts[index]]]
-            if not np.allclose(actual, desc.drives[drive].position_limit_device, atol=1e-6, rtol=0):
+            if not np.allclose(actual, desc.drives[drive].shaft_limits, atol=1e-6, rtol=0):
                 raise RuntimeError(f"native crank {name} has incorrect physical stops: {actual}")
     stage = Usd.Stage.Open(str(desc.usd_path))
     enabled = model.joint_enabled.numpy()

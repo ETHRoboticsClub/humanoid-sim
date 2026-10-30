@@ -47,8 +47,10 @@ def test_native_ankle_drives_step_on_cuda(request, solver, cuda_graph):
     for drive, joint in crank_joints(sim.desc).items():
         drive_id = sim.plant.map.drive_names.index(drive)
         joint_id = sim.backend.joint_names.index(joint)
-        torch.testing.assert_close(feedback.position_rad[:, drive_id], native_positions[:, joint_id])
-        torch.testing.assert_close(feedback.velocity_rad_s[:, drive_id], native_velocities[:, joint_id])
+        crank = sim.desc.drives[drive]
+        torch.testing.assert_close(feedback.position_rad[:, drive_id],
+                                   crank.sign * (native_positions[:, joint_id] - crank.shaft_zero_rad))
+        torch.testing.assert_close(feedback.velocity_rad_s[:, drive_id], crank.sign * native_velocities[:, joint_id])
         lower, upper = sim.desc.drives[drive].position_limit_device
         assert (feedback.position_rad[:, drive_id] >= lower - 0.02).all()
         assert (feedback.position_rad[:, drive_id] <= upper + 0.02).all()

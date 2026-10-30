@@ -12,7 +12,9 @@ Geometry, axes, frame signs and the linkage neutral come from the description (`
 ``ankle_model``); nothing is typed in here. ``q`` is in URDF (calibration) joint coordinates. The linkage
 neutral, where both cranks read zero (the drives' calibration zero), sits at ``semantic_neutral_rad``; the
 linkage is solved on the offset from it, which ``semantic_to_kinematic_sign`` maps to the linkage frame.
-Crank angles are relative to the linkage neutral.
+Crank angles are relative to the linkage neutral. With ``native_angles`` the hinges and crank shafts are the
+delivered USD joints, and a crank's angle is its device angle, ``crank_sign * (shaft angle - crank_zero)``
+(humanoid-urdf ``actuators.yaml`` ``drives.<crank>.shaft_sign`` and ``shaft_zero_rad``).
 
 It is golden-tested against humanoid-urdf ``ankle_model``.
 """
@@ -75,7 +77,7 @@ class AnkleTransmission:
     """One ankle side, batched over leading dims. ``q``: ``[..., 2]`` (pitch, roll), URDF coordinates."""
 
     def __init__(self, geometry: dict, kinematic_sign, neutral=(0.0, 0.0), *, native_angles=False,
-                 device="cpu", dtype=torch.float32):
+                 device="cpu", dtype=torch.float32, crank_sign=(1, 1), crank_zero=(0.0, 0.0)):
         for name, axis in (("pitch_axis", [0, 1, 0]), ("roll_axis", [1, 0, 0])):
             if not np.allclose(geometry[name], axis):
                 raise ValueError(f"ankle transmission requires {name}={axis}")
@@ -87,6 +89,13 @@ class AnkleTransmission:
         if neutral.shape != (2,) or not np.isfinite(neutral).all():
             raise ValueError("invalid semantic_neutral_rad")
         self._neutral_np = neutral
+        crank_sign = np.asarray(crank_sign, dtype=np.float64)
+        crank_zero = np.asarray(crank_zero, dtype=np.float64)
+        if crank_sign.shape != (2,) or not np.isin(crank_sign, (-1, 1)).all():
+            raise ValueError("invalid crank_sign")
+        if crank_zero.shape != (2,) or not np.isfinite(crank_zero).all():
+            raise ValueError("invalid crank_zero")
+        self._crank_sign_np, self._crank_zero_np = crank_sign, crank_zero
         self.native_angles = native_angles
         self.to(device, dtype, sign=sign)
 
@@ -109,6 +118,8 @@ class AnkleTransmission:
         self._len = t([c.length for c in g])
         self._theta0 = t([0.0 if self.native_angles else c.theta0 for c in g])
         self._branch = t([float(c.branch) for c in g])
+        self._crank_sign = t(self._crank_sign_np)
+        self._crank_zero = t(self._crank_zero_np)
         return self
 
     def _foot(self, qk):
@@ -133,8 +144,16 @@ class AnkleTransmission:
         """Crank angles relative to neutral, ``[..., 2]`` (upper, lower). ``reach`` = |K/R| (≥1: unreachable)."""
         p_f, _, _, _ = self._foot((q - self.neutral) * self.sign)
         theta, reach = self._theta_abs(p_f)
-        rel = torch.remainder(theta - self._theta0 + torch.pi, 2 * torch.pi) - torch.pi
+        rel = self._crank_sign * (theta - self._theta0 - self._crank_zero)
+        rel = torch.remainder(rel + torch.pi, 2 * torch.pi) - torch.pi
         return (rel, reach) if return_reach else rel
+
+    def shafts(self, q: torch.Tensor) -> torch.Tensor:
+        """Crank shaft angles ``[..., 2]`` (upper, lower): the USD joint angles with ``native_angles``, else the
+        crank angles relative to the neutral."""
+        p_f, _, _, _ = self._foot((q - self.neutral) * self.sign)
+        theta, _ = self._theta_abs(p_f)
+        return torch.remainder(theta - self._theta0 + torch.pi, 2 * torch.pi) - torch.pi
 
     def jacobian(self, q: torch.Tensor) -> torch.Tensor:
         """``dθ/dq`` ``[..., 2 (crank), 2 (pitch, roll)]`` in URDF joint coordinates."""
@@ -150,7 +169,7 @@ class AnkleTransmission:
         cp, sp = cp.unsqueeze(-1).squeeze(-1), sp
         dr = torch.stack([sp * p_r[..., 1], -p_r[..., 2], cp * p_r[..., 1]], dim=-1)
         f_q = torch.stack([-2 * (e * dp).sum(-1), -2 * (e * dr).sum(-1)], dim=-1)
-        return -f_q / f_theta.unsqueeze(-1) * self.sign
+        return -f_q / f_theta.unsqueeze(-1) * self.sign * self._crank_sign.unsqueeze(-1)
 
     def crank_state(self, q: torch.Tensor, qd: torch.Tensor):
         """Crank angles and velocities from hinge state."""
