@@ -35,6 +35,25 @@ def test_decode_starts_at_the_start_values_and_spans_the_bounds():
     assert np.allclose(r.decode(r.x0())["friction_ratio"], [0.25, 0.5])
 
 
+def test_a_wider_box_keeps_the_first_steps_and_the_start():
+    """Widening the box moves its walls only: the start decodes to the same values and a step of the search moves
+    every value as far as in the default box; a ratio above 1 is reachable."""
+    narrow = PaceSpace(J, D, START)
+    wide = PaceSpace(J, D, START, log_bound=math.log(1000.0), bias_bound_rad=0.1, delay_bounds_ns=(0, 50_000_000),
+                     ratio_bounds=(0.0, 5.0), delay_start_ns=10_000_000)
+    assert np.allclose(narrow.step_scale(), 1.0)
+    for p in ("armature", "damping", "friction", "friction_ratio", "bias", "delay"):
+        assert np.allclose(narrow.decode(narrow.x0())[p], wide.decode(wide.x0())[p])
+    step = 0.1
+    dn = {k: v[1] - v[0] for k, v in narrow.decode(np.stack([narrow.x0(), narrow.x0() + step])).items()}
+    dw = {k: v[1] - v[0] for k, v in wide.decode(np.stack([wide.x0(), wide.x0() + step * wide.step_scale()])).items()}
+    assert np.allclose(np.log(wide.decode(wide.x0() + step * wide.step_scale())["damping"][0] / START["damping"]),
+                       np.log(narrow.decode(narrow.x0() + step)["damping"][0] / START["damping"]))
+    assert np.allclose(dw["bias"], dn["bias"])
+    assert abs(int(dw["delay"][0]) - int(dn["delay"][0])) <= 1
+    assert wide.decode(np.ones((1, wide.dim)))["friction_ratio"][0].tolist() == [5.0, 5.0]
+
+
 def test_fixed_entries_stay_at_the_start():
     s = PaceSpace(J, D, START, fixed={"bias": np.array([False, True]), "damping": np.array([True, False]),
                                       "friction_ratio": np.array([True, False])})
@@ -42,6 +61,20 @@ def test_fixed_entries_stay_at_the_start():
     assert v["bias"][0].tolist() == [-s.bias_bound_rad, 0.0]
     assert v["friction_ratio"][0].tolist() == [1.0, 0.0]  # fixed at the start, not at the middle
     assert np.allclose(v["damping"][0], [START["damping"][0], START["damping"][1] / 10])
+
+
+def test_structural_zeros_and_their_friction_ratio_are_fixed():
+    """A multiplier cannot move zero; a joint without friction has no ratio to fit either."""
+    from humanoid_sim.sysid.pace import structural_fixed
+
+    start = START | {"armature": np.array([0.0, 0.2]), "friction": np.array([0.3, 0.0])}
+    fixed = structural_fixed(start)
+    assert fixed["armature"].tolist() == [True, False] and fixed["friction_ratio"].tolist() == [False, True]
+    assert "friction_ratio" not in structural_fixed(start, ratio=False)
+    s = PaceSpace(J, D, start, fixed=fixed)
+    v = s.decode(np.ones((1, s.dim)))
+    assert v["armature"][0].tolist() == [0.0, pytest.approx(2.0)] and v["friction"][0, 1] == 0.0
+    PaceSpace(J, D, start, fixed=structural_fixed(start, ratio=False), separate_dynamic_friction=False)
 
 
 def test_pace_bounds_and_params_put_the_delay_in_steps():
@@ -60,7 +93,9 @@ def test_refuses_bad_spaces():
     with pytest.raises(ValueError, match="positive"):
         PaceSpace(J, D, START | {"friction": np.array([0.0, 0.1])})
     with pytest.raises(ValueError, match="ratio"):
-        PaceSpace(J, D, START, ratio_bounds=(0.5, 1.5))
+        PaceSpace(J, D, START, ratio_bounds=(1.5, 0.5))
+    with pytest.raises(ValueError, match="ratio"):
+        PaceSpace(J, D, START, ratio_bounds=(-0.1, 1.0))
     with pytest.raises(ValueError, match="fixed"):
         PaceSpace(J, D, START, fixed={"bias": np.array([True])})
 

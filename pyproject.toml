@@ -42,7 +42,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "humanoid_sim.runtime.abi" = ["plant_abi.h"]
-"humanoid_sim.replay" = ["msgs/*.msg"]
+"humanoid_sim.replay" = ["msgs/*.msg", "legacy/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

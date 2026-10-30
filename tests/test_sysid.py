@@ -3,6 +3,7 @@
 import math
 
 import numpy as np
+import pytest
 
 from humanoid_sim.sysid.passive import Cmaes, FitSpace, Group
 
@@ -75,3 +76,9 @@ def test_fit_space_refuses_unknown_names():
         FitSpace([Group("g", ("j",))], params=("stiffness",))
     with pytest.raises(ValueError, match="unknown group"):
         FitSpace([Group("g", ("j",))], start={"h.armature": 1.0})
+
+
+def test_cmaes_scale_sets_the_first_steps_per_coordinate():
+    es = Cmaes(np.zeros(2), 0.5, 4000, seed=0, scale=np.array([1.0, 0.1]))
+    xs = es.ask()
+    assert xs[:, 0].std() == pytest.approx(0.5, rel=0.05) and xs[:, 1].std() == pytest.approx(0.05, rel=0.05)

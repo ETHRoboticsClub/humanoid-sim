@@ -22,6 +22,14 @@
     humanoid-sim check-bag <capture>... [--base yaw|orientation|fixed]
                                                    check captures or rosbags against what a PACE fit needs
                                                    (no physics); fit-pace runs the same checks first
+    humanoid-sim convert-capture <exc-dir>... --out DIR [--from urdf6-b14158e] [--ankles cranks|hold]
+                                                   a capture recorded on an older description (Controls' URDF_6)
+                                                   in this description's joint names, checked at the drive level
+    humanoid-sim segment-capture <exc-dir>... --out DIR [--bands 3] [--window NAME:START:END ...]
+                                                   cut captures into windows (pieces, chirp bands) to fit on one
+                                                   and score on the others
+    humanoid-sim pace-report <fit-dir>... --out DIR  holdout error per joint group before/after, entries at a
+                                                   bound, values against the description and the datasheets
     humanoid-sim pace-selftest --num-envs N --generations G
                                                    plant known PACE parameters, record a chirp on a fixed base and
                                                    fit it back: checks the model is identifiable and the fit wired
@@ -57,6 +65,20 @@ def _usd(args, *, base_joints: bool = False) -> Path:
     return out / json.loads(meta.read_text())["usd"]
 
 
+def _plant_identity(sim, usd: Path) -> dict:
+    """What a replay or fit ran on: the description (robot, digest, revision, its root) and the USD (path, the
+    delivered source's sha256 from the built asset), so a result names the model it belongs to."""
+    from humanoid_sim.model.asset import asset_meta
+
+    try:
+        meta = asset_meta(usd)
+    except FileNotFoundError:
+        meta = {}
+    return {**sim.desc.identity(), "description_root": str(sim.desc.root.resolve()), "usd": str(usd.resolve()),
+            "asset_key": meta.get("key"), "source_usd_sha256": meta.get("source_usd_sha256"),
+            "source_usd": None if sim.desc.usd_path is None else str(sim.desc.usd_path.resolve())}
+
+
 def cmd_build_asset(args) -> int:
     from humanoid_sim.model.asset import build_asset, load_profile
     from humanoid_sim.model.description import Description
@@ -75,22 +97,29 @@ def cmd_replay(args) -> int:
     from humanoid_sim.sim import SimCore
 
     cap = ExcitationCapture(Path(args.capture))
-    period_ns = int(round(args.period_ms * 1e6))
     moving = args.base != "fixed"
-    sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, period_ns=period_ns,
-                  fixed_base=not moving, base_joints=moving, solver=args.solver, integrator=args.integrator)
+    usd = _usd(args, base_joints=moving)
+    sim = SimCore(usd, device=args.device, robot=args.robot,
+                  period_ns=None if args.period_ms is None else int(round(args.period_ms * 1e6)),
+                  fixed_base=not moving, base_joints=moving, solver=args.solver, integrator=args.integrator,
+                  self_collision=False if args.no_self_collision else None)
+    period_ns = sim.period_ns
     t = time.time()
     res = replay(cap, sim, duration_s=args.duration, base_motion=args.base if moving else None,
                  demand_delay_ns=int(round(args.demand_delay_ms * 1e6)))
     wall = time.time() - t
     integrator = sim.integrator
     delay = f"_demand{args.demand_delay_ms:+g}ms" if args.demand_delay_ms else ""
-    out = Path(args.out) / f"{cap.dataset_id}_{sim.solver}_{integrator}_{period_ns // 1000}us_base-{args.base}{delay}"
+    selfcol = "_noselfcol" if args.no_self_collision else ""
+    out = Path(args.out) / (f"{cap.dataset_id}_{sim.solver}_{integrator}_{period_ns // 1000}us_base-{args.base}"
+                            f"{delay}{selfcol}")
     out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out / "trace.npz", t_ns=res.t_ns, demand=res.demand,
                         **{f"sim_{k}": v for k, v in res.sim.items()}, **{f"real_{k}": v for k, v in res.real.items()})
     summary = {"dataset_id": cap.dataset_id, "name": cap.name, "period_ns": period_ns,
                "physics": f"isaaclab/{sim.solver}", "device": args.device, "integrator": integrator, "base": args.base,
+               "self_collision": not args.no_self_collision and bool(sim.profile["physics"]["self_collision"]),
+               **_plant_identity(sim, usd),
                "wall_s": wall,
                "sim_s": len(res.t_ns) * period_ns / 1e9, "drives": res.drives,
                "rms_position_rad": res.rms("position"), "rms_velocity_rad_s": res.rms("velocity"),
@@ -204,16 +233,31 @@ def cmd_fit_passive(args) -> int:
     return 0
 
 
-def open_capture(path: str):
-    """An ``exc-*`` capture directory or a rosbag2 directory."""
+class FrameStamped:
+    """A capture whose command frames are replayed from their own stamps, its controller acknowledgements unread."""
+
+    def __init__(self, capture):
+        self._capture = capture
+
+    def __getattr__(self, name):
+        return getattr(self._capture, name)
+
+    def applied_commands(self):
+        return None
+
+
+def open_capture(path: str, *, frame_stamps: bool = False):
+    """An ``exc-*`` capture directory or a rosbag2 directory; ``frame_stamps``: ignore its acknowledgements."""
     p = Path(path)
     if (p / "metadata.yaml").is_file():
         from humanoid_sim.replay.bag import BagCapture
 
-        return BagCapture(p)
-    from humanoid_sim.replay.exc import ExcitationCapture
+        capture = BagCapture(p)
+    else:
+        from humanoid_sim.replay.exc import ExcitationCapture
 
-    return ExcitationCapture(p)
+        capture = ExcitationCapture(p)
+    return FrameStamped(capture) if frame_stamps else capture
 
 
 def _check_captures(args, captures: list) -> dict:
@@ -242,7 +286,7 @@ def _check_captures(args, captures: list) -> dict:
 
 
 def cmd_check_bag(args) -> int:
-    checks = _check_captures(args, [open_capture(c) for c in args.captures])
+    checks = _check_captures(args, [open_capture(c, frame_stamps=args.frame_stamps) for c in args.captures])
     return 0 if all(c.ok for c in checks.values()) else 1
 
 
@@ -253,10 +297,10 @@ def cmd_fit_pace(args) -> int:
 
     from humanoid_sim.replay.replay import fit_commands
     from humanoid_sim.sim import SimCore
-    from humanoid_sim.sysid.pace import PaceSpace, evaluate, fit, save, start_values, structural_fixed
+    from humanoid_sim.sysid.pace import PaceSpace, blocks, evaluate, fit, save, start_values, structural_fixed
 
-    captures = [open_capture(c) for c in args.captures]
-    held = [open_capture(c) for c in args.holdout]
+    captures = [open_capture(c, frame_stamps=args.frame_stamps) for c in args.captures]
+    held = [open_capture(c, frame_stamps=args.frame_stamps) for c in args.holdout]
     checks = _check_captures(args, captures + held)
     refused = [cid for cid, chk in checks.items() if not chk.ok]
     if refused:
@@ -268,17 +312,20 @@ def cmd_fit_pace(args) -> int:
                          "different things, fit them separately")
     reference = references.pop()
     moving = args.base != "fixed"
-    sim = SimCore(_usd(args, base_joints=moving), device=args.device, robot=args.robot, num_envs=args.num_envs,
-                  fixed_base=not moving, base_joints=moving, solver=args.solver)
+    period_ns = None if args.period_ms is None else int(round(args.period_ms * 1e6))
+    usd = _usd(args, base_joints=moving)
+    sim = SimCore(usd, device=args.device, robot=args.robot, num_envs=args.num_envs,
+                  fixed_base=not moving, base_joints=moving, solver=args.solver, period_ns=period_ns,
+                  self_collision=False if args.no_self_collision else None)
     plant = sim.plant
-    joints, drives = list(plant.map.joint_names), list(plant.map.drive_names)
+    joints, drives = list(plant.solver_map.joint_names), list(plant.map.drive_names)
     kw = dict(log_bound=math.log(args.bound), bias_bound_rad=args.bias_bound_mrad / 1e3,
               delay_bounds_ns=tuple(int(round(v * 1e6)) for v in args.delay_ms),
-              separate_dynamic_friction=not args.no_dynamic_friction,
+              ratio_bounds=(0.0, args.ratio_max), separate_dynamic_friction=not args.no_dynamic_friction,
+              delay_start_ns=None if args.delay_start_ms is None else int(round(args.delay_start_ms * 1e6)),
               delay_groups=None if args.one_delay else [sim.desc.drives[d].family for d in drives])
-    joints = list(plant.solver_map.joint_names)
     start = start_values(sim.desc, joints)
-    fixed = structural_fixed(start)
+    fixed = structural_fixed(start, ratio=not args.no_dynamic_friction)
     sizes = PaceSpace(joints, drives, start, fixed=fixed, **kw).sizes
     for item in args.fix:
         param, _, name = item.partition(".")
@@ -286,17 +333,33 @@ def cmd_fit_pace(args) -> int:
         if param not in sizes or param == "delay" or name not in names:
             raise SystemExit(f"--fix {item}: PARAM.NAME, PARAM one of {sorted(set(sizes) - {'delay'})}")
         fixed.setdefault(param, np.zeros(sizes[param], dtype=bool))[names.index(name)] = True
-    space = PaceSpace(joints, drives, start_values(sim.desc, joints), fixed=fixed, **kw)
+    space = PaceSpace(joints, drives, start, fixed=fixed, **kw)
     scored = [i for i, d in enumerate(drives) if d not in set(args.skip_drives)]
     base = args.base if moving else None
     t = time.time()
     result = fit(sim, captures, space, scored, generations=args.generations, base_motion=base,
                  duration_s=args.duration, seed=args.seed, search=args.search)
     best = {k: v[0] for k, v in space.decode(np.asarray(result["x"])[None]).items()}
+    x0 = {k: v[0] for k, v in space.decode(space.x0()[None]).items()}
+    if args.search == "blocks":
+        free = sorted({int(i) for idx, _ in blocks(space, plant, scored) for i in idx})
+    else:
+        mask = np.zeros(space.dim, dtype=bool)
+        for name, m in space.fixed.items():
+            mask[np.arange(space.dim)[space.slices()[name]][np.asarray(m, dtype=bool)]] = True
+        free = np.flatnonzero(~mask).tolist()
     meta = result | {"captures": [c.dataset_id for c in captures], "base": args.base, "num_envs": args.num_envs,
+                     "free": [space.names[i] for i in free], "search": args.search,
+                     "start": {j: {p: float(x0[p][i]) for p in ("armature", "damping", "friction", "friction_ratio")}
+                               for i, j in enumerate(joints)},
+                     "box": {"multiplier": args.bound, "bias_mrad": args.bias_bound_mrad, "delay_ms": list(args.delay_ms),
+                             "delay_start_ms": args.delay_start_ms,
+                             "friction_ratio": [0.0, args.ratio_max]},
                      "generations": args.generations, "duration_s": args.duration, "seed": args.seed,
                      "scored": [drives[i] for i in scored], "fixed": sorted(args.fix), "wall_s": time.time() - t,
-                     "command_rebuild": rebuild, "delay_reference": reference, **sim.desc.identity()}
+                     "command_rebuild": rebuild, "delay_reference": reference, **_plant_identity(sim, usd),
+                     "self_collision": not args.no_self_collision and bool(sim.profile["physics"]["self_collision"]),
+                     "frame_stamps": args.frame_stamps, "solver": sim.solver, "integrator": sim.integrator}
     if reference == "applied" and not args.one_delay:
         # Ready for actuators.yaml: each family's drive_delay_s, controller APPLIED to the drive acting.
         meta["drive_delay_s"] = {g: int(v) / 1e9 for g, v in zip(space.groups, best["delay"], strict=True)}
@@ -335,17 +398,19 @@ def cmd_pace_selftest(args) -> int:
     sim = SimCore(_usd(args), device=args.device, robot=args.robot, num_envs=args.num_envs, fixed_base=True,
                   solver=args.solver)
     plant = sim.plant
-    joints, drives = list(plant.map.joint_names), list(plant.map.drive_names)
+    drives = list(plant.map.drive_names)
     physics_joints = list(plant.solver_map.joint_names)
     start = start_values(sim.desc, physics_joints)
-    space = PaceSpace(physics_joints, drives, start, fixed=structural_fixed(start), log_bound=math.log(args.bound),
+    space = PaceSpace(physics_joints, drives, start, fixed=structural_fixed(start, ratio=not args.no_dynamic_friction),
+                      log_bound=math.log(args.bound),
                       separate_dynamic_friction=not args.no_dynamic_friction,
                       delay_groups=None if args.one_delay else [sim.desc.drives[d].family for d in drives])
     rng = np.random.default_rng(args.seed)
     x_true = rng.uniform(-args.spread, args.spread, space.dim)
     planted = space.decode(np.tile(x_true, (args.num_envs, 1)))
-    amp = {j: args.amplitude_rad / (2 if sim.desc.joints[j].device is None else 1) for j in joints}
-    commands = chirp_commands(joints, duration_s=args.duration, f0_hz=args.f0, f1_hz=args.f1, amplitude_rad=amp,
+    commanded = list(plant.map.joint_names)  # the body joints; the solver's crank shafts follow the ankles
+    amp = {j: args.amplitude_rad / (2 if sim.desc.joints[j].device is None else 1) for j in commanded}
+    commands = chirp_commands(commanded, duration_s=args.duration, f0_hz=args.f0, f1_hz=args.f1, amplitude_rad=amp,
                               seed=args.seed)
     t = time.time()
     capture = synthetic_capture(sim, space, planted, commands)
@@ -358,7 +423,8 @@ def cmd_pace_selftest(args) -> int:
                  seed=args.seed, search=args.search)
     best = {k: v[0] for k, v in space.decode(np.asarray(result["x"])[None]).items()}
     truth = {k: v[0] for k, v in planted.items()}
-    recovery = {p: float(np.median(np.abs(np.log(best[p] / truth[p])))) for p in JOINT_PARAMS}
+    recovery = {p: float(np.median(np.abs(np.log(best[p][truth[p] > 0] / truth[p][truth[p] > 0]))))
+                for p in JOINT_PARAMS}  # zero starts are held at zero
     recovery |= {"bias_rad": float(np.median(np.abs(best["bias"] - truth["bias"]))),
                  "delay_ns": dict(zip(space.groups, map(int, best["delay"] - truth["delay"]), strict=True)),
                  "friction_ratio": float(np.median(np.abs(best["friction_ratio"] - truth["friction_ratio"])))}
@@ -460,6 +526,50 @@ def cmd_splat_usd(args) -> int:
     return 0
 
 
+def cmd_convert_capture(args) -> int:
+    from humanoid_sim.model.description import Description
+    from humanoid_sim.replay.convert import convert_capture, is_legacy
+
+    desc = Description.load(args.robot)
+    for c in args.captures:
+        if not is_legacy(Path(c), desc) and not args.force:
+            raise SystemExit(f"{c}: its commands already name {args.robot}'s joints (--force converts anyway)")
+        out = convert_capture(Path(c), Path(args.out), desc, args.source, ankles=args.ankles)
+        report = json.loads((out / "conversion.json").read_text())
+        worst = max(report["drive_targets"]["max_abs_rad"].items(), key=lambda kv: kv[1] or 0.0)
+        print(json.dumps({"capture": str(out), "ankles": args.ankles, "frames": report["drive_targets"]["frames"],
+                          "worst_drive_target_rad": worst, "ankle_residual_rad": report["ankle_residual_rad"]}))
+    return 0
+
+
+def cmd_segment_capture(args) -> int:
+    from humanoid_sim.replay.segments import cut_window, parse_window, plan_windows
+
+    explicit = [parse_window(w) for w in args.window]
+    for c in args.captures:
+        windows = plan_windows(Path(c), explicit=explicit, bands=args.bands, gap_s=args.gap_s, min_s=args.min_s)
+        if not windows:
+            raise SystemExit(f"{c}: no window of at least {args.min_s} s")
+        for w in windows:
+            out = cut_window(Path(c), Path(args.out), w)
+            print(json.dumps({"capture": str(out), "window": w.name, "start_s": w.start_s, "end_s": w.end_s,
+                              "note": w.note}))
+    return 0
+
+
+def cmd_pace_report(args) -> int:
+    from humanoid_sim.model.description import Description
+    from humanoid_sim.sysid.pace_report import render, summarize
+
+    summary = summarize([Path(f) for f in args.fits], Description.load(args.robot))
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "pace-report.json").write_text(json.dumps(summary, indent=1))
+    (out / "pace-report.md").write_text(render(summary))
+    print(out / "pace-report.md")
+    return 0
+
+
 def cmd_fit_delay(args) -> int:
     import numpy as np
 
@@ -501,7 +611,10 @@ def main(argv: list[str] | None = None) -> int:
 
     r = sub.add_parser("replay")
     r.add_argument("capture")
-    r.add_argument("--period-ms", type=float, default=4.0)
+    r.add_argument("--period-ms", type=float, default=None, help="physics period (default: the profile's)")
+    r.add_argument("--no-self-collision", action="store_true",
+                   help="no collisions between the robot's own bodies (a diagnostic: the profile's setting is what a "
+                        "deployable plant runs)")
     r.add_argument("--integrator", default=None)
     r.add_argument("--device", default="cuda:0", help="cuda:N, or cpu (Warp's CPU device: slow)")
     r.add_argument("--duration", type=float, default=None)
@@ -610,7 +723,36 @@ def main(argv: list[str] | None = None) -> int:
     cb.add_argument("--bias-bound-mrad", type=float, default=20.0, help="as fit-pace's")
     cb.add_argument("--delay-ms", nargs=2, type=float, default=[0.0, 20.0], metavar=("FROM", "TO"), help="as fit-pace's")
     cb.add_argument("--skip-drives", nargs="*", default=[], help="drives the fit leaves out")
+    cb.add_argument("--frame-stamps", action="store_true", help="as fit-pace's")
     cb.set_defaults(func=cmd_check_bag)
+
+    cc = sub.add_parser("convert-capture", help="a capture recorded on an older description in this one's joint "
+                        "names, checked at the drive level (replay/convert.py)")
+    cc.add_argument("captures", nargs="+")
+    cc.add_argument("--out", required=True, help="parent directory of the converted captures")
+    cc.add_argument("--from", dest="source", default="urdf6-b14158e",
+                    help="the description the capture was recorded on: a bundled name or an actuators.yaml path")
+    cc.add_argument("--ankles", choices=("cranks", "hold"), default="cranks",
+                    help="cranks: through the old transmission's crank targets (exact at the drives); hold: both "
+                         "ankles held at the first frame (leave the ankle drives out of a fit)")
+    cc.add_argument("--force", action="store_true", help="convert even when the joint names already match")
+    cc.set_defaults(func=cmd_convert_capture)
+
+    sc = sub.add_parser("segment-capture", help="cut captures into windows to fit on one and score on the others")
+    sc.add_argument("captures", nargs="+")
+    sc.add_argument("--out", required=True)
+    sc.add_argument("--window", action="append", default=[], metavar="NAME:START:END",
+                    help="an explicit window, seconds from the first command frame (repeatable; replaces the plan)")
+    sc.add_argument("--bands", type=int, default=3, help="windows of a single chirp (equal octaves each)")
+    sc.add_argument("--gap-s", type=float, default=0.5, help="a pause in the command frames that separates pieces")
+    sc.add_argument("--min-s", type=float, default=8.0, help="shorter windows are dropped")
+    sc.set_defaults(func=cmd_segment_capture)
+
+    pr = sub.add_parser("pace-report", help="holdout report of fit-pace results: per group before/after, entries "
+                        "at a bound, values against the description and datasheets")
+    pr.add_argument("fits", nargs="+", help="fit-pace output directories")
+    pr.add_argument("--out", required=True)
+    pr.set_defaults(func=cmd_pace_report)
 
     fpc = sub.add_parser("fit-pace", help="fit PACE 0.2.0's actuator model to captures or rosbags, from their "
                                           "command frames")
@@ -628,12 +770,24 @@ def main(argv: list[str] | None = None) -> int:
     fpc.add_argument("--bias-bound-mrad", type=float, default=20.0, help="encoder bias within ± this")
     fpc.add_argument("--delay-ms", nargs=2, type=float, default=[0.0, 20.0], metavar=("FROM", "TO"),
                      help="command delay range")
+    fpc.add_argument("--delay-start-ms", type=float, default=None,
+                     help="the delay the search starts from and the holdout's before is scored at (default: the "
+                          "middle of --delay-ms)")
+    fpc.add_argument("--ratio-max", type=float, default=1.0,
+                     help="dynamic over static friction within [0, this]; above 1 the sliding friction may exceed "
+                          "the static one")
     fpc.add_argument("--no-dynamic-friction", action="store_true",
                      help="one Coulomb friction per joint (PACE without separate_dynamic_friction)")
     fpc.add_argument("--fix", nargs="*", default=[], metavar="PARAM.NAME",
                      help="hold entries at their start, e.g. bias.maxonHEJ50L_ANK1 friction_ratio.knee_l")
     fpc.add_argument("--skip-drives", nargs="*", default=[], help="drives left out of the objective")
     fpc.add_argument("--one-delay", action="store_true", help="one delay for every drive, not one per family")
+    fpc.add_argument("--period-ms", type=float, default=None, help="physics period (default: the profile's)")
+    fpc.add_argument("--no-self-collision", action="store_true",
+                     help="no collisions between the robot's own bodies (a diagnostic: the profile's setting is what a "
+                          "deployable plant runs)")
+    fpc.add_argument("--frame-stamps", action="store_true",
+                     help="replay command frames from their own stamps, not the controller's APPLIED acknowledgements (the delay then includes the software path)")
     fpc.add_argument("--search", choices=("blocks", "joint"), default="blocks",
                      help="a CMA-ES per drive (ankle) on its own error, or one over every parameter as PACE does")
     fpc.add_argument("--out", default="outputs/sysid/pace")

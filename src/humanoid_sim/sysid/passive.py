@@ -110,7 +110,9 @@ def evaluate(sim, captures, space: FitSpace, x: np.ndarray, scored: list[int], *
 class Cmaes:
     """(μ/μ_w, λ)-CMA-ES (Hansen's tutorial defaults), minimizing."""
 
-    def __init__(self, x0: np.ndarray, sigma: float, popsize: int, seed: int = 0):
+    def __init__(self, x0: np.ndarray, sigma: float, popsize: int, seed: int = 0, scale: np.ndarray | None = None):
+        """``scale``: per coordinate, the initial step relative to ``sigma`` (the covariance starts diagonal at
+        ``scale²``); all ones by default."""
         n = len(x0)
         self.n, self.lam, self.mean, self.sigma = n, popsize, np.asarray(x0, float), sigma
         self.mu = popsize // 2
@@ -123,7 +125,8 @@ class Cmaes:
         self.cmu = min(1 - self.c1, 2 * (self.mueff - 2 + 1 / self.mueff) / ((n + 2) ** 2 + self.mueff))
         self.damps = 1 + 2 * max(0, math.sqrt((self.mueff - 1) / (n + 1)) - 1) + self.cs
         self.chin = math.sqrt(n) * (1 - 1 / (4 * n) + 1 / (21 * n * n))
-        self.pc, self.ps, self.C = np.zeros(n), np.zeros(n), np.eye(n)
+        self.pc, self.ps = np.zeros(n), np.zeros(n)
+        self.C = np.eye(n) if scale is None else np.diag(np.asarray(scale, dtype=float) ** 2)
         self.rng = np.random.default_rng(seed)
         self.gen = 0
 
