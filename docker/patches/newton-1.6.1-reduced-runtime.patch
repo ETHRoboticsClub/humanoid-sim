@@ -1,0 +1,1482 @@
+--- a/_src/solvers/kamino/_src/dynamics/dual.py
++++ b/_src/solvers/kamino/_src/dynamics/dual.py
+@@ -1275,6 +1275,9 @@
+         self._data: DualProblemData | None = None
+         """The dual problem data container bundling are relevant memory allocations."""
+ 
++        self._jacobians: SparseSystemJacobians | DenseSystemJacobians | None = None
++        """Current Jacobian container, retaining live topology for optional solvers."""
++
+         self._sparse: bool = sparse
+         """Flag to indicate whether the dual uses a sparse data representation."""
+ 
+@@ -1345,6 +1348,13 @@
+         return self._data
+ 
+     @property
++    def jacobians(self) -> SparseSystemJacobians | DenseSystemJacobians:
++        """Jacobian container most recently supplied to finalize or build."""
++        if self._jacobians is None:
++            raise ValueError("Jacobians unavailable; call finalize first")
++        return self._jacobians
++
++    @property
+     def sparse(self) -> bool:
+         """
+         Returns whether the dual problem is using sparse operators.
+@@ -1404,6 +1414,8 @@
+         if contacts is not None:
+             if not isinstance(contacts, ContactsKamino):
+                 raise ValueError("Invalid contacts container provided. Must be an instance of `ContactsKamino`.")
++
++        self._jacobians = jacobians
+ 
+         # Use the model's device
+         self._device = model.device
+@@ -1564,6 +1576,8 @@
+         """
+         if self._sparse and not isinstance(jacobians, SparseSystemJacobians):
+             raise TypeError("Dual problem in sparse configuration requires sparse jacobians.")
++
++        self._jacobians = jacobians
+ 
+         # Initialize problem data
+         if reset_to_zero:
+--- /dev/null
++++ b/_src/solvers/kamino/_src/solvers/padmm/recovery3.py
+@@ -0,0 +1,74 @@
++"""Three independent RHS recoveries sharing factor reads, with unchanged summation order."""
++import warp as wp
++from newton._src.solvers.kamino._src.linalg.factorize.llt_blocked import get_float32_array_offset_ptr
++
++@wp.kernel(enable_backward=False)
++def recovery_rhs3(
++    L: wp.array[wp.float32], dims: wp.array[wp.int32], mio: wp.array[wp.int32],
++    v: wp.array[wp.float32], x: wp.array2d[wp.float32], y: wp.array2d[wp.float32], yh: wp.array2d[wp.float32],
++    free: int, b0: wp.array[wp.float32], b1: wp.array[wp.float32], b2: wp.array[wp.float32],
++):
++    w, j = wp.tid()
++    n = dims[w]
++    a0 = wp.float32(0.0)
++    a1 = wp.float32(0.0)
++    a2 = wp.float32(0.0)
++    for k in range(n - free):
++        l = L[mio[w] + (free + k) * n + j]
++        a0 = a0 + l * x[w, k]
++        a1 = a1 + l * y[w, k]
++        a2 = a2 + l * yh[w, k]
++    vf = v[w * free + j]
++    b0[w * free + j] = -vf - a0
++    b1[w * free + j] = -vf - a1
++    b2[w * free + j] = -vf - a2
++
++
++def make_backward3(block=32):
++    @wp.kernel(module="unique", enable_backward=False)
++    def solve(
++        L: wp.array[wp.float32], dims: wp.array[wp.int32], mio: wp.array[wp.int32],
++        b0: wp.array[wp.float32], b1: wp.array[wp.float32], b2: wp.array[wp.float32], free: int,
++        x0: wp.array[wp.float32], x1: wp.array[wp.float32], x2: wp.array[wp.float32],
++    ):
++        w, lane = wp.tid()
++        threads = wp.block_dim()
++        n = dims[w]
++        lm = wp.array(ptr=get_float32_array_offset_ptr(L, mio[w]), shape=(n,n), dtype=wp.float32)
++        bv0 = wp.array(ptr=get_float32_array_offset_ptr(b0,w*free), shape=(free,1), dtype=wp.float32)
++        bv1 = wp.array(ptr=get_float32_array_offset_ptr(b1,w*free), shape=(free,1), dtype=wp.float32)
++        bv2 = wp.array(ptr=get_float32_array_offset_ptr(b2,w*free), shape=(free,1), dtype=wp.float32)
++        out0 = wp.array(ptr=get_float32_array_offset_ptr(x0,w*free), shape=(free,1), dtype=wp.float32)
++        out1 = wp.array(ptr=get_float32_array_offset_ptr(x1,w*free), shape=(free,1), dtype=wp.float32)
++        out2 = wp.array(ptr=get_float32_array_offset_ptr(x2,w*free), shape=(free,1), dtype=wp.float32)
++        padded = (free+block-1)//block*block
++        for iteration in range(padded//block):
++            i = padded-block-iteration*block
++            rhs0 = wp.tile_load(bv0,shape=(block,1),offset=(i,0),storage="shared")
++            rhs1 = wp.tile_load(bv1,shape=(block,1),offset=(i,0),storage="shared")
++            rhs2 = wp.tile_load(bv2,shape=(block,1),offset=(i,0),storage="shared")
++            diag = wp.tile_load(lm,shape=(block,block),offset=(i,i),storage="shared")
++            if i+block>free:
++                for chunk in range((block*block+threads-1)//threads):
++                    k = (lane+chunk*threads)%(block*block)
++                    row = k//block
++                    col = k%block
++                    value = diag[row,col]
++                    if i+row>=free or i+col>=free:
++                        value = wp.where(row==col,wp.float32(1.0),wp.float32(0.0))
++                    diag[row,col] = value
++            for j in range(i+block,padded,block):
++                lb = wp.tile_load(lm,shape=(block,block),offset=(j,i))
++                xb0 = wp.tile_load(out0,shape=(block,1),offset=(j,0))
++                xb1 = wp.tile_load(out1,shape=(block,1),offset=(j,0))
++                xb2 = wp.tile_load(out2,shape=(block,1),offset=(j,0))
++                wp.tile_matmul(wp.tile_transpose(lb),xb0,rhs0,alpha=-1.0)
++                wp.tile_matmul(wp.tile_transpose(lb),xb1,rhs1,alpha=-1.0)
++                wp.tile_matmul(wp.tile_transpose(lb),xb2,rhs2,alpha=-1.0)
++            wp.tile_upper_solve_inplace(wp.tile_transpose(diag),rhs0)
++            wp.tile_upper_solve_inplace(wp.tile_transpose(diag),rhs1)
++            wp.tile_upper_solve_inplace(wp.tile_transpose(diag),rhs2)
++            wp.tile_store(out0,rhs0,offset=(i,0))
++            wp.tile_store(out1,rhs1,offset=(i,0))
++            wp.tile_store(out2,rhs2,offset=(i,0))
++    return solve
+--- /dev/null
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_diagnostics.py
+@@ -0,0 +1,193 @@
++"""Frozen diagnostic candidates; no runtime integration."""
++
++import warp as wp
++from newton._src.solvers.kamino._src.solvers.padmm.math import (
++    compute_box_complementarity_residual,
++    project_to_coulomb_cone,
++)
++
++
++@wp.func_native("""
++float r = value;
++#pragma unroll
++for (int offset = 16; offset > 0; offset >>= 1)
++    r += __shfl_xor_sync(0xffffffffu, r, offset, 32);
++return r;
++""")
++def warp_sum(value: wp.float32) -> wp.float32: ...
++
++
++def make_bounded(threads, reduction="block"):
++    if threads not in (128, 256):
++        raise ValueError("Only qualified block dimensions 128 and 256 are candidates")
++    if reduction not in ("block", "warp"):
++        raise ValueError("Unknown explicit reduction candidate")
++    WARPS = wp.constant(threads // 32)
++
++    @wp.kernel(enable_backward=False)
++    def bounded_block(
++        D: wp.array[float],
++        q: wp.array[float],
++        P: wp.array[float],
++        dim: wp.array[int],
++        mio: wp.array[int],
++        vio: wp.array[int],
++        nbc: wp.array[int],
++        nl: wp.array[int],
++        bcgo: wp.array[int],
++        lcgo: wp.array[int],
++        ccgo: wp.array[int],
++        bcio: wp.array[int],
++        cio: wp.array[int],
++        lower: wp.array[float],
++        upper: wp.array[float],
++        mu: wp.array[float],
++        x: wp.array[float],
++        y: wp.array[float],
++        z: wp.array[float],
++        sigma: float,
++        result: wp.array2d[float],
++    ):
++        w, thread = wp.tid()
++        n = dim[w]
++        lane = thread % 32
++        warp = thread // 32
++        stationarity = wp.float32(0.0)
++        feasibility = wp.float32(0.0)
++        natural_map = wp.float32(0.0)
++        complementarity = wp.float32(0.0)
++        for k in range(warp, n, WARPS):
++            partial = wp.float32(0.0)
++            for j in range(lane, n, 32):
++                partial = partial + D[mio[w] + k * n + j] * y[vio[w] + j]
++            product = warp_sum(partial)
++            if lane == 0:
++                idx = vio[w] + k
++                pv = P[idx]
++                yv = y[idx]
++                zv = z[idx]
++                correction = wp.float32(0.0)
++                pr = yv
++                natural = yv - zv
++                comp = wp.float32(0.0)
++                if k >= bcgo[w] and k < bcgo[w] + nbc[w]:
++                    j = bcio[w] + k - bcgo[w]
++                    lo = lower[j]
++                    hi = upper[j]
++                    pr = wp.clamp(yv, lo, hi)
++                    natural = wp.clamp(yv - zv, lo, hi)
++                    comp = wp.abs(compute_box_complementarity_residual(yv, zv, lo, hi))
++                elif k >= lcgo[w] and k < lcgo[w] + nl[w]:
++                    pr = wp.max(yv, 0.0)
++                    natural = wp.max(yv - zv, 0.0)
++                    comp = wp.abs(yv * zv)
++                elif k >= ccgo[w]:
++                    component = (k - ccgo[w]) % 3
++                    j = idx - component
++                    m = mu[cio[w] + (k - ccgo[w]) // 3]
++                    yy = wp.vec3f(y[j], y[j + 1], y[j + 2])
++                    zz = wp.vec3f(z[j], z[j + 1], z[j + 2])
++                    pr = project_to_coulomb_cone(yy, m)[component]
++                    natural = project_to_coulomb_cone(yy - zz, m)[component]
++                    if component == 2:
++                        correction = m * wp.sqrt(z[j] * z[j] + z[j + 1] * z[j + 1])
++                    if component == 0:
++                        comp = wp.abs(wp.dot(yy, zz))
++                value = q[idx] + correction - zv - sigma * yv
++                value = value + product
++                stationarity = wp.max(stationarity, wp.abs(value / pv))
++                feasibility = wp.max(feasibility, wp.abs(pv * (yv - pr)))
++                natural_map = wp.max(natural_map, wp.abs(yv - natural))
++                complementarity = wp.max(complementarity, comp)
++        stationarity = wp.tile_max(wp.tile(stationarity))[0]
++        feasibility = wp.tile_max(wp.tile(feasibility))[0]
++        natural_map = wp.tile_max(wp.tile(natural_map))[0]
++        complementarity = wp.tile_max(wp.tile(complementarity))[0]
++        if thread == 0:
++            result[w, 0] = stationarity
++            result[w, 1] = feasibility
++            result[w, 2] = natural_map
++            result[w, 3] = complementarity
++
++    @wp.kernel(enable_backward=False)
++    def bounded_warp(
++        D: wp.array[float],
++        q: wp.array[float],
++        P: wp.array[float],
++        dim: wp.array[int],
++        mio: wp.array[int],
++        vio: wp.array[int],
++        nbc: wp.array[int],
++        nl: wp.array[int],
++        bcgo: wp.array[int],
++        lcgo: wp.array[int],
++        ccgo: wp.array[int],
++        bcio: wp.array[int],
++        cio: wp.array[int],
++        lower: wp.array[float],
++        upper: wp.array[float],
++        mu: wp.array[float],
++        x: wp.array[float],
++        y: wp.array[float],
++        z: wp.array[float],
++        sigma: float,
++        result: wp.array2d[float],
++    ):
++        w, thread = wp.tid()
++        n = dim[w]
++        lane = thread % 32
++        warp = thread // 32
++        stationarity = wp.float32(0.0)
++        feasibility = wp.float32(0.0)
++        natural_map = wp.float32(0.0)
++        complementarity = wp.float32(0.0)
++        for k in range(warp, n, WARPS):
++            partial = wp.float32(0.0)
++            for j in range(lane, n, 32):
++                partial = partial + D[mio[w] + k * n + j] * y[vio[w] + j]
++            product = warp_sum(partial)
++            if lane == 0:
++                idx = vio[w] + k
++                pv = P[idx]
++                yv = y[idx]
++                zv = z[idx]
++                correction = wp.float32(0.0)
++                pr = yv
++                natural = yv - zv
++                comp = wp.float32(0.0)
++                if k >= bcgo[w] and k < bcgo[w] + nbc[w]:
++                    j = bcio[w] + k - bcgo[w]
++                    lo = lower[j]
++                    hi = upper[j]
++                    pr = wp.clamp(yv, lo, hi)
++                    natural = wp.clamp(yv - zv, lo, hi)
++                    comp = wp.abs(compute_box_complementarity_residual(yv, zv, lo, hi))
++                elif k >= lcgo[w] and k < lcgo[w] + nl[w]:
++                    pr = wp.max(yv, 0.0)
++                    natural = wp.max(yv - zv, 0.0)
++                    comp = wp.abs(yv * zv)
++                elif k >= ccgo[w]:
++                    component = (k - ccgo[w]) % 3
++                    j = idx - component
++                    m = mu[cio[w] + (k - ccgo[w]) // 3]
++                    yy = wp.vec3f(y[j], y[j + 1], y[j + 2])
++                    zz = wp.vec3f(z[j], z[j + 1], z[j + 2])
++                    pr = project_to_coulomb_cone(yy, m)[component]
++                    natural = project_to_coulomb_cone(yy - zz, m)[component]
++                    if component == 2:
++                        correction = m * wp.sqrt(z[j] * z[j] + z[j + 1] * z[j + 1])
++                    if component == 0:
++                        comp = wp.abs(wp.dot(yy, zz))
++                value = q[idx] + correction - zv - sigma * yv
++                value = value + product
++                stationarity = wp.max(stationarity, wp.abs(value / pv))
++                feasibility = wp.max(feasibility, wp.abs(pv * (yv - pr)))
++                natural_map = wp.max(natural_map, wp.abs(yv - natural))
++                complementarity = wp.max(complementarity, comp)
++        if lane == 0:
++            wp.atomic_max(result, w, 0, stationarity)
++            wp.atomic_max(result, w, 1, feasibility)
++            wp.atomic_max(result, w, 2, natural_map)
++            wp.atomic_max(result, w, 3, complementarity)
++
++    return bounded_block if reduction == "block" else bounded_warp
+--- /dev/null
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_dynamic_factor.py
+@@ -0,0 +1,193 @@
++# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
++# SPDX-License-Identifier: Apache-2.0
++"""Direct-source RCM LLTB derivative, skipping only symbolic zero blocks.
++
++Gathers authoritative source lower-triangle entries under the free permutation;
++adds the original constrained diagonal shift before factor arithmetic. No K copy.
++
++No elementwise tile write is conditional on lane id. Every skip predicate is
++uniform for the world's cooperative block. Skipped lower output tiles are zeroed.
++"""
++
++from functools import cache
++
++import warp as wp
++
++from ...linalg.factorize._tile_builtins import HAS_TILE_MATMUL_TRANSPOSE_UPDATE
++from ...linalg.factorize.llt_blocked import get_float32_array_offset_ptr
++
++
++@cache
++def make_runtime_dynamic_factor(block_size: int, skip_structural_zeros: bool):
++    @wp.kernel(module="unique", enable_backward=False)
++    def llt_blocked_factorize_kernel(
++        # Inputs:
++        dim: wp.array[wp.int32],
++        mio: wp.array[wp.int32],
++        D: wp.array[wp.float32],
++        source_dim: wp.array[wp.int32],
++        source_mio: wp.array[wp.int32],
++        bad: wp.array[wp.bool],
++        permutation: wp.array[wp.int32],
++        free: int,
++        sigma: float,
++        occupied: wp.array2d[wp.uint32],
++        # Outputs:
++        L: wp.array[wp.float32],
++    ):
++        # Retrieve the thread index and thread-block configuration
++        tid, tid_block = wp.tid()
++        num_threads_per_block = wp.block_dim()
++
++        # Retrieve the matrix block dimensions and size
++        n_i = dim[tid]
++        A_i_start = mio[tid]
++
++        # Retrieve a pointer to the start of the i-th matrix in A
++        L_i_ptr = get_float32_array_offset_ptr(L, A_i_start)
++
++        # Create a temporary warp array pointing to the i-th matrix
++        L_i = wp.array(ptr=L_i_ptr, shape=(n_i, n_i), dtype=wp.float32)
++
++        # Round up active_matrix_size to next multiple of block_size
++        n_i_padded = ((n_i + block_size - 1) // block_size) * block_size
++
++        # Process the matrix in blocks along its leading dimension.
++        for k in range(0, n_i_padded, block_size):
++            end = k + block_size
++
++            # Load current diagonal block A[k:end, k:end]
++            # and update with contributions from previously computed blocks.
++            A_kk_tile = wp.tile_zeros(shape=(block_size, block_size), dtype=wp.float32, storage="shared")
++            num_tile_elements = block_size * block_size
++            num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
++            for load_index in range(num_iterations):
++                linear_index = (tid_block + load_index * num_threads_per_block) % num_tile_elements
++                row = linear_index // block_size
++                col = linear_index % block_size
++                logical_row = k + row
++                logical_col = k + col
++                value = wp.where(logical_row == logical_col, wp.float32(1), wp.float32(0))
++                if not bad[tid] and logical_row < n_i and logical_col < n_i:
++                    source_row = permutation[logical_row]
++                    source_col = permutation[logical_col]
++                    value = D[
++                        source_mio[tid]
++                        + wp.max(source_row, source_col) * source_dim[tid]
++                        + wp.min(source_row, source_col)
++                    ]
++                    if logical_row == logical_col and logical_row >= free:
++                        value = value + sigma
++                A_kk_tile[row, col] = value
++
++            # Update the diagonal block with contributions from previously computed blocks.
++            # ``tile_matmul(..., alpha=-1.0)`` accumulates ``A_kk_tile += -1 * L_block @ L_block_T``
++            # in-place, which avoids the intermediate ``L_L_T_block`` tile allocation that
++            # the ``A_kk_tile -= L_L_T_block`` form required.
++            if k > 0:
++                for j in range(0, k, block_size):
++                    if (
++                        not wp.static(skip_structural_zeros)
++                        or (occupied[tid, k // block_size] & (wp.uint32(1) << wp.uint32(j // block_size))) != wp.uint32(0)
++                    ):
++                        L_block = wp.tile_load(L_i, shape=(block_size, block_size), offset=(k, j))
++                        if wp.static(HAS_TILE_MATMUL_TRANSPOSE_UPDATE):
++                            wp.tile_matmul_transpose_update(A_kk_tile, L_block, L_block, alpha=-1.0)
++                        else:
++                            L_block_T = wp.tile_transpose(L_block)
++                            wp.tile_matmul(L_block, L_block_T, A_kk_tile, alpha=-1.0)
++
++            # Compute the Cholesky factorization for the block in-place (avoids an extra
++            # tile allocation vs. ``wp.tile_cholesky``).
++            wp.tile_cholesky_inplace(A_kk_tile)
++            wp.tile_store(L_i, A_kk_tile, offset=(k, k))
++
++            # Process the blocks below the current block
++            for i in range(end, n_i_padded, block_size):
++                if not wp.static(skip_structural_zeros) or (occupied[tid, i // block_size] & (wp.uint32(1) << wp.uint32(k // block_size))) != wp.uint32(0):
++                    # Load the current block A[i:end, k:end]
++                    A_ik_tile = wp.tile_zeros(
++                        shape=(block_size, block_size), dtype=wp.float32, storage="shared"
++                    )
++                    num_tile_elements = block_size * block_size
++                    num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
++                    for load_index in range(num_iterations):
++                        linear_index = (tid_block + load_index * num_threads_per_block) % num_tile_elements
++                        row = linear_index // block_size
++                        col = linear_index % block_size
++                        logical_row = i + row
++                        logical_col = k + col
++                        value = wp.where(logical_row == logical_col, wp.float32(1), wp.float32(0))
++                        if not bad[tid] and logical_row < n_i and logical_col < n_i:
++                            source_row = permutation[logical_row]
++                            source_col = permutation[logical_col]
++                            value = D[
++                                source_mio[tid]
++                                + wp.max(source_row, source_col) * source_dim[tid]
++                                + wp.min(source_row, source_col)
++                            ]
++                            if logical_row == logical_col and logical_row >= free:
++                                value = value + sigma
++                        A_ik_tile[row, col] = value
++
++                    # Update the block with contributions from previously computed blocks
++                    # (in-place negative-accumulating matmul; see the diagonal-block loop above).
++                    if k > 0:
++                        for j in range(0, k, block_size):
++                            if not wp.static(skip_structural_zeros) or (
++                                (occupied[tid, i // block_size] & (wp.uint32(1) << wp.uint32(j // block_size))) != wp.uint32(0)
++                                and (occupied[tid, k // block_size] & (wp.uint32(1) << wp.uint32(j // block_size))) != wp.uint32(0)
++                            ):
++                                L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, j))
++                                L_2_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(k, j))
++                                if wp.static(HAS_TILE_MATMUL_TRANSPOSE_UPDATE):
++                                    wp.tile_matmul_transpose_update(A_ik_tile, L_tile, L_2_tile, alpha=-1.0)
++                                else:
++                                    L_T_tile = wp.tile_transpose(L_2_tile)
++                                    wp.tile_matmul(L_tile, L_T_tile, A_ik_tile, alpha=-1.0)
++
++                    # Solve for the current block using the in-place triangular solve to avoid
++                    # an extra intermediate tile.
++                    t = wp.tile_transpose(A_ik_tile)
++                    wp.tile_lower_solve_inplace(A_kk_tile, t)
++                    sol_tile = wp.tile_transpose(t)
++                    wp.tile_store(L_i, sol_tile, offset=(i, k))
++                else:
++                    # Active strides vary with contacts: never leave stale L.
++                    zeros = wp.tile_zeros(shape=(block_size, block_size), dtype=wp.float32)
++                    wp.tile_store(L_i, zeros, offset=(i, k))
++
++    # Return the kernel function
++    return llt_blocked_factorize_kernel
++
++
++@wp.kernel(enable_backward=False)
++def pack_runtime_permuted_q(
++    q: wp.array[wp.float32],
++    dim: wp.array[wp.int32],
++    vio: wp.array[wp.int32],
++    bad: wp.array[wp.bool],
++    permutation: wp.array[wp.int32],
++    free: int,
++    width: int,
++    qF: wp.array[wp.float32],
++    qdense: wp.array[wp.float32],
++):
++    world, row = wp.tid()
++    value = wp.float32(0.0)
++    if not bad[world] and row < dim[world]:
++        value = q[vio[world] + permutation[row]]
++    qdense[world * width + row] = value
++    if row < free:
++        qF[world * free + row] = value
++
++
++@wp.kernel(enable_backward=False)
++def restore_runtime_free_order(
++    value: wp.array[wp.float32],
++    permutation: wp.array[wp.int32],
++    free: int,
++    output: wp.array[wp.float32],
++):
++    world, row = wp.tid()
++    output[world * free + permutation[row]] = value[world * free + row]
+--- /dev/null
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_ordering.py
+@@ -0,0 +1,65 @@
++"""Deterministic constructor-only symbolic ordering and conservative block fill."""
++
++import numpy as np
++
++
++def rcm(A):
++    """Reverse Cuthill-McKee with deterministic minimum-degree component roots."""
++    A = A.copy()
++    np.fill_diagonal(A, False)
++    degree = A.sum(1)
++    remaining = set(range(len(A)))
++    order = []
++    while remaining:
++        root = min(remaining, key=lambda v: (degree[v], v))
++        remaining.remove(root)
++        queue = [root]
++        while queue:
++            u = queue.pop(0)
++            order.append(u)
++            children = sorted(
++                (int(v) for v in np.flatnonzero(A[u]) if int(v) in remaining), key=lambda v: (degree[v], v)
++            )
++            for v in children:
++                remaining.remove(v)
++            queue.extend(children)
++    return np.array(order[::-1])
++
++
++def minimum_degree(A):
++    """Exact greedy minimum degree on the filled graph, not SuiteSparse AMD."""
++    graph = [set(np.flatnonzero(A[i]).tolist()) - {i} for i in range(len(A))]
++    remaining = set(range(len(A)))
++    order = []
++    while remaining:
++        k = min(remaining, key=lambda v: (len(graph[v] & remaining), v))
++        ns = (graph[k] & remaining) - {k}
++        for v in ns:
++            graph[v].update(ns - {v})
++        remaining.remove(k)
++        order.append(k)
++    return np.array(order)
++
++
++def symbolic(A):
++    filled = A.copy()
++    L = np.eye(len(A), dtype=bool)
++    for k in range(len(A)):
++        ns = np.flatnonzero(filled[k, k + 1 :]) + k + 1
++        L[ns, k] = True
++        filled[np.ix_(ns, ns)] = True
++    return L
++
++
++def block_pattern(A, block=16):
++    n = len(A)
++    b = (n + block - 1) // block
++    return np.array(
++        [
++            [
++                bool(A[i * block : min((i + 1) * block, n), j * block : min((j + 1) * block, n)].any())
++                for j in range(b)
++            ]
++            for i in range(b)
++        ]
++    )
+--- /dev/null
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_pattern.py
+@@ -0,0 +1,68 @@
++"""Per-world topology-only block fill; no Jacobian or factor values are inspected."""
++import warp as wp
++
++
++@wp.kernel(enable_backward=False)
++def collect_body_tile_bits(
++    coords: wp.array2d[wp.int32], starts: wp.array[wp.int32], counts: wp.array[wp.int32],
++    dims: wp.array[wp.int32], body_counts: wp.array[wp.int32], inverse_permutation: wp.array[wp.int32],
++    block: int, max_tiles: int, body_tiles: wp.array2d[wp.uint32], invalid: wp.array[wp.int32],
++):
++    world, entry = wp.tid()
++    if entry < counts[world]:
++        row = coords[starts[world]+entry,0]
++        column = coords[starts[world]+entry,1]
++        body = column//6
++        if row < 0 or row >= dims[world] or row >= inverse_permutation.shape[0] or column < 0 or column%6 != 0 or body >= body_counts[world]:
++            wp.atomic_or(invalid,world,1)
++        else:
++            tile = inverse_permutation[row]//block
++            if tile >= max_tiles:
++                wp.atomic_or(invalid,world,1)
++            else:
++                wp.atomic_or(body_tiles,world,body,wp.uint32(1)<<wp.uint32(tile))
++
++
++def make_symbolic_fill(max_tiles=20):
++    """Each world is owned by one thread; bitset fill is an integer exact operation."""
++    assert 1 <= max_tiles <= 32
++    Masks = wp.types.vector(length=max_tiles,dtype=wp.uint32)
++    @wp.kernel(module='unique',enable_backward=False)
++    def fill(
++        body_tiles: wp.array2d[wp.uint32], body_counts: wp.array[wp.int32],
++        dims: wp.array[wp.int32], block: int, invalid: wp.array[wp.int32],
++        occupied: wp.array2d[wp.uint32],
++    ):
++        world=wp.tid()
++        tiles=(dims[world]+block-1)//block
++        rows=Masks(wp.uint32(0))
++        if tiles>max_tiles or tiles<1:
++            invalid[world]=1
++        if invalid[world]!=0:
++            # Reject metadata by emitting conservative dense predicates.
++            for i in range(max_tiles):occupied[world,i]=wp.uint32(0xffffffff)
++        else:
++            # A body is a dense 6x6 mass block, so all incident row tiles form
++            # a clique. Diagonal regularization always contributes diagonals.
++            for i in range(tiles):
++                bits=wp.uint32(1)<<wp.uint32(i)
++                for body in range(body_counts[world]):
++                    body_bits=body_tiles[world,body]
++                    if body_bits & (wp.uint32(1)<<wp.uint32(i)):
++                        bits=bits|body_bits
++                rows[i]=bits
++            # Symmetric symbolic elimination. Preserve all original and filled
++            # edges; elimination k connects every surviving neighbor of k.
++            for k in range(tiles):
++                after_k=wp.uint32(0xffffffff)
++                if k<31:after_k=~((wp.uint32(1)<<wp.uint32(k+1))-wp.uint32(1))
++                else:after_k=wp.uint32(0)
++                neighbors=rows[k]&after_k
++                for i in range(k+1,tiles):
++                    if neighbors & (wp.uint32(1)<<wp.uint32(i)):
++                        rows[i]=rows[i]|neighbors
++            for i in range(max_tiles):
++                value=wp.uint32(0)
++                if i<tiles:value=rows[i]
++                occupied[world,i]=value
++    return fill
+--- /dev/null
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_rcm_factor.py
+@@ -0,0 +1,193 @@
++# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
++# SPDX-License-Identifier: Apache-2.0
++"""Direct-source RCM LLTB derivative, skipping only symbolic zero blocks.
++
++Gathers authoritative source lower-triangle entries under the free permutation;
++adds the original constrained diagonal shift before factor arithmetic. No K copy.
++
++No elementwise tile write is conditional on lane id. Every skip predicate is
++uniform for the world's cooperative block. Skipped lower output tiles are zeroed.
++"""
++
++from functools import cache
++
++import warp as wp
++
++from ...linalg.factorize._tile_builtins import HAS_TILE_MATMUL_TRANSPOSE_UPDATE
++from ...linalg.factorize.llt_blocked import get_float32_array_offset_ptr
++
++
++@cache
++def make_runtime_rcm_factor(block_size: int, skip_structural_zeros: bool):
++    @wp.kernel(module="unique", enable_backward=False)
++    def llt_blocked_factorize_kernel(
++        # Inputs:
++        dim: wp.array[wp.int32],
++        mio: wp.array[wp.int32],
++        D: wp.array[wp.float32],
++        source_dim: wp.array[wp.int32],
++        source_mio: wp.array[wp.int32],
++        bad: wp.array[wp.bool],
++        permutation: wp.array[wp.int32],
++        free: int,
++        sigma: float,
++        occupied: wp.array2d[wp.int32],
++        # Outputs:
++        L: wp.array[wp.float32],
++    ):
++        # Retrieve the thread index and thread-block configuration
++        tid, tid_block = wp.tid()
++        num_threads_per_block = wp.block_dim()
++
++        # Retrieve the matrix block dimensions and size
++        n_i = dim[tid]
++        A_i_start = mio[tid]
++
++        # Retrieve a pointer to the start of the i-th matrix in A
++        L_i_ptr = get_float32_array_offset_ptr(L, A_i_start)
++
++        # Create a temporary warp array pointing to the i-th matrix
++        L_i = wp.array(ptr=L_i_ptr, shape=(n_i, n_i), dtype=wp.float32)
++
++        # Round up active_matrix_size to next multiple of block_size
++        n_i_padded = ((n_i + block_size - 1) // block_size) * block_size
++
++        # Process the matrix in blocks along its leading dimension.
++        for k in range(0, n_i_padded, block_size):
++            end = k + block_size
++
++            # Load current diagonal block A[k:end, k:end]
++            # and update with contributions from previously computed blocks.
++            A_kk_tile = wp.tile_zeros(shape=(block_size, block_size), dtype=wp.float32, storage="shared")
++            num_tile_elements = block_size * block_size
++            num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
++            for load_index in range(num_iterations):
++                linear_index = (tid_block + load_index * num_threads_per_block) % num_tile_elements
++                row = linear_index // block_size
++                col = linear_index % block_size
++                logical_row = k + row
++                logical_col = k + col
++                value = wp.where(logical_row == logical_col, wp.float32(1), wp.float32(0))
++                if not bad[tid] and logical_row < n_i and logical_col < n_i:
++                    source_row = permutation[logical_row]
++                    source_col = permutation[logical_col]
++                    value = D[
++                        source_mio[tid]
++                        + wp.max(source_row, source_col) * source_dim[tid]
++                        + wp.min(source_row, source_col)
++                    ]
++                    if logical_row == logical_col and logical_row >= free:
++                        value = value + sigma
++                A_kk_tile[row, col] = value
++
++            # Update the diagonal block with contributions from previously computed blocks.
++            # ``tile_matmul(..., alpha=-1.0)`` accumulates ``A_kk_tile += -1 * L_block @ L_block_T``
++            # in-place, which avoids the intermediate ``L_L_T_block`` tile allocation that
++            # the ``A_kk_tile -= L_L_T_block`` form required.
++            if k > 0:
++                for j in range(0, k, block_size):
++                    if (
++                        not wp.static(skip_structural_zeros)
++                        or occupied[k // block_size, j // block_size] != 0
++                    ):
++                        L_block = wp.tile_load(L_i, shape=(block_size, block_size), offset=(k, j))
++                        if wp.static(HAS_TILE_MATMUL_TRANSPOSE_UPDATE):
++                            wp.tile_matmul_transpose_update(A_kk_tile, L_block, L_block, alpha=-1.0)
++                        else:
++                            L_block_T = wp.tile_transpose(L_block)
++                            wp.tile_matmul(L_block, L_block_T, A_kk_tile, alpha=-1.0)
++
++            # Compute the Cholesky factorization for the block in-place (avoids an extra
++            # tile allocation vs. ``wp.tile_cholesky``).
++            wp.tile_cholesky_inplace(A_kk_tile)
++            wp.tile_store(L_i, A_kk_tile, offset=(k, k))
++
++            # Process the blocks below the current block
++            for i in range(end, n_i_padded, block_size):
++                if not wp.static(skip_structural_zeros) or occupied[i // block_size, k // block_size] != 0:
++                    # Load the current block A[i:end, k:end]
++                    A_ik_tile = wp.tile_zeros(
++                        shape=(block_size, block_size), dtype=wp.float32, storage="shared"
++                    )
++                    num_tile_elements = block_size * block_size
++                    num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
++                    for load_index in range(num_iterations):
++                        linear_index = (tid_block + load_index * num_threads_per_block) % num_tile_elements
++                        row = linear_index // block_size
++                        col = linear_index % block_size
++                        logical_row = i + row
++                        logical_col = k + col
++                        value = wp.where(logical_row == logical_col, wp.float32(1), wp.float32(0))
++                        if not bad[tid] and logical_row < n_i and logical_col < n_i:
++                            source_row = permutation[logical_row]
++                            source_col = permutation[logical_col]
++                            value = D[
++                                source_mio[tid]
++                                + wp.max(source_row, source_col) * source_dim[tid]
++                                + wp.min(source_row, source_col)
++                            ]
++                            if logical_row == logical_col and logical_row >= free:
++                                value = value + sigma
++                        A_ik_tile[row, col] = value
++
++                    # Update the block with contributions from previously computed blocks
++                    # (in-place negative-accumulating matmul; see the diagonal-block loop above).
++                    if k > 0:
++                        for j in range(0, k, block_size):
++                            if not wp.static(skip_structural_zeros) or (
++                                occupied[i // block_size, j // block_size] != 0
++                                and occupied[k // block_size, j // block_size] != 0
++                            ):
++                                L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, j))
++                                L_2_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(k, j))
++                                if wp.static(HAS_TILE_MATMUL_TRANSPOSE_UPDATE):
++                                    wp.tile_matmul_transpose_update(A_ik_tile, L_tile, L_2_tile, alpha=-1.0)
++                                else:
++                                    L_T_tile = wp.tile_transpose(L_2_tile)
++                                    wp.tile_matmul(L_tile, L_T_tile, A_ik_tile, alpha=-1.0)
++
++                    # Solve for the current block using the in-place triangular solve to avoid
++                    # an extra intermediate tile.
++                    t = wp.tile_transpose(A_ik_tile)
++                    wp.tile_lower_solve_inplace(A_kk_tile, t)
++                    sol_tile = wp.tile_transpose(t)
++                    wp.tile_store(L_i, sol_tile, offset=(i, k))
++                else:
++                    # Active strides vary with contacts: never leave stale L.
++                    zeros = wp.tile_zeros(shape=(block_size, block_size), dtype=wp.float32)
++                    wp.tile_store(L_i, zeros, offset=(i, k))
++
++    # Return the kernel function
++    return llt_blocked_factorize_kernel
++
++
++@wp.kernel(enable_backward=False)
++def pack_runtime_permuted_q(
++    q: wp.array[wp.float32],
++    dim: wp.array[wp.int32],
++    vio: wp.array[wp.int32],
++    bad: wp.array[wp.bool],
++    permutation: wp.array[wp.int32],
++    free: int,
++    width: int,
++    qF: wp.array[wp.float32],
++    qdense: wp.array[wp.float32],
++):
++    world, row = wp.tid()
++    value = wp.float32(0.0)
++    if not bad[world] and row < dim[world]:
++        value = q[vio[world] + permutation[row]]
++    qdense[world * width + row] = value
++    if row < free:
++        qF[world * free + row] = value
++
++
++@wp.kernel(enable_backward=False)
++def restore_runtime_free_order(
++    value: wp.array[wp.float32],
++    permutation: wp.array[wp.int32],
++    free: int,
++    output: wp.array[wp.float32],
++):
++    world, row = wp.tid()
++    output[world * free + permutation[row]] = value[world * free + row]
+--- a/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py
+@@ -11,7 +11,16 @@
+ import warp as wp
+ 
+ from .kernels import _update_delassus_proximal_regularization
++from .reduced_direct_factor import make_runtime_direct_factor, pack_runtime_q
+ from .reduced_iteration import make_kernel
++from .width_iteration import make_width_kernel
++from .reduced_diagnostics import make_bounded
++from .recovery3 import make_backward3, recovery_rhs3
++from .reduced_ordering import block_pattern, rcm, symbolic
++from .reduced_dynamic_factor import make_runtime_dynamic_factor
++from .reduced_pattern import collect_body_tile_bits, make_symbolic_fill
++from ...kinematics.jacobians import SparseSystemJacobians
++from .reduced_rcm_factor import make_runtime_rcm_factor, pack_runtime_permuted_q, restore_runtime_free_order
+ from .reduced_runtime_kernels import (
+     bridge,
+     check_factor,
+@@ -19,12 +28,11 @@
+     classify,
+     merge_status,
+     merge_vectors,
+-    original_diagnostics,
+     pack_vectors,
+     sanitize_rejected_factor,
+ )
+-from .reduced_setup import make_free_solve, make_reduced_inverse, make_reduced_q, recovery_rhs
+-from .reduced_direct_factor import make_runtime_direct_factor, pack_runtime_q
++from .reduced_setup import make_free_solve, make_reduced_inverse, make_reduced_q
++from .reduced_topology import common_bilateral_topology
+ 
+ 
+ class ReducedRuntime:
+@@ -51,11 +59,31 @@
+         self.width = self.free + self.capacity
+         self.count = model.size.num_worlds
+         self.device = model.device
+-        # Match _initialize_solver: config.eta and config.rho_0 are each
+-        # stored as FP32 before their FP32 addition. Adding Python doubles
+-        # and casting only the sum can differ by one ULP for valid configs.
+         self.sigma = float(np.float32(np.float32(cfg.eta) + np.float32(cfg.rho_0)))
++        self.diagnostics = make_bounded(128, "warp")
+         self.owner = owner
++        self.reduced_ordering = cfg.reduced_ordering
++        self.reduced_dynamic_pattern = cfg.reduced_dynamic_pattern
++        if self.reduced_dynamic_pattern and self.reduced_ordering != "rcm":
++            raise ValueError("reduced_dynamic_pattern requires reduced_ordering=rcm")
++        if self.reduced_dynamic_pattern:
++            self.pattern_tiles = (self.width + 15) // 16
++            if self.pattern_tiles > 32:
++                raise ValueError("reduced_dynamic_pattern supports at most 32 factor tiles")
++            body_counts = model.info.num_body_dofs.numpy().astype(np.int32) // 6
++            if np.any(body_counts <= 0):
++                raise ValueError("reduced_dynamic_pattern requires positive body counts")
++        if self.reduced_ordering not in ("natural", "rcm"):
++            raise ValueError("reduced_ordering must be natural or rcm")
++        if self.reduced_ordering == "rcm":
++            topology = common_bilateral_topology(model)
++            self.topology_fingerprint = topology.fingerprint
++            permutation = np.r_[rcm(topology.graph), np.arange(self.free, self.width)].astype(np.int32)
++            structural = np.ones((self.width, self.width), dtype=bool)
++            structural[: self.free, : self.free] = topology.graph[
++                np.ix_(permutation[: self.free], permutation[: self.free])
++            ]
++            occupied = symbolic(block_pattern(structural, 16)).astype(np.int32)
+         self.residual_scope_description = {
+             0: "original full PADMM",
+             1: "reduced constrained-coordinate PADMM",
+@@ -86,7 +114,7 @@
+             self.L = z(self.count * self.width * self.width)
+             self.qF = z(self.count * self.free)
+             self.v = z(self.count * self.free)
+-            self.bF = z(self.count * self.free)
++            self.recovery_bF = [z(self.count * self.free) for _ in range(3)]
+             self.q = z(self.count * self.width)
+             self.qr = z(self.count * self.capacity)
+             self.Y = z(self.count * self.capacity * self.capacity)
+@@ -102,12 +130,33 @@
+             self.status = z((self.count, 12))
+             self.accel = z((self.count, 2))
+             self.original_residuals = z((self.count, 4))
++            if self.reduced_ordering == "rcm":
++                self.permutation = wp.array(permutation, dtype=wp.int32)
++                self.occupied = wp.array(occupied, dtype=wp.int32)
++                self.permuted_free_outputs = {k: z(self.count * self.free) for k in ("x", "y", "y_hat")}
++                if self.reduced_dynamic_pattern:
++                    self.body_counts = wp.array(body_counts, dtype=wp.int32)
++                    self.body_tiles = z((self.count, int(body_counts.max())), wp.uint32)
++                    self.pattern_invalid = z(self.count, wp.int32)
++                    self.inverse_permutation = wp.array(np.argsort(permutation).astype(np.int32), dtype=wp.int32)
++                    self.occupied = z((self.count, self.pattern_tiles), wp.uint32)
+         self.factor = make_runtime_direct_factor(16)
++        if self.reduced_ordering == "rcm":
++            self.factor = make_runtime_rcm_factor(16, True)
++        if self.reduced_dynamic_pattern:
++            self.factor = make_runtime_dynamic_factor(16, True)
++            self.symbolic_fill = make_symbolic_fill(self.pattern_tiles)
+         self.forward = make_free_solve(False)
+-        self.backward = make_free_solve(True)
++        self.backward3 = make_backward3()
+         self.small_inverse = make_reduced_inverse()
+         self.q_kernel = make_reduced_q()
+         self.iterate = make_kernel(self.capacity, 128)
++        self.iteration_kernels = (self.iterate,)
++        if self.capacity == 96:
++            self.iteration_kernels = (
++                make_width_kernel(64, 96, 1, 128),
++                make_width_kernel(96, 96, 65, 128),
++            )
+ 
+     def launch(self, kernel, dim, args, block=128):
+         wp.launch(kernel, dim=dim, inputs=args, device=self.device, block_dim=block)
+@@ -122,6 +171,22 @@
+         if problem.sparse:
+             raise ValueError("bilateral_reduced prototype only supports dense dynamics")
+         p = problem.data
++        if self.reduced_dynamic_pattern:
++            jacobians = problem.jacobians
++            if not isinstance(jacobians, SparseSystemJacobians) or jacobians._J_cts is None:
++                raise ValueError("reduced_dynamic_pattern requires live SparseSystemJacobians")
++            topology = jacobians._J_cts.bsm
++            self.body_tiles.zero_()
++            self.pattern_invalid.zero_()
++            self.launch(collect_body_tile_bits, (self.count, topology.max_of_num_nzb), [
++                topology.nzb_coords, topology.nzb_start, topology.num_nzb, p.dim,
++                self.body_counts, self.inverse_permutation, 16, self.pattern_tiles,
++                self.body_tiles, self.pattern_invalid,
++            ], 256)
++            self.launch(self.symbolic_fill, self.count, [
++                self.body_tiles, self.body_counts, p.dim, 16,
++                self.pattern_invalid, self.occupied,
++            ], 128)
+         s = self.owner.data.state
+         cfg = self.cfg
+         self.bad_count.zero_()
+@@ -146,12 +211,20 @@
+                 self.bad,
+             ],
+         )
+-        self.launch(
+-            pack_runtime_q,
+-            (self.count, self.width),
+-            [p.v_f, p.dim, p.vio, self.bad, self.free, self.width, self.qF, self.q],
+-            256,
+-        )
++        if self.reduced_ordering == "rcm":
++            self.launch(
++                pack_runtime_permuted_q,
++                (self.count, self.width),
++                [p.v_f, p.dim, p.vio, self.bad, self.permutation, self.free, self.width, self.qF, self.q],
++                256,
++            )
++        else:
++            self.launch(
++                pack_runtime_q,
++                (self.count, self.width),
++                [p.v_f, p.dim, p.vio, self.bad, self.free, self.width, self.qF, self.q],
++                256,
++            )
+         self.launch(
+             pack_vectors,
+             (self.count, self.capacity),
+@@ -179,10 +252,30 @@
+                 ],
+             ],
+         )
+-        self.launch(
+-            self.factor, (self.count, 128),
+-            [self.dim, self.mio, p.D, p.dim, p.mio, self.bad, self.free, self.sigma, self.L],
+-        )
++        if self.reduced_ordering == "rcm":
++            self.launch(
++                self.factor,
++                (self.count, 128),
++                [
++                    self.dim,
++                    self.mio,
++                    p.D,
++                    p.dim,
++                    p.mio,
++                    self.bad,
++                    self.permutation,
++                    self.free,
++                    self.sigma,
++                    self.occupied,
++                    self.L,
++                ],
++            )
++        else:
++            self.launch(
++                self.factor,
++                (self.count, 128),
++                [self.dim, self.mio, p.D, p.dim, p.mio, self.bad, self.free, self.sigma, self.L],
++            )
+         self.launch(check_factor, self.count, [self.L, self.dim, self.mio, self.bad])
+         self.launch(
+             sanitize_rejected_factor,
+@@ -237,19 +330,28 @@
+             self.output["z_hat"],
+             self.accel,
+         ]
+-        self.launch(self.iterate, (self.count, 128), args)
+-        for key in ("x", "y", "y_hat"):
+-            self.launch(
+-                recovery_rhs,
+-                (self.count, self.free),
+-                [self.L, self.dim, self.mio, self.v, self.output[key], self.free, self.bF],
+-                256,
+-            )
+-            self.launch(
+-                self.backward,
+-                (self.count, 128),
+-                [self.L, self.dim, self.mio, self.bF, self.free, self.free_output[key]],
+-            )
++        for kernel in self.iteration_kernels:
++            self.launch(kernel, (self.count, 128), args)
++        self.launch(
++            recovery_rhs3, (self.count, self.free),
++            [self.L, self.dim, self.mio, self.v,
++             self.output["x"], self.output["y"], self.output["y_hat"],
++             self.free, *self.recovery_bF], 256,
++        )
++        recovery_output = self.permuted_free_outputs if self.reduced_ordering == "rcm" else self.free_output
++        self.launch(
++            self.backward3, (self.count, 128),
++            [self.L, self.dim, self.mio, *self.recovery_bF, self.free,
++             recovery_output["x"], recovery_output["y"], recovery_output["y_hat"]],
++        )
++        if self.reduced_ordering == "rcm":
++            for key in ("x", "y", "y_hat"):
++                self.launch(
++                    restore_runtime_free_order,
++                    (self.count, self.free),
++                    [self.permuted_free_outputs[key], self.permutation, self.free, self.free_output[key]],
++                    256,
++                )
+         self.launch(
+             check_output,
+             self.count,
+@@ -308,8 +410,8 @@
+         s.done.zero_()
+         self.original_residuals.zero_()
+         self.launch(
+-            original_diagnostics,
+-            (self.count, self.owner._size.max_of_max_total_cts),
++            self.diagnostics,
++            (self.count, 128),
+             [
+                 p.D,
+                 p.v_f,
+--- /dev/null
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_topology.py
+@@ -0,0 +1,98 @@
++"""Constructor-only bilateral row/body topology from finalized ModelKamino.
++
++No captured fixtures, robot dimensions, numeric Jacobian values or current poses.
++Matches SparseSystemJacobians.finalize's dynamic/kinematic coordinate loops.
++"""
++
++import hashlib
++from dataclasses import dataclass
++
++import numpy as np
++
++
++@dataclass(frozen=True)
++class BilateralTopology:
++    graph: np.ndarray
++    row_body: np.ndarray
++    fingerprint: str
++    worlds_verified: int
++
++
++def common_bilateral_topology(model):
++    """Read immutable model arrays once, after constraint offsets are finalized.
++
++    Reject heterogeneous row/body connectivity rather than selecting a schedule
++    that might skip a real nonzero in another world. All constrained coupling is
++    added densely by the schedule builder, independently of this free graph.
++    """
++    world_count = int(model.size.num_worlds)
++    free_counts = model.info.num_joint_bilateral_cts.numpy().astype(np.int64)
++    if world_count < 1 or len(free_counts) != world_count or not np.all(free_counts == free_counts[0]):
++        raise ValueError("A common bilateral prefix is required")
++    free = int(free_counts[0])
++    if free <= 0:
++        raise ValueError("A positive bilateral prefix is required")
++    world_offsets = model.info.total_cts_offset.numpy().astype(np.int64)
++    body_offsets = model.info.bodies_offset.numpy().astype(np.int64)
++    body_dofs = model.info.num_body_dofs.numpy().astype(np.int64)
++    if np.any(body_dofs % 6):
++        raise ValueError("Expected six spatial degrees of freedom per body")
++    body_counts = body_dofs // 6
++    joints = model.joints
++    worlds = joints.wid.numpy().astype(np.int64)
++    follower = joints.bid_F.numpy().astype(np.int64)
++    base = joints.bid_B.numpy().astype(np.int64)
++    dynamic_counts = joints.num_dynamic_cts.numpy().astype(np.int64)
++    kinematic_counts = joints.num_kinematic_cts.numpy().astype(np.int64)
++    bilateral_counts = joints.num_bilateral_cts.numpy().astype(np.int64)
++    if not np.array_equal(dynamic_counts + kinematic_counts, bilateral_counts):
++        raise ValueError("Unknown bilateral row partition")
++
++    def offsets(name, counts):
++        array = getattr(joints, name)
++        if array is None:
++            if np.any(counts):
++                raise ValueError(f"Required finalized constraint offsets are missing: {name}")
++            return np.zeros_like(counts)
++        return array.numpy().astype(np.int64)
++
++    dynamic_offsets = offsets("dynamic_cts_offset_total_cts", dynamic_counts)
++    kinematic_offsets = offsets("kinematic_cts_offset_total_cts", kinematic_counts)
++    by_world = [[] for _ in range(world_count)]
++    owners = np.full((world_count, free), -1, dtype=np.int64)
++    for j, w in enumerate(worlds):
++        if not 0 <= w < world_count:
++            raise ValueError("Joint world index is invalid")
++        bodies = [follower[j]]
++        if base[j] >= 0:
++            bodies.append(base[j])
++        local_bodies = [int(b - body_offsets[w]) for b in bodies]
++        if any(b < 0 or b >= body_counts[w] for b in local_bodies):
++            raise ValueError("Joint refers outside its world's body interval")
++        for count, offset in (
++            (dynamic_counts[j], dynamic_offsets[j]),
++            (kinematic_counts[j], kinematic_offsets[j]),
++        ):
++            if not count:
++                continue
++            first = int(offset - world_offsets[w])
++            if first < 0 or first + count > free:
++                raise ValueError("Bilateral rows fall outside the free prefix")
++            for row in range(first, first + int(count)):
++                if owners[w, row] >= 0:
++                    raise ValueError("Overlapping bilateral row ownership")
++                owners[w, row] = j
++                by_world[w].extend((row, b) for b in local_bodies)
++    if np.any(owners < 0):
++        raise ValueError("Bilateral prefix contains rows not described by joint metadata")
++    canonical = np.unique(np.asarray(by_world[0], dtype=np.int64), axis=0)
++    for coordinates in by_world[1:]:
++        if not np.array_equal(np.unique(np.asarray(coordinates, dtype=np.int64), axis=0), canonical):
++            raise ValueError("Bilateral row/body topology differs between worlds")
++    incidence = np.zeros((free, int(canonical[:, 1].max()) + 1), dtype=np.int32)
++    incidence[canonical[:, 0], canonical[:, 1]] = 1
++    graph = incidence @ incidence.T > 0
++    np.fill_diagonal(graph, True)
++    graph.flags.writeable = False
++    canonical.flags.writeable = False
++    return BilateralTopology(graph, canonical, hashlib.sha256(canonical.tobytes()).hexdigest(), world_count)
+--- /dev/null
++++ b/_src/solvers/kamino/_src/solvers/padmm/width_iteration.py
+@@ -0,0 +1,254 @@
++"""Width-specialized matrix cache; exact original128-thread PADMM reductions.
++
++A different finite iteration algorithm after exact bilateral elimination.
++No production imports/patches except Newton's published mathematical helpers.
++The reduced inverse is loaded once per world into shared memory, transposed to
++avoid a bank conflict when all lanes apply separate rows to the same vector.
++"""
++
++import warp as wp
++from newton._src.solvers.kamino._src.linalg.factorize.rcm_batch import _sync_threads
++from newton._src.solvers.kamino._src.solvers.padmm.math import (
++    compute_box_complementarity_residual,
++    project_to_coulomb_cone,
++)
++
++
++def make_width_kernel(compute_width=64, storage_pitch=96, min_dimension=1, threads=128):
++    assert compute_width in (32, 64, 96)
++    assert storage_pitch == 96 and threads == 128
++    assert 1 <= min_dimension <= compute_width
++    assert compute_width * compute_width % threads == 0
++
++    @wp.kernel(module="unique", enable_backward=False)
++    def solve(
++        inverse_transposed: wp.array2d[wp.float32],
++        q: wp.array2d[wp.float32],
++        P: wp.array2d[wp.float32],
++        lower: wp.array2d[wp.float32],
++        upper: wp.array2d[wp.float32],
++        mu: wp.array2d[wp.float32],
++        seed_x: wp.array2d[wp.float32],
++        seed_y: wp.array2d[wp.float32],
++        seed_z: wp.array2d[wp.float32],
++        seed_y_hat: wp.array2d[wp.float32],
++        seed_z_hat: wp.array2d[wp.float32],
++        dims: wp.array[wp.int32],
++        nbc: wp.array[wp.int32],
++        nl: wp.array[wp.int32],
++        eta: wp.float32,
++        rho: wp.float32,
++        a0: wp.float32,
++        restart_tolerance: wp.float32,
++        primal_tolerance: wp.float32,
++        dual_tolerance: wp.float32,
++        compl_tolerance: wp.float32,
++        max_iterations: int,
++        out_x: wp.array2d[wp.float32],
++        out_y: wp.array2d[wp.float32],
++        out_z: wp.array2d[wp.float32],
++        out_status: wp.array2d[wp.float32],
++        out_y_hat: wp.array2d[wp.float32],
++        out_z_hat: wp.array2d[wp.float32],
++        out_accel: wp.array2d[wp.float32],
++    ):
++        world, lane = wp.tid()
++        n = dims[world]
++        # World-uniform early return occurs before any collective tile operation.
++        if n < min_dimension or n > compute_width:
++            return
++        b = nbc[world]
++        c = b + nl[world]
++        inv = wp.tile_zeros(shape=(compute_width, compute_width), dtype=wp.float32, storage="shared")
++        rhs = wp.tile_zeros(shape=threads, dtype=wp.float32, storage="shared")
++        xs = wp.tile_zeros(shape=threads, dtype=wp.float32, storage="shared")
++        zs = wp.tile_zeros(shape=threads, dtype=wp.float32, storage="shared")
++        zhs = wp.tile_zeros(shape=threads, dtype=wp.float32, storage="shared")
++        rp_tile = wp.tile_zeros(shape=threads, dtype=wp.float32, storage="shared")
++        rd_tile = wp.tile_zeros(shape=threads, dtype=wp.float32, storage="shared")
++        rc_tile = wp.tile_zeros(shape=threads, dtype=wp.float32, storage="shared")
++        ra_tile = wp.tile_zeros(shape=threads, dtype=wp.float32, storage="shared")
++        for k in range((compute_width * compute_width + threads - 1) // threads):
++            index = lane + k * threads
++            if index < compute_width * compute_width:
++                row = index // compute_width
++                col = index % compute_width
++                inv[row, col] = inverse_transposed[world * storage_pitch + row, col]
++        xp = wp.float32(0.0)
++        yp = wp.float32(0.0)
++        zp = wp.float32(0.0)
++        pv = wp.float32(1.0)
++        qv = wp.float32(0.0)
++        lov = wp.float32(0.0)
++        hiv = wp.float32(0.0)
++        muv = wp.float32(0.0)
++        if lane < n:
++            xp = seed_x[world, lane]
++            yp = seed_y[world, lane]
++            zp = seed_z[world, lane]
++            pv = P[world, lane]
++            qv = q[world, lane]
++            lov = lower[world, lane]
++            hiv = upper[world, lane]
++            muv = mu[world, lane]
++        yh = wp.float32(0.0)
++        zh = wp.float32(0.0)
++        if lane < n:
++            yh = seed_y_hat[world, lane]
++            zh = seed_z_hat[world, lane]
++        zhs[lane] = zh
++        ap = a0
++        ra_prev = wp.float32(3.4028234663852886e38)
++        restarts = int(0)
++        rpmax = wp.float32(0.0)
++        rdmax = wp.float32(0.0)
++        rcmax = wp.float32(0.0)
++        converged = int(0)
++        iterations = int(0)
++        x = xp
++        y = yp
++        z = zp
++        restart = int(0)
++        afactor = wp.float32(0.0)
++        ra_previous = ra_prev
++        dx_norm = wp.float32(0.0)
++        dy_norm = wp.float32(0.0)
++        dz_norm = wp.float32(0.0)
++        rasum = wp.float32(0.0)
++        dx_tile = wp.tile_zeros(shape=threads, dtype=wp.float32, storage="shared")
++        dy_tile = wp.tile_zeros(shape=threads, dtype=wp.float32, storage="shared")
++        dz_tile = wp.tile_zeros(shape=threads, dtype=wp.float32, storage="shared")
++        _sync_threads()
++        for iteration in range(max_iterations):
++            correction = wp.float32(0.0)
++            if lane >= c and lane < n and (lane - c) % 3 == 2:
++                k = lane - 2
++                correction = muv * wp.sqrt(zhs[k] * zhs[k] + zhs[k + 1] * zhs[k + 1])
++            value = wp.float32(0.0)
++            if lane < n:
++                value = -qv - correction + eta * xp + rho * yh + zh
++            rhs[lane] = value
++            _sync_threads()
++            x = wp.float32(0.0)
++            if lane < n:
++                for j in range(n):
++                    x = x + inv[j, lane] * rhs[j]
++            xs[lane] = x
++            _sync_threads()
++            y = wp.float32(0.0)
++            if lane < n:
++                y = x - zh / rho
++                if lane < b:
++                    y = wp.clamp(y, lov, hiv)
++                elif lane < c:
++                    y = wp.max(y, wp.float32(0.0))
++                else:
++                    component = (lane - c) % 3
++                    k = lane - component
++                    projected = project_to_coulomb_cone(
++                        wp.vec3f(
++                            xs[k] - zhs[k] / rho, xs[k + 1] - zhs[k + 1] / rho, xs[k + 2] - zhs[k + 2] / rho
++                        ),
++                        muv,
++                    )
++                    y = projected[component]
++            z = zh + rho * (y - x)
++            zs[lane] = z
++            _sync_threads()
++            rp = wp.float32(0.0)
++            rd = wp.float32(0.0)
++            rc = wp.float32(0.0)
++            ra = wp.float32(0.0)
++            if lane < n:
++                rp = wp.abs(pv * (x - y))
++                rd = wp.abs((eta * (x - xp) + rho * (y - yh)) / pv)
++                dy = pv * (y - yh)
++                dz = (z - zh) / pv
++                ra = rho * dy * dy + dz * dz / rho
++                if lane < b:
++                    rc = wp.abs(compute_box_complementarity_residual(x, z, lov, hiv))
++                elif lane < c:
++                    rc = wp.abs(x * z)
++                elif (lane - c) % 3 == 0:
++                    rc = wp.abs(
++                        xs[lane] * zs[lane] + xs[lane + 1] * zs[lane + 1] + xs[lane + 2] * zs[lane + 2]
++                    )
++            rp_tile[lane] = rp
++            rd_tile[lane] = rd
++            rc_tile[lane] = rc
++            ra_tile[lane] = ra
++            dxv = wp.float32(0.0)
++            dyv = wp.float32(0.0)
++            dzv = wp.float32(0.0)
++            if lane < n:
++                dxv = pv * (x - xp)
++                dyv = pv * (y - yh)
++                dzv = (z - zh) / pv
++            dx_tile[lane] = dxv * dxv
++            dy_tile[lane] = dyv * dyv
++            dz_tile[lane] = dzv * dzv
++            _sync_threads()
++            rpmax = wp.tile_max(rp_tile)[0]
++            rdmax = wp.tile_max(rd_tile)[0]
++            rcmax = wp.tile_max(rc_tile)[0]
++            rasum = wp.tile_sum(ra_tile)[0]
++            iterations = iteration + 1
++            dx_norm = wp.sqrt(wp.tile_sum(dx_tile)[0])
++            dy_norm = wp.sqrt(wp.tile_sum(dy_tile)[0])
++            dz_norm = wp.sqrt(wp.tile_sum(dz_tile)[0])
++            ra_previous = ra_prev
++            restart = 0
++            if (
++                iterations > 1
++                and rpmax <= primal_tolerance
++                and rdmax <= dual_tolerance
++                and rcmax <= compl_tolerance
++            ):
++                converged = 1
++                break
++            if rasum < restart_tolerance * ra_prev:
++                a = wp.float32(0.5) * (wp.float32(1.0) + wp.sqrt(wp.float32(1.0) + wp.float32(4.0) * ap * ap))
++                momentum = (ap - wp.float32(1.0)) / a
++                afactor = momentum
++                yh = y + momentum * (y - yp)
++                zh = z + momentum * (z - zp)
++                ap = a
++                ra_prev = rasum
++            else:
++                yh = yp
++                zh = zp
++                ap = a0
++                ra_prev = ra_prev / restart_tolerance
++                restarts += 1
++                restart = 1
++                rasum = ra_prev
++                afactor = 0.0
++            xp = x
++            yp = y
++            zp = z
++            zhs[lane] = zh
++            _sync_threads()
++        # Scalar tile extraction/assignment is collective; global array writes below may diverge.
++        if lane < n:
++            out_x[world, lane] = x
++            out_y[world, lane] = y
++            out_z[world, lane] = z
++            out_y_hat[world, lane] = yh
++            out_z_hat[world, lane] = zh
++        if lane == 0:
++            out_status[world, 0] = wp.float32(iterations)
++            out_status[world, 1] = wp.float32(converged)
++            out_status[world, 2] = rpmax
++            out_status[world, 3] = rdmax
++            out_status[world, 4] = rcmax
++            out_status[world, 5] = wp.float32(restarts)
++            out_status[world, 6] = dx_norm
++            out_status[world, 7] = dy_norm
++            out_status[world, 8] = dz_norm
++            out_status[world, 9] = rasum
++            out_status[world, 10] = ra_previous
++            out_status[world, 11] = wp.float32(restart)
++            out_accel[world, 0] = ap
++            out_accel[world, 1] = afactor
++
++    return solve
+--- a/_src/solvers/kamino/config.py
++++ b/_src/solvers/kamino/config.py
+@@ -489,6 +489,12 @@
+ 
+     algorithm: Literal["full", "bilateral_reduced"] = "full"
+     """Explicit experimental iteration algorithm; full preserves the default path."""
++
++    reduced_dynamic_pattern: bool = False
++    """Rebuild topology-only per-world RCM factor block fill on device each solve."""
++
++    reduced_ordering: Literal["natural", "rcm"] = "natural"
++    """Optional bilateral ordering for the reduced algorithm; natural preserves its original path."""
+ 
+     reduced_capacity: int = 96
+     """Maximum active constrained rows in the optional reduced workspace."""
+@@ -767,6 +773,9 @@
+         # Import here to avoid module-level imports and circular dependencies
+         from ._src.solvers.padmm import PADMMPenaltyUpdate, PADMMWarmStartMode  # noqa: PLC0415
+         from ._src.solvers.warmstart import WarmstarterContacts  # noqa: PLC0415
++
++        if self.reduced_ordering not in ("natural", "rcm"):
++            raise ValueError("reduced_ordering must be natural or rcm")
+ 
+         # Ensure that the scalar parameters are within valid ranges
+         if self.primal_tolerance < 0.0:

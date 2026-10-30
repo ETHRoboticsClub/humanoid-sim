@@ -1,5 +1,6 @@
 """Explicit reduced-solver plumbing and incompatible-mode rejection in the physics image."""
 import dataclasses
+
 import pytest
 
 pytestmark = pytest.mark.physics
@@ -10,6 +11,9 @@ pytestmark = pytest.mark.physics
     {"algorithm": "bilateral_reduced"},
     {"algorithm": "bilateral_reduced", "reduced_capacity": 64},
     {"reduced_capacity": 32},
+    {"algorithm": "bilateral_reduced", "reduced_ordering": "rcm"},
+    {"algorithm": "bilateral_reduced", "reduced_ordering": "rcm", "reduced_dynamic_pattern": True},
+    {"reduced_ordering": "natural", "reduced_dynamic_pattern": False},
 ])
 def test_algorithm_bridge_preserves_other_solver_parameters(options):
     from humanoid_sim.physics.isaaclab import solver_cfg
@@ -21,6 +25,10 @@ def test_algorithm_bridge_preserves_other_solver_parameters(options):
     configured = solver_cfg("kamino", settings | {"padmm": settings["padmm"] | options}).to_solver_config()
     assert configured.padmm.algorithm == options.get("algorithm", "full")
     assert configured.padmm.reduced_capacity == options.get("reduced_capacity", 96)
+    assert configured.padmm.reduced_ordering == options.get("reduced_ordering", "natural")
+    assert configured.padmm.reduced_dynamic_pattern == options.get("reduced_dynamic_pattern", False)
+    configured.padmm.reduced_ordering = baseline.padmm.reduced_ordering
+    configured.padmm.reduced_dynamic_pattern = baseline.padmm.reduced_dynamic_pattern
     configured.padmm.algorithm = baseline.padmm.algorithm
     configured.padmm.reduced_capacity = baseline.padmm.reduced_capacity
     assert dataclasses.asdict(configured) == dataclasses.asdict(baseline)
@@ -29,6 +37,8 @@ def test_algorithm_bridge_preserves_other_solver_parameters(options):
 @pytest.mark.parametrize("changed, constructor, message", [
     ({"algorithm": "unknown"}, {}, "explicit PADMM algorithm"),
     ({"reduced_capacity": 33}, {}, "reduced_capacity"),
+    ({"reduced_ordering": "unknown"}, {}, "reduced_ordering"),
+    ({"reduced_dynamic_pattern": True, "reduced_ordering": "natural"}, {}, "requires reduced_ordering=rcm"),
     ({}, {"use_graph_conditionals": False}, "graph conditionals"),
     ({}, {"use_acceleration": False}, "acceleration"),
     ({}, {"collect_info": True}, "collect_info"),
@@ -37,9 +47,9 @@ def test_algorithm_bridge_preserves_other_solver_parameters(options):
 def test_reduced_rejects_incompatible_modes_before_solve(changed, constructor, message):
     # A small real fixture supplies model metadata; these are mechanism constraints,
     # not robot-specific joint counts or gains.
+    from kamino_reduced_fixture import make
     from newton._src.solvers.kamino._src.solvers.padmm.solver import PADMMSolver
     from newton._src.solvers.kamino.config import PADMMSolverConfig
-    from kamino_reduced_fixture import make
 
     model, _ = make()
     default = PADMMSolver(model=model)
@@ -61,10 +71,10 @@ def test_reduced_sigma_matches_initialized_source_and_factor(eta):
     """The operator uses the source GPU config rounding, including the 1-ULP case."""
     import numpy as np
     import warp as wp
-    from newton._src.solvers.kamino._src.solvers.padmm.solver import PADMMSolver
-    from newton._src.solvers.kamino._src.solvers.padmm.reduced_direct_factor import make_runtime_direct_factor
-    from newton._src.solvers.kamino.config import PADMMSolverConfig
     from kamino_reduced_fixture import make
+    from newton._src.solvers.kamino._src.solvers.padmm.reduced_direct_factor import make_runtime_direct_factor
+    from newton._src.solvers.kamino._src.solvers.padmm.solver import PADMMSolver
+    from newton._src.solvers.kamino.config import PADMMSolverConfig
 
     model, problem = make()
     cfg = PADMMSolverConfig(algorithm="bilateral_reduced", eta=eta, rho_0=0.05,

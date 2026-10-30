@@ -316,13 +316,15 @@ def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None):
 
             dynamics_type = KaminoExecutionDynamicsCfg
         padmm_type = KaminoPADMMCfg
-        if {"algorithm", "reduced_capacity"}.intersection(settings.get("padmm", {})):
+        if {"algorithm", "reduced_capacity", "reduced_ordering", "reduced_dynamic_pattern"}.intersection(settings.get("padmm", {})):
             from isaaclab.utils import configclass
 
             @configclass
             class KaminoAlgorithmPADMMCfg(KaminoPADMMCfg):
                 algorithm: str = "full"
                 reduced_capacity: int = 96
+                reduced_ordering: str = "natural"
+                reduced_dynamic_pattern: bool = False
 
             padmm_type = KaminoAlgorithmPADMMCfg
         return KaminoPADMMSolverCfg(**common, dynamics_solver_cfg=padmm_type(
