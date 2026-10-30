@@ -1,0 +1,548 @@
+--- a/_src/solvers/kamino/_src/solvers/padmm/reduced_inverse_publication.py
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_inverse_publication.py
+@@ -0,0 +1,121 @@
++"""Exact backward-solve derivative with direct padded inverse publication."""
++
++import warp as wp
++from newton._src.solvers.kamino._src.linalg.factorize.llt_blocked import get_float32_array_offset_ptr
++from newton._src.solvers.kamino._src.linalg.factorize.rcm_batch import _sync_threads
++
++
++def make_inverse_publication(block=32):
++    @wp.kernel(module="unique", enable_backward=False)
++    def solve(
++        L: wp.array[wp.float32],
++        dims: wp.array[wp.int32],
++        mio: wp.array[wp.int32],
++        free: int,
++        max_reduced: int,
++        column_blocks: int,
++        Y: wp.array[wp.float32],
++        X: wp.array[wp.float32],
++        capacity: int,
++        qr: wp.array[wp.float32],
++        published: wp.array[wp.float32],
++        outq: wp.array2d[wp.float32],
++    ):
++        job, lane = wp.tid()
++        w = job // column_blocks
++        column = (job % column_blocks) * block
++        n = dims[w]
++        r = n - free
++        threads = wp.block_dim()
++        # Each column CTA owns the corresponding transposed output rows.
++        # Initialize every capacity entry, including column CTAs with no solve.
++        for index in range(lane, block * capacity, threads):
++            row = column + index // capacity
++            col = index % capacity
++            if row < capacity:
++                published[w * capacity * capacity + row * capacity + col] = wp.float32(0.0)
++        for index in range(lane, block, threads):
++            row = column + index
++            if row < capacity:
++                value = wp.float32(0.0)
++                if row < r:
++                    value = qr[w * max_reduced + row]
++                outq[w, row] = value
++        _sync_threads()
++        if column >= r:
++            return
++        published_matrix = wp.array(
++            ptr=get_float32_array_offset_ptr(published, w * capacity * capacity),
++            shape=(capacity, capacity),
++            dtype=wp.float32,
++        )
++        lm = wp.array(ptr=get_float32_array_offset_ptr(L, mio[w]), shape=(n, n), dtype=wp.float32)
++        ym = wp.array(
++            ptr=get_float32_array_offset_ptr(Y, w * max_reduced * max_reduced),
++            shape=(r, max_reduced),
++            dtype=wp.float32,
++        )
++        xm = wp.array(
++            ptr=get_float32_array_offset_ptr(X, w * max_reduced * max_reduced),
++            shape=(r, max_reduced),
++            dtype=wp.float32,
++        )
++        padded = (r + block - 1) // block * block
++        for i in range(0, padded, block):
++            rhs = wp.tile_zeros(shape=(block, block), dtype=wp.float32, storage="shared")
++            for chunk in range((block * block + threads - 1) // threads):
++                k = (lane + chunk * threads) % (block * block)
++                row = k // block
++                col = k % block
++                value = wp.float32(0.0)
++                if i + row == column + col and i + row < r:
++                    value = wp.float32(1.0)
++                rhs[row, col] = value
++            diag = wp.tile_load(lm, shape=(block, block), offset=(free + i, free + i), storage="shared")
++            if i + block > r:
++                for chunk in range((block * block + threads - 1) // threads):
++                    k = (lane + chunk * threads) % (block * block)
++                    row = k // block
++                    col = k % block
++                    value = diag[row, col]
++                    if i + row >= r or i + col >= r:
++                        value = wp.where(row == col, wp.float32(1.0), wp.float32(0.0))
++                    diag[row, col] = value
++            for j in range(0, i, block):
++                lb = wp.tile_load(lm, shape=(block, block), offset=(free + i, free + j))
++                yb = wp.tile_load(ym, shape=(block, block), offset=(j, column))
++                wp.tile_matmul(lb, yb, rhs, alpha=-1.0)
++            wp.tile_lower_solve_inplace(diag, rhs)
++            wp.tile_store(ym, rhs, offset=(i, column))
++        for i in range(padded - block, -1, -block):
++            rhs = wp.tile_load(ym, shape=(block, block), offset=(i, column), storage="shared")
++            diag = wp.tile_load(lm, shape=(block, block), offset=(free + i, free + i), storage="shared")
++            if i + block > r:
++                for chunk in range((block * block + threads - 1) // threads):
++                    k = (lane + chunk * threads) % (block * block)
++                    row = k // block
++                    col = k % block
++                    value = diag[row, col]
++                    if i + row >= r or i + col >= r:
++                        value = wp.where(row == col, wp.float32(1.0), wp.float32(0.0))
++                    diag[row, col] = value
++            for j in range(i + block, padded, block):
++                lb = wp.tile_load(lm, shape=(block, block), offset=(free + j, free + i))
++                xb = wp.tile_load(xm, shape=(block, block), offset=(j, column))
++                wp.tile_matmul(wp.tile_transpose(lb), xb, rhs, alpha=-1.0)
++            wp.tile_upper_solve_inplace(wp.tile_transpose(diag), rhs)
++            wp.tile_store(xm, rhs, offset=(i, column))
++            # Preserve the scratch solve unchanged; publish a separate shared tile
++            # so masking output padding cannot change subsequent backward updates.
++            final = wp.tile_zeros(shape=(block, block), dtype=wp.float32, storage="shared")
++            for chunk in range((block * block + threads - 1) // threads):
++                index = lane + chunk * threads
++                row = index // block
++                col = index % block
++                value = wp.float32(0.0)
++                if i + row < r and column + col < r:
++                    value = rhs[row, col]
++                final[row, col] = value
++            wp.tile_store(published_matrix, wp.tile_transpose(final), offset=(column, i))
++
++    return solve
+--- a/_src/solvers/kamino/_src/solvers/padmm/reduced_sparse_diagnostics.py
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_sparse_diagnostics.py
+@@ -0,0 +1,114 @@
++"""Frozen sparse-load diagnostics; all original arithmetic and cadence retained."""
++
++import warp as wp
++from newton._src.solvers.kamino._src.solvers.padmm.math import (
++    compute_box_complementarity_residual,
++    project_to_coulomb_cone,
++)
++
++
++@wp.func_native("""
++float r = value;
++#pragma unroll
++for (int offset = 16; offset > 0; offset >>= 1)
++    r += __shfl_xor_sync(0xffffffffu, r, offset, 32);
++return r;
++""")
++def warp_sum(value: wp.float32) -> wp.float32: ...
++
++
++def make_sparse(capacity):
++    CAPACITY = wp.constant(capacity)
++    WARPS = wp.constant(4)
++
++    @wp.kernel(enable_backward=False)
++    def sparse_warp(
++        D: wp.array[float],
++        q: wp.array[float],
++        P: wp.array[float],
++        dim: wp.array[int],
++        mio: wp.array[int],
++        vio: wp.array[int],
++        nbc: wp.array[int],
++        nl: wp.array[int],
++        bcgo: wp.array[int],
++        lcgo: wp.array[int],
++        ccgo: wp.array[int],
++        bcio: wp.array[int],
++        cio: wp.array[int],
++        lower: wp.array[float],
++        upper: wp.array[float],
++        mu: wp.array[float],
++        x: wp.array[float],
++        y: wp.array[float],
++        z: wp.array[float],
++        sigma: float,
++        row_masks: wp.array2d[wp.uint32],
++        dense: wp.array[int],
++        result: wp.array2d[float],
++    ):
++        w, thread = wp.tid()
++        n = dim[w]
++        lane = thread % 32
++        warp = thread // 32
++        masks = wp.tile_load(row_masks, shape=(1, CAPACITY), offset=(w, 0), storage="shared")
++        use_dense = dense[w] != 0
++        stationarity = wp.float32(0.0)
++        feasibility = wp.float32(0.0)
++        natural_map = wp.float32(0.0)
++        complementarity = wp.float32(0.0)
++        for k in range(warp, n, WARPS):
++            partial = wp.float32(0.0)
++            for j in range(lane, n, 32):
++                value = wp.float32(0.0)
++                if use_dense or k == j:
++                    value = D[mio[w] + k * n + j]
++                elif (masks[0, k] & masks[0, j]) != wp.uint32(0):
++                    value = D[mio[w] + k * n + j]
++                partial = partial + value * y[vio[w] + j]
++            product = warp_sum(partial)
++            if lane == 0:
++                idx = vio[w] + k
++                pv = P[idx]
++                yv = y[idx]
++                zv = z[idx]
++                correction = wp.float32(0.0)
++                pr = yv
++                natural = yv - zv
++                comp = wp.float32(0.0)
++                if k >= bcgo[w] and k < bcgo[w] + nbc[w]:
++                    j = bcio[w] + k - bcgo[w]
++                    lo = lower[j]
++                    hi = upper[j]
++                    pr = wp.clamp(yv, lo, hi)
++                    natural = wp.clamp(yv - zv, lo, hi)
++                    comp = wp.abs(compute_box_complementarity_residual(yv, zv, lo, hi))
++                elif k >= lcgo[w] and k < lcgo[w] + nl[w]:
++                    pr = wp.max(yv, 0.0)
++                    natural = wp.max(yv - zv, 0.0)
++                    comp = wp.abs(yv * zv)
++                elif k >= ccgo[w]:
++                    component = (k - ccgo[w]) % 3
++                    j = idx - component
++                    m = mu[cio[w] + (k - ccgo[w]) // 3]
++                    yy = wp.vec3f(y[j], y[j + 1], y[j + 2])
++                    zz = wp.vec3f(z[j], z[j + 1], z[j + 2])
++                    pr = project_to_coulomb_cone(yy, m)[component]
++                    natural = project_to_coulomb_cone(yy - zz, m)[component]
++                    if component == 2:
++                        correction = m * wp.sqrt(z[j] * z[j] + z[j + 1] * z[j + 1])
++                    if component == 0:
++                        comp = wp.abs(wp.dot(yy, zz))
++                value = q[idx] + correction - zv - sigma * yv
++                value = value + product
++                stationarity = wp.max(stationarity, wp.abs(value / pv))
++                feasibility = wp.max(feasibility, wp.abs(pv * (yv - pr)))
++                natural_map = wp.max(natural_map, wp.abs(yv - natural))
++                complementarity = wp.max(complementarity, comp)
++        if lane == 0:
++            wp.atomic_max(result, w, 0, stationarity)
++            wp.atomic_max(result, w, 1, feasibility)
++            wp.atomic_max(result, w, 2, natural_map)
++            wp.atomic_max(result, w, 3, complementarity)
++
++    return sparse_warp
+--- a/_src/solvers/kamino/_src/solvers/padmm/reduced_diagnostic_support.py
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_diagnostic_support.py
+@@ -0,0 +1,75 @@
++"""Fresh sparse-assembly certificate and topology guards; never infer numerical zeros."""
++
++import warp as wp
++
++
++@wp.kernel(enable_backward=False)
++def build_masks(
++    coords: wp.array2d[int],
++    starts: wp.array[int],
++    counts: wp.array[int],
++    dim: wp.array[int],
++    bodies: wp.array[int],
++    fresh_sparse: wp.array[int],
++    max_entries: int,
++    masks: wp.array2d[wp.uint32],
++    dense: wp.array[int],
++):
++    w, k = wp.tid()
++    n = dim[w]
++    valid = fresh_sparse[w] != 0 and bodies[w] > 0 and bodies[w] <= 32 and n >= 0 and n <= masks.shape[1]
++    valid = (
++        valid
++        and starts[w] >= 0
++        and counts[w] >= 0
++        and counts[w] <= max_entries
++        and starts[w] + counts[w] <= coords.shape[0]
++    )
++    if not valid:
++        wp.atomic_or(dense, w, 1)
++    elif k < counts[w]:
++        r = coords[starts[w] + k, 0]
++        col = coords[starts[w] + k, 1]
++        if r < 0 or r >= n or col < 0 or col % 6 != 0 or col // 6 >= bodies[w]:
++            wp.atomic_or(dense, w, 2)
++        else:
++            wp.atomic_or(masks, w, r, wp.uint32(1) << wp.uint32(col // 6))
++
++
++@wp.kernel(enable_backward=False)
++def guard_preconditioner(P: wp.array[float], dim: wp.array[int], vio: wp.array[int], dense: wp.array[int]):
++    w, lane = wp.tid()
++    for row in range(lane, dim[w], 128):
++        p = P[vio[w] + row]
++        if not wp.isfinite(p) or p <= 0.0:
++            wp.atomic_or(dense, w, 4)
++
++
++@wp.kernel(enable_backward=False)
++def audit_products(
++    D: wp.array[float],
++    y: wp.array[float],
++    dim: wp.array[int],
++    mio: wp.array[int],
++    vio: wp.array[int],
++    masks: wp.array2d[wp.uint32],
++    dense: wp.array[int],
++    source: wp.array3d[float],
++    candidate: wp.array3d[float],
++):
++    w, k, lane = wp.tid()
++    if k < dim[w]:
++        n = dim[w]
++        original = wp.float32(0.0)
++        sparse = wp.float32(0.0)
++        for j in range(lane, n, 32):
++            d = D[mio[w] + k * n + j]
++            value = wp.float32(0.0)
++            if dense[w] != 0 or k == j:
++                value = d
++            elif (masks[w, k] & masks[w, j]) != wp.uint32(0):
++                value = d
++            original = original + d * y[vio[w] + j]
++            sparse = sparse + value * y[vio[w] + j]
++        source[w, k, lane] = original
++        candidate[w, k, lane] = sparse
+--- a/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py
+@@ -15,6 +15,9 @@
+ from .reduced_iteration import make_kernel
+ from .width_iteration import make_width_kernel
+ from .reduced_diagnostics import make_bounded
++from .reduced_inverse_publication import make_inverse_publication
++from .reduced_sparse_diagnostics import make_sparse
++from .reduced_diagnostic_support import build_masks, guard_preconditioner
+ from .recovery3 import make_backward3, recovery_rhs3
+ from .reduced_ordering import block_pattern, rcm, symbolic
+ from .reduced_dynamic_factor import make_runtime_dynamic_factor
+@@ -61,6 +64,14 @@
+         self.device = model.device
+         self.sigma = float(np.float32(np.float32(cfg.eta) + np.float32(cfg.rho_0)))
+         self.diagnostics = make_bounded(128, "warp")
++        self.use_sparse_diagnostics = cfg.reduced_sparse_diagnostics
++        if self.use_sparse_diagnostics:
++            dofs = model.info.num_body_dofs
++            diagnostic_bodies = (
++                np.zeros(self.count, dtype=np.int32) if dofs is None
++                else dofs.numpy().astype(np.int32) // 6
++            )
++            self.sparse_diagnostics = make_sparse(self.width)
+         self.owner = owner
+         self.reduced_ordering = cfg.reduced_ordering
+         self.reduced_dynamic_pattern = cfg.reduced_dynamic_pattern
+@@ -130,6 +141,17 @@
+             self.status = z((self.count, 12))
+             self.accel = z((self.count, 2))
+             self.original_residuals = z((self.count, 4))
++            if self.use_sparse_diagnostics:
++                self.diagnostic_bodies = wp.array(diagnostic_bodies, dtype=wp.int32)
++                self.diagnostic_masks = z((self.count, self.width), wp.uint32)
++                self.diagnostic_dense = z(self.count, wp.int32)
++                # Constant input to the qualified metadata kernel, not a saved
++                # freshness state. Used only inside the private fresh-build call.
++                self.diagnostic_all_worlds = wp.ones(self.count, dtype=wp.int32)
++            self.inverse_T_flat = wp.array(
++                ptr=self.inverse_T.ptr, shape=(self.count * self.capacity * self.capacity,),
++                dtype=wp.float32, device=self.device,
++            )
+             if self.reduced_ordering == "rcm":
+                 self.permutation = wp.array(permutation, dtype=wp.int32)
+                 self.occupied = wp.array(occupied, dtype=wp.int32)
+@@ -148,7 +170,7 @@
+             self.symbolic_fill = make_symbolic_fill(self.pattern_tiles)
+         self.forward = make_free_solve(False)
+         self.backward3 = make_backward3()
+-        self.small_inverse = make_reduced_inverse()
++        self.small_inverse = make_inverse_publication()
+         self.q_kernel = make_reduced_q()
+         self.iterate = make_kernel(self.capacity, 128)
+         self.iteration_kernels = (self.iterate,)
+@@ -167,7 +189,7 @@
+         problem._delassus.compute(reset_to_zero=True)
+         self.owner._run_iterations(problem)
+ 
+-    def solve(self, problem):
++    def solve(self, problem, *, _fresh_sparse_build=False):
+         if problem.sparse:
+             raise ValueError("bilateral_reduced prototype only supports dense dynamics")
+         p = problem.data
+@@ -293,13 +315,8 @@
+         self.launch(
+             self.small_inverse,
+             (self.count * columns, 128),
+-            [self.L, self.dim, self.mio, self.free, self.capacity, columns, self.Y, self.inverse],
+-        )
+-        self.launch(
+-            bridge,
+-            (self.count, self.capacity, self.capacity),
+-            [self.inverse, self.qr, self.rdim, self.capacity, self.inverse_T, self.redq],
+-            256,
++            [self.L, self.dim, self.mio, self.free, self.capacity, columns,
++             self.Y, self.inverse, self.capacity, self.qr, self.inverse_T_flat, self.redq],
+         )
+         args = [
+             self.inverse_T,
+@@ -409,10 +426,7 @@
+         )
+         s.done.zero_()
+         self.original_residuals.zero_()
+-        self.launch(
+-            self.diagnostics,
+-            (self.count, 128),
+-            [
++        diagnostic_args = [
+                 p.D,
+                 p.v_f,
+                 p.P,
+@@ -434,5 +448,33 @@
+                 s.z,
+                 self.sigma,
+                 self.original_residuals,
+-            ],
+-        )
++        ]
++        # Public PADMMSolver.solve never sets this private call-local context.
++        # The simulation's _forward encloses reset=True build and consumption,
++        # with no callback between them. External D aliases remain dense.
++        live_sparse = (
++            _fresh_sparse_build and self.use_sparse_diagnostics
++            and isinstance(problem.jacobians, SparseSystemJacobians)
++            and problem.jacobians._J_cts is not None
++            and p.D is problem._delassus.D
++            and p.dim is problem._delassus.info.dim
++            and p.mio is problem._delassus.info.mio
++        )
++        if live_sparse:
++            topology = problem.jacobians._J_cts.bsm
++            self.diagnostic_masks.zero_()
++            self.diagnostic_dense.zero_()
++            self.launch(build_masks, (self.count, max(1, topology.max_of_num_nzb)), [
++                topology.nzb_coords, topology.nzb_start, topology.num_nzb, p.dim,
++                self.diagnostic_bodies, self.diagnostic_all_worlds, max(1, topology.max_of_num_nzb),
++                self.diagnostic_masks, self.diagnostic_dense,
++            ], 256)
++            self.launch(guard_preconditioner, (self.count, 128), [
++                p.P, p.dim, p.vio, self.diagnostic_dense,
++            ])
++            self.launch(self.sparse_diagnostics, (self.count, 128), [
++                *diagnostic_args[:-1], self.diagnostic_masks, self.diagnostic_dense,
++                diagnostic_args[-1],
++            ])
++        else:
++            self.launch(self.diagnostics, (self.count, 128), diagnostic_args)
+--- a/_src/solvers/kamino/_src/solvers/padmm/solver.py
++++ b/_src/solvers/kamino/_src/solvers/padmm/solver.py
+@@ -402,6 +402,17 @@
+         Args:
+             problem: The dual forward dynamics problem to be solved.
+         """
++        self._solve_impl(problem, _fresh_sparse_build=False)
++
++    def _solve_from_fresh_build(self, problem: DualProblem):
++        """Private consumer used only by SolverKaminoImpl's enclosed _forward.
++
++        Generic callers must use solve(), including after manual matrix writes,
++        reset=False builds, or independently maintained sparse Jacobians.
++        """
++        self._solve_impl(problem, _fresh_sparse_build=True)
++
++    def _solve_impl(self, problem: DualProblem, *, _fresh_sparse_build=False):
+         # Pass the PADMM-owned tolerance array to the iterative linear solver (if present), so the
+         # inexact-ADMM tolerance schedule (set in the convergence kernel) drives the inner solve.
+         inner = getattr(problem._delassus._solver, "solver", None)
+@@ -416,7 +427,7 @@
+         self._initialize()
+ 
+         if self._reduced_runtime is not None:
+-            self._reduced_runtime.solve(problem)
++            self._reduced_runtime.solve(problem, _fresh_sparse_build=_fresh_sparse_build)
+         else:
+             # The default full algorithm retains its original ordering.
+             self._update_regularization(problem)
+--- a/_src/solvers/kamino/config.py
++++ b/_src/solvers/kamino/config.py
+@@ -489,6 +489,13 @@
+ 
+     algorithm: Literal["full", "bilateral_reduced"] = "full"
+     """Explicit experimental iteration algorithm; full preserves the default path."""
++
++    reduced_sparse_diagnostics: bool = False
++    """Use topology-based D loads only in the enclosed fresh-build simulation path.
++
++    Public PADMMSolver.solve remains dense even when enabled. This changes no
++    diagnostic arithmetic, tolerance, or per-solve cadence.
++    """
+ 
+     reduced_dynamic_pattern: bool = False
+     """Rebuild topology-only per-world RCM factor block fill on device each solve."""
+--- a/_src/solvers/kamino/_src/solver_kamino_impl.py
++++ b/_src/solvers/kamino/_src/solver_kamino_impl.py
+@@ -1033,7 +1033,7 @@
+             reset_to_zero=True,
+         )
+ 
+-    def _update_constraints(self, contacts: ContactsKamino | None = None):
++    def _update_constraints(self, contacts: ContactsKamino | None = None, *, _fresh_dynamics=False):
+         """
+         Solves the forward dynamics sub-problem to compute constraint
+         reactions and body wrenches effected through constraints.
+@@ -1056,7 +1056,13 @@
+             self._solver_fd.coldstart()
+ 
+         # Solve the dual problem to compute the constraint reactions
+-        self._solver_fd.solve(problem=self._problem_fd)
++        if (
++            _fresh_dynamics and isinstance(self._solver_fd, PADMMSolver)
++            and self._solver_fd.config[0].reduced_sparse_diagnostics
++        ):
++            self._solver_fd._solve_from_fresh_build(problem=self._problem_fd)
++        else:
++            self._solver_fd.solve(problem=self._problem_fd)
+ 
+         # Compute the effective body wrenches applied by the set of
+         # active constraints from the respective reaction multipliers
+@@ -1104,7 +1110,9 @@
+         self._update_dynamics(contacts=contacts)
+ 
+         # Compute constraint reactions
+-        self._update_constraints(contacts=contacts)
++        # Call-local certificate: reset=True build directly above, no user hook
++        # before consumption. Direct _update_constraints calls default dense.
++        self._update_constraints(contacts=contacts, _fresh_dynamics=True)
+ 
+         # Post-processing
+         self._update_wrenches()
+--- a/_src/solvers/kamino/_src/dynamics/delassus.py
++++ b/_src/solvers/kamino/_src/dynamics/delassus.py
+@@ -879,7 +879,7 @@
+     vi = values[i]
+     Ji_v = wp.vec3f(vi[0], vi[1], vi[2])
+     Ji_w = wp.vec3f(vi[3], vi[4], vi[5])
+-    for pos in range(lane, counts[b], 32):
++    for pos in range(lane, counts[b], 16):
+         j = grouped[starts[b] + pos]
+         # Original ordering owns each unordered block pair once, independent
+         # of nondeterministic scatter order. Same-row mirror rule is unchanged.
+@@ -929,7 +929,7 @@
+         )
+         wp.launch(
+             _body_assemble_by_body,
+-            dim=(self.worlds, jac.max_of_num_nzb, 32),
++            dim=(self.worlds, jac.max_of_num_nzb, 16),
+             inputs=[
+                 bio,
+                 inv_mass,

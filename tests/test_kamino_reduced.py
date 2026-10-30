@@ -14,6 +14,8 @@ pytestmark = pytest.mark.physics
     {"algorithm": "bilateral_reduced", "reduced_ordering": "rcm"},
     {"algorithm": "bilateral_reduced", "reduced_ordering": "rcm", "reduced_dynamic_pattern": True},
     {"reduced_ordering": "natural", "reduced_dynamic_pattern": False},
+    {"reduced_sparse_diagnostics": False},
+    {"algorithm": "bilateral_reduced", "reduced_sparse_diagnostics": True},
 ])
 def test_algorithm_bridge_preserves_other_solver_parameters(options):
     from humanoid_sim.physics.isaaclab import solver_cfg
@@ -27,6 +29,8 @@ def test_algorithm_bridge_preserves_other_solver_parameters(options):
     assert configured.padmm.reduced_capacity == options.get("reduced_capacity", 96)
     assert configured.padmm.reduced_ordering == options.get("reduced_ordering", "natural")
     assert configured.padmm.reduced_dynamic_pattern == options.get("reduced_dynamic_pattern", False)
+    assert configured.padmm.reduced_sparse_diagnostics == options.get("reduced_sparse_diagnostics", False)
+    configured.padmm.reduced_sparse_diagnostics = baseline.padmm.reduced_sparse_diagnostics
     configured.padmm.reduced_ordering = baseline.padmm.reduced_ordering
     configured.padmm.reduced_dynamic_pattern = baseline.padmm.reduced_dynamic_pattern
     configured.padmm.algorithm = baseline.padmm.algorithm

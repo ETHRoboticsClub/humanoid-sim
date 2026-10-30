@@ -1,0 +1,34 @@
+{
+  "_src/solvers/kamino/_src/solvers/padmm/reduced_inverse_publication.py": {
+    "before": null,
+    "after": "b5b21266bd7db60bc16ca8e2c8dd9d7a432e44519b5fe770aea6376a1ed7006b"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/reduced_sparse_diagnostics.py": {
+    "before": null,
+    "after": "bca852f84d2915633427c83d912fff1dc45a37480a0d0e8f587dcd58d0d9f8ae"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/reduced_diagnostic_support.py": {
+    "before": null,
+    "after": "2deee0924ef658b4b1258998e5ce1406658ac414af62c957794f1e5c9b8a3122"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py": {
+    "before": "068b35531927a5c945eb56e7690dd666d84f3427f3f8cc55979cc17e91087312",
+    "after": "dd085c4807541977ab47ac594c80b84e5ee1694db597f6ea7d9889a1615f17dc"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/solver.py": {
+    "before": "1c71898a5899b872274b80dcea88facf43df837a90fc59ca8c53bc22221bbdd5",
+    "after": "fc92429d8c94b4d4414931a9d84b9e713f83ffb63af22c345fb6c7e8e1185bc9"
+  },
+  "_src/solvers/kamino/config.py": {
+    "before": "aef7a637bbcf63ec35b7df6c82d1224056ba72c7d41b77c4c9dbaac16ebb6832",
+    "after": "cfa4fc66f6cad126cb08a8367b25788e2115995f318b5f1fbdfb9af1f5034fbb"
+  },
+  "_src/solvers/kamino/_src/solver_kamino_impl.py": {
+    "before": "de089917e2d721d182d2a0e6c7ce337834ea2f16f7c3895cef407af718f97c67",
+    "after": "72bf952bdf33686b37640f8383987158259d0b95c32cc8e2772d99ca2435aede"
+  },
+  "_src/solvers/kamino/_src/dynamics/delassus.py": {
+    "before": "c4760a0be5fede374df0e5dea15ecfbdcf38e770662d90eee803f93d8ba2e023",
+    "after": "37dd448c9ed303ba61cfde37dc33665de615ca4e6987bc4ce7f7efaad812d6c7"
+  }
+}
