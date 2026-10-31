@@ -15,7 +15,8 @@ Drive feedback and IMU samples are measured signals, the ones the real robot has
 | `OakDW` | `camera` | Luxonis OAK-D-W | V1 |
 | `RealSenseD435i` | `camera` | Intel RealSense D435i | the `g1-cameras-d435` extra rig (the lab G1's camera service finds no D435) |
 | `ZedMini` | `camera` | Stereolabs ZED Mini | the `g1-cameras` extra rig |
-| `ZedMiniImu` | `imu` | The ZED Mini's built-in IMU (**a modeled guess**: rate from the datasheet, noise and mount not published) | the `g1-cameras` extra rig, as `zed_imu` |
+| `ZedMiniImu` | `imu` | The ZED Mini's built-in IMU (noise measured on one unit; **mount a guess**, `mount_basis` `guess` in the descriptor) | the `g1-cameras` extra rig, as `zed_imu` |
+| `Mid360Imu` | `imu` | The Livox Mid-360's built-in IMU (**noise unmeasured**: every figure 0, descriptor kind `unmeasured`; mount from the description's `mid360_imu_link`) | the `g1-mid360-imu` extra rig, as `mid360_imu`; needs a humanoid-urdf revision with `mid360_imu_link` |
 | `LivoxMid360` | `lidar` | Livox Mid-360 | G1 |
 
 A camera class lists its streams as Controls' backend for the product publishes them, and may give each stream's kind (`stream_kinds`: `color`, `mono` or `depth`), its nominal optical centre in the camera frame (`nominal_offsets_m`) and the depth range (`depth_range_m`).
@@ -136,6 +137,10 @@ Stereolabs publishes only the ZED Mini's rate (800 Hz) for its gyroscope and acc
 | Mount | the camera frame `camera0_camera`, its axes, no offset | guess |
 
 The capture is 55 minutes of the camera lying still on a desk (with a person typing and standing up nearby; the disturbed seconds are masked, and Allan deviation is taken only over windows that lie wholly in quiet data), logged raw with zed-open-capture. Its accelerometer is uncalibrated (about 4 % high) and its axes are the sensor's, not the camera frame's, so the mount is the weakest figure; replace it with the unit's `camera_imu_transform`. The bias is a first-order Gauss-Markov process (its stationary sigma is the bias instability), not a random walk. `SimCore(..., imu=True, extra_rig="g1-cameras")` simulates the IMU: `SimCore.extra_imus["zed_imu"]` is an `ImuDelivery` like `SimCore.imu`, stepped with it, inside the CUDA graphs too (training's `RobotPlant` has only the body IMU). The 800 Hz samples are linear interpolations between physics-step boundaries with fresh noise per sample (see below), so a 4 ms physics step carries no motion detail above 250 Hz.
+
+### The Mid-360's IMU
+
+`Mid360Imu` sits at `mid360_imu_link`, a fixed link 0.011, 0.02329, -0.04412 m from `mid360_link` with the point cloud's axes (Livox Mid-360 user manual, p. 15; added by humanoid-urdf's `mid360-imu` branch, not in the pinned revision, so `rigs.load(..., "g1-mid360-imu")` refuses the pinned description with "no link"). No noise figure is carried: the manual does not state the IMU's noise, the chip's datasheet is not cited here, and no capture exists. Its figures are therefore 0 and the descriptor's `noise.kind` is `unmeasured` (not `ideal`: the real chip has errors). The 200 Hz rate is unverified here. Every extra IMU's descriptor `mount.basis` is `description` (a link placed from the sensor's manual) or `guess` (the ZED's, until its `camera_imu_transform` is read).
 
 ### Body IMU
 

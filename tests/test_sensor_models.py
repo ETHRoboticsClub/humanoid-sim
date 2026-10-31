@@ -13,6 +13,7 @@ from humanoid_sim.sensors.models import (
     Camera,
     Imu,
     LivoxMid360,
+    Mid360Imu,
     Mti610,
     OakDW,
     RealSenseD435i,
@@ -213,3 +214,67 @@ def test_a_feedback_transfer_parses_into_the_delivered_samples_newest_first():
     out = imu_samples(gyro, accel, ints, h)
     assert list(out["seq"]) == [7, 6, 5] and list(out["sample_ns"]) == [70, 60, 50] and list(out["stamp_ns"]) == [71, 61, 51]
     assert out["gyro_rad_s"][2].tolist() == [6.0, 7.0, 8.0] and out["specific_force_m_s2"][0].tolist() == [100.0, 101.0, 102.0]
+
+
+MID360_IMU_JOINT = (
+    '<link name="mid360_imu_link"/>'
+    '<joint name="mid360_imu_joint" type="fixed"><origin xyz="0.011 0.02329 -0.04412" rpy="0 0 0"/>'
+    '<parent link="mid360_link"/><child link="mid360_imu_link"/></joint>'
+)
+
+
+def description_with_mid360_imu(tmp_path):
+    """The pinned G1 description plus the fixed ``mid360_imu_link`` of humanoid-urdf's mid360-imu branch (the pin
+    does not have it yet), as a copy of the two files a Description reads."""
+    import shutil
+
+    src = Description.load("g1_29dof_with_hand_rev_1_0")
+    dst = tmp_path / src.robot
+    urdf = dst / src.urdf_path.relative_to(src.robot_dir)
+    urdf.parent.mkdir(parents=True)
+    shutil.copy(src.actuators_path, dst / "actuators.yaml")
+    text = src.urdf_path.read_text()
+    urdf.write_text(text.replace("</robot>", MID360_IMU_JOINT + "</robot>"))
+    return Description.load(src.robot, tmp_path)
+
+
+def test_the_mid360_imu_is_unmeasured_at_the_descriptions_mount(tmp_path):
+    from humanoid_sim.runtime.host import extra_imu_descriptors
+
+    assert Mid360Imu.noise_basis == "unmeasured" and "UNMEASURED" in Mid360Imu.source
+    assert Mid360Imu.gyro_noise_density_rad_s_sqrt_hz == 0 and Mid360Imu.accel_noise_density_m_s2_sqrt_hz == 0
+    desc = description_with_mid360_imu(tmp_path)
+    block = extra_imu_descriptors(desc, "g1-mid360-imu")["mid360_imu"]
+    assert block["noise"]["kind"] == "unmeasured"  # not "ideal": the real chip has errors nobody has measured
+    assert block["frame"] == "mid360_imu_link" and block["mount"]["basis"] == "description"
+    # Independent oracle: the offset from mid360_link, carried through mid360_link's own mount.
+    lidar = Mount.from_urdf(desc.urdf_path, "mid360_link")
+    offset = [sum(lidar.rotation[i][j] * v for j, v in enumerate((0.011, 0.02329, -0.04412))) for i in range(3)]
+    assert block["mount"]["body"] == lidar.link
+    assert block["mount"]["translation_m"] == pytest.approx([lidar.translation_m[i] + offset[i] for i in range(3)])
+    assert sum(block["mount"]["rotation"], []) == pytest.approx(sum(([*row] for row in lidar.rotation), []))  # axes of the cloud
+    assert block["mount"]["body"] != desc.imu_link() and block["sample_period_ns"] == 5_000_000
+
+
+def test_a_description_without_the_mid360_imu_link_refuses_its_rig():
+    desc = Description.load("g1_29dof_with_hand_rev_1_0")
+    if "mid360_imu_link" in desc.link_names():
+        pytest.skip("the pinned description already has the link")
+    with pytest.raises(ValueError, match="no link 'mid360_imu_link'"):
+        rigs.load(desc.robot, desc, "g1-mid360-imu")
+
+
+def test_the_zed_imu_descriptor_flags_its_guessed_mount_and_the_body_imu_stays_ideal_or_modeled():
+    from humanoid_sim.runtime.host import extra_imu_descriptors
+
+    desc = Description.load("g1_29dof_with_hand_rev_1_0")
+    block = extra_imu_descriptors(desc, "g1-cameras")["zed_imu"]
+    assert block["mount"]["basis"] == "guess" and block["noise"]["kind"] == "measured"
+    assert rigs.imu(desc).noise_basis != "unmeasured"
+
+
+def test_an_unknown_noise_or_mount_basis_is_refused():
+    with pytest.raises(ValueError, match="noise_basis"):
+        type("Bad", (Imu,), {"noise_basis": "assumed"})
+    with pytest.raises(ValueError, match="mount_basis"):
+        type("Bad", (Imu,), {"mount_basis": "approximate"})

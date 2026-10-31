@@ -175,8 +175,8 @@ class _Disturbance:
 
 def _imu_block(imu) -> dict:
     """What a client needs of an IMU model: which device, where it sits, how its samples arrive and its errors.
-    ``noise`` declares the model's errors (``SET_FIDELITY`` ``ideal`` turns them off): ``ideal`` when the model has
-    none, else its ``noise_basis`` (``modeled`` or ``measured``) with the figures; the model's ``source`` says where
+    ``noise`` declares the model's errors (``SET_FIDELITY`` ``ideal`` turns them off): ``unmeasured`` when the
+    model's basis is unmeasured (figures 0), ``ideal`` when it has none, else its ``noise_basis`` (``modeled`` or ``measured``) with the figures; the model's ``source`` says where
     they come from (the descriptor is size-limited). The bias is a first-order Gauss-Markov process with the bias
     instability as its stationary sigma and ``bias_correlation_time_ns``; there is no random-walk term."""
     figures = {"gyro_noise_density_rad_s_sqrt_hz": imu.gyro_noise_density_rad_s_sqrt_hz,
@@ -190,7 +190,7 @@ def _imu_block(imu) -> dict:
     return {"model": imu.model, "product": imu.product, "frame": imu.frame,
             "sample_period_ns": imu.sample_period_ns, "burst_period_ns": list(imu.burst_period_ns),
             "in_burst_spacing_ns": imu.in_burst_spacing_ns,
-            "noise": {"kind": "ideal" if ideal else imu.noise_basis, "bias_model": "gauss_markov", **figures}}
+            "noise": {"kind": imu.noise_basis if imu.noise_basis == "unmeasured" else "ideal" if ideal else imu.noise_basis, "bias_model": "gauss_markov", **figures}}
 
 
 def imu_descriptor(desc) -> dict:
@@ -214,7 +214,7 @@ def extra_imu_descriptors(desc, extra_rig: str | None) -> dict:
         if sensor.kind == "imu" and name != "imu":
             mount = Mount.from_urdf(desc.urdf_path, sensor.frame)
             out[name] = {**_imu_block(sensor), "mount": {
-                "body": mount.link, "translation_m": list(mount.translation_m),
+                "basis": sensor.mount_basis, "body": mount.link, "translation_m": list(mount.translation_m),
                 "rotation": [list(row) for row in mount.rotation]}}
     return out
 

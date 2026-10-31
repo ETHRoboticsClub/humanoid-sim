@@ -73,7 +73,12 @@ class Imu(Sensor):
     gyro_bias_instability_rad_s: ClassVar[float] = 0.0
     accel_bias_instability_m_s2: ClassVar[float] = 0.0
     bias_correlation_time_ns: ClassVar[int] = 100_000_000_000
-    noise_basis: ClassVar[str] = "modeled"  # how the figures are known: "modeled" (a guess or an inference) or "measured"
+    # How the noise figures are known: "measured", "modeled" (a guess or an inference), or "unmeasured" (no source: all
+    # figures stay 0, an ideal sensor that says so).
+    noise_basis: ClassVar[str] = "modeled"
+    # Where the frame comes from: "description" (a link of the robot description placed from the sensor's own manual) or
+    # "guess" (a stand-in until the unit's own transform is read).
+    mount_basis: ClassVar[str] = "description"
 
     def __init__(self, frame: str, *, sample_period_ns: int, burst_period_ns: tuple[int, int] | None = None,
                  in_burst_spacing_ns: int = 0):
@@ -94,8 +99,10 @@ class Imu(Sensor):
 
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
-        if cls.noise_basis not in ("modeled", "measured"):
-            raise ValueError(f"{cls.__name__}.noise_basis {cls.noise_basis!r}: modeled or measured")
+        if cls.noise_basis not in ("modeled", "measured", "unmeasured"):
+            raise ValueError(f"{cls.__name__}.noise_basis {cls.noise_basis!r}: modeled, measured or unmeasured")
+        if cls.mount_basis not in ("description", "guess"):
+            raise ValueError(f"{cls.__name__}.mount_basis {cls.mount_basis!r}: description or guess")
         _positive_ns(f"{cls.__name__}.bias_correlation_time_ns", cls.bias_correlation_time_ns)
         for name in ("gyro_noise_density_rad_s_sqrt_hz", "accel_noise_density_m_s2_sqrt_hz", "gyro_turn_on_bias_rad_s",
                      "accel_turn_on_bias_m_s2", "gyro_bias_instability_rad_s", "accel_bias_instability_m_s2"):
@@ -157,11 +164,24 @@ class ZedMiniImu(Imu):
               "(MODELED GUESS): the real IMU sits a few cm away with its own axes (camera_imu_transform, read per "
               "unit from the ZED SDK).")
     noise_basis = "measured"
+    mount_basis = "guess"
     gyro_noise_density_rad_s_sqrt_hz = 1.0e-4
     accel_noise_density_m_s2_sqrt_hz = 1.4e-3
     gyro_bias_instability_rad_s = 3.0e-5
     accel_bias_instability_m_s2 = 9.4e-4
     gyro_turn_on_bias_rad_s = 7.2e-3  # modeled
+
+
+class Mid360Imu(Imu):
+    model = "livox-mid360-imu"
+    product = "Livox Mid-360 built-in IMU (gyroscope and accelerometer)"
+    source = ("UNMEASURED: no noise figure is carried. The Mid-360 user manual does not state the IMU's noise density "
+              "or bias (the figures belong to the chip's own datasheet, which is not cited here), and no capture of the "
+              "unit exists, so every figure is 0 and the descriptor says 'unmeasured'; a consumer must treat the "
+              "IMU as uncharacterized. Rate: 200 Hz, UNVERIFIED here (Livox driver default; check the manual's "
+              "specifications). Mount: the description's mid360_imu_link, 0.011 0.02329 -0.04412 m from mid360_link, "
+              "axes parallel to the point cloud's (Livox Mid-360 user manual, p. 15).")
+    noise_basis = "unmeasured"
 
 
 class Camera(Sensor):
@@ -372,5 +392,5 @@ class Rig:
             raise ValueError(f"the IMU sits at {self.imu.frame!r}, but imu_joint mounts {desc.imu_link()!r}")
 
 
-__all__ = ["RTX_KINDS", "Camera", "Imu", "Lidar", "LivoxMid360", "Mti610", "OakDW", "RealSenseD435i", "Rig", "Sensor",
-           "UnitreeG1Imu", "ZedMini", "ZedMiniImu"]
+__all__ = ["RTX_KINDS", "Camera", "Imu", "Lidar", "LivoxMid360", "Mid360Imu", "Mti610", "OakDW", "RealSenseD435i", "Rig", "Sensor",
+           "UnitreeG1Imu", "ZedMini", "ZedMiniImu", "Mid360Imu"]

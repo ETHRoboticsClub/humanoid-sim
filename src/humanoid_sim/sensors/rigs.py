@@ -8,6 +8,7 @@ from __future__ import annotations
 from humanoid_sim.sensors.models import (
     Imu,
     LivoxMid360,
+    Mid360Imu,
     Mti610,
     OakDW,
     RealSenseD435i,
@@ -59,9 +60,16 @@ def g1_cameras() -> Rig:
             stream_offsets_m={"right": (0.000233734, -0.0628272, 0.000181381)},
         ),
         # MODELED GUESS: the ZED's IMU at the left eye's optical centre, in the camera frame's axes. The real one sits
-        # a few cm away (camera_imu_transform, per unit); 800 Hz is the datasheet's.
+        # a few cm away (camera_imu_transform, per unit); 800 Hz is the datasheet's. No description link carries it, so
+        # its mount_basis is 'guess' in the descriptor.
         zed_imu=ZedMiniImu("camera0_camera", sample_period_ns=1_250_000),
     )
+
+
+def g1_mid360_imu() -> Rig:
+    """The G1 Mid-360's built-in IMU at the description's ``mid360_imu_link`` (a description from the humanoid-urdf
+    revision that has it). Noise is unmeasured: the figures stay 0 and the descriptor says so."""
+    return Rig(mid360_imu=Mid360Imu("mid360_imu_link", sample_period_ns=5_000_000))
 
 
 def g1_cameras_d435() -> Rig:
@@ -82,7 +90,7 @@ def g1_cameras_d435() -> Rig:
 
 
 RIGS = {"ethrc_v1": ethrc_v1, "g1_29dof_rev_1_0": g1, "g1_29dof_with_hand_rev_1_0": g1}
-EXTRAS = {"g1-cameras": g1_cameras, "g1-cameras-d435": g1_cameras_d435}
+EXTRAS = {"g1-cameras": g1_cameras, "g1-mid360-imu": g1_mid360_imu, "g1-cameras-d435": g1_cameras_d435}
 
 
 def rig(robot: str) -> Rig:
