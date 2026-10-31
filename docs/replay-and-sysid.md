@@ -61,7 +61,7 @@ This is what the code here needs from a capture:
 
 - The robot hangs on the gantry with its feet unloaded. The identification profiles require gantry support. The replay keeps the base's position fixed and at most turns it as the IMU recorded, so it assumes that nothing but the gantry holds the robot.
 - The gains stay the same for the whole capture. `ExcitationCapture.gains()` refuses a capture whose raw gains at the end differ from those at the start. The excitation never changes gains itself; set non-baseline gains with `SET_ACTUATOR_GAINS` before the run. The sim's target shaping is only guaranteed stable up to twice the description's baseline gains (`outside_stable_region` in `src/humanoid_sim/devices/shaping.py`), and the replay does not report a capture that goes beyond that. The present captures run the baseline gains, which `tests/test_exc_reader.py` checks.
-- The capture is complete. A run the robot API ramped down early is stored with `complete: false`, and `ExcitationCapture` refuses it.
+- The capture is complete. A run the robot API ramped down early is stored with `complete: false`, and `ExcitationCapture` refuses it; `fit-pace --partial` fits the sweeps it finished ([fitting part of a capture](#fitting-part-of-a-capture)).
 - The IMU stream has no gaps in `source_seq`. The moving-base modes rebuild the IMU sample times from the sequence and raise on a gap. A fixed-base replay does not read the IMU.
 - Every drive in the description has rows in `pdo_feedback.csv` with `position_demand_rad` filled in.
 - The drives move. Every score here is a position error, so a drive whose demand hardly changes contributes little but noise. On the present captures two ankle cranks, `maxonHEJ50L_ANK1` and `maxonHEJ50R_ANK2`, move by only 1 to 4 mrad peak to peak, so their numbers say little. Each body region has a low-band profile (`<region>`, 0.2 to 3 Hz over 30 s) and a high-band one (`<region>-high`, 3 to 10 Hz over 45 s); record both. The large excursions at low frequency expose friction, and the high band is where inertia (armature) dominates. `fit-passive` uses a capture from one band to check a fit made on the other.
@@ -298,6 +298,7 @@ Every time comes from the messages' own stamps, never from the bag's receipt tim
 
 ```bash
 humanoid-sim fit-pace <capture-or-bag>... --holdout <capture-or-bag>... [--num-envs 512] [--generations 40]
+                      [--partial] [--max-frequency HZ]
 humanoid-sim pace-selftest [--num-envs 512] [--generations 40]
 ```
 
@@ -354,13 +355,22 @@ The rebuild check scans shifts from 10 ms below to 10 ms above the delay range. 
 
 Two things are not in the data, and the contract cannot check them: that the robot hung on the gantry, and which excitation band a capture holds. Pass the captures of one band to fit and another's as `--holdout`.
 
+### Fitting part of a capture
+
+An excitation sweeps every joint `sequence_scales` times, each sweep `duration_s` long from rest at the centers with `sequence_gap_s` at rest between them, at `f(t) = f0 (f1/f0)^(t/duration_s)` (the manifest's `signals`, Controls' `ChirpSpec`). Two options cut an `exc-*` capture into its sweeps (`ExcitationCapture.sequences` in `src/humanoid_sim/replay/exc.py`); a bag has no sweep record and is refused with either:
+
+- `--partial` accepts a capture stored with `complete: false` and keeps the sweeps a command frame reached the end of. A capture that finished none is refused. Without it an incomplete capture is refused as before.
+- `--max-frequency HZ` ends each kept sweep where its chirp reaches `HZ`, for example to leave out a band in which the gantry let the base shake. It applies to complete captures too.
+
+With either, every kept sweep is a capture of its own (`<dataset_id>#sequence<k>`): the first from the capture's start, a later one from its own start, where the body rests at the centers, with the frame in force then; the feedback and IMU are clipped to the same span. The contract checks run on each, and holdout captures are cut the same way. `fit-pace.json` lists them under `sequences`: the capture, whether it was complete, the sweep's index and scale, its signal-time span, its frame span in ROS time, the cut and the frequency the sweep reached. Joints on different sweep schedules (start offsets, durations, bands) cannot be cut and are refused. Fewer sweeps hold fewer amplitude levels, which separate friction from damping less well than a full run.
+
 ### Output
 
 `<out>/` (default `outputs/sysid/pace`):
 
 | File | Contents |
 |---|---|
-| `fit-pace.json` | `values` per joint (armature, damping, friction, friction ratio and the resulting dynamic friction) and per drive (bias), and `delay_ns` per family; `delay_reference` (`applied` or `frame`) and, for `applied`, `drive_delay_s` per family, the figures for actuators.yaml's `families`. Also `pace_params`, `pace_names` and `bounds`; the objective at the start and the fit, the per-generation `history`, `rms_start` and `rms_best` per capture and drive, `holdout`, `command_rebuild`; the run settings and the description identity |
+| `fit-pace.json` | `values` per joint (armature, damping, friction, friction ratio and the resulting dynamic friction) and per drive (bias), and `delay_ns` per family; `delay_reference` (`applied` or `frame`) and, for `applied`, `drive_delay_s` per family, the figures for actuators.yaml's `families`. Also `pace_params`, `pace_names` and `bounds`; the objective at the start and the fit, the per-generation `history`, `rms_start` and `rms_best` per capture and drive, `holdout`, `command_rebuild`, `sequences` (with `--partial` or `--max-frequency`); the run settings and the description identity |
 | `config.pt` | PACE's: `bounds`, `joint_order`, `dof_pos` and `des_dof_pos` (the first capture's readings and the rebuilt targets in force, one row per physics step as PACE's `fit.py` steps them, drive order), `time`, `separate_dynamic_friction`, plus `drive_order`, `delay_mode`, `sim_dt` and `pace_version` |
 | `mean_final.pt` | PACE's parameter vector, its one delay the drives' mean rounded to whole physics steps of `sim_dt` (PACE's delay buffer takes whole steps; `pace_names` labels it) |
 

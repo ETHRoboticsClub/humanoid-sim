@@ -16,9 +16,12 @@
     humanoid-sim fit-delay <exc-dir>... [--delays-ms FROM TO STEP]
                                                    replay with a range of demand delays, best delay per drive
     humanoid-sim fit-pace <capture>... --holdout <capture>... --num-envs N --generations G
+                     [--partial] [--max-frequency HZ]
                                                    fit PACE 0.2.0's actuator model (armature, damping, static and
                                                    dynamic friction, encoder bias, command delay) to excitation
-                                                   captures or rosbags, replayed from their command frames
+                                                   captures or rosbags, replayed from their command frames;
+                                                   --partial fits the sweeps an incomplete capture finished,
+                                                   --max-frequency each sweep only up to that frequency
     humanoid-sim check-bag <capture>... [--base yaw|orientation|fixed]
                                                    check captures or rosbags against what a PACE fit needs
                                                    (no physics); fit-pace runs the same checks first
@@ -204,7 +207,7 @@ def cmd_fit_passive(args) -> int:
     return 0
 
 
-def open_capture(path: str):
+def open_capture(path: str, *, allow_incomplete: bool = False):
     """An ``exc-*`` capture directory or a rosbag2 directory."""
     p = Path(path)
     if (p / "metadata.yaml").is_file():
@@ -213,7 +216,28 @@ def open_capture(path: str):
         return BagCapture(p)
     from humanoid_sim.replay.exc import ExcitationCapture
 
-    return ExcitationCapture(p)
+    return ExcitationCapture(p, allow_incomplete=allow_incomplete)
+
+
+def _fit_captures(paths: list[str], args) -> list:
+    """The captures a fit replays: each whole, or with ``--partial`` / ``--max-frequency`` each finished sweep of an
+    ``exc-*`` capture on its own (``ExcitationCapture.sequences``)."""
+    from humanoid_sim.replay.exc import ExcitationCapture
+
+    windowed = args.partial or args.max_frequency is not None
+    out = []
+    for path in paths:
+        capture = open_capture(path, allow_incomplete=args.partial)
+        if not windowed:
+            out.append(capture)
+            continue
+        if not isinstance(capture, ExcitationCapture):
+            raise SystemExit(f"{path}: --partial and --max-frequency need an exc-* capture, not a rosbag")
+        try:
+            out.extend(capture.sequences(args.max_frequency))
+        except ValueError as e:
+            raise SystemExit(str(e)) from None
+    return out
 
 
 def _check_captures(args, captures: list) -> dict:
@@ -263,8 +287,8 @@ def cmd_fit_pace(args) -> int:
         structural_fixed,
     )
 
-    captures = [open_capture(c) for c in args.captures]
-    held = [open_capture(c) for c in args.holdout]
+    captures = _fit_captures(args.captures, args)
+    held = _fit_captures(args.holdout, args)
     checks = _check_captures(args, captures + held)
     refused = [cid for cid, chk in checks.items() if not chk.ok]
     if refused:
@@ -309,6 +333,10 @@ def cmd_fit_pace(args) -> int:
                      "generations": args.generations, "duration_s": args.duration, "seed": args.seed,
                      "scored": [drives[i] for i in scored], "fixed": sorted(args.fix), "ranges": ranges,
                      "wall_s": time.time() - t, "command_rebuild": rebuild, "delay_reference": reference, **sim.desc.identity()}
+    windows = {c.dataset_id: c.provenance for c in captures + held if hasattr(c, "provenance")}
+    if windows:
+        # Which sweeps of which capture were fitted, and the frequency they were cut at.
+        meta["sequences"] = windows
     if reference == "applied" and not args.one_delay:
         # Ready for actuators.yaml: each family's drive_delay_s, controller APPLIED to the drive acting.
         meta["drive_delay_s"] = {g: int(v) / 1e9 for g, v in zip(space.groups, best["delay"], strict=True)}
@@ -653,6 +681,12 @@ def main(argv: list[str] | None = None) -> int:
     fpc.add_argument("--one-delay", action="store_true", help="one delay for every drive, not one per family")
     fpc.add_argument("--search", choices=("blocks", "joint"), default="blocks",
                      help="a CMA-ES per drive (ankle) on its own error, or one over every parameter as PACE does")
+    fpc.add_argument("--partial", action="store_true",
+                     help="accept captures the run left incomplete and fit only the sweeps they finished, each as a "
+                          "capture of its own; recorded in fit-pace.json under sequences")
+    fpc.add_argument("--max-frequency", type=float, default=None, metavar="HZ",
+                     help="fit each finished sweep only up to where its chirp reaches this frequency (e.g. to leave "
+                          "out a band where the base shook); implies one capture per sweep")
     fpc.add_argument("--out", default="outputs/sysid/pace")
     fpc.set_defaults(func=cmd_fit_pace)
 
