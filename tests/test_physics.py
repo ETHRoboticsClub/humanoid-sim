@@ -16,6 +16,7 @@ from conftest import (
 
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
+from humanoid_sim.timing import NS_PER_MS
 
 
 @pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
@@ -160,7 +161,7 @@ def test_holds_its_pose_on_a_fixed_base_against_gravity(request, robot, solver):
     qdrv, _, _ = p.map.drive_state(q, qd)
     p.submit(DriveDemand.pd(qdrv, p.drive_stiffness.expand(1, -1), p.drive_damping.expand(1, -1)),
              torch.zeros(1, dtype=torch.long))
-    for _ in range(100):  # 0.4 s: settled at the baseline damping
+    for _ in range(400 * NS_PER_MS // sim.period_ns):  # 0.4 s: settled at the baseline damping
         fb = sim.step()
     q1, _ = sim.joint_state()
     assert torch.isfinite(fb.applied_torque_nm).all()
@@ -219,7 +220,7 @@ def test_imu_delivers_raw_samples_on_a_fixed_base(request, robot):
 
     sim = SimCore(built_usd(robot), device="cpu", robot=robot, fixed_base=True, imu=True, contacts=True)
     request.addfinalizer(sim.close)
-    for _ in range(50):  # 0.2 s
+    for _ in range(200 * NS_PER_MS // sim.period_ns):  # 0.2 s
         sim.step()
     s = sim.imu.samples
     n = int(s.count[0])

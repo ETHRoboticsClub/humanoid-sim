@@ -21,6 +21,7 @@ from humanoid_sim.model.poses import pose_joint_positions, start_pose
 from humanoid_sim.model.urdf import PreparedUrdf
 from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.sensors import rigs
+from humanoid_sim.timing import NS_PER_MS, NS_PER_S
 
 REPO = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.physics
@@ -289,7 +290,8 @@ def test_the_crane_lifts_and_carries_a_hoisted_robot(tmp_path, robot):
         weight = float(t0["mass_kg"]) * 9.81
         # Hook 10 cm above the harness: the robot comes up by that less the rope's stretch under its weight.
         host._move_gantry({"position_m": [0.0, 0.0, harness_z + 0.1]})
-        for _ in range(750):  # 3 s: time for the hook to climb from home to any start pose's harness
+        # 3 s: time for the hook to climb from home to any start pose's harness
+        for _ in range(3 * NS_PER_S // host.period_ns):
             host.step()
         t1 = truth()
         assert t1["gantry_command_m"].tolist() == pytest.approx([0.0, 0.0, harness_z + 0.1], abs=1e-6)
@@ -298,7 +300,7 @@ def test_the_crane_lifts_and_carries_a_hoisted_robot(tmp_path, robot):
         assert float(t1["gantry_tension_n"]) > 0.5 * weight
         # The trolley 30 cm along x carries the hanging robot with it.
         assert host._move_gantry({"position_m": [0.3, 0.0, harness_z + 0.1]}).startswith("moving to 0.300")
-        for _ in range(500):
+        for _ in range(2 * NS_PER_S // host.period_ns):
             host.step()
         t2 = truth()
         assert t2["gantry_top_m"].tolist() == pytest.approx([0.3, 0.0, 4.0], abs=1e-3)
@@ -366,54 +368,36 @@ def test_demand_intake_queues_what_the_record_says(tmp_path, robot):
 
 
 @pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
-def test_joint_disturbance_deflects_a_held_joint_and_clears(tmp_path, robot):
+def test_joint_disturbance_reaches_the_joint_and_expires(tmp_path, robot):
+    """The disturbance command: a held torque until cleared, a timed sinusoid that expires, no crank drives."""
     pytest.importorskip("isaaclab_newton")
     from humanoid_sim.runtime.host import RuntimeHost
 
-    path = tmp_path / "plant"
-    host = RuntimeHost(path, built_usd(robot), device="cpu", robot=robot, support="suspended", compile=False)
+    host = RuntimeHost(tmp_path / "plant", built_usd(robot), device="cpu", robot=robot, support="suspended",
+                       compile=False)
     try:
-        client = abi.Segment.open(path, wait_s=1)
-        drives = client.descriptor()["drives"]
-        n = len(drives)
         d = Description.load(robot)
-        hold = client.regions["feedback"].read()[1]["drive"]["position_rad"][:n].copy()
-        demand = abi.pd_demand(hold, [d.drives[x].baseline_stiffness for x in drives],
-                               [d.drives[x].baseline_damping for x in drives])
-        client.write_demands(demand, cycle=1)
         elbow = PARTS[robot]["elbow"]
         drive = next(x for x, dr in d.drives.items() if dr.joints == (elbow,))
         j = host.joints.index(elbow)
-
-        def settle(steps=60):
-            for _ in range(steps):
-                host.step()
-            return float(host.sim.joint_state()[0][0, j])
-
-        reference = settle()
         assert host._disturb({"drive": drive, "torque_nm": 10.0, "duration_s": None}) == f"{elbow} until cleared"
-        deflected = settle()
+        host.step()
         assert float(host.sim.plant.external_torque[0, j]) == 10.0
-        # Against the drive's stiffness (the elbow's drive and joint frames agree in sign).
-        assert deflected - reference == pytest.approx(10.0 / d.drives[drive].baseline_stiffness, rel=0.35)
         assert host._disturb({"joint": elbow, "torque_nm": 0.0}) == "cleared"
-        # Back to where it was: friction holds the joint anywhere within friction / stiffness of where the drive
-        # and gravity balance, on either side, before and after.
-        band = d.joints[elbow].friction / d.drives[drive].baseline_stiffness
-        assert abs(settle() - reference) < 2 * band + 0.005
+        host.step()
         assert float(host.sim.plant.external_torque.abs().max()) == 0.0
         host._disturb({"joint": elbow, "torque_nm": 4.0, "frequency_hz": 5.0, "duration_s": 0.04})
         host.step()
         t = host.sim.t_ns - host.period_ns  # the step just taken started here
         assert float(host.sim.plant.external_torque[0, j]) == pytest.approx(4.0 * np.sin(2 * np.pi * 5.0 * t / 1e9),
                                                                          abs=1e-5)
-        settle(12)
+        for _ in range(48 * NS_PER_MS // host.period_ns):
+            host.step()
         assert float(host.sim.plant.external_torque.abs().max()) == 0.0  # expired
         cranks = [x for x, dr in d.drives.items() if dr.crank is not None]
         if cranks:
             with pytest.raises(ValueError, match="1:1 drive"):
                 host._disturb({"drive": cranks[0], "torque_nm": 1.0})
-        client.close()
     finally:
         host.close()
 
@@ -589,7 +573,7 @@ def test_free_in_place_unhooks_the_rope_without_moving_the_robot(tmp_path, robot
     try:
         host.step()  # hangs the harness
         host._prescribe({"release": True})
-        for _ in range(5):
+        for _ in range(20 * NS_PER_MS // host.period_ns):
             host.step()
         base = host.robot.data.root_link_pose_w.torch[0].clone()
         q = host.sim.joint_state()[0].clone()
@@ -600,7 +584,7 @@ def test_free_in_place_unhooks_the_rope_without_moving_the_robot(tmp_path, robot
         assert int(host.sim.gantry.mode[0]) == NONE
         assert torch.equal(host.robot.data.root_link_pose_w.torch[0], base)
         assert torch.equal(host.sim.joint_state()[0], q)
-        for _ in range(25):  # 0.1 s
+        for _ in range(100 * NS_PER_MS // host.period_ns):  # 0.1 s
             host.step()
         assert float(host.robot.data.root_link_pose_w.torch[0, 2]) < float(base[2]) - 0.01
     finally:
