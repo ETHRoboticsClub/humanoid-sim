@@ -18,6 +18,7 @@ each render moves those parts to where the truth has the crane. Needs the Isaac 
 from __future__ import annotations
 
 import dataclasses
+import os
 import signal
 import time
 from pathlib import Path
@@ -100,6 +101,12 @@ class RuntimeRender:
                                   spawn_m=cfg.spawn_m if cfg.scene else spawn,
                                   scan_mesh=cfg.scan_mesh or scan_mesh)
         self.session = SensorSession(cfg)
+        # Opt-in, cameras only: render at most once per HSIM_CAMERA_MIN_PERIOD_S of plant time. On one GPU shared with
+        # the physics and a policy, Kit's camera renders hold it ~80% busy at any resolution; a longer period leaves
+        # it idle between renders.
+        minimum_s = float(os.environ.get("HSIM_CAMERA_MIN_PERIOD_S", "0") or 0)
+        if minimum_s > 0 and self.session.cameras:
+            self.session.render_ns = max(self.session.render_ns, int(minimum_s * 1e9))
         self._crane = self._crane_parts(record.get("gantry")) if cfg.splat else {}
         self.gantry = record.get("gantry")
         joints = record["joints"]

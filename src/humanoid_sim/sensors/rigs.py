@@ -64,6 +64,55 @@ def g1_cameras() -> Rig:
     )
 
 
+def _g1_cameras_scaled(scale: int) -> Rig:
+    """SIMULATION ONLY: :func:`g1_cameras` at 1/``scale`` resolution, for a single GPU shared by Kit, the physics and
+    the policy: each render's kernels shrink with the pixel count. The focal lengths and principal points scale with
+    the image (pixel centres at +0.5); the equidistant coefficients act on angles and stay. No ZED mode matches."""
+    def scaled(fx, fy, cx, cy):
+        return fx / scale, fy / scale, (cx + 0.5) / scale - 0.5, (cy + 0.5) / scale - 0.5
+
+    return Rig(
+        zed=ZedMini(
+            "camera0_camera", width=1280 // scale, height=720 // scale, frame_period_ns=33_333_333,
+            intrinsics={"left": scaled(771.4, 771.14, 629.115, 353.0685),
+                        "right": scaled(772.01, 771.55, 641.75, 346.6085)},
+            distortion={"left": ("equidistant", (-0.0358597, 0.0185157, -0.00496448, 0.00194007)),
+                        "right": ("equidistant", (-0.0368591, 0.0234426, -0.0128113, 0.00625172))},
+            stream_offsets_m={"right": (0.000233734, -0.0628272, 0.000181381)},
+        ),
+        zed_imu=ZedMiniImu("camera0_camera", sample_period_ns=1_250_000),
+    )
+
+
+def g1_cameras_half() -> Rig:
+    """SIMULATION ONLY: :func:`g1_cameras` at 640 x 360 (:func:`_g1_cameras_scaled`)."""
+    return _g1_cameras_scaled(2)
+
+
+def g1_cameras_quarter() -> Rig:
+    """SIMULATION ONLY: :func:`g1_cameras` at 320 x 180 (:func:`_g1_cameras_scaled`)."""
+    return _g1_cameras_scaled(4)
+
+
+class _ZedMiniColor(ZedMini):
+    """SIMULATION ONLY: the ZED Mini with colour eyes. Controls' zed backend publishes each eye's grey luma; this
+    renders the colour that luma comes from, for studies of what colour would add."""
+
+    stream_kinds = {"left": "color", "right": "color"}
+
+
+def g1_cameras_color() -> Rig:
+    """SIMULATION ONLY: :func:`g1_cameras` with colour eyes (:class:`_ZedMiniColor`) at 2 Hz, for offline studies
+    (``render-trajectory``); no Controls backend publishes it."""
+    return Rig(zed=_ZedMiniColor(
+        "camera0_camera", width=1280, height=720, frame_period_ns=500_000_000,
+        intrinsics={"left": (771.4, 771.14, 629.115, 353.0685), "right": (772.01, 771.55, 641.75, 346.6085)},
+        distortion={"left": ("equidistant", (-0.0358597, 0.0185157, -0.00496448, 0.00194007)),
+                    "right": ("equidistant", (-0.0368591, 0.0234426, -0.0128113, 0.00625172))},
+        stream_offsets_m={"right": (0.000233734, -0.0628272, 0.000181381)},
+    ))
+
+
 def g1_cameras_d435() -> Rig:
     """:func:`g1_cameras` and the G1's head D435, which the lab unit's camera service does not find."""
     return g1_cameras().extended(Rig(
@@ -82,7 +131,7 @@ def g1_cameras_d435() -> Rig:
 
 
 RIGS = {"ethrc_v1": ethrc_v1, "g1_29dof_rev_1_0": g1, "g1_29dof_with_hand_rev_1_0": g1}
-EXTRAS = {"g1-cameras": g1_cameras, "g1-cameras-d435": g1_cameras_d435}
+EXTRAS = {"g1-cameras": g1_cameras, "g1-cameras-half": g1_cameras_half, "g1-cameras-quarter": g1_cameras_quarter, "g1-cameras-color": g1_cameras_color, "g1-cameras-d435": g1_cameras_d435}
 
 
 def rig(robot: str) -> Rig:
