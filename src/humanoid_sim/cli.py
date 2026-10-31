@@ -364,7 +364,8 @@ def cmd_fit_pace(args) -> int:
         # Ready for actuators.yaml: each family's drive_delay_s, controller APPLIED to the drive acting.
         meta["drive_delay_s"] = {g: int(v) / 1e9 for g, v in zip(space.groups, best["delay"], strict=True)}
     if held:
-        x = np.zeros((args.num_envs, space.dim))
+        # Env 0 at the start values (the description's, the friction ratio and delay where the search started).
+        x = np.tile(space.x0(), (args.num_envs, 1))
         x[1:] = result["x"]
         f, per = evaluate(sim, held, space, x, scored, base_motion=base, duration_s=None)
         meta["holdout"] = {"captures": [c.dataset_id for c in held], "objective_start": float(f[0]),
@@ -414,7 +415,7 @@ def cmd_pace_selftest(args) -> int:
                               seed=args.seed)
     t = time.time()
     capture = synthetic_capture(sim, space, planted, commands)
-    x = np.zeros((args.num_envs, space.dim))
+    x = np.tile(space.x0(), (args.num_envs, 1))
     x[0] = x_true
     f, _ = evaluate(sim, [capture], space, x, list(range(len(drives))), base_motion=None, duration_s=None)
     print(f"objective at the planted values {f[0] * 1e3:.4f} mrad, at the start values {f[1] * 1e3:.3f} mrad",
