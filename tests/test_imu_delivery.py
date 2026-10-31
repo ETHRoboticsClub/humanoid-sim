@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from humanoid_sim.sensors.imu import ImuDelivery, ImuDeliveryCfg, rotvec_matrix
+from humanoid_sim.sensors.imu import ImuDelivery, ImuDeliveryCfg, pending_slots, rotvec_matrix
 
 STEP = 4_000_000
 CFG = ImuDeliveryCfg(sample_period_ns=2_740_000, burst_period_ns=(13_900_000, 17_600_000), in_burst_spacing_ns=13_000,
@@ -158,3 +158,21 @@ def test_noise_off_also_drops_the_models_bias():
     z = torch.zeros(3, 3, dtype=torch.float64)
     _run(imu, 20, lambda t: (z, z))
     assert torch.allclose(imu.samples.gyro[:, 0], torch.full((3, 3), 0.5, dtype=torch.float64), atol=1e-12)
+
+
+def test_a_latency_holds_each_sample_at_least_that_long_per_env():
+    cfg = ImuDeliveryCfg(**{**CFG.__dict__, "sample_period_ns": 2_500_000, "burst_period_ns": (2_500_000, 2_500_000),
+                            "in_burst_spacing_ns": 0})
+    latency = torch.tensor([0, 1_000_000, 2_100_000, 5_000_000, 12_000_000, 60_000_000])
+    e = len(latency)
+    cfg = ImuDeliveryCfg(**{**cfg.__dict__, "pending": pending_slots(cfg, int(latency.max()), STEP)})
+    imu = ImuDelivery(cfg, e, dtype=torch.float64)
+    imu.reset(torch.arange(e), 0, torch.zeros(e, 6, dtype=torch.float64))
+    imu.latency_ns.copy_(latency)
+    _run(imu, 250, lambda t: (torch.zeros(e, 3, dtype=torch.float64), torch.zeros(e, 3, dtype=torch.float64)))
+    s = imu.samples
+    age = s.stamp_ns - s.sample_ns
+    assert (age >= latency.unsqueeze(1)).all()
+    # Bursts every sample period: at most one period beyond the latency, and none missed.
+    assert (age < latency.unsqueeze(1) + cfg.burst_period_ns[1]).all()
+    assert (s.seq[:, :-1] == s.seq[:, 1:] + 1).all()

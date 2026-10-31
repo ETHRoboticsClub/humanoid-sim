@@ -54,6 +54,11 @@ devices:
   # (Controls scripts/sim/command_delay.py over the 2026-10-28 excitation datasets, controls 462dac7d9: 6.6 ms
   # mean, 3.6-10.0 ms p5-p95, 18 1:1 joints; the ankle cranks are unmeasured and go through the same callback).
   command_path: {frame_to_drive_ns: 6600000}
+  # The IMU's path past its CAN receipt stamp to the controller's topic, mean: the training plant holds each sample
+  # this long before delivery (passive /rt/imu subscriber on the idle V1, 2026-10-31, 24000 samples: 2.09 ms mean,
+  # 1.25-5.12 ms p5-p95, Madgwick and the relay 0.6 ms of it). The MTi's own delay before the stamp is unmeasured
+  # (the datasheet gives none); the rig's random delivery phase, 0-2.5 ms, stands in for it.
+  imu_path: {sample_to_host_ns: 2100000}
 
 solver_gains: baseline        # constant per-episode PD = humanoid-urdf baseline_position_gains (native ankle shafts use crank gains)
 

@@ -167,7 +167,9 @@ The plant delivers samples as the rig says. Both robots' rigs deliver every samp
 - A burst arrives every `burst_period_ns`, drawn uniformly from its range for each burst, starting from a random phase per env. It delivers every pending sample measured by the burst time.
 - Delivered samples get host-receipt stamps: the oldest sample of a burst is stamped at the burst time and each newer one `in_burst_spacing_ns` later.
 
-A consumer that reads "the latest sample" then sees it up to one burst period late. The V1's earlier serial path did this (bursts every 13.9 to 17.6 ms, 13 µs apart, on the `exc-*` captures), and replays of those captures still read it.
+A consumer that reads "the latest sample" then sees it up to one burst period late.
+
+In training, a sample is also held for the plant's IMU latency (`ImuDelivery.latency_ns`, per env) before a burst can deliver it: the host's path from the sensor to the consumer, which the burst model leaves out. Its nominal is the profile's `devices.imu_path.sample_to_host_ns` and the `imu_latency` randomization parameter draws it ([training.md](training.md#parameters)). The runtime leaves it at 0, as Controls' own IMU chain runs on top of what it publishes. The V1's earlier serial path did this (bursts every 13.9 to 17.6 ms, 13 µs apart, on the `exc-*` captures), and replays of those captures still read it.
 
 ### `ImuSamples`
 

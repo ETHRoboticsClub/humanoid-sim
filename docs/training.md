@@ -332,7 +332,7 @@ The contact sensor covers every body and also tracks force history (3 steps) and
 
 ### `params()`
 
-`params()` returns the realized randomized parameters per env as a dict keyed by parameter name. Only the parameters in the spec list appear. Units are those of the [parameter table](#parameters); shapes are `[E, N]` over the parameter's targets, `[E, 23, 3]` for `body_com`, `[E, 1]` for `friction` and `[E, 3]` for the IMU parameters. They suit privileged critic inputs (latency, payload, friction). The tensors are the randomizer's own; clone what you keep.
+`params()` returns the realized randomized parameters per env as a dict keyed by parameter name. Only the parameters in the spec list appear. Units are those of the [parameter table](#parameters); shapes are `[E, N]` over the parameter's targets, `[E, 23, 3]` for `body_com`, `[E, 1]` for `friction` and `imu_latency`, `[E, 3]` for the IMU axis parameters. They suit privileged critic inputs (latency, payload, friction). The tensors are the randomizer's own; clone what you keep.
 
 ## Time
 
@@ -412,6 +412,7 @@ The full table is `PARAMS` in `src/humanoid_sim/randomization/spec.py`. E is the
 | `imu_gyro_bias` | device | `[E, 3]` | rad/s | 0 | Gyro bias, sensor frame |
 | `imu_accel_bias` | device | `[E, 3]` | m/s² | 0 | Accelerometer bias, sensor frame |
 | `imu_misalignment` | device | `[E, 3]` | rad | 0 | Rotation of the sensor in its mount, as a rotation vector |
+| `imu_latency` | device | `[E, 1]` | s | the profile's `devices.imu_path` (2.1 ms on the V1), else 0 | From an IMU sample's measurement to its earliest delivery. A scale needs `imu_path`; the draw must be bounded (not `normal`), and the plant sizes the IMU's pending buffer for its largest value |
 
 A drive acts on its own reading, so with an `encoder_offset` it regulates the offset position: the drive output settles `encoder_offset` away from the demanded target, and `measured()` shows the offset reading while `truth()` shows the physical one. Randomizing `friction` needs the physics manager, which `PlantAction` passes in; see the ground-friction pitfall below. The IMU parameters only take effect when the scene has the IMU.
 
