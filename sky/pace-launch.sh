@@ -5,11 +5,11 @@
 #                      [--generations N] [--num-envs N] [--bands N] [--window NAME:START:END ...]
 #                      [--no-full-fit] [--dry] [--keep] [--name NAME] [--part PART] [--only PATTERN ...]
 #                      [--parallel N] [--bound B] [--bias-bound-mrad M] [--delay-ms FROM TO] [--delay-start-ms D]
-#                      [--ratio-max R] [--physics-tests]
+#                      [--ratio-max R] [--physics-tests] [--attach]
 #
 # Stages the captures (and the description, when one is given: a humanoid-urdf checkout) in
 # ~/ETHRC/runs/<date>-pace/input, launches sky/pace-capture.sky.yaml on cluster sim-pace (L40S first, autodown after
-# 15 idle minutes), waits for the run, copies outputs/pace-run into ~/ETHRC/runs/<date>-pace/ and takes the cluster
+# 15 idle minutes) detached, waits for the node's STATUS, copies outputs/pace-run into ~/ETHRC/runs/<date>-pace/ and takes the cluster
 # down. The node mirrors the same folder to s3://ethrc-rc-humanoid-ckpts/amoec/pace/<date>/ on its own, so the result
 # survives this script being stopped. --dry: a tiny fit (2 generations, 16 envs) into <date>-pace-dry, with the
 # replay and PACE physics tests first, to check the chain end to end. --keep: leave the cluster up (it still autodowns when idle).
@@ -17,11 +17,12 @@
 # subfolder on its own cluster (sim-NAME-PART), so several nodes can share one run, each with its own --only fits.
 # --bound, --bias-bound-mrad, --delay-ms, --delay-start-ms, --ratio-max: the search box (fit-pace's options).
 # --physics-tests: the replay and PACE physics tests first, as --dry runs them.
+# --attach: launch nothing; wait for the run already on the cluster of --name/--part, then copy and take it down.
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
-date=$(TZ=Europe/Zurich date +%Y-%m-%d)
+date=${PACE_DATE:-$(TZ=Europe/Zurich date +%Y-%m-%d)}  # PACE_DATE: add to a run started on an earlier day
 captures=() desc_root="" ankles=cranks fit_ankles=1 generations=40 num_envs=256 bands=3 windows="" full=1 dry=0 keep=0
-physics_tests=0 name="" part="" only="" parallel=3 bound=10 bias=20 delay="0 20" delay_start="" ratio_max=1
+attach=0 physics_tests=0 name="" part="" only="" parallel=3 bound=10 bias=20 delay="0 20" delay_start="" ratio_max=1
 while [ $# -gt 0 ]; do
   case $1 in
     --description-root) desc_root=$2; shift 2 ;;
@@ -35,6 +36,7 @@ while [ $# -gt 0 ]; do
     --dry) dry=1; shift ;;
     --keep) keep=1; shift ;;
     --physics-tests) physics_tests=1; shift ;;
+    --attach) attach=1; shift ;;
     --name) name=$2; shift 2 ;;
     --part) part=$2; shift 2 ;;
     --only) only="$only $2"; shift 2 ;;
@@ -44,12 +46,12 @@ while [ $# -gt 0 ]; do
     --delay-ms) delay="$2 $3"; shift 3 ;;
     --delay-start-ms) delay_start=$2; shift 2 ;;
     --ratio-max) ratio_max=$2; shift 2 ;;
-    -h|--help) sed -n 2,22p "$0"; exit 0 ;;
+    -h|--help) sed -n 2,23p "$0"; exit 0 ;;
     -*) echo "unknown option $1" >&2; exit 2 ;;
     *) captures+=("$1"); shift ;;
   esac
 done
-[ ${#captures[@]} -gt 0 ] || { echo "no capture given" >&2; exit 2; }
+[ ${#captures[@]} -gt 0 ] || [ "$attach" = 1 ] || { echo "no capture given" >&2; exit 2; }
 topic=${name:-pace}
 if [ "$dry" = 1 ]; then physics_tests=1; topic=$topic-dry; generations=${DRY_GENERATIONS:-2}; num_envs=${DRY_NUM_ENVS:-16}; fi
 run="$HOME/ETHRC/runs/$date-$topic"
@@ -57,6 +59,7 @@ prefix="amoec/pace/$date${name:+-$name}"
 [ "$dry" = 1 ] && prefix="$prefix-dry"
 cluster=sim-${name:-pace}
 if [ -n "$part" ]; then run="$run/$part"; prefix="$prefix/$part"; cluster="$cluster-$part"; fi
+if [ "$attach" = 0 ]; then
 if [ -e "$run/input" ]; then
   echo "$run/input exists: a run of today is staged already; move it away or pass a different capture set" >&2
   exit 2
@@ -103,7 +106,23 @@ sky launch -y -c "$cluster" -i 15 --down sky/pace-capture.sky.yaml \
   --env GENERATIONS="$generations" --env NUM_ENVS="$num_envs" --env BANDS="$bands" --env WINDOWS="$windows" \
   --env FULL_FIT="$full" --env PHYSICS_TESTS="$physics_tests" --env ONLY="${only# }" --env PARALLEL="$parallel" \
   --env BOUND="$bound" --env BIAS_BOUND_MRAD="$bias" --env DELAY_MS="$delay" --env DELAY_START_MS="$delay_start" \
-  --env RATIO_MAX="$ratio_max" 2>&1 | tee "$run/launch.log" || true
+  --env RATIO_MAX="$ratio_max" -d 2>&1 | tee "$run/launch.log" || true
+fi
+# Detached: the run is over when the node's STATUS file is written, not when a log stream ends (a cancelled or
+# dropped `sky logs` used to read as the end of the run and take the cluster down mid-fit).
+misses=0
+while :; do
+  st=$(ssh -o ConnectTimeout=30 -o LogLevel=ERROR "$cluster" 'cat sky_workdir/outputs/pace-run/STATUS 2>/dev/null; echo ok' 2>/dev/null) || st=""
+  case $st in
+    DONE*|FAILED*) break ;;
+    *ok) misses=0 ;;
+    *) misses=$((misses + 1))
+       if [ "$misses" -ge 6 ] && sky status "$cluster" 2>&1 | grep -q "not found"; then
+         echo "[pace] cluster $cluster is gone"; break
+       fi ;;
+  esac
+  sleep 300
+done
 mkdir -p "$run/out"
 rsync -a "$cluster:sky_workdir/outputs/pace-run/" "$run/out/" || echo "[pace] could not copy from the node; the result is in s3://ethrc-rc-humanoid-ckpts/$prefix"
 if [ "$keep" = 0 ]; then
