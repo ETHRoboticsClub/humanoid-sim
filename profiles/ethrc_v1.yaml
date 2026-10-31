@@ -49,6 +49,11 @@ devices:
     HEJ90-48-140: {counts_per_revolution: 4096}
     HEJ70-48-50: {counts_per_revolution: 16384}
     HEJ50-48-30: {counts_per_revolution: 16384}
+  # Controls' command path, a frame's stamp to the drive's position demand starting to move, mean: the plant puts
+  # this less each drive's own delay (drive_delay_s) before the drive, as the nominal `latency`
+  # (Controls scripts/sim/command_delay.py over the 2026-10-28 excitation datasets, controls 462dac7d9: 6.6 ms
+  # mean, 3.6-10.0 ms p5-p95, 18 1:1 joints; the ankle cranks are unmeasured and go through the same callback).
+  command_path: {frame_to_drive_ns: 6600000}
 
 solver_gains: baseline        # constant per-episode PD = humanoid-urdf baseline_position_gains (native ankle shafts use crank gains)
 

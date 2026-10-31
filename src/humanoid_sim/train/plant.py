@@ -77,6 +77,22 @@ class Truth:
     contact_forces_w: torch.Tensor | None  # [E, B, 3] net force per body
 
 
+def command_latency_ns(profile: dict, drive_delay_ns: torch.Tensor) -> torch.Tensor:
+    """Each drive's nominal latency before it ``[D]`` (int ns): the profile's measured ``devices.command_path``
+    ``frame_to_drive_ns`` less the drive's own delay; zero without one (an ideal controller path)."""
+    path = profile["devices"].get("command_path")
+    if path is None:
+        return torch.zeros_like(drive_delay_ns)
+    total = path["frame_to_drive_ns"]
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise ValueError(f"devices.command_path.frame_to_drive_ns {total!r}: expected a non-negative integer of ns")
+    out = total - drive_delay_ns
+    if (out < 0).any():
+        raise ValueError(f"devices.command_path.frame_to_drive_ns {total} is shorter than a drive's own delay "
+                         f"({int(drive_delay_ns.max())} ns)")
+    return out
+
+
 class RobotPlant:
     def __init__(self, robot, cfg: TrainPlantCfg | None = None, *, imu=None, contacts=None, physics_manager=None):
         """``robot``: the scene's articulation; ``imu`` / ``contacts``: its sensors (optional);
@@ -110,11 +126,12 @@ class RobotPlant:
         self.drives = self.core.map.drive_names
         d = len(self.drives)
         self.t_ns = 0
-        self.latency_ns = torch.zeros(e, d, dtype=torch.int64, device=self.device)  # before the drive, randomized
         models = drive_models(self.desc)
         self.drive_models = [models[n] for n in self.drives]
         self.drive_delay_ns = torch.tensor([m.drive_delay_ns for m in self.drive_models], dtype=torch.int64,
                                            device=self.device)
+        self.command_latency_ns = command_latency_ns(self.profile, self.drive_delay_ns)  # [D] nominal
+        self.latency_ns = self.command_latency_ns.expand(e, -1).clone()  # before the drive, randomized
         self._targets = robot.data.default_joint_pos.torch.clone()
         self._physics_manager = physics_manager
         harness = self.profile["support"]["harness"]
@@ -145,6 +162,8 @@ class RobotPlant:
         nominal = {name: v for name, v in self._nominal_physics.items()} | self._device_nominal()
         self._ratio = nominal["joint_friction_ratio"]
         used = {s.param for s in specs}
+        if any(s.param == "latency" and s.op == "scale" for s in specs) and "command_path" not in self.profile["devices"]:
+            raise ValueError(f"{cfg.robot}: scaling latency needs the profile's devices.command_path")
         if {"friction", "shape_friction"} <= used:
             raise ValueError("choose per-env friction or per-shape friction, not both")
         self.randomizer = Randomizer(specs, {k: v for k, v in nominal.items() if k in used},
@@ -212,7 +231,8 @@ class RobotPlant:
                                 for n in self.core.solver_map.joint_names], device=self.device)
         ratio = torch.where(static > 0, dynamic / static.clamp(min=1e-12), torch.ones_like(static))
         return {"drive_stiffness": ones, "drive_damping": ones.clone(), "torque_limit": ones.clone(),
-                "latency": torch.zeros_like(ones), "encoder_offset": torch.zeros_like(ones),
+                "latency": (self.command_latency_ns / NS_PER_S).to(ones.dtype).expand(e, -1).clone(),
+                "encoder_offset": torch.zeros_like(ones),
                 "joint_friction_ratio": ratio.expand(e, -1).clone(),
                 "imu_gyro_bias": zeros3, "imu_accel_bias": zeros3.clone(), "imu_misalignment": zeros3.clone()}
 

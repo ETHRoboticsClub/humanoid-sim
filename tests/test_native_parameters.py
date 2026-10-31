@@ -59,6 +59,7 @@ def test_training_randomization_writes_native_ids_and_projects_relief():
     plant.core = core
     plant.device, plant.num_envs = torch.device("cpu"), 2
     plant.drives = core.map.drive_names
+    plant.command_latency_ns = torch.zeros(len(plant.drives), dtype=torch.int64)
     plant.desc = core.desc
     plant.solver_joint_ids = torch.arange(len(core.solver_map.joint_names)) + 3
     plant._solver, plant.imu = "kamino", None
