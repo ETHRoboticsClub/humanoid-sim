@@ -48,7 +48,8 @@ physics:
     # (physics/crank_stops.py), on top of the hinges' box. hinges: the box alone, the axis hull of what the stops
     # allow, whose corners need a crank past its stop (driven there, the V1's cranks go 0.5 rad past their stops).
     ankle_stops: cranks
-    # The stops' constraint (MuJoCo solref: time constant s, damping ratio). Twice the 4 ms period, the stiffest
+    # The stops' constraint (MuJoCo solref: time constant s, damping ratio), on the tendons or, for a native USD, on
+    # its crank joints' limits. Twice the 4 ms period, the stiffest
     # MuJoCo's solver keeps stable (its XML reference, solref; it raises anything shorter to that): a crank pushed
     # with its 22 Nm/rad baseline spring 1 rad past a stop rests 13 mrad past it (52 mrad at the joint stops' 0.02 s).
     # The real stops are metal; their stiffness is not measured (modeled).

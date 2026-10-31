@@ -150,6 +150,8 @@ def test_native_asset_preserves_closures_and_authors_shaft_limits(desc, tmp_path
             joint = UsdPhysics.RevoluteJoint(p)
             assert np.radians([joint.GetLowerLimitAttr().Get(), joint.GetUpperLimitAttr().Get()]) == pytest.approx(
                 desc.drives[drive].shaft_limits, abs=1e-6)
+            assert list(p.GetAttribute("mjc:solreflimit").Get()) == pytest.approx(
+                profile["physics"]["mjwarp"]["ankle_stop_solref"])
     assert source.digest() == source_hash
 
 

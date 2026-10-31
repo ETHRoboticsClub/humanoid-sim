@@ -169,9 +169,10 @@ def fixed_body_excludes(edges: list[tuple[str, str]]) -> list[tuple[str, str]]:
 
 
 def asset_key(desc, profile: dict, *, base_joints: bool = False) -> str:
-    record = {"schema": "humanoid-sim-native-usd/v5", "source": desc.usd_model.digest(),
+    record = {"schema": "humanoid-sim-native-usd/v6", "source": desc.usd_model.digest(),
               "description": desc.digest, "base_joints": base_joints,
-              "actuators": hashlib.sha256(desc.actuators_path.read_bytes()).hexdigest(), "model": profile["model"]}
+              "actuators": hashlib.sha256(desc.actuators_path.read_bytes()).hexdigest(), "model": profile["model"],
+              "ankle_stop_solref": profile["physics"]["mjwarp"]["ankle_stop_solref"]}
     return hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -245,6 +246,9 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
         revolute = UsdPhysics.RevoluteJoint(stage.GetPrimAtPath(target))
         revolute.CreateLowerLimitAttr(math.degrees(bounds[0]))
         revolute.CreateUpperLimitAttr(math.degrees(bounds[1]))
+        if name in crank_limits:  # the crank stops' constraint, not the joint stops' (Newton passes it to MJWarp raw)
+            revolute.GetPrim().CreateAttribute("mjc:solreflimit", Sdf.ValueTypeNames.Float2).Set(
+                Gf.Vec2f(*profile["physics"]["mjwarp"]["ankle_stop_solref"]))
 
     universal = _author_universal_rods(desc, profile, source, stage, mapped)
 
