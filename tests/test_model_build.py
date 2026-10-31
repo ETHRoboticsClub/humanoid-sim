@@ -119,9 +119,11 @@ def test_one_collision_mesh_per_body(built):
         assert all(not p._links[link].findall("collision") for link in subtree[1:])
         # Every triangle of the per-mesh colliders is in the merged mesh, and nothing else.
         assert len(p.merged.get(body, [])) // 3 == _mesh_triangles(per_mesh, subtree)
-    # The sole boxes stay primitives on the feet, and the sole plates are not merged back in.
-    boxes = [c for link in p._links.values() for c in link.findall("collision") if c.find("geometry/box") is not None]
-    assert len(boxes) == len(p.soles)
+    # The sole boxes stay primitives on the feet, beside the description's own boxes, and the sole plates are not
+    # merged back in.
+    def boxes(links):
+        return [c for link in links for c in link.findall("collision") if c.find("geometry/box") is not None]
+    assert len(boxes(p._links.values())) == len(p.soles) + len(boxes(ET.parse(desc.urdf_path).getroot().iter("link")))
     soles = {s.body: s for s in p.soles}
     for body, sole in soles.items():
         z_min = p.merged[body][:, 2].min()
