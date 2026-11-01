@@ -25,3 +25,6 @@ fi
 "$PY" -c "import torch, warp as wp; wp.init(); print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), 'warp devices', wp.get_cuda_device_count())"
 uv pip install -q --python "$PY" --no-deps -e "$HOME/sky_workdir"
 uv pip install -q --python "$PY" "rosbags>=0.11,<0.12"  # the bag extra: reading rosbag2 recordings
+# The image's source-guarded solver patches (docker/Dockerfile): the profile's solver options need them.
+"$PY" "$HOME/sky_workdir/docker/apply_mjwarp_patch.py"
+"$PY" "$HOME/sky_workdir/docker/apply_kamino_patch.py"
