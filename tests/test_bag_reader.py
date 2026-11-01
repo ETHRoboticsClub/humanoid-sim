@@ -51,9 +51,9 @@ def _write(path, *, plugin="SQLITE3", gains=((320.0, 12.0), (480.0, 9.0)), chang
         def frame(t, kind, joints, q):
             return T["msg_ethrc/msg/BodyControlFrame"](
                 header=_header(store, t), body_mode=0, kind=kind, clear_latches=False, robot_id="", authority_runtime_id="",
-                component_session_id="", grant_id="", source_id="", sequence=1, input_sequence=0, valid_for_ns=0,
-                joint_ids=joints, positions_rad=np.asarray(q, dtype=np.float64), require_exact_positions=False,
-                hold_joint_ids=[], stop_profile_id="")
+                component_session_id="", grant_id="", source_id="", control_scope="body", sequence=1,
+                input_sequence=0, valid_for_ns=0, joint_ids=joints, positions_rad=np.asarray(q, dtype=np.float64),
+                velocities_rad_s=np.zeros(0), require_exact_positions=False, hold_joint_ids=[], stop_profile_id="")
 
         def gains_msg(t, pairs):
             f = np.array

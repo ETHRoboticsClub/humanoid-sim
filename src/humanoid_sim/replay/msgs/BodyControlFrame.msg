@@ -31,6 +31,8 @@ uint8 KIND_MANUAL=10
 # clear_latches. The controller answers APPLIED once the release is durably
 # recorded (or no latch stood), REJECTED with the cause otherwise.
 uint8 KIND_CLEAR_ESTOP=11
+# Powers off only the named control scope through its safety lane.
+uint8 KIND_POWER_OFF=12
 
 uint8 MODE_POWERED=1
 uint8 MODE_STIFF=2
@@ -53,6 +55,9 @@ string authority_runtime_id
 string component_session_id
 string grant_id
 string source_id
+# Independent Joint Host control domain. Body and each hand keep separate grants,
+# sequence floors, Arm and power state. Emergency stop remains robot-wide.
+string control_scope "body"
 
 # Strictly increasing for every frame in one authority runtime. Zero is invalid.
 uint64 sequence
@@ -68,6 +73,13 @@ uint64 valid_for_ns
 # Joint coordinates are semantic radians.
 string[] joint_ids
 float64[] positions_rad
+# COMMAND and MANUAL, optional: each joint's velocity at positions_rad in rad/s, in joint_ids
+# order; empty is zero for every joint, and a hold joint's entry is zero. The receiver
+# admits it against the joint's velocity limits, feeds it forward, and advances the
+# joint's reference along it from positions_rad until the next frame, for at most its
+# own bounded interval (JointHost: kVelocityExtrapolationS). A sender streaming a path
+# sends frames well inside that interval.
+float64[] velocities_rad_s
 # COMMAND only: the final receiver refuses the complete frame if any safety
 # projection would substitute a different endpoint. It never bypasses a gate.
 bool require_exact_positions
