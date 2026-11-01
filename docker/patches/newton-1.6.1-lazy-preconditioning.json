@@ -21,7 +21,7 @@
   },
   "_src/solvers/kamino/_src/solvers/padmm/reduced_lazy_diagnostics.py": {
     "before": null,
-    "after": "3d1931afc5dec1e951c904b052ae995ec5f753b600101f2965fccfd4fb5c5da0"
+    "after": "e20acf69c58794b32e81c8334a55c1d740a79a7307963e85074bf8b357d1ba45"
   },
   "_src/solvers/kamino/_src/solvers/padmm/reduced_lazy_factor.py": {
     "before": null,
@@ -29,7 +29,7 @@
   },
   "_src/solvers/kamino/_src/solvers/padmm/reduced_lazy_sparse_diagnostics.py": {
     "before": null,
-    "after": "8032a29fe63ff27d70917a81a51c1962f5b4d5cc6392b80c7e80874090628137"
+    "after": "007ed3f3f92f095c2959bbc537a98165c775de8a2cff4d8bab4d123635028c9b"
   },
   "_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py": {
     "before": "dd085c4807541977ab47ac594c80b84e5ee1694db597f6ea7d9889a1615f17dc",

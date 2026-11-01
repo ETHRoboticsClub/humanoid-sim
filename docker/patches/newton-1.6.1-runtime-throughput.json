@@ -5,7 +5,7 @@
   },
   "_src/solvers/kamino/_src/solvers/padmm/reduced_sparse_diagnostics.py": {
     "before": null,
-    "after": "bca852f84d2915633427c83d912fff1dc45a37480a0d0e8f587dcd58d0d9f8ae"
+    "after": "cd99f35d2734a044984dd198deb3c596fc483d2cfd9ee94053d5204804b61739"
   },
   "_src/solvers/kamino/_src/solvers/padmm/reduced_diagnostic_support.py": {
     "before": null,

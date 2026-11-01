@@ -592,7 +592,7 @@
  
 --- /dev/null
 +++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_lazy_diagnostics.py
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,227 @@
 +"""Frozen diagnostic candidates; no runtime integration."""
 +
 +import warp as wp
@@ -604,10 +604,22 @@
 +
 +
 +@wp.func_native("""
++#if defined(__CUDA_ARCH__)
++return 32;
++#else
++return 1;
++#endif
++""")
++def warp_lanes() -> int: ...
++
++
++@wp.func_native("""
 +float r = value;
++#if defined(__CUDA_ARCH__)
 +#pragma unroll
 +for (int offset = 16; offset > 0; offset >>= 1)
 +    r += __shfl_xor_sync(0xffffffffu, r, offset, 32);
++#endif
 +return r;
 +""")
 +def warp_sum(value: wp.float32) -> wp.float32: ...
@@ -618,7 +630,6 @@
 +        raise ValueError("Only qualified block dimensions 128 and 256 are candidates")
 +    if reduction not in ("block", "warp"):
 +        raise ValueError("Unknown explicit reduction candidate")
-+    WARPS = wp.constant(threads // 32)
 +
 +    @wp.kernel(enable_backward=False)
 +    def bounded_block(
@@ -653,15 +664,19 @@
 +    ):
 +        w, thread = wp.tid()
 +        n = dim[w]
-+        lane = thread % 32
-+        warp = thread // 32
++        lanes = warp_lanes()
++        lane = thread % lanes
++        warp = thread // lanes
++        warps = wp.block_dim() // lanes
++        # CPU blocks have one thread: the first of each world covers it alone.
++        first = wp.where(thread < wp.block_dim(), warp, n)
 +        stationarity = wp.float32(0.0)
 +        feasibility = wp.float32(0.0)
 +        natural_map = wp.float32(0.0)
 +        complementarity = wp.float32(0.0)
-+        for k in range(warp, n, WARPS):
++        for k in range(first, n, warps):
 +            partial = wp.float32(0.0)
-+            for j in range(lane, n, 32):
++            for j in range(lane, n, lanes):
 +                partial = partial + read_entry(D, P_epoch, phase, epoch_dim, epoch_mio, epoch_vio, pending_delta, pending_apply, dim, mio, w, k, j) * y[vio[w] + j]
 +            product = warp_sum(partial)
 +            if lane == 0:
@@ -745,15 +760,19 @@
 +    ):
 +        w, thread = wp.tid()
 +        n = dim[w]
-+        lane = thread % 32
-+        warp = thread // 32
++        lanes = warp_lanes()
++        lane = thread % lanes
++        warp = thread // lanes
++        warps = wp.block_dim() // lanes
++        # CPU blocks have one thread: the first of each world covers it alone.
++        first = wp.where(thread < wp.block_dim(), warp, n)
 +        stationarity = wp.float32(0.0)
 +        feasibility = wp.float32(0.0)
 +        natural_map = wp.float32(0.0)
 +        complementarity = wp.float32(0.0)
-+        for k in range(warp, n, WARPS):
++        for k in range(first, n, warps):
 +            partial = wp.float32(0.0)
-+            for j in range(lane, n, 32):
++            for j in range(lane, n, lanes):
 +                partial = partial + read_entry(D, P_epoch, phase, epoch_dim, epoch_mio, epoch_vio, pending_delta, pending_apply, dim, mio, w, k, j) * y[vio[w] + j]
 +            product = warp_sum(partial)
 +            if lane == 0:
@@ -999,7 +1018,7 @@
 +    output[world * free + permutation[row]] = value[world * free + row]
 --- /dev/null
 +++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_lazy_sparse_diagnostics.py
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,137 @@
 +"""Frozen sparse-load diagnostics; all original arithmetic and cadence retained."""
 +
 +import warp as wp
@@ -1011,10 +1030,22 @@
 +
 +
 +@wp.func_native("""
++#if defined(__CUDA_ARCH__)
++return 32;
++#else
++return 1;
++#endif
++""")
++def warp_lanes() -> int: ...
++
++
++@wp.func_native("""
 +float r = value;
++#if defined(__CUDA_ARCH__)
 +#pragma unroll
 +for (int offset = 16; offset > 0; offset >>= 1)
 +    r += __shfl_xor_sync(0xffffffffu, r, offset, 32);
++#endif
 +return r;
 +""")
 +def warp_sum(value: wp.float32) -> wp.float32: ...
@@ -1022,7 +1053,6 @@
 +
 +def make_sparse(capacity):
 +    CAPACITY = wp.constant(capacity)
-+    WARPS = wp.constant(4)
 +
 +    @wp.kernel(enable_backward=False)
 +    def sparse_warp(
@@ -1059,17 +1089,21 @@
 +    ):
 +        w, thread = wp.tid()
 +        n = dim[w]
-+        lane = thread % 32
-+        warp = thread // 32
++        lanes = warp_lanes()
++        lane = thread % lanes
++        warp = thread // lanes
++        warps = wp.block_dim() // lanes
++        # CPU blocks have one thread: the first of each world covers it alone.
++        first = wp.where(thread < wp.block_dim(), warp, n)
 +        masks = wp.tile_load(row_masks, shape=(1, CAPACITY), offset=(w, 0), storage="shared")
 +        use_dense = dense[w] != 0
 +        stationarity = wp.float32(0.0)
 +        feasibility = wp.float32(0.0)
 +        natural_map = wp.float32(0.0)
 +        complementarity = wp.float32(0.0)
-+        for k in range(warp, n, WARPS):
++        for k in range(first, n, warps):
 +            partial = wp.float32(0.0)
-+            for j in range(lane, n, 32):
++            for j in range(lane, n, lanes):
 +                value = wp.float32(0.0)
 +                if use_dense or k == j:
 +                    value = read_entry(D, P_epoch, phase, epoch_dim, epoch_mio, epoch_vio, pending_delta, pending_apply, dim, mio, w, k, j)
