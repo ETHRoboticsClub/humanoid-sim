@@ -265,8 +265,8 @@ def ground_cfg(friction: float):
     return AssetBaseCfg(prim_path="/World/Ground", spawn=sim_utils.GroundPlaneCfg(physics_material=material))
 
 
-def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None):
-    """Isaac Lab's config for ``solver`` from its block of the profile's ``physics``."""
+def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None, device: str = "cuda"):
+    """Isaac Lab's config for ``solver`` from its block of the profile's ``physics``, for ``device``."""
     integrator = integrator or settings["integrator"]
     if solver == "mjwarp":
         from isaaclab_newton.physics import MJWarpSolverCfg
@@ -315,8 +315,13 @@ def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None):
                 tracked_active_clear: bool = False
 
             dynamics_type = KaminoExecutionDynamicsCfg
+        padmm = dict(settings.get("padmm", {}))
+        if padmm.get("algorithm") == "bilateral_reduced" and not device.startswith("cuda"):
+            # The reduced elimination is GPU execution tuning of the same constraint problem: CPU runs the full PADMM.
+            padmm = {name: value for name, value in padmm.items()
+                     if name != "algorithm" and not name.startswith("reduced_")}
         padmm_type = KaminoPADMMCfg
-        if {"algorithm", "reduced_capacity", "reduced_ordering", "reduced_dynamic_pattern", "reduced_sparse_diagnostics", "reduced_lazy_preconditioning"}.intersection(settings.get("padmm", {})):
+        if {"algorithm", "reduced_capacity", "reduced_ordering", "reduced_dynamic_pattern", "reduced_sparse_diagnostics", "reduced_lazy_preconditioning"}.intersection(padmm):
             from isaaclab.utils import configclass
 
             @configclass
@@ -331,7 +336,7 @@ def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None):
             padmm_type = KaminoAlgorithmPADMMCfg
         return KaminoPADMMSolverCfg(**common, dynamics_solver_cfg=padmm_type(
             max_iterations=settings["iterations"],
-            use_graph_conditionals=settings.get("use_graph_conditionals", False), **settings.get("padmm", {})),
+            use_graph_conditionals=settings.get("use_graph_conditionals", False), **padmm),
             dynamics=dynamics_type(linear_solver_type=settings.get("linear_solver", "LLTB"),
                                    linear_solver_kwargs=dict(settings.get("linear_solver_kwargs", {})), **execution))
     raise ValueError(f"physics solver {solver!r}: one of {', '.join(SOLVERS)}")
@@ -346,7 +351,8 @@ def simulation_cfg(physics: dict, *, device: str, period_s: float, solver: str |
 
     name, settings = solver_settings(physics, solver)
     return sim_utils.SimulationCfg(
-        dt=period_s, device=device, physics=NewtonCfg(solver_cfg=solver_cfg(name, settings, integrator=integrator)),
+        dt=period_s, device=device,
+        physics=NewtonCfg(solver_cfg=solver_cfg(name, settings, integrator=integrator, device=device)),
         visualizer_cfgs=visualizers or None)
 
 
