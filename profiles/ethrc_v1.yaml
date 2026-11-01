@@ -90,9 +90,23 @@ physics:
     sparse_jacobian: true
     sparse_dynamics: false
     dynamics_solver: padmm
+    # Reduced bilateral elimination with RCM ordering and lazy preconditioning: the same converged constraint
+    # problem, timestep and tolerances as the full PADMM, about 6.7x faster for 4096 worlds with self-collision
+    # (5.1 vs 34 s per Matias training iteration on an RTX PRO 6000). Its finite iterates differ, hence the higher
+    # iteration cap for difficult solves.
+    iterations: 250
     linear_solver: LLTB
-    linear_solver_kwargs: {}
-    padmm: {rho_0: 0.05}
+    linear_solver_kwargs: {solve_block_dim: 256, solve_max_registers: 48}
+    matrix_preconditioner_stride: 1024
+    tracked_active_clear: true
+    padmm:
+      rho_0: 0.05
+      algorithm: bilateral_reduced
+      reduced_capacity: 96
+      reduced_ordering: rcm
+      reduced_dynamic_pattern: true
+      reduced_sparse_diagnostics: true
+      reduced_lazy_preconditioning: true
     # Keep PADMM iterations as CUDA graph loops instead of unrolling
     # every iteration into a graph too large for the native 4096-world batch.
     use_graph_conditionals: true
