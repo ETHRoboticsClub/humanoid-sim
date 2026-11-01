@@ -94,7 +94,23 @@ def describe_sensors(writer, session, robot_links: list[str] | None = None) -> N
         writer.describe_lidar(lidar.sensor.name, {
             "model": lidar.sensor.model, "product": lidar.sensor.product, "frame": lidar.sensor.frame,
             "period_ns": int(lidar.period_ns), "range_min_m": lidar.sensor.range_min_m,
-            "mount": _mount(session, lidar.sensor.name), "stage": stage})
+            "mount": _mount(session, lidar.sensor.name), "stage": stage, "surfaces": lidar_surfaces(session),
+            "mount_fit": getattr(session, "mount_fits", {}).get(lidar.sensor.name)})
+
+
+def lidar_surfaces(session) -> dict:
+    """The scan mesh the lidar traces besides the boxes and the robot, by checksum."""
+    import hashlib
+
+    scan = getattr(session, "scan_mesh", None)
+    digest = None
+    if scan:
+        h = hashlib.sha256()
+        with open(scan, "rb") as f:
+            for block in iter(lambda: f.read(1 << 24), b""):
+                h.update(block)
+        digest = h.hexdigest()
+    return {"scan_mesh": scan, "scan_mesh_sha256": digest}
 
 
 def expected_sensors(session) -> list[str]:
@@ -122,6 +138,10 @@ def _render(traj, name, desc, order, cfg, out, start_s, end_s, gantry, log) -> d
         if not session.camera_specs and not session.lidars:
             raise ValueError(f"nothing to render: {desc.robot}'s rig with sensors={cfg.sensors!r} has no camera or "
                              f"lidar the RTX sensors simulate (unsimulated: {session.unsimulated})")
+        if session.lidars and not session.scan_mesh:
+            named = ((traj.header.get("scene") or {}).get("scan") or {}).get("mesh")
+            raise ValueError(f"the lidar would see only the boxes: no scan mesh is readable here (the recording names "
+                             f"{named}): mount it or pass --scan-mesh")
         if cfg.splat and session.lidars:
             raise ValueError("the lidar would trace the splat (RTX hides it from camera rays only): render the lidar "
                              "in its own pass without --splat (--no-cameras) and the cameras with it (--no-lidar)")

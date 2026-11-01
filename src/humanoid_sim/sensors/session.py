@@ -64,6 +64,46 @@ class SessionCfg:
     physics: bool = True  # False: posed from outside (pose, render_at), never stepped
 
 
+def mount_on(parent, translation_m, rpy) -> "Mount":
+    """A sensor pose given in the frame of a fixed link (``parent``, a Mount of that link on its body) as a Mount on
+    the body: the sensor rides rigidly on the link, so a change of the link's pose carries the sensor with it."""
+    from humanoid_sim.sensors.geometry import Mount, rpy_matrix
+
+    t, r = [float(v) for v in translation_m], [float(v) for v in rpy]
+    if len(t) != 3 or len(r) != 3:
+        raise ValueError("a mount on a link takes translation_m and rpy of 3 numbers each")
+    Rp = np.asarray(parent.rotation, dtype=np.float64)
+    R = Rp @ rpy_matrix(*r)
+    o = Rp @ np.asarray(t) + np.asarray(parent.translation_m, dtype=np.float64)
+    return Mount(parent.sensor_link, parent.link, tuple(float(v) for v in o), tuple(tuple(float(v) for v in row) for row in R))
+
+
+def fitted_mounts(profile: dict, lidars, mounts: dict, desc) -> dict:
+    """Replace in ``mounts`` the mount of each lidar whose frame the profile's ``lidar_mount`` fits: a pose in the
+    frame of a link (``parent``, fixed to the lidar's body) that the sensor rides on, so its rays, TF and manifest all
+    use the fit; returns each fit's record. The description keeps its own mount: it pins the recordings by digest."""
+    from humanoid_sim.sensors.geometry import Mount
+
+    fits = profile.get("lidar_mount") or {}
+    out = {}
+    for s in lidars:
+        fit = fits.get(s.frame)
+        if fit is None:
+            continue
+        old = mounts[s.name]
+        parent = Mount.from_description(desc, fit["parent"])
+        if parent.link != old.link:
+            raise ValueError(f"{fit['parent']} rides on {parent.link}, the description's {s.frame} on {old.link}")
+        m = mount_on(parent, fit["translation_m"], fit["rpy"])
+        mounts[s.name] = Mount(old.sensor_link, old.link, m.translation_m, m.rotation)
+        out[s.name] = {"basis": fit["basis"], "parent": fit["parent"], "in_parent_translation_m": fit["translation_m"],
+                       "in_parent_rpy": fit["rpy"], "translation_m": list(m.translation_m),
+                       "rotation": [list(r) for r in m.rotation],
+                       "description_translation_m": list(old.translation_m),
+                       "description_rotation": [list(r) for r in old.rotation]}
+    return out
+
+
 class SensorSession:
     def __init__(self, cfg: SessionCfg):
         from humanoid_sim.devices.demand import DriveDemand
@@ -87,6 +127,7 @@ class SensorSession:
         simulated = {s.name for s in cameras + lidars} | {n for n, s in self.rig.sensors.items() if s.simulated}
         self.unsimulated = [n for n in self.rig.sensors if n not in simulated]
         self.mounts = {s.name: Mount.from_description(desc, s.frame) for s in cameras + lidars}
+        self.mount_fits = fitted_mounts(load_profile(cfg.robot), lidars, self.mounts, desc)
         self.camera_specs = [camera_spec(s) for s in cameras]
         bodies = rtx.body_paths(self.usd, {m.link for m in self.mounts.values()})
         entities = rtx.camera_entities([(spec, self.mounts[s.name]) for spec, s in zip(self.camera_specs, cameras,
@@ -156,6 +197,9 @@ class SensorSession:
         self.clock: ClockMapping | None = None  # supplied by a host that steps physics separately
         self.render_ns = min([int(round(1e9 / s.rate_hz)) for c in self.camera_specs for s in c.streams]
                              or [lidar.period_ns for lidar in self.lidars] or [0])
+        if any(lidar.period_ns != self.render_ns for lidar in self.lidars):
+            raise ValueError(f"a lidar sweep is one render (sensors/lidar.py), but the session renders every "
+                             f"{self.render_ns} ns for its cameras: render the lidar in its own session (no cameras)")
 
     def _apply_room_rays(self, cameras: bool, lidar: bool) -> RoomRays | None:
         """Add the scan mesh for the lidar and hide each of the room's surfaces from the rays that do not see it

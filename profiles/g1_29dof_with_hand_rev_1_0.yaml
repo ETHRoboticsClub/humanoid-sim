@@ -28,3 +28,17 @@ poses:
 support:
   # The lab's straps hold the torso at the shoulders (Controls ethrc_sim unitree_plant.py HARNESS_BODY, SHOULDER_LINKS).
   harness: {body: torso_link, shoulders: [left_shoulder_pitch_link, right_shoulder_pitch_link]}
+
+# The Mid-360's mount as rendered, replacing the description's (sensors/session.py fitted_mounts). The sensor rides on
+# the head shell's mounting plate, so its pose is given in head_link's frame and follows any pose of head_link:
+# Unitree's factory mount (unitree_ros g1 URDF mid360_joint: xyz 0.0002835 0.00003 0.428434, rpy pi 0.0511 0, in
+# torso_link; head_link sits at 0.0039635 0 -0.044 unrotated) expressed in head_link, lowered 15 mm along head_link z.
+# The 15 mm is a FIT chosen by the user, not a measurement: at the factory origin the closed head_link.STL skirt
+# blocks the front. Offline replay of gantry-table-ccw-a4 (files 100..299, original head STL) predicts a front-band
+# return (|az| < 45 deg, world el -25..+3 deg, non-ground) of 0.004 at 0 mm / pitch 0.0836 and 0.535 at -15 mm / 0.0511.
+lidar_mount:
+  mid360_link:
+    parent: head_link
+    translation_m: [-0.003680, 0.00003, 0.457434]
+    rpy: [3.141592653589793, 0.0511, 0.0]
+    basis: "fitted, user-chosen: factory pose in head_link lowered 15 mm along head_link z (replay front band 0.535)"

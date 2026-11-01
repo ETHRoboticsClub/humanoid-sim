@@ -9,13 +9,13 @@ Layout under the dataset directory (``humanoid-sim-sensor-dataset/v1``):
   sensors, render period and summary, ``complete`` only if it finished.
 * ``cameras/<camera_id>/<stream>/index.csv`` and ``<seq>.png``: ``seq,stamp_ns,file``. Mono is 8-bit grey, colour
   8-bit RGB, depth 16-bit millimetres (0: no depth).
-* ``lidars/<name>/index.csv`` and ``<seq>.npz``: one sweep each: ``points_m`` ``[N, 3]`` in the sensor frame in firing
-  order (zero where a ray did not return), ``hit``, ``time_s`` (each ray after the sweep start), ``start_ns`` and
-  ``origin_w`` / ``rotation_w``: the sensor's world pose at the render that completed the sweep, so at the sweep's END
-  (about ``start_ns`` plus the sweep period), not at ``start_ns``. A ray fired at ``start_ns + time_s`` is best placed
-  with the sensor's pose at that time, from the trajectory.
+* ``lidars/<name>/index.csv`` and ``<seq>.npz``: one sweep each, one render's output: ``points_m`` ``[N, 3]`` in the
+  sensor frame by emitter (zero where a ray did not return), ``hit``, ``time_s`` (each ray's trace time after
+  ``start_ns``: 0, RTX traces a render's rays at once, with no motion), ``start_ns`` (the render's plant time) and
+  ``origin_w`` / ``rotation_w``: the sensor's world pose at that render, where every ray of the sweep was traced.
+  The manifest's lidar records the scan mesh's checksum (``surfaces``) and a profile-fitted mount (``mount_fit``).
 
-The camera frame's stamp is the plant time it was rendered at; a lidar sweep's is the plant time its first ray fired.
+The camera frame's stamp is the plant time it was rendered at; a lidar sweep's is the plant time it was traced at.
 """
 
 from __future__ import annotations

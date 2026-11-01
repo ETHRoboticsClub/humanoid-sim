@@ -1,21 +1,22 @@
 """The Mid-360 as an RTX lidar, and the scanned room's surfaces it sees.
 
 * :class:`RtxLidar` puts a rig lidar on the robot as an RTX solid-state lidar (Isaac Sim's ``OmniLidar``), on the
-  body its rig frame is merged into, at the frame's mount, with its model's range, field and noise; and assembles
-  each sweep from what every render fires: points in the sensor frame with their firing times. Its emitters fire the
-  directions of :func:`~humanoid_sim.sensors.geometry.scan_pattern`: one RTX tick per sweep, every ray of the sweep
-  an emitter firing at its time in the sweep, and one emitter state per sweep for ``PATTERN_SWEEPS`` sweeps, after
-  which the pattern repeats.
+  body its rig frame is merged into, at the frame's mount, with its model's range, field and noise; and makes each
+  sweep from one render's output: points in the sensor frame by emitter. Its emitters fire the directions of
+  :func:`~humanoid_sim.sensors.geometry.scan_pattern`: one RTX tick per sweep and one emitter state per tick for
+  ``PATTERN_SWEEPS`` sweeps, after which the pattern repeats.
 * :func:`scan_mesh_prim` writes a room's scan (the OBJ ``world/scan.py`` reads) as a USD mesh in the world frame
   (moved by ``-spawn`` like the room's boxes), for the lidar to hit. With a splat the cameras see it instead and
   the mesh is hidden from camera rays (``rtx.hide_from_cameras``, ``sensors/room_rays.py``).
 
 The lidar fires on Kit's timeline, which :class:`~humanoid_sim.sensors.rtx.KitRender` advances by the plant time
-between renders. The RTX sensor clock runs at the timeline's rate from its own origin, and its sweeps start on whole
-multiples of the sweep period of that clock; :meth:`RtxLidar.read` maps them to plant time by the render's own time.
-A render reports the rays fired in at most one sweep period after the previous render, so when renders fall further
-apart than that, :meth:`RtxLidar.render_time` advances the timeline by one period only: the rays stay contiguous and
-the sweeps whole, and the plant time skipped is a gap between sweeps.
+between renders. A render's output holds the rays fired since the previous render, all from one emitter state and all
+traced at the pose of that render (no motion BVH): the RTX sensor clock's sweep boundaries fall anywhere inside it.
+So a sweep is one render's output, and the lidar must render once per sweep period (its own pass, without cameras):
+:meth:`RtxLidar.read` stamps it with the render's plant time and pose and every ray's time 0, which is when RTX traced
+it. Splicing outputs at the sensor clock's boundaries instead mixes two states traced at two poses under one pose.
+When renders fall further apart than a period, :meth:`RtxLidar.render_time` advances the timeline by one period only,
+so an output stays one whole pattern and the plant time skipped is a gap between sweeps.
 
 Every ray that meets a surface within the model's range returns: the scene's surfaces carry no lidar reflectance
 (RTX non-visual materials), so a real sensor's reflectivity-dependent reach (the Mid-360's 70 m is at 80 %) and its
@@ -42,9 +43,9 @@ VALID = 64  # GenericModelOutput ElementFlags.VALID: the ray returned
 
 @dataclass(frozen=True)
 class Sweep:
-    """One sweep: its start (plant ns), every ray's point in the sensor frame ``[N, 3]`` in firing order (zero where
-    it did not return), whether it returned ``[N]`` and when it fired after the start ``[N]`` (s); and the sensor's
-    world pose at the render that completed it."""
+    """One sweep, one render's output: the render's plant time (ns), every ray's point in the sensor frame ``[N, 3]``
+    by emitter (zero where it did not return), whether it returned ``[N]`` and when it was traced after ``start_ns``
+    ``[N]`` (s, 0: RTX traces a render's rays at once); and the sensor's world pose at that render."""
 
     start_ns: int
     points_m: np.ndarray
@@ -126,10 +127,12 @@ class RtxLidar:
             prim.GetAttribute(state + "channelId").Set(list(range(1, n + 1)))
             prim.GetAttribute(state + "bank").Set(line)
         self.runtime = rtx.LidarSensor(self.lidar, annotators=["generic-model-output"])
-        self._open: dict[int, list[tuple[np.ndarray, ...]]] = {}  # sweep start (sensor ns): rays so far
-        self._first_ns: int | None = None  # the sensor clock at the first render
+        self._init_reads()
+
+    def _init_reads(self) -> None:
         self._last: tuple[int, int] | None = None  # the last render's plant and timeline times
-        self.dropped = 0  # sweeps begun before the first render, which the sensor reports in part or out of time
+        self._whole = False  # whether an output has held the whole pattern yet
+        self.dropped = 0  # partial outputs while the sensor starts, before its first whole one
         self.reads = {"renders": 0, "outputs": 0, "rays": 0}
 
     def render_time(self, now_ns: int) -> int:
@@ -141,53 +144,50 @@ class RtxLidar:
         return timeline_ns + min(now_ns - plant_ns, self.period_ns)
 
     def read(self, now_ns: int, timeline_ns: int | None = None) -> list[Sweep]:
-        """The sweeps completed by the render at plant time ``now_ns`` (on the timeline at ``timeline_ns``, by
-        default ``now_ns``), oldest first."""
+        """The sweep the render at plant time ``now_ns`` traced (on the timeline at ``timeline_ns``, by default
+        ``now_ns``): none while the sensor starts. Refuses an output that is not one whole pattern once one was."""
         self._last = (now_ns, now_ns if timeline_ns is None else timeline_ns)
         self.reads["renders"] += 1
         data, _ = self.runtime.get_data("generic-model-output")
         if data is None or getattr(data, "size", 0) == 0:
-            return []
+            return self._partial(now_ns, 0)
         g = self._rtx.parse_generic_model_output_data(data)
         if g.numElements == 0:
-            return []
+            return self._partial(now_ns, 0)
         self.reads["outputs"] += 1
         self.reads["rays"] += int(g.numElements)
-        end_ns = int(g.frameEnd.timestampNs)  # the sensor clock at this render
-        if self._first_ns is None:
-            self._first_ns = end_ns
+        n = len(self.fire_ns)
         emitter = np.asarray(g.emitterId, dtype=np.int64)
-        start = int(g.timestampNs) + np.asarray(g.timeOffsetNs, dtype=np.int64) - self.fire_ns[emitter]
-        fields = (emitter, np.asarray(g.x, dtype=np.float64), np.asarray(g.y, dtype=np.float64),
-                  np.asarray(g.z, dtype=np.float64), np.asarray(g.flags))
-        for s in np.unique(start):
-            rows = start == s
-            self._open.setdefault(int(s), []).append(tuple(f[rows] for f in fields))
-        out = []
+        if emitter.min() < 0 or emitter.max() >= n:
+            raise ValueError(f"lidar output names emitters {emitter.min()}..{emitter.max()} of {n}")
+        # A ray fired on a render's boundary can come twice: keep its first report (np.unique sorts by emitter).
+        _, first = np.unique(emitter, return_index=True)
+        if len(first) != n:
+            return self._partial(now_ns, len(first))
+        self._whole = True
         pose = (np.asarray(g.frameEnd.posM, dtype=np.float64), _quat_matrix(g.frameEnd.orientation))
-        for s in sorted(k for k in self._open if k + self.period_ns <= end_ns):
-            parts = self._open.pop(s)
-            emitter, az, el, r, flags = (np.concatenate(f) for f in zip(*parts, strict=True))
-            # A ray fired on a render's boundary comes in both renders' outputs: keep its first report.
-            _, first = np.unique(emitter, return_index=True)
-            if s < self._first_ns or len(first) != len(self.fire_ns):
-                self.dropped += 1
-                continue
-            out.append(self._sweep(s - (end_ns - now_ns), emitter[first], az[first], el[first], r[first],
-                                   flags[first], pose))
-        return out
+        return [self._sweep(now_ns, np.asarray(g.x, dtype=np.float64)[first], np.asarray(g.y, dtype=np.float64)[first],
+                            np.asarray(g.z, dtype=np.float64)[first], np.asarray(g.flags)[first], pose)]
 
-    def _sweep(self, start_ns, emitter, az_deg, el_deg, r, flags, pose) -> Sweep:
+    def _partial(self, now_ns: int, rays: int) -> list[Sweep]:
+        if self._whole:
+            raise RuntimeError(f"the render at {now_ns} ns traced {rays} of the lidar's {len(self.fire_ns)} rays: "
+                               "render the lidar once per sweep period, in its own pass")
+        self.dropped += 1
+        return []
+
+    @staticmethod
+    def _sweep(stamp_ns, az_deg, el_deg, r, flags, pose) -> Sweep:
         hit = ((flags & VALID) > 0) & (r > 0)
         r = np.where(hit, r, 0.0)
         az, el = np.radians(az_deg), np.radians(el_deg)
         points = np.stack([r * np.cos(el) * np.cos(az), r * np.cos(el) * np.sin(az), r * np.sin(el)], axis=1)
-        return Sweep(start_ns=int(start_ns), points_m=points.astype(np.float32), hit=hit,
-                     time_s=self.fire_ns[emitter] / 1e9, origin_w=pose[0], rotation_w=pose[1])
+        return Sweep(start_ns=int(stamp_ns), points_m=points.astype(np.float32), hit=hit, time_s=np.zeros(len(r)),
+                     origin_w=pose[0], rotation_w=pose[1])
 
     @staticmethod
     def to_world(sweep: Sweep) -> np.ndarray:
-        """The sweep's returns in the world, all at the sensor's pose at the render that completed it."""
+        """The sweep's returns in the world, at the sensor's pose at the render that traced them."""
         return sweep.points_m[sweep.hit].astype(np.float64) @ sweep.rotation_w.T + sweep.origin_w
 
 
