@@ -55,6 +55,8 @@ class SessionCfg:
     rrd: str | None = None
     images: str | None = None
     lidar_noise: bool = True  # the lidar model's range and angular errors; off for exact geometry
+    depth_noise: bool = False  # the stereo cameras' depth errors (sensors/stereo_depth.py); off: exact depth
+    seed: int = 0  # the depth errors' random generator
     light: float = DOME_INTENSITY  # the dome light (nits); 0 for none
     lights: str | None = None  # ceiling lights (JSON, sensors/lights.py), placed with spawn_m; may set the dome
     keep_sweeps: int = 0  # the last sweeps to keep in ``SensorSession.sweeps``
@@ -88,6 +90,8 @@ class SensorSession:
         self.unsimulated = [n for n in self.rig.sensors if n not in simulated]
         self.mounts = {s.name: Mount.from_description(desc, s.frame) for s in cameras + lidars}
         self.camera_specs = [camera_spec(s) for s in cameras]
+        self.camera_models = {spec.camera_id: s for spec, s in zip(self.camera_specs, cameras, strict=True)}
+        self.rng = np.random.default_rng(cfg.seed)
         bodies = rtx.body_paths(self.usd, {m.link for m in self.mounts.values()})
         entities = rtx.camera_entities([(spec, self.mounts[s.name]) for spec, s in zip(self.camera_specs, cameras,
                                                                                      strict=True)], bodies)
@@ -248,10 +252,14 @@ class SensorSession:
 
         stamp = ros_time_s(now_ns, self.now_ns)
         for cam in self.camera_specs:
+            frames = {}
             for s in cam.streams:
                 t = time.perf_counter()
                 image = self.cameras.image(cam, s)
                 self.ms["camera_read"].append(1e3 * (time.perf_counter() - t))
+                if s.kind == "depth" and self.cfg.depth_noise:
+                    image = self._stereo_depth(cam, s, image, frames)
+                frames[s.name] = image
                 frame = depth_mm(image, s.range_m) if s.kind == "depth" else image
                 if cam.camera_id in self.feeds:
                     t = time.perf_counter()
@@ -260,6 +268,31 @@ class SensorSession:
                 self.counts["camera_frames"] += 1
                 self.last_images[(cam.camera_id, s.name)] = image
                 self._record_image(f"{cam.camera_id}/{s.name}", image, now_ns, depth=s.kind == "depth")
+
+    def _stereo_depth(self, cam, depth, image: np.ndarray, frames: dict[str, np.ndarray]) -> np.ndarray:
+        """The depth ``image`` as the stereo camera ``cam`` reports it, its reference imager's frame of this render
+        among ``frames`` (the camera's streams before ``depth``)."""
+        from humanoid_sim.sensors.geometry import quat_matrix, resample
+        from humanoid_sim.sensors.stereo_depth import stereo_depth, stereo_pair
+
+        model = self.camera_models[cam.camera_id]
+        if not model.stereo_baseline_m:
+            return image
+        reference, baseline_m, on_right = stereo_pair(cam.streams, depth, model.stereo_baseline_m)
+        grey = frames.get(reference) if reference is not None else None
+        if grey is not None:  # the matcher sees the reference imager rectified: on the depth image's lens and axes
+            ref = cam.stream(reference)
+            rotation = quat_matrix(ref.rotation_xyzw).T @ quat_matrix(depth.rotation_xyzw)
+            grey = resample(grey, ref.lens, depth.lens, rotation)
+        return stereo_depth(image, focal_px=depth.lens.fx_px, baseline_m=baseline_m,
+                            disparity_sigma_px=model.depth_disparity_sigma_px, rng=self.rng,
+                            disparity_step_px=model.depth_disparity_step_px, depth_focal_px=model.depth_focal_px,
+                            reference=grey,
+                            min_texture=model.depth_min_texture if grey is not None else 0.0,
+                            texture_exponent=model.depth_noise_texture_exponent,
+                            texture_range=model.depth_noise_texture_range, noise_blur_px=model.depth_noise_blur_px,
+                            median_px=model.depth_median_px, lr_check_px=model.depth_lr_check_px,
+                            second_on_right=on_right)
 
     def _record_image(self, key: str, image: np.ndarray, now_ns: int, *, depth: bool) -> None:
         if self.recorder:

@@ -1,6 +1,6 @@
 """Where the G1's cameras and lidar sit and what they see (``sensors/geometry.py``), built from the sensor models and
 the rig: mounts on the bodies of the G1 URDF, each lens against projections worked out by hand for points at known
-angles, and the lidar's pattern against its model's figures."""
+angles, an image resampled from one lens onto another, and the lidar's pattern against its model's figures."""
 
 from __future__ import annotations
 
@@ -63,6 +63,83 @@ def test_a_pinhole_maps_angles_to_pixels():
     np.testing.assert_allclose(uv, [[320, 240], [640, 240], [320, 80]], atol=1e-9)
 
 
+RATIONAL = (0.3, -0.04, 0.0012, -0.0007, -0.0015, 0.65, -0.02, -0.01)  # k1 k2 p1 p2 k3 k4 k5 k6, a wide lens
+
+
+def test_a_rational_lens_is_opencvs_rational_model():
+    k1, k2, p1, p2, k3, k4, k5, k6 = RATIONAL
+    lens = geometry.Lens(640, 400, 280.0, 281.0, 320.0, 200.0, "rational_polynomial", RATIONAL)
+    for x, y in ((0.2, 0.0), (0.0, -0.5), (0.8, 0.6), (-1.1, 0.3)):
+        r2 = x * x + y * y
+        radial = (1 + k1 * r2 + k2 * r2**2 + k3 * r2**3) / (1 + k4 * r2 + k5 * r2**2 + k6 * r2**3)
+        xd = x * radial + 2 * p1 * x * y + p2 * (r2 + 2 * x * x)
+        yd = y * radial + p1 * (r2 + 2 * y * y) + 2 * p2 * x * y
+        (u, v), = lens.project([[2 * x, 2 * y, 2.0]])
+        assert (u, v) == (pytest.approx(280.0 * xd + 320.0), pytest.approx(281.0 * yd + 200.0))
+    # Without its denominator it is plumb_bob.
+    plumb = geometry.Lens(640, 400, 280.0, 281.0, 320.0, 200.0, "plumb_bob", RATIONAL[:5])
+    flat = geometry.Lens(640, 400, 280.0, 281.0, 320.0, 200.0, "rational_polynomial", (*RATIONAL[:5], 0, 0, 0))
+    points = [[0.3, -0.2, 1.0], [-0.9, 0.5, 1.0]]
+    np.testing.assert_allclose(flat.project(points), plumb.project(points))
+
+
+def test_an_image_resampled_onto_a_pinhole_is_what_the_pinhole_sees():
+    lens = geometry.Lens(640, 400, 280.0, 281.0, 320.0, 200.0, "rational_polynomial", RATIONAL)
+    onto = geometry.Lens(640, 400, 260.0, 260.0, 322.0, 198.0)
+    v, u = np.mgrid[0:400, 0:640].astype(float)
+    out = geometry.resample(np.stack([u, v], axis=-1), lens, onto)  # each pixel holds its own place in ``lens``
+    for x, y in ((322, 198), (100, 50), (600, 380)):
+        (eu, ev), = lens.project([[(x - 322.0) / 260.0, (y - 198.0) / 260.0, 1.0]])
+        np.testing.assert_allclose(out[y, x], (eu, ev), atol=1e-9)  # bilinear on a linear ramp is exact
+    same = geometry.Lens(640, 400, 260.0, 260.0, 322.0, 198.0)
+    np.testing.assert_allclose(geometry.resample(u, same, onto), u, atol=1e-9)
+    with pytest.raises(ValueError, match="distortion-free"):
+        geometry.resample(u, onto, lens)
+
+
+def test_a_streams_calibrated_orientation_turns_its_optical_frame_and_its_rtx_camera():
+    from humanoid_sim.sensors.rtx import stream_offset
+
+    yaw = math.radians(2.0)  # the depth view turned 2 deg about the camera's up axis, towards its left
+    turn = np.array([[math.cos(yaw), -math.sin(yaw), 0.0], [math.sin(yaw), math.cos(yaw), 0.0], [0.0, 0.0, 1.0]])
+    q = geometry.quat_xyzw(turn @ geometry.LINK_FROM_OPTICAL)
+    pinhole = (300.0, 300.0, 320.0, 200.0)
+    camera = OakDW("camera_link", width=640, height=400, frame_period_ns=33_333_333,
+                   intrinsics={s: pinhole for s in OakDW.streams}, stream_rotations_xyzw={"depth": q})
+    camera.name = "cam"
+    spec = geometry.camera_spec(camera)
+    depth, left = spec.stream("depth"), spec.stream("mono_left")
+    np.testing.assert_allclose(geometry.quat_matrix(depth.rotation_xyzw), turn @ geometry.LINK_FROM_OPTICAL,
+                               atol=1e-12)
+    np.testing.assert_allclose(geometry.quat_matrix(left.rotation_xyzw), geometry.LINK_FROM_OPTICAL, atol=1e-12)
+    # On a body turned a quarter about z, the RTX camera of the nominal stream looks along the body's y, the turned
+    # one 2 deg further round.
+    mount = geometry.Mount("camera_link", "body", (0.0, 0.0, 0.0), ((0.0, -1.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)))
+    for stream, angle in ((left, 0.0), (depth, yaw)):
+        _, q_rtx = stream_offset(mount, stream)
+        forward = geometry.quat_matrix(q_rtx) @ [1.0, 0.0, 0.0]
+        np.testing.assert_allclose(forward, (-math.sin(angle), math.cos(angle), 0.0), atol=1e-12)
+
+
+def test_a_turned_view_samples_where_its_rays_land():
+    lens = geometry.Lens(640, 400, 280.0, 281.0, 320.0, 200.0, "rational_polynomial", RATIONAL)
+    onto = geometry.Lens(640, 400, 260.0, 260.0, 322.0, 198.0)
+    a = math.radians(1.0)
+    rotation = np.array([[math.cos(a), 0.0, math.sin(a)], [0.0, 1.0, 0.0], [-math.sin(a), 0.0, math.cos(a)]])
+    v, u = np.mgrid[0:400, 0:640].astype(float)
+    out = geometry.resample(np.stack([u, v], axis=-1), lens, onto, rotation)
+    for x, y in ((322, 198), (100, 50), (600, 380)):
+        (eu, ev), = lens.project([rotation @ [(x - 322.0) / 260.0, (y - 198.0) / 260.0, 1.0]])
+        np.testing.assert_allclose(out[y, x], (eu, ev), atol=1e-9)
+
+
+def test_the_v1s_raw_streams_have_rational_lenses_and_its_depth_none():
+    spec = geometry.camera_spec(rigs.rig("ethrc_v1").sensors["camera0"])
+    models = {s.name: (s.lens.distortion_model, len(s.lens.distortion)) for s in spec.streams}
+    assert models == {"rgb": ("rational_polynomial", 8), "mono_left": ("rational_polynomial", 8),
+                      "mono_right": ("rational_polynomial", 8), "depth": ("none", 0)}
+
+
 def test_the_zed_minis_streams_are_its_rig_calibration(rig):
     spec = geometry.camera_spec(rig.sensors["zed"])
     assert (spec.camera_id, spec.product, spec.sensor_link) == ("sim-zed", "Stereolabs ZED Mini", "camera0_camera")
@@ -122,7 +199,9 @@ def test_a_camera_without_every_stream_placed_is_refused(rig):
     spec = geometry.camera_spec(v1.sensors["camera0"])
     places = {st.name: st.translation_m for st in spec.streams}
     assert places["mono_left"] == places["depth"] == (0.0, 0.0, 0.0)
-    assert places["mono_right"] == (0.0, -OakDW.stereo_baseline_m, 0.0)
+    # The unit's calibration places the right mono about a baseline to the right (y right is negative).
+    assert places["mono_right"][1] < 0
+    assert np.linalg.norm(places["mono_right"]) == pytest.approx(OakDW.stereo_baseline_m, abs=0.001)
     assert {st.name: st.kind for st in spec.streams} == dict(OakDW.stream_kinds)
     assert v1.unsimulated(rtx=True) == []
     # The G1's Mid-360 is simulated with the RTX sensors; with the example cameras so are they.

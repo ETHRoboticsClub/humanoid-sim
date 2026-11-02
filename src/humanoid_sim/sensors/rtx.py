@@ -6,7 +6,7 @@ it. Needs the Isaac Sim image (``docker/Dockerfile.kit``); training and the kitl
 * :func:`start_kit` starts Kit with cameras enabled, headless or with its window, before the simulation is built.
 * :func:`camera_entities` turns rig cameras' streams (``geometry.camera_spec``) into Isaac Lab cameras on the robot
   body each is mounted on (its rig frame, merged into that body), with the stream's lens: OpenCV's fisheye or
-  pinhole model, which RTX renders natively (``omni:lensdistortion``).
+  pinhole model (rational or not), which RTX renders natively (``omni:lensdistortion``).
 * :func:`splat_entity` places a room's Gaussian splat (``world/splat.py``) for the cameras, :func:`light_entity` a
   dome light for everything else.
 * :class:`KitRender` renders the stage at a plant time: Kit's timeline at that time (RTX lidars fire on it), the
@@ -24,7 +24,15 @@ import sys
 
 import numpy as np
 
-from humanoid_sim.sensors.geometry import CameraSpec, Lens, Mount, Stream, quat_xyzw
+from humanoid_sim.sensors.geometry import (
+    LINK_FROM_OPTICAL,
+    CameraSpec,
+    Lens,
+    Mount,
+    Stream,
+    quat_matrix,
+    quat_xyzw,
+)
 
 ROBOT_PRIM = "{ENV_REGEX_NS}/Robot"
 ROBOT_ROOT = "/World/envs/env_0/Robot"
@@ -104,14 +112,19 @@ def _distortion(lens: Lens):
     if lens.distortion_model == "plumb_bob":
         k1, k2, p1, p2, k3 = lens.distortion
         return OpenCvPinholeDistortionCfg(**common, k1=k1, k2=k2, k3=k3, p1=p1, p2=p2)
+    if lens.distortion_model == "rational_polynomial":
+        k1, k2, p1, p2, k3, k4, k5, k6 = lens.distortion
+        return OpenCvPinholeDistortionCfg(**common, k1=k1, k2=k2, k3=k3, k4=k4, k5=k5, k6=k6, p1=p1, p2=p2)
     return OpenCvPinholeDistortionCfg(**common)
 
 
 def stream_offset(mount: Mount, stream: Stream) -> tuple[tuple, tuple]:
     """The stream's camera in its body: position, and orientation (x, y, z, w) in Isaac Lab's ``world`` camera
-    convention (x forward, z up), which is the camera frame's; every stream of a camera looks along its x axis."""
+    convention (x forward, z up), which is the camera frame's for a stream at its nominal orientation; a stream the
+    unit's calibration turns looks along its own optical axis."""
     position = mount.R @ np.asarray(stream.translation_m) + np.asarray(mount.translation_m)
-    return tuple(float(v) for v in position), quat_xyzw(mount.R)
+    turned = quat_matrix(stream.rotation_xyzw) @ LINK_FROM_OPTICAL.T  # the stream's world convention in the camera
+    return tuple(float(v) for v in position), quat_xyzw(mount.R @ turned)
 
 
 def body_paths(usd_path, bodies) -> dict[str, str]:

@@ -43,6 +43,8 @@ def main() -> None:
     p.add_argument("--seconds", type=float, default=5.0)
     p.add_argument("--no-cameras", action="store_true")
     p.add_argument("--no-lidar", action="store_true")
+    p.add_argument("--depth-noise", action="store_true",
+                   help="the stereo cameras' depth errors (noise, occlusion and texture holes); off: exact depth")
     p.add_argument("--feeds", default=None, help="camera feed root (ethrc-camera-sim-feed/v1)")
     p.add_argument("--lidar-domain", type=int, default=None, help="publish the Mid-360 on Unitree's DDS domain")
     p.add_argument("--rrd", default=None)
@@ -61,7 +63,7 @@ def main() -> None:
         robot=args.robot, sensors=args.sensors, scene=args.scene, spawn_m=tuple(args.spawn), splat=args.splat,
         splat_intensity=args.splat_intensity, scan_mesh=args.scan_mesh, cameras=not args.no_cameras,
         lidar=not args.no_lidar, feeds=args.feeds, lidar_domain=args.lidar_domain, rrd=args.rrd, images=args.images,
-        device=args.device, assets=args.assets))
+        depth_noise=args.depth_noise, device=args.device, assets=args.assets))
     try:
         start = time.perf_counter()
         session.run(args.seconds)
