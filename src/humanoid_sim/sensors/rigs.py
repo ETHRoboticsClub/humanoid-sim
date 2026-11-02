@@ -16,9 +16,6 @@ from humanoid_sim.sensors.models import (
     ZedMini,
 )
 
-V1_MONO_LEFT = (283.604271, 283.556541, 321.744194, 196.769579)
-
-
 def ethrc_v1() -> Rig:
     return Rig(
         # 400 Hz over CAN (Controls ethrc_mti_can), each sample reaching the host as it is sent: kernel stamps of
@@ -28,12 +25,14 @@ def ethrc_v1() -> Rig:
         # (MT CAN Protocol MT1604P 2020.A 6.4.2 and 6.4.4, as Controls' ethrc_mti_can decodes them; the 2026-10-28
         # exc-* captures sit on that grid).
         imu=Mti610("imu_link", sample_period_ns=2_500_000, output_lsb=(2.0**-9, 2.0**-8)),
-        # As Controls' camera service opens it, with the unit's calibration (camera_info on the V1, 2026-10-20) for
-        # rgb and mono_left. mono_right (the same OV9282 sensor) and depth (aligned to the rectified left image) are
-        # modeled with mono_left's pinhole until the unit's are read.
+        # As Controls' camera service opens it, with the unit's calibration (camera_info on the V1: rgb and mono_left
+        # 2026-10-20, mono_right and depth 2026-11-02, unchanged rgb and mono_left). Depth is on the rectified left
+        # image, whose camera matrix DepthAI takes from the right imager: close to mono_right's, not mono_left's.
         camera0=OakDW("camera1_link", width=640, height=400, frame_period_ns=33_333_333,
                       intrinsics={"rgb": (283.087462, 282.805448, 325.969479, 198.375709),
-                                  "mono_left": V1_MONO_LEFT, "mono_right": V1_MONO_LEFT, "depth": V1_MONO_LEFT}),
+                                  "mono_left": (283.604271, 283.556541, 321.744194, 196.769579),
+                                  "mono_right": (282.176691, 282.201086, 322.219193, 195.29002),
+                                  "depth": (282.187653, 282.203949, 322.194153, 195.345032)}),
     )
 
 
