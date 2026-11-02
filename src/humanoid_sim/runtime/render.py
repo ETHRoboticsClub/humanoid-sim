@@ -48,6 +48,40 @@ def host_scene(record: dict | None) -> tuple[str | None, tuple[float, float], st
     return record["file"], spawn, mesh if mesh and Path(mesh).is_file() else None
 
 
+def crane_parts(rig) -> dict:
+    """The rig and the translate op of each crane part the splat has (``splat-usd --parts``), for a rig with a
+    ``scan_m``."""
+    if rig is None or rig.scan_m is None:
+        return {}
+    import isaaclab.sim as sim_utils
+    from pxr import UsdGeom
+
+    from humanoid_sim.sensors.rtx import SPLAT_PRIM
+
+    stage = sim_utils.get_current_stage()
+    ops = {}
+    for name in ("bridge", "trolley", "hook"):
+        prim = stage.GetPrimAtPath(f"{SPLAT_PRIM}/{name}")
+        if prim.IsValid():
+            translate = [op for op in UsdGeom.Xformable(prim).GetOrderedXformOps()
+                         if op.GetOpType() == UsdGeom.XformOp.TypeTranslate]
+            if translate:
+                ops[name] = translate[0]
+    return {"rig": rig, "ops": ops} if ops else {}
+
+
+def move_crane(crane: dict, position_m) -> None:
+    """Move the splat's crane parts to where the hook is (a NaN position: no crane, nothing moves)."""
+    position = np.asarray(position_m, dtype=np.float64)
+    if not crane or not np.isfinite(position).all():
+        return
+    from pxr import Gf
+
+    offsets = crane["rig"].part_offsets(position)
+    for name, op in crane["ops"].items():
+        op.Set(Gf.Vec3d(*map(float, offsets[name])))
+
+
 class RuntimeRender:
     """Renders one segment's robot; :meth:`frame` renders once if a render is due."""
 
@@ -80,32 +114,12 @@ class RuntimeRender:
         """The rig and the translate op of each crane part the splat has, when the host has a crane."""
         if not gantry or gantry.get("scan_m") is None:
             return {}
-        import isaaclab.sim as sim_utils
-        from pxr import UsdGeom
-
-        from humanoid_sim.sensors.rtx import SPLAT_PRIM
         from humanoid_sim.world.trolley import GantryRig
 
-        stage = sim_utils.get_current_stage()
-        ops = {}
-        for name in ("bridge", "trolley", "hook"):
-            prim = stage.GetPrimAtPath(f"{SPLAT_PRIM}/{name}")
-            if prim.IsValid():
-                translate = [op for op in UsdGeom.Xformable(prim).GetOrderedXformOps()
-                             if op.GetOpType() == UsdGeom.XformOp.TypeTranslate]
-                if translate:
-                    ops[name] = translate[0]
-        return {"rig": GantryRig.from_dict(gantry), "ops": ops} if ops else {}
+        return crane_parts(GantryRig.from_dict(gantry))
 
     def _move_crane(self, truth) -> None:
-        position = np.asarray(truth["gantry_position_m"], dtype=np.float64)
-        if not self._crane or not np.isfinite(position).all():
-            return
-        from pxr import Gf
-
-        offsets = self._crane["rig"].part_offsets(position)
-        for name, op in self._crane["ops"].items():
-            op.Set(Gf.Vec3d(*map(float, offsets[name])))
+        move_crane(self._crane, truth["gantry_position_m"])
 
     def _read(self, region: str):
         try:
@@ -231,4 +245,4 @@ def render_runtime(segment: str | Path, cfg, *, seconds: float | None = None, wa
     return out
 
 
-__all__ = ["RuntimeRender", "host_scene", "plant_now_ns", "render_runtime"]
+__all__ = ["RuntimeRender", "crane_parts", "host_scene", "move_crane", "plant_now_ns", "render_runtime"]
