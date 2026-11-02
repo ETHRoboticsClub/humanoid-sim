@@ -136,12 +136,14 @@ Each sample and axis gets Gaussian white noise with `σ = density · √(sample 
 
 | Channel | Density | σ per sample |
 |---|---|---|
-| Gyro | 1.2217e-4 rad/s/√Hz (0.007 °/s/√Hz) | 2.33e-3 rad/s |
-| Accelerometer | 5.884e-4 m/s²/√Hz (60 µg/√Hz) | 0.0112 m/s² |
+| Gyro | 1.2217e-4 rad/s/√Hz (0.007 °/s/√Hz) | 2.44e-3 rad/s |
+| Accelerometer | 5.884e-4 m/s²/√Hz (60 µg/√Hz) | 0.0118 m/s² |
+
+The V1's MTi at rest bears out both the formula and the figures (`/imu/data_raw` on the idle robot, 2026-11-02, 124 s at 400 Hz, chip axes): the gyro's spectrum is flat to 200 Hz, its Allan deviation at 0.1 s gives densities of 1.06, 1.06 and 0.91e-4 rad/s/√Hz, and its per-sample σ less the CAN quantization is 1.99, 1.95 and 1.58e-3 rad/s, 0.87 to 0.94 of density · √(sample rate) (density · √(rate / 2), the Nyquist band alone, would give 0.71). The accelerometer's densities are 5.8, 5.3 and 4.4e-4 m/s²/√Hz. With the drives energized the robot reads 2.1 to 2.9e-3 rad/s per sample in `base_link`, so the leaflet's figure sits between the two.
 
 The model also gives the sensor a bias, per axis and env:
 
-- Turn-on bias (`turn_on`): drawn at every reset from a normal distribution with the model's 1σ (`gyro_turn_on_bias_rad_s`, `accel_turn_on_bias_m_s2`), constant until the next reset. The MTi-610's gyro figure, 1.5e-3 rad/s, is modeled from the size of the bias at one power-on of the V1 (the spread across power-ons is unmeasured); the 2026-10-28 excitation captures (`exc-53f09771`, `exc-5fd2bcca`) read run means of 0.0 to 0.1, 2.1 to 2.2 and 1.3 to 1.7e-3 rad/s in `base_link`, the same size, and 0.09 to 0.12 rad of yaw over their first 60 s against 0.09 rad RMS for the model; its accelerometer figure is unmeasured (0). The runtime redraws it at every IMU reset, not only at power-on.
+- Turn-on bias (`turn_on`): drawn at every reset from a normal distribution with the model's 1σ (`gyro_turn_on_bias_rad_s`, `accel_turn_on_bias_m_s2`), constant until the next reset. The MTi-610's gyro figure, 1.5e-3 rad/s, is modeled from the size of the bias at one power-on of the V1 (the spread across power-ons is unmeasured); the 2026-10-28 excitation captures (`exc-53f09771`, `exc-5fd2bcca`) read run means of 0.0 to 0.1, 2.1 to 2.2 and 1.3 to 1.7e-3 rad/s in `base_link`, the same size, as do the chip-axis means at rest on 2026-11-02 (1.0, 0.3 and 2.1e-3 rad/s), and 0.09 to 0.12 rad of yaw over their first 60 s against 0.09 rad RMS for the model; its accelerometer figure is unmeasured (0). The runtime redraws it at every IMU reset, not only at power-on.
 - In-run drift (`drift`): a first-order Gauss-Markov process advanced every sample, whose stationary σ is the model's bias instability (`gyro_bias_instability_rad_s`, `accel_bias_instability_m_s2`: for the MTi-610 8 °/h and 15 µg) and whose correlation time is `bias_correlation_time_ns` (100 s, modeled). A reset draws it from its stationary distribution.
 
 On top of the model, each env has a gyro bias `gyro_bias` (rad/s), an accelerometer bias `accel_bias` (m/s²) and a `misalignment` (a rotation vector in rad: the sensor's rotation in its mount). A sample is `R(misalignment) · ideal + bias + turn_on + drift + noise`. In training the three come from the `imu_gyro_bias`, `imu_accel_bias` and `imu_misalignment` [randomization](training.md#randomization) parameters and stay constant through an episode; a task adds them to widen what the model gives. In the runtime they are zero unless an `imu_bias` or `imu_spike` fault is injected (see [drives.md](drives.md#physical-faults)).
