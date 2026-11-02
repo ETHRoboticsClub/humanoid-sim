@@ -139,3 +139,72 @@ def test_invalid_discrete_or_bucket_specs_fail(overrides):
             'quantum': .005, 'op': 'set'}
     with pytest.raises(ValueError):
         ParamSpec.from_dict(base | overrides)
+
+
+COM_AXES = [[-0.03, 0.12], [-0.01, 0.01], [0.02, 0.05]]
+
+
+@pytest.mark.parametrize("dist,rng", [("uniform", COM_AXES), ("discrete_uniform", [[0.0, 0.1], [0.0, 0.02], [0.0, 0.05]]),
+                                      ("log_uniform", [[0.1, 1.0], [1.0, 2.0], [5.0, 6.0]])])
+def test_per_axis_draws_stay_in_each_axis_bounds(dist, rng):
+    extra = {"quantum": 0.01} if dist == "discrete_uniform" else {}
+    specs = parse_specs([{"param": "body_com", "bodies": "torso", "dist": dist, "range": rng, "op": "set", **extra}])
+    com = Randomizer(specs, _nominal(256), NAMES, num_envs=256).values["body_com"][:, 1]
+    for a, (lo, hi) in enumerate(rng):
+        assert (com[:, a] >= lo - 1e-12).all() and (com[:, a] <= hi + 1e-12).all()
+        assert com[:, a].max() - com[:, a].min() > 0.5 * (hi - lo)
+
+
+def test_per_axis_normal_scale_and_levels():
+    specs = parse_specs([{"param": "body_com", "bodies": "torso", "dist": "normal",
+                          "range": [[0.0, 0.0], [1.0, 0.0], [0.0, 0.5]], "op": "set"}])
+    com = Randomizer(specs, _nominal(256), NAMES, num_envs=256).values["body_com"][:, 1]
+    assert (com[:, 0] == 0).all() and (com[:, 1] == 1).all() and com[:, 2].std() > 0.2
+    half = Randomizer(specs, _nominal(256), NAMES, num_envs=256, level=0.5).values["body_com"][:, 1]
+    assert torch.allclose(half[:, 1], torch.full((256,), 1.0, dtype=half.dtype))  # set: centre is the mean
+
+
+def test_per_axis_levels_shrink_toward_each_axis_centre():
+    specs = parse_specs([{"param": "body_com", "bodies": "torso", "dist": "uniform", "range": COM_AXES, "op": "set"}])
+    com = Randomizer(specs, _nominal(256), NAMES, num_envs=256, level=0.0).values["body_com"][:, 1]
+    centres = torch.tensor([0.5 * (lo + hi) for lo, hi in COM_AXES])
+    assert torch.allclose(com, centres.expand(256, 3), atol=1e-6)
+
+
+def test_per_axis_imu_range_is_taken_by_selected_axis():
+    rng = [[0.0, 1.0], [10.0, 11.0], [20.0, 21.0]]
+    specs = parse_specs([{"param": "imu_gyro_bias", "select": "[yz]", "dist": "uniform", "range": rng, "op": "set"}])
+    g = Randomizer(specs, _nominal(), NAMES, num_envs=64).values["imu_gyro_bias"]
+    assert (g[:, 0] == 0).all()
+    assert ((g[:, 1] >= 10) & (g[:, 1] <= 11)).all() and ((g[:, 2] >= 20) & (g[:, 2] <= 21)).all()
+
+
+def test_scalar_pair_is_unchanged_by_per_axis_support():
+    pair = {"param": "body_com", "bodies": "torso", "dist": "uniform", "op": "add"}
+    a = Randomizer(parse_specs([{**pair, "range": [-0.03, 0.12]}]), _nominal(), NAMES, num_envs=64, seed=3)
+    b = Randomizer(parse_specs([{**pair, "range": [[-0.03, 0.12]] * 3}]), _nominal(), NAMES, num_envs=64, seed=3)
+    assert ParamSpec.from_dict({**pair, "range": [-0.03, 0.12]}).axis_ranges is None
+    assert torch.equal(a.values["body_com"], b.values["body_com"])
+
+
+@pytest.mark.parametrize("param,rng,match", [
+    ("body_com", [[0, 1], [0, 1]], "needs 3 pairs"),
+    ("body_com", [[0, 1], [0, 1], [0, 1], [0, 1]], "needs 3 pairs"),
+    ("body_com", [[0, 1], [0, 1], [0]], "two numbers"),
+    ("body_com", [[0, 1], [0, 1], [0, 1, 2]], "two numbers"),
+    ("body_com", [[0, 1], [2, 1], [0, 1]], "low"),
+    ("body_mass", [[0, 1]], "scalar parameter"),
+    ("latency", [[0, 1], [0, 1], [0, 1]], "scalar parameter"),
+])
+def test_bad_per_axis_ranges_are_refused(param, rng, match):
+    with pytest.raises(ValueError, match=match):
+        ParamSpec.from_dict({"param": param, "dist": "uniform", "range": rng, "op": "add"})
+
+
+def test_per_axis_log_uniform_and_quantum_are_checked_per_pair():
+    with pytest.raises(ValueError, match="log_uniform"):
+        ParamSpec.from_dict({"param": "body_com", "dist": "log_uniform", "range": [[1, 2], [0, 1], [1, 2]],
+                             "op": "scale"})
+    with pytest.raises(ValueError, match="whole number"):
+        ParamSpec.from_dict({"param": "body_com", "dist": "discrete_uniform", "quantum": 0.01, "op": "set",
+                             "range": [[0, 0.1], [0, 0.015], [0, 0.1]]})

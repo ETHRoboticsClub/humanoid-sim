@@ -191,11 +191,15 @@ class RobotPlant:
             lo, hi = imu_latency_bounds(specs, self.imu_latency_ns)
             if lo < 0:
                 raise ValueError(f"imu_latency can draw {lo} ns; a latency is not negative")
-            delivery = rigs.imu(self.desc).delivery_cfg()
+            sensor = rigs.imu(self.desc)
+            delivery = sensor.delivery_cfg()
             pending = max(delivery.pending, pending_slots(delivery, math.ceil(hi), self.period_ns))
             self.imu = ImuDelivery(replace(delivery, pending=pending), e, device=self.device, seed=cfg.seed + 1)
             self.imu.reset(torch.arange(e, device=self.device), 0)
             self.imu.latency_ns.fill_(self.imu_latency_ns)
+            if sensor.output_lsb is not None:  # the host decodes counts; the runtime's client does this itself
+                gyro_lsb, accel_lsb = sensor.output_lsb
+                self.imu.lsb.copy_(torch.tensor([gyro_lsb] * 3 + [accel_lsb] * 3, device=self.device))
 
         self._nominal_physics = self._read_physics()
         self.core.enabled_friction.copy_(self._nominal_physics["joint_friction"])

@@ -385,7 +385,7 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `physics.period_ns` | `SimCore`, `RobotPlant`, `robot_sim_cfg` | Physics step: 1000000 ns for native V1, 4000000 ns for G1. `replay --period-ms` sets it for replays. |
 | `physics.solver` | `solver_settings` | The Newton solver that steps the robot: `mjwarp` (the default) or `kamino` (beta). The global option `--solver` and `robot_sim_cfg(solver=...)` override it; the solver needs its own block below. |
 | `physics.self_collision` | `SimCore`, `robot_scene_cfg` | Self-collision on the spawned articulation. |
-| `physics.mjwarp.integrator` | `solver_cfg` | MJWarp integrator: native V1 uses `rk4`; the general default is `implicitfast`. `replay --integrator` overrides it. |
+| `physics.mjwarp.integrator` | `solver_cfg` | MJWarp integrator: `rk4` for every robot. The first-order integrators (`euler`, `implicit`, `implicitfast`) do not conserve angular momentum under fast joint motion at 4 ms (`tests/test_angular_momentum.py`). `replay --integrator` overrides it. |
 | `physics.mjwarp.cone` | `solver_cfg` | Friction cone model, `pyramidal`. |
 | `physics.mjwarp.iterations`, `.ls_iterations` | `solver_cfg` | Solver and line-search iteration limits. |
 | `physics.mjwarp.njmax`, `.nconmax` | `solver_cfg` | MJWarp buffers: constraint rows per world (a maximum) and contacts per world (an average; the pool is shared by all worlds). |
@@ -393,7 +393,7 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `physics.mjwarp.heightfield_base_m` | `apply_heightfield_base` | Depth of the solid base under a heightfield's lowest point, 1.0 m (see [world.md](world.md#the-heightfields-base)). |
 | `physics.kamino.integrator` | `solver_cfg` | `euler`, the only one allowed: `moreau` needs Kamino's own collision detector, which is not used here. |
 | `physics.kamino.dynamics_solver`, `.iterations` | `solver_cfg` | `padmm` (default) or `dvi`, and its outer iteration limit. |
-| `physics.kamino.max_contacts_per_world` | `solver_cfg`, `ContactCapacityGuard` | Contact buffer per world (144 for native V1). Training and runtime check Newton's collision pool on device and stop if a world exceeds Kamino's capacity. |
+| `physics.kamino.max_contacts_per_world` | `solver_cfg`, `ContactCapacityGuard` | Contact buffer per world (144 for native V1). Training and runtime assert on Kamino's own overflow flag on device after each step and stop if a world dropped a contact. The flag counts only the contacts Kamino keeps: it culls speculative ones (still apart) before it reserves capacity. |
 | `physics.mjwarp.loop_closure_solref`, `.loop_closure_solimp` | `apply_loop_closure` | Numerical response time/damping and impedance of joint-synthesized native loop constraints; actuator gains are independent. |
 | `physics.kamino.use_fk_solver` | `solver_cfg` | Native V1 uses `false`: resets supply all crank and ball coordinates, so tree FK preserves that closed state without a regularized kinematics solve. |
 | `physics.kamino.sparse_jacobian`, `.sparse_dynamics` | `solver_cfg` | Sparse storage for the constraint Jacobian and dynamics operator. Native V1 uses a sparse Jacobian and a direct dense operator after fixed-joint collapse, sized for 4096 environments. |

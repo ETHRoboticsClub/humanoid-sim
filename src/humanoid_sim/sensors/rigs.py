@@ -24,7 +24,10 @@ def ethrc_v1() -> Rig:
         # 400 Hz over CAN (Controls ethrc_mti_can), each sample reaching the host as it is sent: kernel stamps of
         # /imu/data_raw on the V1 (2026-10-20, 2000 samples) are 2.47 ms apart (median; p1 2.33, p99 3.12 ms), none
         # missed. The exc-* captures' bursts were the earlier serial path.
-        imu=Mti610("imu_link", sample_period_ns=2_500_000),
+        # Over CAN the host reads RateOfTurn in counts of 2^-9 rad/s and Acceleration in 2^-8 m/s^2, signed 16-bit
+        # (MT CAN Protocol MT1604P 2020.A 6.4.2 and 6.4.4, as Controls' ethrc_mti_can decodes them; the 2026-10-28
+        # exc-* captures sit on that grid).
+        imu=Mti610("imu_link", sample_period_ns=2_500_000, output_lsb=(2.0**-9, 2.0**-8)),
         # As Controls' camera service opens it, with the unit's calibration (camera_info on the V1, 2026-10-20) for
         # rgb and mono_left. mono_right (the same OV9282 sensor) and depth (aligned to the rectified left image) are
         # modeled with mono_left's pinhole until the unit's are read.

@@ -75,10 +75,14 @@ class Imu(Sensor):
     bias_correlation_time_ns: ClassVar[int] = 100_000_000_000
 
     def __init__(self, frame: str, *, sample_period_ns: int, burst_period_ns: tuple[int, int] | None = None,
-                 in_burst_spacing_ns: int = 0):
+                 in_burst_spacing_ns: int = 0, output_lsb: tuple[float, float] | None = None):
         """``burst_period_ns``: the host receives samples in bursts this far apart (uniform per burst); default:
-        every sample as it is taken."""
+        every sample as it is taken. ``output_lsb``: the host reads each axis as a signed 16-bit count of this
+        many rad/s (gyro) and m/s² (accelerometer); default: unquantized."""
         super().__init__(frame)
+        if output_lsb is not None and (len(output_lsb) != 2 or not all(v > 0 for v in output_lsb)):
+            raise ValueError(f"output_lsb {output_lsb!r}: expected (gyro rad/s, accel m/s^2) per count, both > 0")
+        self.output_lsb = None if output_lsb is None else (float(output_lsb[0]), float(output_lsb[1]))
         self.sample_period_ns = _positive_ns("sample_period_ns", sample_period_ns)
         burst = tuple(burst_period_ns or (sample_period_ns, sample_period_ns))
         if len(burst) != 2:

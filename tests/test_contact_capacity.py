@@ -5,19 +5,28 @@ from types import SimpleNamespace
 import pytest
 
 
-def test_contact_capacity_counts_each_world_and_ignores_unused_pool_entries():
-    wp = pytest.importorskip("warp")
-    from humanoid_sim.physics.contact_capacity import ContactCapacityGuard
+def _solver(flag):
+    return SimpleNamespace(_contacts_kamino=SimpleNamespace(_data=SimpleNamespace(_contact_overflow_warning_emitted=flag)))
 
-    contacts = SimpleNamespace(
-        rigid_contact_count=wp.array([4], dtype=int, device="cpu"),
-        rigid_contact_shape0=wp.array([0, 1, 2, 0, 1], dtype=int, device="cpu"),
-        rigid_contact_shape1=wp.array([1, 0, 0, 0, 0], dtype=int, device="cpu"))
-    model = SimpleNamespace(shape_world=wp.array([-1, 0, 1], dtype=int, device="cpu"))
-    manager = SimpleNamespace(get_contacts=lambda: contacts, get_model=lambda: model)
-    guard = ContactCapacityGuard(manager, 2, 2, "cpu")
-    guard.check()  # two contacts in world 0, one in world 1; global-static pair is ignored
-    guard.check()  # counts reset rather than accumulating across steps
-    contacts.rigid_contact_count.assign([5])
+
+def test_contact_capacity_guard_follows_kaminos_overflow_flag():
+    wp = pytest.importorskip("warp")
+    from humanoid_sim.physics.contact_capacity import ContactCapacityGuard, kamino_overflow_flag
+
+    flag = wp.zeros(1, dtype=wp.int32, device="cpu")
+    guard = ContactCapacityGuard(kamino_overflow_flag(_solver(flag)))
+    guard.check()  # no contact dropped in the last conversion
+    flag.fill_(1)  # Kamino dropped a contact: a world ran out of capacity
     with pytest.raises(RuntimeError, match="contact capacity exceeded"):
         guard.check()
+    flag.zero_()  # Kamino clears the flag before each conversion
+    guard.check()
+
+
+def test_contact_capacity_guard_needs_the_flag():
+    pytest.importorskip("warp")
+    from humanoid_sim.physics.contact_capacity import kamino_overflow_flag
+
+    assert kamino_overflow_flag(SimpleNamespace(_contacts_kamino=None)) is None  # the model admits no contacts
+    with pytest.raises(RuntimeError, match="no overflow flag"):
+        kamino_overflow_flag(SimpleNamespace(_contacts_kamino=SimpleNamespace(_data=SimpleNamespace())))
