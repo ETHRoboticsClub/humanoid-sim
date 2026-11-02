@@ -20,7 +20,11 @@ depth errors follow from that, and this module applies them to an exact depth im
 * **Occlusion.** A pixel the second imager cannot see has no match: the band beside a foreground edge, on the side
   away from the second imager (``d_near − d_far`` pixels wide), and the image border on that side, where the second
   imager's view ends. A pixel is occluded when a nearer pixel on the second imager's side lands on or past it in
-  the second imager.
+  the second imager. A matcher finds occluded pixels by matching back from the second image (its left-right check):
+  a pixel loses its depth when the two matches disagree by more than the check's threshold (the model's
+  ``depth_lr_check_px``), and at an occluded pixel they disagree by how much nearer, in disparity, the surface hiding
+  it is. Bands beside a small step in depth keep the depth of their own surface; 0 drops every occluded pixel and
+  no check (None) keeps them all. The image border has no match either way.
 * **No texture.** A matcher compares image patches; where the reference image is too uniform (a plain wall, a dark
   surface) it finds no match. A pixel whose reference-image patch has a grey-level standard deviation below the
   model's ``depth_min_texture`` gets no depth.
@@ -33,8 +37,9 @@ Pixels without depth are NaN; :func:`~humanoid_sim.sensors.feeds.depth_mm` repor
 The depth range (``depth_range_m``) is applied there too.
 
 Not modeled: errors correlated farther than the blur and the median reach, and more along rows than along columns
-(as the V1's OAK-D-W shows), the matcher's confidence threshold, foreground edges widened by the matcher's window,
-grazing-angle failures, flying pixels at edges, and the cameras' post-processing filters other than the median.
+(as the V1's OAK-D-W shows), a confidence threshold of its own (the texture threshold stands for it), foreground
+edges widened by the matcher's window, grazing-angle failures, flying pixels at edges, and the cameras'
+post-processing filters other than the median.
 """
 
 from __future__ import annotations
@@ -64,6 +69,29 @@ def occluded(disparity: np.ndarray, *, second_on_right: bool = True) -> np.ndarr
     after = np.minimum.accumulate(where[:, ::-1], axis=1)[:, ::-1]
     after = np.concatenate([after[:, 1:], np.full((d.shape[0], 1), np.inf)], axis=1)
     return (after < where) | (where < 0)
+
+
+def outside_view(disparity: np.ndarray, *, second_on_right: bool = True) -> np.ndarray:
+    """Pixels ``[H, W]`` that land outside the second imager's view (the image border on its side)."""
+    d = np.asarray(disparity, dtype=np.float64)
+    u = np.arange(d.shape[1], dtype=np.float64)
+    return u[None, :] - d < 0 if second_on_right else u[None, :] + d > d.shape[1] - 1
+
+
+def occlusion_gap_px(disparity: np.ndarray, *, second_on_right: bool = True) -> np.ndarray:
+    """Per pixel ``[H, W]``, how much larger the disparity of the surface the second imager sees where the pixel
+    lands (to the nearest column) is than the pixel's own: 0 where it sees the pixel itself, outside its view and
+    where there is no surface."""
+    d = np.asarray(disparity, dtype=np.float64)
+    if not second_on_right:
+        return occlusion_gap_px(d[:, ::-1], second_on_right=True)[:, ::-1]
+    h, w = d.shape
+    rows = np.broadcast_to(np.arange(h)[:, None], d.shape)
+    col = np.rint(np.arange(w)[None, :] - d).astype(int)
+    ok = (d > 0) & (col >= 0) & (col < w)
+    seen = np.zeros(d.shape)  # per second-imager pixel, the nearest surface landing there
+    np.maximum.at(seen, (rows[ok], col[ok]), d[ok])
+    return np.where(ok, seen[rows, np.clip(col, 0, w - 1)] - d, 0.0)
 
 
 def texture_std(image: np.ndarray, window: int = TEXTURE_WINDOW_PX) -> np.ndarray:
@@ -132,12 +160,14 @@ def stereo_depth(depth_m: np.ndarray, *, focal_px: float, baseline_m: float, dis
                  rng: np.random.Generator, disparity_step_px: float = 0.0, depth_focal_px: float | None = None,
                  reference: np.ndarray | None = None, min_texture: float = 0.0,
                  texture_exponent: float = 0.0, texture_range: tuple[float, float] | None = None,
-                 noise_blur_px: float = 0.0, median_px: int = 0, second_on_right: bool = True) -> np.ndarray:
+                 noise_blur_px: float = 0.0, median_px: int = 0, lr_check_px: float | None = 0.0,
+                 second_on_right: bool = True) -> np.ndarray:
     """The depth (m) a stereo camera reports for the exact depth ``depth_m`` ``[H, W]``: noisy through its disparity
     (``disparity_sigma_px``, times ``t^-texture_exponent`` at a reference-image texture ``t`` held within
     ``texture_range``, blurred by ``noise_blur_px``), rounded to its ``disparity_step_px`` (0: continuous), NaN
-    where its second imager is occluded or its reference image ``reference`` (grey, ``[H, W]``) has less texture
-    than ``min_texture``, median filtered over ``median_px`` (0: not), turned back into depth with
+    where its second imager is occluded (past its left-right check's ``lr_check_px``: 0 every occluded pixel, None
+    none but the image border) or its reference image ``reference`` (grey, ``[H, W]``) has less texture than
+    ``min_texture``, median filtered over ``median_px`` (0: not), turned back into depth with
     ``depth_focal_px`` (None: ``focal_px``). ``baseline_m`` and ``focal_px`` are the depth stream's."""
     depth_focal_px = focal_px if depth_focal_px is None else depth_focal_px
     if baseline_m <= 0 or focal_px <= 0 or depth_focal_px <= 0:
@@ -150,6 +180,8 @@ def stereo_depth(depth_m: np.ndarray, *, focal_px: float, baseline_m: float, dis
     if texture_exponent > 0 and (texture_range is None or not 0 < texture_range[0] <= texture_range[1]):
         raise ValueError(f"texture_exponent needs a texture_range (low, high) with 0 < low <= high, got "
                          f"{texture_range}")
+    if lr_check_px is not None and lr_check_px < 0:
+        raise ValueError(f"lr_check_px must be >= 0 or None, got {lr_check_px}")
     if median_px != 0 and (median_px < 3 or median_px % 2 == 0):
         raise ValueError(f"median_px must be 0 or an odd number >= 3, got {median_px}")
     texture = None
@@ -167,7 +199,14 @@ def stereo_depth(depth_m: np.ndarray, *, focal_px: float, baseline_m: float, dis
     noisy = d + sigma * blurred_noise(rng, d.shape, noise_blur_px) if disparity_sigma_px > 0 else d
     if disparity_step_px > 0:
         noisy = np.round(noisy / disparity_step_px) * disparity_step_px
-    valid = surface & (noisy > 0) & ~occluded(d, second_on_right=second_on_right)
+    side = dict(second_on_right=second_on_right)
+    if lr_check_px is None:
+        hidden = outside_view(d, **side)
+    elif lr_check_px > 0:
+        hidden = (occluded(d, **side) & (occlusion_gap_px(d, **side) > lr_check_px)) | outside_view(d, **side)
+    else:
+        hidden = occluded(d, **side)
+    valid = surface & (noisy > 0) & ~hidden
     if min_texture > 0:
         valid &= texture >= min_texture
     if median_px:

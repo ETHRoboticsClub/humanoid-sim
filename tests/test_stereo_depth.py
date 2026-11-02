@@ -15,6 +15,7 @@ from humanoid_sim.sensors.stereo_depth import (
     disparity_px,
     median_filter,
     occluded,
+    occlusion_gap_px,
     stereo_depth,
     stereo_pair,
     texture_std,
@@ -86,6 +87,32 @@ def test_a_foreground_edge_casts_its_occlusion_band_away_from_the_second_imager(
     mirrored = occluded(disparity_px(depth, FOCAL_PX, BASELINE_M), second_on_right=False)[0]
     hidden = np.flatnonzero(mirrored[:-int(np.ceil(d_far))])
     assert hidden.min() == b and hidden.max() == pytest.approx(b - 1 + band, abs=1)
+
+
+@pytest.mark.parametrize("near_m, lr_check_px, band_dropped", [
+    (1.0, 0.0, True),  # every occluded pixel dropped
+    (1.0, 10.0, True),  # a 15 px step: the two matches disagree past the threshold
+    (2.0, 10.0, False),  # a 5 px step: they agree within it, the band keeps the background's depth
+    (1.0, None, False),  # no check
+])
+def test_the_left_right_check_drops_the_band_beside_a_step_larger_than_its_threshold(near_m, lr_check_px,
+                                                                                       band_dropped):
+    far_m, a = 4.0, 60
+    depth = np.full((4, 120), far_m)
+    depth[:, a:80] = near_m
+    fb = FOCAL_PX * BASELINE_M
+    band = slice(int(a - (fb / near_m - fb / far_m)) + 1, a - 1)
+    gap = occlusion_gap_px(disparity_px(depth, FOCAL_PX, BASELINE_M))
+    np.testing.assert_allclose(gap[:, band], fb / near_m - fb / far_m)
+    assert not gap[:, a:].any()
+    out = stereo_depth(depth, focal_px=FOCAL_PX, baseline_m=BASELINE_M, disparity_sigma_px=0.0, rng=_rng(),
+                       lr_check_px=lr_check_px)
+    if band_dropped:
+        assert np.isnan(out[:, band]).all()
+    else:
+        np.testing.assert_array_equal(out[:, band], far_m)
+    border = int(np.ceil(fb / far_m))  # outside the second imager's view whatever the check
+    assert np.isnan(out[:, :border]).all()
 
 
 def test_no_surface_hides_no_surface():
@@ -190,6 +217,9 @@ def test_bad_inputs_are_refused():
     with pytest.raises(ValueError, match="noise_blur_px"):
         stereo_depth(depth, focal_px=FOCAL_PX, baseline_m=BASELINE_M, disparity_sigma_px=0.1, rng=_rng(),
                      noise_blur_px=-1.0)
+    with pytest.raises(ValueError, match="lr_check_px"):
+        stereo_depth(depth, focal_px=FOCAL_PX, baseline_m=BASELINE_M, disparity_sigma_px=0.1, rng=_rng(),
+                     lr_check_px=-1.0)
     for median_px in (1, 4, -3):
         with pytest.raises(ValueError, match="median_px"):
             stereo_depth(depth, focal_px=FOCAL_PX, baseline_m=BASELINE_M, disparity_sigma_px=0.1, rng=_rng(),
@@ -201,6 +231,7 @@ def test_bad_inputs_are_refused():
     ({"depth_noise_texture_exponent": 0.3, "depth_noise_texture_range": (2.0, 1.0)}, "depth_noise_texture_range"),
     ({"depth_noise_blur_px": -1.0}, ">= 0"),
     ({"depth_median_px": 4}, "depth_median_px"),
+    ({"depth_lr_check_px": -1.0}, "depth_lr_check_px"),
 ])
 def test_a_camera_model_with_bad_depth_figures_is_refused(figures, match):
     with pytest.raises(ValueError, match=match):

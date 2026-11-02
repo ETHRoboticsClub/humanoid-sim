@@ -160,8 +160,10 @@ class Camera(Sensor):
     # error (pixels, 1 sigma; with a texture exponent, at a texture of 1 grey level), how it grows on plain surfaces
     # (sigma * t^-exponent at a reference-image texture t, held within the range; 0: the same everywhere), the blur
     # that spreads it over neighbouring pixels (pixels, a Gaussian's sigma), the step it reports disparity in
-    # (pixels; 0: continuous), the least grey-level spread of the reference image it matches on and the side of its
-    # median filter (pixels, odd; 0: none). 0: exact depth.
+    # (pixels; 0: continuous), the least grey-level spread of the reference image it matches on, the side of its
+    # median filter (pixels, odd; 0: none) and its left-right check's threshold (pixels of disparity: an occluded
+    # pixel keeps its depth unless the surface hiding it is more than this nearer; 0: every occluded pixel loses it,
+    # None: no check). 0: exact depth but for occlusion.
     depth_disparity_sigma_px: ClassVar[float] = 0.0
     depth_noise_texture_exponent: ClassVar[float] = 0.0
     depth_noise_texture_range: ClassVar[tuple[float, float] | None] = None
@@ -169,6 +171,7 @@ class Camera(Sensor):
     depth_disparity_step_px: ClassVar[float] = 0.0
     depth_min_texture: ClassVar[float] = 0.0
     depth_median_px: ClassVar[int] = 0
+    depth_lr_check_px: ClassVar[float | None] = 0.0
 
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
@@ -193,6 +196,8 @@ class Camera(Sensor):
         if cls.depth_noise_texture_exponent > 0 and (tex is None or not 0 < tex[0] <= tex[1]):
             raise ValueError(f"{where}: depth_noise_texture_range {tex}: a texture exponent needs (low, high) grey "
                              f"levels with 0 < low <= high")
+        if cls.depth_lr_check_px is not None and cls.depth_lr_check_px < 0:
+            raise ValueError(f"{where}: depth_lr_check_px {cls.depth_lr_check_px}: expected >= 0 or None")
         if cls.depth_median_px != 0 and (cls.depth_median_px < 3 or cls.depth_median_px % 2 == 0):
             raise ValueError(f"{where}: depth_median_px {cls.depth_median_px}: expected 0 or an odd number >= 3")
 
@@ -276,12 +281,14 @@ class OakDW(Camera):
     # levels to 0.04 px at 34; 72214 pixels at 0.6-4 m, off depth edges), and the correlation of neighbours' flicker
     # (0.74, 0.57, 0.36 at 1, 2, 4 px; the fit 0.78, 0.61, 0.37). Texture outside the measured 0.25-48 grey levels
     # is held at its ends. Plain surfaces keep their depth (95 % of frames below 0.5 grey levels of texture), so no
-    # texture threshold.
+    # texture threshold: the matcher's confidence threshold (245) drops nothing measurable. Its left-right check's
+    # threshold, 10, is taken as pixels of disparity (modeled: the occlusion band was not measured).
     depth_disparity_sigma_px = 0.4
     depth_noise_texture_exponent = 0.2
     depth_noise_texture_range = (0.25, 48.0)
     depth_noise_blur_px = 3.0
     depth_median_px = 5
+    depth_lr_check_px = 10.0
     depth_disparity_step_px = 1.0
 
 
