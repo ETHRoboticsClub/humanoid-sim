@@ -41,6 +41,19 @@ from pathlib import Path
 DEFAULT_ASSETS = Path("outputs/assets")
 
 
+def compile_without_precompiled_headers() -> None:
+    """Have Warp compile CUDA kernels without NVRTC's precompiled header. With one, NVRTC keeps a 256 MB heap mapped
+    for the process and maps it again, with the header, for every later compile; when that mapping fails ("unable to
+    obtain mapped memory") Warp raises instead of compiling without the header, so a fresh kernel cache (a new
+    container) could end `serve` at start. Without it a fresh cache compiles about 10% slower; a warm cache is
+    unaffected. Set before any kernel is loaded; a no-op where Warp is not installed."""
+    try:
+        import warp
+    except ImportError:
+        return
+    warp.config.use_precompiled_headers = False
+
+
 def _usd(args, *, base_joints: bool = False) -> Path:
     if args.usd:
         return Path(args.usd)
@@ -716,6 +729,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         p.print_help()
         return 0
+    compile_without_precompiled_headers()
     return args.func(args)
 
 
