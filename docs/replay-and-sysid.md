@@ -94,7 +94,7 @@ A replay (`replay()`, `_prepare()` and `_run()` in `src/humanoid_sim/replay/repl
 |---|---|---|
 | `<exc-dir>` | required | The capture directory |
 | `--period-ms` | 4 | Physics period and replay step, in ms. The profile's `physics.period_ns` is 4 ms. |
-| `--integrator` | the profile's, `implicitfast` | MJWarp integrator, for example `euler` |
+| `--integrator` | the profile's, `rk4` | MJWarp integrator, for example `implicitfast` |
 | `--device` | `cuda:0` | `cuda:N`, or `cpu` for Warp's CPU device, which is slow |
 | `--duration` | the whole capture | Replay only the first this many seconds |
 | `--base` | `yaw` | `yaw`, `orientation` or `fixed`; see below |
@@ -123,7 +123,7 @@ The base-joints asset hangs the robot from a world-fixed root through three revo
 
 ### Output
 
-The result directory is `<out>/<dataset_id>_mjwarp_<integrator>_<period in us>us_base-<base>`, with `_demand<delay>ms` appended when a delay is set (for example `exc-503fc128aaf14405a0c2418d63ff9a60_mjwarp_implicitfast_4000us_base-yaw_demand+2ms`). It holds `summary.json` and `trace.npz`. All values are SI.
+The result directory is `<out>/<dataset_id>_mjwarp_<integrator>_<period in us>us_base-<base>`, with `_demand<delay>ms` appended when a delay is set (for example `exc-503fc128aaf14405a0c2418d63ff9a60_mjwarp_rk4_4000us_base-yaw_demand+2ms`). It holds `summary.json` and `trace.npz`. All values are SI.
 
 `summary.json`:
 
@@ -374,7 +374,7 @@ Judge a fit as for `fit-passive`: `holdout.objective_fit` clearly below `holdout
 
 `sky/replay.sky.yaml` and `sky/sysid.sky.yaml` run the replays and the passive fit on one L40S on AWS (8 or more CPUs, 32 GB or more of memory, 200 GB of disk). `sky/setup.sh` installs Isaac Lab release 3.0.0 at `ISAACLAB_COMMIT` and humanoid-sim in editable mode. The repository is synced to `~/sky_workdir` on the node, and the three captures are mounted from `../datasets/humanoid-v1/` (beside the repository) at `/data/exc-<id>`. To use another capture, add it to `file_mounts`.
 
-`replay.sky.yaml` builds both assets and replays every mounted capture once for each `period_ms:integrator` pair in `RUNS` (`4:implicitfast 4:euler 1:implicitfast`), with the default `yaw` base and no demand delay, one process per capture in parallel. Results go to `outputs/replay-mjwarp/`, with a log per capture and run; the task ends by printing each run's JSON summary line.
+`replay.sky.yaml` builds both assets and replays every mounted capture once for each `period_ms:integrator` pair in `RUNS` (`4:rk4 4:implicitfast 1:rk4`), with the default `yaw` base and no demand delay, one process per capture in parallel. Results go to `outputs/replay-mjwarp/`, with a log per capture and run; the task ends by printing each run's JSON summary line.
 
 ```bash
 sky launch -y -c hsim-bench -i 10 sky/replay.sky.yaml
