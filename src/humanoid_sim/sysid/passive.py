@@ -67,9 +67,10 @@ class FitSpace:
         return ((x - np.clip(x, -self.log_bound, self.log_bound)) ** 2).sum(axis=-1)
 
 
-def _write(robot, desc, space: FitSpace, x: np.ndarray) -> None:
+def _write(robot, desc, space: FitSpace, x: np.ndarray, plant=None) -> None:
     """Write candidate ``x[e]`` to env ``e``: start value × multiplier per joint (start value alone for the
-    parameters not fitted)."""
+    parameters not fitted). A fitted friction is ``plant``'s enabled friction too, so an off drive's joint keeps
+    its back-drive torque."""
     m = space.multipliers(x)  # [E, G*P]
     e = m.shape[0]
     joints = [j for g in space.groups for j in g.joints]
@@ -91,6 +92,10 @@ def _write(robot, desc, space: FitSpace, x: np.ndarray) -> None:
                                                                         joint_ids=ids)
         elif p == "friction":
             robot.write_joint_friction_coefficient_to_sim_index(joint_friction_coeff=value, joint_ids=ids)
+            if plant is not None:
+                at = [plant.solver_map.joint_names.index(j) for j in joints]
+                plant.enabled_friction[:, at] = value.to(plant.enabled_friction)
+                plant.friction_changed = True
         else:
             robot.write_joint_armature_to_sim_index(armature=value, joint_ids=ids)
 
@@ -100,7 +105,7 @@ def evaluate(sim, captures, space: FitSpace, x: np.ndarray, scored: list[int], *
     """Objective per candidate ``[E]`` and the per-capture, per-drive RMS ``[C, E, D]``."""
     from humanoid_sim.replay.replay import replay_position_rms
 
-    _write(sim.backend.robot, sim.desc, space, x)
+    _write(sim.backend.robot, sim.desc, space, x, sim.plant)
     delays = np.full(len(x), demand_delay_ns) if demand_delay_ns else None
     per = np.stack([replay_position_rms(c, sim, base_motion=base_motion, duration_s=duration_s,
                                         delays_ns=delays).cpu().numpy() for c in captures])

@@ -246,17 +246,6 @@ class RuntimeHost:
         self._sole_ids = torch.tensor([s["id"] for s in self._soles], device=self.device)
         self._sole_points = torch.stack([torch.cat([s["corners"], s["face"], s["axes"]]) for s in self._soles])
         self._sole_half = torch.stack([s["half"] for s in self._soles])
-        # Back-drive friction: the 1:1 drives' joints, their friction enabled and disabled.
-        one_to_one = [(k, self.joints.index(d.joints[0])) for k, d in
-                      enumerate(self.desc.drives[n] for n in self.drives) if d.crank is None]
-        self._backdrive_drives = np.array([k for k, _ in one_to_one])
-        self._backdrive_joint_ids = [self.robot.joint_names.index(self.joints[j]) for _, j in one_to_one]
-        self._friction_on = torch.tensor([[self.desc.joints[self.joints[j]].friction for _, j in one_to_one]],
-                                         device=self.device)
-        # A family without a recorded backdrive_torque keeps the enabled friction.
-        self._friction_off = torch.tensor([[float(self.desc.family_value(
-            self.desc.drives[self.drives[k]].family, "backdrive_torque",
-            self.desc.joints[self.joints[j]].friction)) for k, j in one_to_one]], device=self.device)
         self._drive_off: np.ndarray | None = None
         # Device-to-host copies: into pinned buffers, waited for on a blocking event (the host thread sleeps
         # instead of spinning while the GPU finishes: it shares the machine with Controls).
@@ -338,6 +327,7 @@ class RuntimeHost:
         self.sim.write_joint_state(q, qd)
         env = torch.tensor([0], device=self.device)
         self.sim.plant.reset(env)  # plant time keeps running: the IMU's sample clock depends on it
+        self._drive_off = None  # every drive off until the next demand
         self.sim.feedback = None
         self.sim.imu.reset(env, self.sim.t_ns, keep_seq=True)
 
@@ -563,6 +553,7 @@ class RuntimeHost:
         elif roped and base is not None:
             self._release_rope()
         self.sim.plant.reset(env)
+        self._drive_off = None
         self.sim.imu.reset(env, self.sim.t_ns, keep_seq=True)
         self._prescribed = None
         self._disturbances.clear()
@@ -821,15 +812,15 @@ class RuntimeHost:
         self._set_drives_off(~running)
 
     def _set_drives_off(self, off: np.ndarray) -> None:
-        """Back-drive friction on the joints of the 1:1 drives that are off; written only on a change."""
-        off = off[self._backdrive_drives]
+        """Back-drive friction on the joints of the 1:1 drives that are off (:meth:`PlantCore.joint_friction`). The
+        demands reach the plant through a CUDA graph, which cannot flag the change itself: this does, on a change
+        of the on/off pattern."""
         if self._drive_off is not None and np.array_equal(off, self._drive_off):
             return
         self._drive_off = off.copy()
-        mask = torch.from_numpy(off).to(self.device).unsqueeze(0)
-        self.robot.write_joint_friction_coefficient_to_sim_index(
-            joint_friction_coeff=torch.where(mask, self._friction_off, self._friction_on),
-            joint_ids=self._backdrive_joint_ids)
+        plant = self.sim.plant
+        plant.drive_off.copy_(torch.from_numpy(off).to(plant.drive_off.device)[plant.backdrive_drives].unsqueeze(0))
+        plant.friction_changed = True
 
     def _client_lost(self) -> bool:
         return self.attached and abi.mono_ns() - self._client_mono_ns > self.client_timeout_ns

@@ -193,6 +193,8 @@ def write(sim, space: PaceSpace, values: dict[str, np.ndarray]) -> None:
     robot.write_joint_viscous_friction_coefficient_to_sim_index(joint_viscous_friction_coeff=t(values["damping"]),
                                                                 joint_ids=ids)
     robot.write_joint_friction_coefficient_to_sim_index(joint_friction_coeff=t(values["friction"]), joint_ids=ids)
+    plant.enabled_friction.copy_(t(values["friction"]))  # an off drive's joint keeps its back-drive torque
+    plant.friction_changed = True
     relief = values["friction"] * (1.0 - values["friction_ratio"])
     plant.friction_relief.copy_(torch.as_tensor(relief, dtype=plant.cfg.dtype, device=plant.cfg.device))
     plant.bank.position_offset.copy_(torch.as_tensor(-values["bias"], dtype=plant.cfg.dtype, device=plant.cfg.device))

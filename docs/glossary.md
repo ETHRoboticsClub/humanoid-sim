@@ -20,7 +20,7 @@ The robot as a USD file that Isaac Lab loads, built by `humanoid-sim build-asset
 
 ### Back-drive
 
-Turning a drive's output by an external force while the drive is disabled. The runtime switches a disabled drive's joint to its back-drive friction; training keeps the enabled friction.
+Turning a drive's output by an external force while the drive is disabled. Training, replay and the runtime switch a disabled 1:1 drive's joint to its back-drive friction ([drives.md](drives.md#disabled-drives-back-drive-friction)).
 
 ### Baseline gains
 

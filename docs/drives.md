@@ -278,7 +278,7 @@ The description states no dynamic friction yet, so the relief is zero by default
 
 ## Disabled drives: back-drive friction
 
-A disabled drive is back-driven through its gearbox. Only the runtime host models this (`RuntimeHost._set_drives_off` in `src/humanoid_sim/runtime/host.py`). When a 1:1 drive's law is disabled in the latest demand record, the host sets its joint's Coulomb friction to the family's `backdrive_torque` in place of the enabled-drive friction from actuators.yaml (a family without one keeps the joint's friction). It writes the friction only when the on/off pattern changes. Before a client attaches every drive is disabled.
+A disabled drive is back-driven through its gearbox, the same way in training, replay and the runtime. `PlantCore` (`src/humanoid_sim/core.py`) keeps which 1:1 drives are off from the latest demand submitted or reset (a reset without a demand, like the bank's, turns every drive off), and `PlantCore.joint_friction` gives their joints the family's `backdrive_torque` as Coulomb friction in place of the enabled-drive friction (a family without one keeps the joint's friction). The switch happens when the demand is submitted, not when it arrives. `SimCore` (replays, sysid, the runtime) and `RobotPlant` (training) write that friction to the solver before a step that follows a submit or a reset; the runtime host, whose demands reach the plant through a CUDA graph, flags it when the on/off pattern of the latest demand record changes. Before a client attaches every drive is disabled.
 
 | Family | `backdrive_torque` | Datasheet figure |
 |---|---|---|
@@ -286,7 +286,7 @@ A disabled drive is back-driven through its gearbox. Only the runtime host model
 | HEJ70-48-50 | 0.5 Nm | approximate |
 | HEJ50-48-30 | 0.8 Nm | upper bound |
 
-The ankle hinges keep their friction, since a crank's figure has no joint-space equivalent. `RobotPlant` (training) and `SimCore` (replays, benchmarks) do not switch friction: an off drive there keeps the enabled-drive friction, or the randomized `joint_friction`.
+The ankle hinges keep their friction, since a crank's figure has no joint-space equivalent. A randomized `joint_friction` or a fitted friction (`fit-pace`, `fit-passive`) is the enabled-drive friction; the back-drive torque itself is not randomized.
 
 ## Physical faults
 
@@ -322,4 +322,4 @@ The runtime publishes its known gaps in the segment descriptor (`fidelity_gaps` 
 - Each drive's delay is its family's fixed figure, with no per-cycle jitter. A family whose description records no delay (the G1's) has none, and the gap names it.
 - Angular momentum is not conserved under fast joint motion at the 4 ms MJWarp step. A hung robot whose waist and hips move fast picks up a spin about the vertical; the gantry's spreader bar turns it back and damps it ([world.md](world.md#suspended-the-lab-gantry)).
 
-For the drive model this means the applied torque follows the law within the step, with no current-loop dynamics, and a drive can hold its peak torque indefinitely. Gearbox losses are only the joints' Coulomb friction and viscous damping from actuators.yaml, plus the back-drive friction of an off drive in the runtime. There is no integral term. The cranks' stops are enforced by the solver on MJWarp (see [The crank stops](#the-crank-stops)); the drive model itself does not clamp a crank's target to them.
+For the drive model this means the applied torque follows the law within the step, with no current-loop dynamics, and a drive can hold its peak torque indefinitely. Gearbox losses are only the joints' Coulomb friction and viscous damping from actuators.yaml, plus the back-drive friction of an off drive. There is no integral term. The cranks' stops are enforced by the solver on MJWarp (see [The crank stops](#the-crank-stops)); the drive model itself does not clamp a crank's target to them.
