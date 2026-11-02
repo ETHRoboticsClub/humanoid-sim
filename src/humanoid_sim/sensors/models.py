@@ -22,7 +22,8 @@ from typing import ClassVar
 G0 = 9.80665  # m/s², the datasheets' g
 DEG = math.pi / 180.0
 RTX_KINDS = ("camera", "lidar")  # what the RTX sensors (Isaac Sim image) simulate
-DISTORTION_MODELS = {"plumb_bob": 5, "equidistant": 4}  # coefficients: OpenCV's k1 k2 p1 p2 k3, fisheye k1..k4
+# Coefficients, as ROS's camera_info orders them: OpenCV's k1 k2 p1 p2 k3, rational k1 k2 p1 p2 k3 k4 k5 k6, fisheye k1..k4
+DISTORTION_MODELS = {"plumb_bob": 5, "rational_polynomial": 8, "equidistant": 4}
 STREAM_KINDS = ("color", "mono", "depth")
 
 
@@ -73,6 +74,7 @@ class Imu(Sensor):
     gyro_bias_instability_rad_s: ClassVar[float] = 0.0
     accel_bias_instability_m_s2: ClassVar[float] = 0.0
     bias_correlation_time_ns: ClassVar[int] = 100_000_000_000
+    noise_basis: ClassVar[str] = "modeled"  # how the figures are known: "modeled" (a guess or an inference) or "measured"
 
     def __init__(self, frame: str, *, sample_period_ns: int, burst_period_ns: tuple[int, int] | None = None,
                  in_burst_spacing_ns: int = 0, output_lsb: tuple[float, float] | None = None):
@@ -97,6 +99,8 @@ class Imu(Sensor):
 
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
+        if cls.noise_basis not in ("modeled", "measured"):
+            raise ValueError(f"{cls.__name__}.noise_basis {cls.noise_basis!r}: modeled or measured")
         _positive_ns(f"{cls.__name__}.bias_correlation_time_ns", cls.bias_correlation_time_ns)
         for name in ("gyro_noise_density_rad_s_sqrt_hz", "accel_noise_density_m_s2_sqrt_hz", "gyro_turn_on_bias_rad_s",
                      "accel_turn_on_bias_m_s2", "gyro_bias_instability_rad_s", "accel_bias_instability_m_s2"):
@@ -141,6 +145,30 @@ class UnitreeG1Imu(Imu):
     source = "unmeasured: Unitree publishes no figures; an ideal sensor until a capture gives them"
 
 
+class ZedMiniImu(Imu):
+    model = "zed-mini-imu"
+    product = "Stereolabs ZED Mini built-in IMU (gyroscope and accelerometer)"
+    # Stereolabs publishes the rate only (800 Hz, ZED Mini datasheet): no chip, noise, bias or mount. The noise figures
+    # are measured on one unit, not Stereolabs'; the mount is a guess.
+    source = ("Noise density and bias instability measured on one unit (SN 11381414, 55 min still on a desk with "
+              "disturbances masked out, raw samples from zed-open-capture; the capture is not in this repo; "
+              "uncalibrated, its accelerometer reads about 4 % high). Noise density: the mean of the three axes' "
+              "Allan deviation at 1 s (gyro 0.95 to 1.09e-4 rad/s/rtHz, accel 1.2 to 1.5e-3 m/s^2/rtHz). Bias "
+              "instability: the mean of each axis' Allan minimum over 0.664, UNRESOLVED (the minimum is at the "
+              "longest averaging time that had quiet data, 100 s), so a lower bound; the accelerometer's y axis "
+              "is 3 to 4 times its other axes. Turn-on bias: MODELED from the gyro axes' means on that unit "
+              "(RMS 7.2e-3 rad/s); the accelerometer's is 0 (not separable from gravity and the uncalibrated "
+              "scale). Correlation time: MODELED, 100 s. The sensor frame is the camera frame's axes at its origin "
+              "(MODELED GUESS): the real IMU sits a few cm away with its own axes (camera_imu_transform, read per "
+              "unit from the ZED SDK).")
+    noise_basis = "measured"
+    gyro_noise_density_rad_s_sqrt_hz = 1.0e-4
+    accel_noise_density_m_s2_sqrt_hz = 1.4e-3
+    gyro_bias_instability_rad_s = 3.0e-5
+    accel_bias_instability_m_s2 = 9.4e-4
+    gyro_turn_on_bias_rad_s = 7.2e-3  # modeled
+
+
 class Camera(Sensor):
     """A camera product. Its frame is its reference imager's optical centre (x forward, y left, z up, as Controls'
     camera calibration has it); ``nominal_offsets_m`` places every stream's optical centre in it (a unit's
@@ -155,6 +183,22 @@ class Camera(Sensor):
     nominal_offsets_m: ClassVar[Mapping[str, tuple[float, float, float]]] = MappingProxyType({})
     depth_range_m: ClassVar[tuple[float, float] | None] = None
     rolling_shutter: ClassVar[frozenset[str]] = frozenset()
+    # Stereo depth errors (sensors/stereo_depth.py), applied when a session asks for them: the matcher's disparity
+    # error (pixels, 1 sigma; with a texture exponent, at a texture of 1 grey level), how it grows on plain surfaces
+    # (sigma * t^-exponent at a reference-image texture t, held within the range; 0: the same everywhere), the blur
+    # that spreads it over neighbouring pixels (pixels, a Gaussian's sigma), the step it reports disparity in
+    # (pixels; 0: continuous), the least grey-level spread of the reference image it matches on, the side of its
+    # median filter (pixels, odd; 0: none) and its left-right check's threshold (pixels of disparity: an occluded
+    # pixel keeps its depth unless the surface hiding it is more than this nearer; 0: every occluded pixel loses it,
+    # None: no check). 0: exact depth but for occlusion.
+    depth_disparity_sigma_px: ClassVar[float] = 0.0
+    depth_noise_texture_exponent: ClassVar[float] = 0.0
+    depth_noise_texture_range: ClassVar[tuple[float, float] | None] = None
+    depth_noise_blur_px: ClassVar[float] = 0.0
+    depth_disparity_step_px: ClassVar[float] = 0.0
+    depth_min_texture: ClassVar[float] = 0.0
+    depth_median_px: ClassVar[int] = 0
+    depth_lr_check_px: ClassVar[float | None] = 0.0
 
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
@@ -171,21 +215,41 @@ class Camera(Sensor):
             raise ValueError(f"{where}: rolling_shutter {set(cls.rolling_shutter)}: expected streams it has")
         if cls.depth_range_m is not None and not 0 <= cls.depth_range_m[0] < cls.depth_range_m[1]:
             raise ValueError(f"{where}: depth_range_m {cls.depth_range_m}: expected (min, max)")
+        if min(cls.depth_disparity_sigma_px, cls.depth_noise_texture_exponent, cls.depth_noise_blur_px,
+               cls.depth_disparity_step_px, cls.depth_min_texture) < 0:
+            raise ValueError(f"{where}: depth_disparity_sigma_px, depth_noise_texture_exponent, depth_noise_blur_px, "
+                             f"depth_disparity_step_px and depth_min_texture must be >= 0")
+        tex = cls.depth_noise_texture_range
+        if cls.depth_noise_texture_exponent > 0 and (tex is None or not 0 < tex[0] <= tex[1]):
+            raise ValueError(f"{where}: depth_noise_texture_range {tex}: a texture exponent needs (low, high) grey "
+                             f"levels with 0 < low <= high")
+        if cls.depth_lr_check_px is not None and cls.depth_lr_check_px < 0:
+            raise ValueError(f"{where}: depth_lr_check_px {cls.depth_lr_check_px}: expected >= 0 or None")
+        if cls.depth_median_px != 0 and (cls.depth_median_px < 3 or cls.depth_median_px % 2 == 0):
+            raise ValueError(f"{where}: depth_median_px {cls.depth_median_px}: expected 0 or an odd number >= 3")
 
     def __init__(self, frame: str, *, width: int, height: int, frame_period_ns: int,
                  intrinsics: dict[str, tuple[float, float, float, float]],
                  distortion: dict[str, tuple[str, tuple[float, ...]]] | None = None,
-                 stream_offsets_m: dict[str, tuple[float, float, float]] | None = None):
+                 stream_offsets_m: dict[str, tuple[float, float, float]] | None = None,
+                 stream_rotations_xyzw: dict[str, tuple[float, float, float, float]] | None = None,
+                 depth_focal_px: float | None = None):
         """Every stream at one resolution and rate; per stream the unit's pinhole calibration ``(fx, fy, cx, cy)`` in
         pixels (OpenCV's: pixel (u, v) centred at u, v), its lens distortion ``(model, coefficients)`` (model
-        ``plumb_bob`` or ``equidistant``; none when absent) and, where the unit's calibration gives it, its optical
-        centre in the camera frame, replacing the model's nominal one."""
+        ``plumb_bob``, ``rational_polynomial`` or ``equidistant``; none when absent) and, where the unit's
+        calibration gives them, its optical centre in the camera frame, replacing the model's nominal one, and its
+        optical frame's orientation in the camera frame (a unit quaternion x, y, z, w), replacing the nominal one
+        (x right, y down, z forward). ``depth_focal_px`` is the focal length the unit turns disparity back into depth
+        with, where it is not the depth stream's own (None: the stream's)."""
         super().__init__(frame)
         where = f"{type(self).__name__} at {frame!r}"
         if not (isinstance(width, int) and isinstance(height, int)) or width <= 0 or height <= 0:
             raise ValueError(f"{where}: resolution {width}x{height}")
+        if depth_focal_px is not None and not depth_focal_px > 0:
+            raise ValueError(f"{where}: depth_focal_px {depth_focal_px}: expected > 0")
         distortion = dict(distortion or {})
-        given = set(intrinsics) | set(distortion) | set(stream_offsets_m or {})
+        rotations = dict(stream_rotations_xyzw or {})
+        given = set(intrinsics) | set(distortion) | set(stream_offsets_m or {}) | set(rotations)
         if given - set(self.streams):
             raise ValueError(f"{where}: calibration for streams a {self.model} does not have: "
                              f"{sorted(given - set(self.streams))}")
@@ -197,11 +261,16 @@ class Camera(Sensor):
                 raise ValueError(f"{where}: distortion {stream!r}: expected (model, coefficients), model one of "
                                  f"{sorted(DISTORTION_MODELS)} with its number of coefficients")
         _check_offsets(stream_offsets_m or {}, self.streams, where)
+        for stream, q in rotations.items():
+            if len(q) != 4 or abs(math.hypot(*q) - 1.0) > 1e-6:
+                raise ValueError(f"{where}: rotation {stream!r}: expected a unit quaternion (x, y, z, w)")
         self.width, self.height = width, height
         self.frame_period_ns = _positive_ns("frame_period_ns", frame_period_ns)
         self.intrinsics = dict(intrinsics)
         self.distortion = distortion
         self.stream_offsets_m = {**self.nominal_offsets_m, **(stream_offsets_m or {})}
+        self.stream_rotations_xyzw = {s: tuple(float(v) for v in q) for s, q in rotations.items()}
+        self.depth_focal_px = depth_focal_px
 
     @property
     def rtx_ready(self) -> bool:
@@ -230,6 +299,24 @@ class OakDW(Camera):
                          "depth": (0.0, 0.0, 0.0)}
     depth_range_m = (0.7, 12.0)  # the vendor's ideal range
     rolling_shutter = frozenset({"rgb"})  # the IMX378 variant
+    # Stereo depth errors as Controls' backend configures the matcher (HIGH_DENSITY preset: sub-pixel off, LR check
+    # on, confidence 245, median 5 x 5, read off stereo.initialConfig on the V1, depthai 2.33), measured on the V1's
+    # unit (2026-11-02, 60 s of a static lab scene, lab lighting, 1808 frames). Every reported depth is the device's
+    # f * b over a whole number of pixels: whole-pixel steps. The noise and its blur are the values with which the
+    # whole chain of sensors/stereo_depth.py (noise, rounding, median), run on the recorded scene, flickers like the
+    # recording: each pixel's flicker over time, per texture of the rectified mono_left (from 0.54 px at 0.4 grey
+    # levels to 0.04 px at 34; 72214 pixels at 0.6-4 m, off depth edges), and the correlation of neighbours' flicker
+    # (0.74, 0.57, 0.36 at 1, 2, 4 px; the fit 0.78, 0.61, 0.37). Texture outside the measured 0.25-48 grey levels
+    # is held at its ends. Plain surfaces keep their depth (95 % of frames below 0.5 grey levels of texture), so no
+    # texture threshold: the matcher's confidence threshold (245) drops nothing measurable. Its left-right check's
+    # threshold, 10, is taken as pixels of disparity (modeled: the occlusion band was not measured).
+    depth_disparity_sigma_px = 0.4
+    depth_noise_texture_exponent = 0.2
+    depth_noise_texture_range = (0.25, 48.0)
+    depth_noise_blur_px = 3.0
+    depth_median_px = 5
+    depth_lr_check_px = 10.0
+    depth_disparity_step_px = 1.0
 
 
 class RealSenseD435i(Camera):
@@ -248,6 +335,12 @@ class RealSenseD435i(Camera):
                          "depth": (0.0, 0.0, 0.0)}
     depth_range_m = (0.28, 10.0)
     rolling_shutter = frozenset({"rgb"})  # the infrared pair is global shutter, as realsense_backend.py declares
+    # Stereo depth errors, modeled until the lab unit is measured: the D400 datasheet's RMS error formula with its
+    # typical sub-pixel error, 0.08 px, its sub-pixel disparity taken as continuous. Controls turns the IR projector
+    # off (realsense_backend.py _configure_depth), so plain surfaces get no depth, below a texture threshold chosen
+    # near an 8-bit imager's read noise.
+    depth_disparity_sigma_px = 0.08
+    depth_min_texture = 2.0
 
 
 class ZedMini(Camera):
@@ -350,4 +443,4 @@ class Rig:
 
 
 __all__ = ["RTX_KINDS", "Camera", "Imu", "Lidar", "LivoxMid360", "Mti610", "OakDW", "RealSenseD435i", "Rig", "Sensor",
-           "UnitreeG1Imu", "ZedMini"]
+           "UnitreeG1Imu", "ZedMini", "ZedMiniImu"]

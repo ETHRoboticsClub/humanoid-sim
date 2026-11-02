@@ -20,7 +20,23 @@ Each sensor sits at its rig frame, composed through the URDF's fixed joints onto
 
 ### Cameras
 
-`sensors/geometry.py` builds each stream from the camera instance (`camera_spec`); `sensors/rtx.py` puts an Isaac Lab camera for it on the body (`camera_entities`), with the stream's OpenCV pinhole or fisheye model, which RTX renders natively. Grey streams are the BT.601 luma of the colour render; depth is the distance along the optical axis, written as millimetres within the model's range (0 outside it).
+`sensors/geometry.py` builds each stream from the camera instance (`camera_spec`); `sensors/rtx.py` puts an Isaac Lab camera for it on the body (`camera_entities`), with the stream's OpenCV pinhole (rational or not) or fisheye model, which RTX renders natively. The V1's OAK-D-W raw streams (rgb and the mono pair) have the rational polynomial lenses of the unit's camera_info; its depth is rectified, a plain pinhole. Each stream sits where the unit's calibration places it and looks along its own optical axis (`stream_rotations_xyzw`): the V1's depth view is turned 0.38° from mono_left, as Controls' `/tf_static` gives it. Grey streams are the BT.601 luma of the colour render; depth is the distance along the optical axis, written as millimetres within the model's range (0 outside it).
+
+### Stereo depth errors
+
+By default the depth is exact. With `depth_noise` (`SessionCfg.depth_noise`, `--depth-noise` on `examples/rtx_sensors.py` and `render-runtime`) each stereo camera's depth is what its matcher would report (`sensors/stereo_depth.py`), from the figures of its model (`sensors/models.py`):
+
+| Error | Model | D435i | OAK-D-W |
+|---|---|---|---|
+| Noise | Gaussian on the disparity `d = f b / z`, so the depth error grows with the square of the range: `σ_z ≈ z² σ_d / (f b)` (the D400 datasheet's RMS error formula). With `depth_noise_texture_exponent` `a` it grows on plain surfaces: `σ_d · t^-a` at a reference-image texture of `t` grey levels (7 x 7 patch spread), `t` held within `depth_noise_texture_range` | `σ_d` 0.08 px everywhere: about 2 cm at 2 m, 12 cm at 5 m (modeled) | `0.4 · t^-0.2` px, `t` within 0.25–48: 0.53 px on the plainest surfaces, 0.18 px at 48 grey levels (measured) |
+| Spread | The noise blurred by a Gaussian of `depth_noise_blur_px` pixels and scaled back to `σ_d` per pixel, so neighbouring pixels err together, as a matcher comparing patches does | none | 3 px (measured) |
+| Steps | The noisy disparity rounded to `depth_disparity_step_px`, so the depth takes only the values `f b / k` | none: sub-pixel, taken as continuous | whole pixels (measured; sub-pixel is off): 1.93 or 2.12 m near 2 m, 4.27 or 5.34 m near 5 m |
+| Scale | The disparity turned back into depth with the unit's `depth_focal_px` (the rig's camera instance) instead of the depth stream's own focal length, so every depth is off by their ratio | none | the V1's unit: 283.60 px (mono_left's fx) against the stream's 282.19, 0.5 % farther (measured) |
+| Occlusion | No depth where the second imager cannot see: a band beside each foreground edge (`d_near − d_far` pixels wide, on the side away from the second imager) and the image border on that side. The matcher's left-right check finds the band: with a threshold `depth_lr_check_px`, a band beside a step of less than that many pixels of disparity keeps its own surface's depth | every occluded pixel | left-right check 10 px (read off the unit; modeled as pixels of disparity): a box at 1.5 m before a wall at 3 m (a 7 px step) keeps its band, at 1 m (14 px) loses it |
+| No texture | No depth where the reference imager's 7 x 7 patch spreads less than `depth_min_texture` grey levels (the reference image resampled onto the depth stream's lens, as the matcher sees it rectified; the texture of the noise reads it the same way) | 2 grey levels (modeled; Controls turns its IR projector off) | none (measured: plain surfaces keep their depth, noisier) |
+| Median | The rounded disparity filtered by a median over `depth_median_px` square, pixels without depth taken as 0: fills holes and closes bands narrower than about half the window, removes islands of depth that small | none | 5 x 5 (Controls' preset) |
+
+The OAK-D-W's figures were measured on the V1's unit with the matcher as Controls configures it (`HIGH_DENSITY`, sub-pixel off), from 60 s of a static lab scene: every reported depth is the device's `f b` over a whole number of pixels. The noise, its texture exponent and its blur are the values with which the whole chain (noise, rounding, 5 x 5 median), run on the recorded scene, flickers like the recording: each pixel's flicker over time per texture (from 0.54 px on the plainest surfaces to 0.04 px on the most textured), and how much neighbours flicker together (0.74, 0.57 and 0.36 at 1, 2 and 4 px). Turning sub-pixel on in Controls would make the step 1/8 px. The D435i's are modeled until a unit is measured. The errors are drawn from the session's `seed`. Pixels without depth are 0 in the published 16UC1 image, as the cameras report them.
 
 Two Isaac Lab 3.0 behaviours are handled in `sensors/rtx.py`:
 
@@ -65,13 +81,57 @@ rsync -avz hsim-rtx:sky_workdir/outputs/rtx/ outputs/rtx/
 
 The robot is welded at the spawn point in its home pose, feet just above the floor (a G1 cannot stand on a fixed-gain hold). `--splat-intensity` scales the splat's emission.
 
+### Rendering a recorded run
+
+`render-runtime` draws from the host's latest truth and skips frames when the GPU falls behind, so its rates depend on the machine. For a benchmark that needs the cameras and the lidar at their nominal rates, record the run and render it afterwards in lockstep with plant time:
+
+```bash
+humanoid-sim serve --segment /run/hsim/plant --trajectory /data/run1.traj --gantry hangar_gantry.json --scene ... # the live run
+humanoid-sim render-trajectory /data/run1.traj --out /data/run1-sensors --sensors g1-cameras \
+    --no-cameras                                                    # the lidar pass, no splat; the robot, scene,
+humanoid-sim render-trajectory /data/run1.traj --out /data/run1-sensors --sensors g1-cameras \
+    --no-lidar --splat outputs/rtx/hangar_splat.usdc                # spawn, scan and crane are the recording's
+humanoid-sim export-truth /data/run1.traj --frames mid360_link camera0_camera imu_link --out /data/run1-truth
+```
+
+`render-trajectory` poses the robot at each render time (the recording interpolated to it), renders every camera period (33.3 ms at 30 Hz) and lets the lidar complete its sweeps (10 Hz), however long the GPU takes. Every stream is rendered at the render period, the fastest stream's; a slower stream gets the first render at or after each of its periods. Each frame is stamped with the plant time it was rendered at, a sweep with the plant time its first ray fired, so stamps, ground truth and the runtime's feedback and IMU samples share one clock. The dataset it writes (`humanoid-sim-sensor-dataset/v1`, `sensors/dataset.py`) holds `manifest.json` (the camera calibrations as the feed descriptor has them, each sensor's mount on its body, nominal rates, counts, and `passes`: each render's sensors and summary, `complete` only if it finished), `cameras/<camera_id>/<stream>/` (8-bit grey, RGB or 16-bit millimetre PNGs and `index.csv`: `seq,stamp_ns,file`) and `lidars/<name>/` (one `.npz` per sweep with `points_m`, `hit`, `time_s`, `start_ns` and the sensor's world pose, and `index.csv`; `start_ns` and `time_s` are the sweep's start and each ray's firing time after it, but `origin_w` and `rotation_w` are the sensor's pose at the render that completed the sweep, about one sweep period after `start_ns`: to place a ray in the world at its firing time, take the sensor's pose at that time from the trajectory). A dataset holds one lidar's sweeps. The IMU is not rendered (the render never steps physics): the live run records it next to the trajectory (`FILE.imu`, [runtime.md](runtime.md#recording-a-run)), on the same plant clock.
+
+### Inputs for sensor-contract replay
+
+For URDF-backed descriptions, the dataset also contains `robot.urdf`,
+`kinematics.npz` (plant timestamps, joint positions and joint names) and copies of
+recorded IMU side files. The manifest's `replay` block identifies these by SHA-256
+and names the base frame; `trajectory_sha256` identifies the source recording.
+Trajectory and IMU headers share a unique `recording_id`, so an IMU file from a
+different run is refused even when the robot and description match. Record a new run
+when this identity is absent.
+
+Kinematics contains no base/world pose. A downstream converter supplies local
+mount TF and measured joints to SLAM; the original trajectory is a separate
+reference for evaluation. LiDAR NPZs include `intensity`, the same modeled
+constant used by the live transport, not a measured reflectance. Replay metadata
+for USD-backed descriptions is not supported.
+
+The manifest is marked incomplete before a pass replaces any indexed frames.
+A process killed during a rerender cannot leave an older completed pass looking
+like a valid dataset. A different trajectory checksum is refused even when the
+file name and time range match.
+
+### Two passes: the lidar must not trace the splat
+
+RTX hides the splat from camera rays only (`SPLAT_PRIM`): a lidar ray hits its Gaussians wherever it meets one, low-opacity and large ones included, so a lidar rendered with a splat returns points in mid-air. `render-trajectory` refuses a lidar with `--splat`: the lidar and the cameras are rendered in two runs into one `--out`, the lidar without the splat (`--no-cameras`), the cameras with it (`--no-lidar`). A dataset directory that holds a manifest of the same run (robot, description digest, trajectory, time range) is added to, each pass keeping the other's sensors and counts; a manifest of another run is refused, and a render that fails leaves its pass `complete: false`. Each sensor's manifest `stage` records `splat` (whether it was on the stage for that sensor) and `robot_links_traced`. The recording's scene files must be readable where it is rendered (same paths), or be given with `--scene`.
+
+### The robot occludes its own sensors
+
+The rays also hit the robot's visual meshes: the G1's Mid-360 sits inside the head's shell with the shoulders and arms below it, so the head's ribs and the shoulders block parts of its field. That is what the meshes in the description do; whether the real unit's head has an opening at the lidar, and what Unitree's driver filters, is not known here (the sensor's 0.1 m minimum range is applied, `nearRangeM`). Compare a recorded cloud of the real unit before hiding any link from the lidar.
+
 ### What each sensor sees of a scanned room
 
 A scanned room has up to three surfaces: its boxes (`--scene`), its scan's mesh (`--scan-mesh`, added only when a lidar is simulated) and its splat (`--splat`, made by `humanoid-sim splat-usd`, [world.md](world.md)). The physics collides with every box whatever the sensors see. Each sensor sees the most faithful surface it has (`sensors/room_rays.py`, applied by `SensorSession`):
 
 | Surface | Lidar | Cameras with a splat | Cameras without a splat |
 |---|---|---|---|
-| Splat | no | yes | |
+| Splat | no: it must not be on the stage (below) | yes | |
 | Scan mesh | yes | no | yes |
 | Wall boxes (the file's `wall` flags) | yes | no | yes |
 | Furniture boxes | only without a scan mesh | no | only without a scan mesh |
@@ -137,7 +197,8 @@ A render serves every sensor due; the cameras render every 33 ms of plant time, 
 
 ## What is not modeled
 
-- Camera exposure, noise, motion blur and rolling shutter: every frame is a global-shutter render at the frame's plant time, every camera at one fixed exposure: RTX's auto exposure off and its tone mapping set by `rtx.EXPOSURE` (ACES, ISO 100, 1/50 s at f/5: Isaac Sim 6.2's defaults, pinned so a Kit upgrade cannot change how bright a room renders); the summary's `rtx_post` records the values Kit ran with. The D435i's infrared imagers see visible light, without the projector's pattern; its depth is the exact distance, without stereo matching.
+- Camera exposure, noise, motion blur and rolling shutter: every frame is a global-shutter render at the frame's plant time, every camera at one fixed exposure: RTX's auto exposure off and its tone mapping set by `rtx.EXPOSURE` (ACES, ISO 100, 1/50 s at f/5: Isaac Sim 6.2's defaults, pinned so a Kit upgrade cannot change how bright a room renders); the summary's `rtx_post` records the values Kit ran with. The D435i's infrared imagers see visible light, without the projector's pattern.
+- Stereo depth is exact unless `depth_noise` is on, and then it has the errors above only: no correlation of the noise farther than its blur and the median reach (the OAK-D-W's errors stay correlated past 30 px, more along rows than along columns), no confidence threshold of its own (the texture threshold stands for it), no widening of foreground edges by the matcher's window, no grazing-angle failures or flying pixels at edges, and none of the cameras' post-processing filters other than the median.
 - With the ZED Mini's fisheye calibration, RTX leaves the corners of the image, beyond about 46 deg off axis, empty (light grey).
 - The Mid-360's real rosette, its reflectivity-dependent reach and intensities. Within one render the lidar sees the scene as it is at that render (Kit's motion BVH is off), so a moving robot's sweep is built from three renders.
 - The D435i on the G1 has no `<mount>_camera` link in the description, so Controls places it at a default mount; the ZED Mini mount's pitch is assumed level (the G1 URDF's `camera0_camera`).

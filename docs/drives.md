@@ -221,7 +221,7 @@ In the runtime these stay at identity, except `torque_scale`, which the `power_s
 
 ## Target shaping with constant solver gains
 
-Isaac Lab's articulation has a joint PD inside the solver. MJWarp's `implicitfast` integrator treats its damping implicitly. Changing solver gains requires a model update, so they are fixed when the plant is built. The gains `k0`, `d0` on one-to-one joints and native crank shafts are the drive's baseline gains from `actuators.yaml`; passive ankle hinges have zero drive gains. They are written at spawn (`src/humanoid_sim/physics/joint_properties.py`). The analytical semantic-only map retains standing-pose reflected gains for calculations without native shafts, not for the delivered USD physics.
+Isaac Lab's articulation has a joint PD inside the solver. MJWarp's `rk4`, the profiles' integrator, integrates it explicitly, damping included; `implicitfast` would treat the damping implicitly but does not conserve angular momentum at 4 ms. Changing solver gains requires a model update, so they are fixed when the plant is built. The gains `k0`, `d0` on one-to-one joints and native crank shafts are the drive's baseline gains from `actuators.yaml`; passive ankle hinges have zero drive gains. They are written at spawn (`src/humanoid_sim/physics/joint_properties.py`). The analytical semantic-only map retains standing-pose reflected gains for calculations without native shafts, not for the delivered USD physics.
 
 | Joints | `k0` (Nm/rad) | `d0` (Nm·s/rad) |
 |---|---|---|

@@ -28,7 +28,13 @@ physics:
   solver: mjwarp
   self_collision: true
   mjwarp:
-    integrator: implicitfast  # implicit in the damping: stable with the stiff ankle-crank PD at 4 ms
+    # RK4 conserves angular momentum under fast joint motion; the first-order integrators (euler, implicit,
+    # implicitfast) do not at 4 ms. Free fall from rest, every 1:1 joint swinging at 3 Hz
+    # (tests/test_angular_momentum.py), peak net angular momentum about the COM over what the bodies carry:
+    # implicitfast 5.4 % (V1), 9.2 % (G1), 10.1 % (G1 with hands); rk4 0.017 %, 0.35 %, 0.36 %. A hung robot shows
+    # the first as a spin about the vertical. Cost per step for one V1: 3.96 ms against 3.14 ms on an L40S, 9.7 ms
+    # against 3.3 ms on Warp's CPU device (spikes/integrator_drift). RK4 is explicit, also in the damping.
+    integrator: rk4
     cone: pyramidal
     iterations: 100
     ls_iterations: 50

@@ -14,9 +14,8 @@ from humanoid_sim.sensors.models import (
     Rig,
     UnitreeG1Imu,
     ZedMini,
+    ZedMiniImu,
 )
-
-V1_MONO_LEFT = (283.604271, 283.556541, 321.744194, 196.769579)
 
 
 def ethrc_v1() -> Rig:
@@ -28,12 +27,44 @@ def ethrc_v1() -> Rig:
         # (MT CAN Protocol MT1604P 2020.A 6.4.2 and 6.4.4, as Controls' ethrc_mti_can decodes them; the 2026-10-28
         # exc-* captures sit on that grid).
         imu=Mti610("imu_link", sample_period_ns=2_500_000, output_lsb=(2.0**-9, 2.0**-8)),
-        # As Controls' camera service opens it, with the unit's calibration (camera_info on the V1, 2026-10-20) for
-        # rgb and mono_left. mono_right (the same OV9282 sensor) and depth (aligned to the rectified left image) are
-        # modeled with mono_left's pinhole until the unit's are read.
+        # As Controls' camera service opens it, with the unit's calibration (camera_info on the V1: rgb and mono_left
+        # 2026-10-20, mono_right and depth 2026-11-02, unchanged rgb and mono_left). Depth is on the rectified left
+        # image, whose camera matrix DepthAI takes from the right imager: close to mono_right's, not mono_left's.
+        # The unit turns disparity back into depth with mono_left's fx instead: every depth in 60 s of its depth
+        # stream (2026-11-02, sub-pixel off) is 21339 mm px over a whole number, 283.60 px times the 75.243 mm
+        # baseline of /tf_static, so it reports depths 0.5 % farther than they are.
+        # The raw streams' lenses are rational polynomials, as their camera_info gives them (2026-11-02: Controls'
+        # backend reads the device's calibration and refits fx, fy, cx, cy, p1, p2 without its thin-prism terms);
+        # depth is rectified, a plain pinhole. Each stream's place and orientation are the unit's calibration, as
+        # /tf_static gives them (2026-11-02): mono_left is the camera frame's origin at the nominal orientation; the
+        # rectified depth view is turned 0.38 deg from it, mono_right sits 75.243 mm away, turned 0.12 deg, and rgb
+        # 37.65 mm away, turned 0.78 deg.
         camera0=OakDW("camera1_link", width=640, height=400, frame_period_ns=33_333_333,
                       intrinsics={"rgb": (283.087462, 282.805448, 325.969479, 198.375709),
-                                  "mono_left": V1_MONO_LEFT, "mono_right": V1_MONO_LEFT, "depth": V1_MONO_LEFT}),
+                                  "mono_left": (283.604271, 283.556541, 321.744194, 196.769579),
+                                  "mono_right": (282.176691, 282.201086, 322.219193, 195.29002),
+                                  "depth": (282.187653, 282.203949, 322.194153, 195.345032)},
+                      distortion={"rgb": ("rational_polynomial", (
+                                      2.8050684928894043, 0.7706795334815979, -0.000120536, -2.0345e-05,
+                                      0.01219945028424263, 3.1599576473236084, 1.589902639389038,
+                                      0.10351193696260452)),
+                                  "mono_left": ("rational_polynomial", (
+                                      0.31908977031707764, -0.04265667125582695, 0.000121868, 6.615e-05,
+                                      -0.001490763621404767, 0.6519906520843506, -0.0185304693877697,
+                                      -0.009558772668242455)),
+                                  "mono_right": ("rational_polynomial", (
+                                      7.652671813964844, 2.6182069778442383, 1.8047e-05, 7.6019e-05,
+                                      0.05332671478390694, 8.02845287322998, 5.012196063995361,
+                                      0.39285749197006226))},
+                      stream_offsets_m={"mono_right": (0.0002542755126580528, -0.07524099355566531,
+                                                       0.0004318634125514962),
+                                        "rgb": (0.0004073064796734663, -0.03765055989466586, -0.000130909748825339)},
+                      stream_rotations_xyzw={
+                          "depth": (0.5021788678878597, -0.4976191082071747, 0.5006850616628487, -0.499505832620234),
+                          "mono_right": (-0.4991427636162324, 0.5004618262050996, -0.5004456956959954,
+                                         0.4999485650548041),
+                          "rgb": (0.5022736427256218, -0.5015980737137385, 0.5019821939719118, -0.49409962275329394)},
+                      depth_focal_px=283.604271),
     )
 
 
@@ -46,7 +77,8 @@ def g1() -> Rig:
 
 
 def g1_cameras() -> Rig:
-    """The camera the lab G1 carries, at the description's camera link, until its rig declares it: the ZED Mini."""
+    """The camera the lab G1 carries, at the description's camera link, until its rig declares it: the ZED Mini, and its
+    IMU (a placeholder at the same frame)."""
     return Rig(
         # The helmet mount: the left eye's optical centre (the G1 URDF's camera0_camera). HD720 at 30 Hz as Controls'
         # zed backend opens it, with the factory calibration of the lab's unit (SN19945568, as Controls'
@@ -59,6 +91,9 @@ def g1_cameras() -> Rig:
                         "right": ("equidistant", (-0.0368591, 0.0234426, -0.0128113, 0.00625172))},
             stream_offsets_m={"right": (0.000233734, -0.0628272, 0.000181381)},
         ),
+        # MODELED GUESS: the ZED's IMU at the left eye's optical centre, in the camera frame's axes. The real one sits
+        # a few cm away (camera_imu_transform, per unit); 800 Hz is the datasheet's.
+        zed_imu=ZedMiniImu("camera0_camera", sample_period_ns=1_250_000),
     )
 
 

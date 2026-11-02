@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +35,14 @@ def rpy_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
     return np.array([[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
                      [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
                      [-sp, cp * sr, cp * cr]])
+
+
+def quat_matrix(q_xyzw) -> np.ndarray:
+    """Rotation matrix of a unit quaternion (x, y, z, w)."""
+    x, y, z, w = q_xyzw
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
 
 
 def quat_xyzw(R: np.ndarray) -> tuple[float, float, float, float]:
@@ -113,7 +122,8 @@ class Mount:
 @dataclass(frozen=True)
 class Lens:
     """A stream's lens at its output resolution: a pinhole with ``distortion_model`` ``plumb_bob`` (k1 k2 p1 p2
-    k3), ``equidistant`` (k1..k4, OpenCV's fisheye) or ``none``."""
+    k3), ``rational_polynomial`` (k1 k2 p1 p2 k3 k4 k5 k6, OpenCV's rational model), ``equidistant`` (k1..k4,
+    OpenCV's fisheye) or ``none``."""
 
     width_px: int
     height_px: int
@@ -143,10 +153,10 @@ class Lens:
             td = theta * (1 + k1 * theta**2 + k2 * theta**4 + k3 * theta**6 + k4 * theta**8)
             scale = np.where(r > 1e-12, td / np.maximum(r, 1e-12), 1.0)
             a, b = a * scale, b * scale
-        elif self.distortion_model == "plumb_bob":
-            k1, k2, p1, p2, k3 = self.distortion
+        elif self.distortion_model in ("plumb_bob", "rational_polynomial"):
+            k1, k2, p1, p2, k3, k4, k5, k6 = (*self.distortion, 0.0, 0.0, 0.0)[:8]
             r2 = a * a + b * b
-            radial = 1 + k1 * r2 + k2 * r2**2 + k3 * r2**3
+            radial = (1 + k1 * r2 + k2 * r2**2 + k3 * r2**3) / (1 + k4 * r2 + k5 * r2**2 + k6 * r2**3)
             a, b = a * radial + 2 * p1 * a * b + p2 * (r2 + 2 * a * a), b * radial + p1 * (r2 + 2 * b * b) + 2 * p2 * a * b
         elif self.distortion_model != "none":
             raise ValueError(f"distortion model {self.distortion_model!r}")
@@ -157,6 +167,36 @@ class Lens:
         if self.distortion_model == "none":
             return "plumb_bob", (0.0, 0.0, 0.0, 0.0, 0.0)
         return self.distortion_model, tuple(self.distortion)
+
+
+def resample(image: np.ndarray, lens: Lens, onto: Lens, rotation: np.ndarray | None = None) -> np.ndarray:
+    """``image`` (``[H, W]`` or ``[H, W, C]``) taken through ``lens``, as the distortion-free ``onto`` at the same
+    optical centre would see it, its optical frame turned by ``rotation`` (3x3, ``onto``'s optical frame to
+    ``lens``'s; None: the same orientation): each of ``onto``'s pixels samples ``image`` (bilinear) where its ray
+    lands through ``lens``, held at the image's edge past it."""
+    key = None if rotation is None else tuple(tuple(float(v) for v in row) for row in np.asarray(rotation))
+    u, v = _sample_map(lens, onto, key)
+    u0 = np.clip(np.floor(u).astype(int), 0, lens.width_px - 2)
+    v0 = np.clip(np.floor(v).astype(int), 0, lens.height_px - 2)
+    fu, fv = np.clip(u - u0, 0.0, 1.0), np.clip(v - v0, 0.0, 1.0)
+    if image.ndim == 3:
+        fu, fv = fu[..., None], fv[..., None]
+    g = np.asarray(image, dtype=np.float64)
+    top = g[v0, u0] * (1 - fu) + g[v0, u0 + 1] * fu
+    bottom = g[v0 + 1, u0] * (1 - fu) + g[v0 + 1, u0 + 1] * fu
+    return top * (1 - fv) + bottom * fv
+
+
+@lru_cache(maxsize=16)
+def _sample_map(lens: Lens, onto: Lens, rotation: tuple | None) -> tuple[np.ndarray, np.ndarray]:
+    """Where each of ``onto``'s pixels lands in ``lens``'s image: ``u``, ``v`` ``[H, W]``."""
+    if onto.distortion_model != "none":
+        raise ValueError(f"resample onto a distortion-free lens, not {onto.distortion_model!r}")
+    v, u = np.mgrid[0:onto.height_px, 0:onto.width_px].astype(np.float64)
+    rays = np.stack([(u - onto.cx_px) / onto.fx_px, (v - onto.cy_px) / onto.fy_px, np.ones_like(u)], axis=-1)
+    rays = rays.reshape(-1, 3) if rotation is None else rays.reshape(-1, 3) @ np.array(rotation).T
+    uv = lens.project(rays).reshape(onto.height_px, onto.width_px, 2)
+    return uv[..., 0], uv[..., 1]
 
 
 @dataclass(frozen=True)
@@ -220,6 +260,7 @@ def camera_spec(camera) -> CameraSpec:
         lens = Lens(c.width, c.height, fx, fy, cx, cy, model, tuple(coefficients))
         streams.append(Stream(name, kind, ENCODINGS[kind], 1e9 / c.frame_period_ns, lens,
                               tuple(c.stream_offsets_m[name]),
+                              c.stream_rotations_xyzw.get(name, quat_xyzw(LINK_FROM_OPTICAL)),
                               sync_group="stereo" if stereo and kind == "mono" else "",
                               depth_source="stereo" if stereo and kind == "depth" else "",
                               range_m=tuple(c.depth_range_m) if kind == "depth" else (0.0, math.inf),
