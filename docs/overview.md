@@ -8,7 +8,7 @@ The same plant code serves three uses:
 |---|---|---|---|
 | Training | humanoid-learning, any Isaac Lab task | Thousands in parallel on one GPU | `humanoid_sim.train` (the Train-Time API) |
 | Real-time runtime | Controls' plant host, tests, demos | One, in real time | `humanoid-sim serve` |
-| Replay and system identification | Anyone checking the sim against the real robot | One per capture, or many for fits | `humanoid-sim replay`, `fit-delay`, `fit-passive` |
+| Replay and system identification | Anyone checking the sim against the real robot | One per capture, or many for fits | `humanoid-sim replay`; fitting in humanoid-learning |
 
 ![Six robots in the training scene](images/scene-hero.png)
 
@@ -88,7 +88,7 @@ A manager-based Isaac Lab environment adds the plant as its action term (`PlantA
 
 ### Replay
 
-Excitation captures recorded on the real robot (`datasets/humanoid-v1/exc-*`) are replayed drive by drive: each simulated drive gets the demand the real drive got, and the sim's positions, velocities and torques are scored against what the real drives measured. `fit-delay` and `fit-passive` use batched replays to fit the command delay and passive joint parameters. See [replay-and-sysid.md](replay-and-sysid.md).
+Excitation captures recorded on the real robot (`datasets/humanoid-v1/exc-*`) are replayed drive by drive: each simulated drive gets the demand the real drive got, and the sim's positions, velocities and torques are scored against what the real drives measured. humanoid-learning uses batched replay to fit timing and mechanical parameters. See [replay-and-sysid.md](replay-and-sysid.md).
 
 ## What is measured, what is true
 

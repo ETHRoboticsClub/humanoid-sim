@@ -109,6 +109,18 @@ def asset_meta(usd_path: Path) -> dict:
     raise FileNotFoundError(f"{usd_path} is not inside a built asset (no asset.json)")
 
 
+def plant_identity(sim, usd_path: Path) -> dict:
+    """Description and delivered-asset provenance shared by replay and fitting clients."""
+    usd = Path(usd_path)
+    try:
+        meta = asset_meta(usd)
+    except FileNotFoundError:
+        meta = {}
+    return {**sim.desc.identity(), "description_root": str(sim.desc.root.resolve()), "usd": str(usd.resolve()),
+            "asset_key": meta.get("key"), "source_usd_sha256": meta.get("source_usd_sha256"),
+            "source_usd": None if sim.desc.usd_path is None else str(sim.desc.usd_path.resolve())}
+
+
 def check_asset_robot(usd_path: Path, robot: str) -> None:
     """Raise when ``usd_path`` is a built asset of a robot other than ``robot``: the description of ``robot``
     supplies the joint properties, drives and poses it is driven with. A USD outside a built asset is not checked."""

@@ -1,0 +1,478 @@
+schema: ethrc-actuators/v1
+urdf: urdf/URDF_6.urdf
+robot: URDF_6
+
+standing_reference:
+  robot_id: humanoid-v1
+  unit_uuid: f7ef2b86-6a57-40bb-b1b9-2aeea0565c8d
+  model_revision: 40ab4eed01d7d663
+  calibration_revision: 'native:op-62365931a3a24202b4d017d47a6d0826'
+
+backend:
+  control_period_s: 0.0015
+  mode_ramp_s: 2.0
+  overload_dwell_s: 0.010
+
+families:
+  HEJ90-48-140:
+    mass: 1.96
+    torque_speed: [[0.0, 140.0], [5.0, 140.0], [6.0, 135.0], [8.0, 100.0], [10.0, 25.0], [10.4, 0.0]]
+    controller_rate_hz: 2500
+    backdrive_torque: 1.5
+    drive_delay_s: 0.0050
+    ethercat_product_code: 0x8A010045
+    torque_constant_nm_per_a: 0.1340
+    max_current_a: 53.0
+    nominal_current_a: 23.0
+    pole_pairs: 10
+    encoder_counts: 4096
+    damping_kd: 2.5
+  HEJ70-48-50:
+    mass: 1.05
+    torque_speed: [[0.0, 50.0], [10.0, 45.0], [15.0, 30.0], [20.0, 10.0], [22.0, 0.0]]
+    controller_rate_hz: 2500
+    backdrive_torque: 0.5
+    drive_delay_s: 0.0050
+    ethercat_product_code: 0x8A020045
+    torque_constant_nm_per_a: 0.0997
+    max_current_a: 46.0
+    nominal_current_a: 14.0
+    pole_pairs: 10
+    encoder_counts: 16384
+    damping_kd: 2.5
+  HEJ50-48-30:
+    mass: 0.57
+    torque_speed: [[0.0, 30.0], [10.0, 25.0], [15.0, 20.0], [20.0, 5.0], [21.0, 0.0]]
+    controller_rate_hz: 2500
+    backdrive_torque: 0.8
+    drive_delay_s: 0.0050
+    ethercat_product_code: 0x8A030045
+    torque_constant_nm_per_a: 0.0685
+    max_current_a: 21.8
+    nominal_current_a: 7.0
+    pole_pairs: 10
+    encoder_counts: 16384
+    damping_kd: 2.5
+
+drives:
+  maxonHEJ50L_ANK1:
+    family: HEJ50-48-30
+    crank: upper
+    effort: 30
+    effort_nominal: 11
+    velocity: 21.0
+    joints: [foot_pitch_l, foot_roll_l]
+    position_limit: [-0.8004, 0.1342]
+  maxonHEJ50L_ANK2:
+    family: HEJ50-48-30
+    crank: lower
+    effort: 30
+    effort_nominal: 11
+    velocity: 21.0
+    joints: [foot_pitch_l, foot_roll_l]
+    position_limit: [-0.2048, 0.6684]
+  maxonHEJ50R_ANK1:
+    family: HEJ50-48-30
+    crank: upper
+    effort: 30
+    effort_nominal: 11
+    velocity: 21.0
+    joints: [foot_pitch_r, foot_roll_r]
+    position_limit: [-0.1917, 0.6723]
+  maxonHEJ50R_ANK2:
+    family: HEJ50-48-30
+    crank: lower
+    effort: 30
+    effort_nominal: 11
+    velocity: 21.0
+    joints: [foot_pitch_r, foot_roll_r]
+    position_limit: [-0.7244, 0.1542]
+
+baseline_position_gains:
+  maxonHEJ70AR1: {stiffness: 100.0, damping: 5.0}
+  maxonHEJ70AR2: {stiffness: 100.0, damping: 5.0}
+  maxonHEJ50AR3: {stiffness: 22.1, damping: 1.41}
+  maxonHEJ50AR4: {stiffness: 22.1, damping: 1.41}
+  maxonHEJ70AL1: {stiffness: 100.0, damping: 5.0}
+  maxonHEJ70AL2: {stiffness: 100.0, damping: 5.0}
+  maxonHEJ50AL3: {stiffness: 22.1, damping: 1.41}
+  maxonHEJ50AL4: {stiffness: 22.1, damping: 1.41}
+  maxonHEJ90M1: {stiffness: 197.4, damping: 12.6}
+  maxonHEJ90L1: {stiffness: 197.4, damping: 12.6}
+  maxonHEJ90L2: {stiffness: 197.4, damping: 12.6}
+  maxonHEJ90L3: {stiffness: 197.4, damping: 12.6}
+  maxonHEJ90L4: {stiffness: 197.4, damping: 12.6}
+  maxonHEJ50L_ANK1: {stiffness: 22.1, damping: 1.41}
+  maxonHEJ50L_ANK2: {stiffness: 22.1, damping: 1.41}
+  maxonHEJ90M2: {stiffness: 197.4, damping: 12.6}
+  maxonHEJ90R1: {stiffness: 197.4, damping: 12.6}
+  maxonHEJ90R2: {stiffness: 197.4, damping: 12.6}
+  maxonHEJ90R3: {stiffness: 197.4, damping: 12.6}
+  maxonHEJ90R4: {stiffness: 197.4, damping: 12.6}
+  maxonHEJ50R_ANK1: {stiffness: 22.1, damping: 1.41}
+  maxonHEJ50R_ANK2: {stiffness: 22.1, damping: 1.41}
+
+joints:
+  hip_central_rotation:
+    region: upper_body
+    drive: mxnHEJ90M1
+    device: maxonHEJ90M1
+    sign: -1
+    standing_offset_rad: 0.0
+    family: HEJ90-48-140
+    gear: 300
+    armature: 0.05
+    effort: 140
+    effort_nominal: 80
+    velocity: 10.4
+    position_limit: [-0.407076, 0.291055]
+    damping: 4.1946
+    friction: 0.2696
+  waist_upperbody_yaw:
+    region: upper_body
+    drive: mxnHEJ90M2
+    device: maxonHEJ90M2
+    sign: +1
+    standing_offset_rad: 0.0
+    family: HEJ90-48-140
+    gear: 300
+    armature: 0.05
+    effort: 140
+    effort_nominal: 80
+    velocity: 10.4
+    position_limit: [-1.132697, 1.147303]
+    damping: 10
+    friction: 0.5
+  leg_flexion_l:
+    region: leg
+    drive: mxnHEJ90L1
+    device: maxonHEJ90L1
+    sign: -1
+    standing_offset_rad: 0.0
+    family: HEJ90-48-140
+    gear: 300
+    armature: 0.05
+    effort: 140
+    effort_nominal: 80
+    velocity: 10.4
+    position_limit: [-0.817201, 0.990799]
+    damping: 4.1998
+    friction: 0.2299
+  leg_flexion_r:
+    region: leg
+    drive: mxnHEJ90R1
+    device: maxonHEJ90R1
+    sign: -1
+    standing_offset_rad: 0.0
+    family: HEJ90-48-140
+    gear: 300
+    armature: 0.05
+    effort: 140
+    effort_nominal: 80
+    velocity: 10.4
+    position_limit: [-1.000144, 0.807856]
+    damping: 4.1998
+    friction: 0.2299
+  leg_abduction_l:
+    region: leg
+    drive: mxnHEJ90L2
+    device: maxonHEJ90L2
+    sign: -1
+    standing_offset_rad: 0.0
+    family: HEJ90-48-140
+    gear: 300
+    armature: 0.05
+    effort: 140
+    effort_nominal: 80
+    velocity: 10.4
+    position_limit: [-0.08224, 1.63456]
+    damping: 4.9698
+    friction: 0.2552
+  leg_abduction_r:
+    region: leg
+    drive: mxnHEJ90R2
+    device: maxonHEJ90R2
+    sign: +1
+    standing_offset_rad: 0.0
+    family: HEJ90-48-140
+    gear: 300
+    armature: 0.05
+    effort: 140
+    effort_nominal: 80
+    velocity: 10.4
+    position_limit: [-0.211762, 1.505038]
+    damping: 4.9698
+    friction: 0.2552
+  hip_yaw_l:
+    region: leg
+    drive: mxnHEJ90L3
+    device: maxonHEJ90L3
+    sign: -1
+    standing_offset_rad: 0.0
+    family: HEJ90-48-140
+    gear: 300
+    armature: 0.05
+    effort: 140
+    effort_nominal: 80
+    velocity: 10.4
+    position_limit: [-1.592899, 1.548701]
+    damping: 3.4929
+    friction: 0.2123
+  hip_yaw_r:
+    region: leg
+    drive: mxnHEJ90R3
+    device: maxonHEJ90R3
+    sign: -1
+    standing_offset_rad: 0.0
+    family: HEJ90-48-140
+    gear: 300
+    armature: 0.05
+    effort: 140
+    effort_nominal: 80
+    velocity: 10.4
+    position_limit: [-1.488169, 1.653431]
+    damping: 3.4929
+    friction: 0.2123
+  knee_l:
+    region: leg
+    drive: mxnHEJ90L4
+    device: maxonHEJ90L4
+    sign: -1
+    autocalibration: true
+    standing_offset_rad: 0.0
+    family: HEJ90-48-140
+    gear: 300
+    armature: 0.05
+    effort: 140
+    effort_nominal: 80
+    velocity: 10.4
+    position_limit: [-2.274218, 0.2]
+    damping: 3.8429
+    friction: 0.3056
+  knee_r:
+    region: leg
+    drive: mxnHEJ90R4
+    device: maxonHEJ90R4
+    sign: +1
+    autocalibration: true
+    standing_offset_rad: 0.0
+    family: HEJ90-48-140
+    gear: 300
+    armature: 0.05
+    effort: 140
+    effort_nominal: 80
+    velocity: 10.4
+    position_limit: [-2.283575, 0.2]
+    damping: 3.8429
+    friction: 0.3056
+  shoulder_flexion_l:
+    region: upper_body
+    drive: mxnHEJ70AL1
+    device: maxonHEJ70AL1
+    sign: -1
+    standing_offset_rad: 0.0
+    family: HEJ70-48-50
+    gear: 100
+    armature: 0.34
+    effort: 50
+    effort_nominal: 19
+    velocity: 22
+    position_limit: [-0.785401, 2.792499]
+    damping: 0.85
+    friction: 0.32
+  shoulder_flexion_r:
+    region: upper_body
+    drive: mxnHEJ70AR1
+    device: maxonHEJ70AR1
+    sign: +1
+    standing_offset_rad: 0.0
+    family: HEJ70-48-50
+    gear: 100
+    armature: 0.34
+    effort: 50
+    effort_nominal: 19
+    velocity: 22
+    position_limit: [-0.785398, 2.792502]
+    damping: 0.85
+    friction: 0.32
+  shoulder_abduction_l:
+    region: upper_body
+    drive: mxnHEJ70AL2
+    device: maxonHEJ70AL2
+    sign: -1
+    standing_offset_rad: 0.0
+    family: HEJ70-48-50
+    gear: 100
+    armature: 0.34
+    effort: 50
+    effort_nominal: 19
+    velocity: 22
+    position_limit: [-2.024561, 0.383939]
+    motion_hook:
+      type: shoulder_clearance
+      outward_sign: -1
+      minimum_outward_rad: -0.245346
+    damping: 0.85
+    friction: 0.05
+  shoulder_abduction_r:
+    region: upper_body
+    drive: mxnHEJ70AR2
+    device: maxonHEJ70AR2
+    sign: +1
+    standing_offset_rad: 0.0
+    family: HEJ70-48-50
+    gear: 100
+    armature: 0.34
+    effort: 50
+    effort_nominal: 19
+    velocity: 22
+    position_limit: [-2.017604, 0.383896]
+    motion_hook:
+      type: shoulder_clearance
+      outward_sign: -1
+      minimum_outward_rad: -0.245303
+    damping: 0.85
+    friction: 0.05
+  shoulder_rotation_l:
+    region: upper_body
+    drive: mxnHEJ50AL3
+    device: maxonHEJ50AL3
+    sign: +1
+    standing_offset_rad: 0.0
+    family: HEJ50-48-30
+    gear: 50
+    armature: 0.0056
+    effort: 30
+    effort_nominal: 11
+    velocity: 21
+    position_limit: [-2.715425, 0.862475]
+    damping: 0.27
+    friction: 0.10
+  shoulder_rotation_r:
+    region: upper_body
+    drive: mxnHEJ50AR3
+    device: maxonHEJ50AR3
+    sign: -1
+    standing_offset_rad: 0.0
+    family: HEJ50-48-30
+    gear: 50
+    armature: 0.0056
+    effort: 30
+    effort_nominal: 11
+    velocity: 21
+    position_limit: [-2.782563, 0.795337]
+    damping: 0.27
+    friction: 0.10
+  elbow_flexion_l:
+    region: upper_body
+    drive: mxnHEJ50AL4
+    device: maxonHEJ50AL4
+    sign: -1
+    standing_offset_rad: 0.0
+    family: HEJ50-48-30
+    gear: 50
+    armature: 0.0056
+    effort: 30
+    effort_nominal: 11
+    velocity: 21
+    position_limit: [-1.7453, 1.7453]
+    damping: 1.11
+    friction: 0.01
+  elbow_flexion_r:
+    region: upper_body
+    drive: mxnHEJ50AR4
+    device: maxonHEJ50AR4
+    sign: +1
+    standing_offset_rad: 0.0
+    family: HEJ50-48-30
+    gear: 50
+    armature: 0.0056
+    effort: 30
+    effort_nominal: 11
+    velocity: 21
+    position_limit: [-1.7453, 1.7453]
+    damping: 1.11
+    friction: 0.01
+
+  foot_pitch_l:
+    region: leg
+    drive: maxonHEJ50LANK1
+    device: null
+    sign: &foot_pitch_l_sign +1
+    standing_offset_rad: 0.0
+    family: HEJ50-48-30
+    gear: 50
+    armature: 0.0056
+    armature_joint: 0.0103796
+    effort: 30
+    effort_nominal: 11
+    velocity: 21.0
+    damping: 10
+    friction: 0.5
+  foot_pitch_r:
+    region: leg
+    drive: maxonHEJ50RANK1
+    device: null
+    sign: &foot_pitch_r_sign +1
+    standing_offset_rad: 0.0
+    family: HEJ50-48-30
+    gear: 50
+    armature: 0.0056
+    armature_joint: 0.0103796
+    effort: 30
+    effort_nominal: 11
+    velocity: 21.0
+    damping: 10
+    friction: 0.5
+  foot_roll_l:
+    region: leg
+    drive: maxonHEJ50LANK2
+    device: null
+    sign: +1
+    standing_offset_rad: 0.0
+    family: HEJ50-48-30
+    gear: 50
+    armature: 0.0056
+    armature_joint: 0.0126230
+    effort: 30
+    effort_nominal: 11
+    velocity: 21.0
+    damping: 10
+    friction: 0.5
+  foot_roll_r:
+    region: leg
+    drive: maxonHEJ50RANK2
+    device: null
+    sign: +1
+    standing_offset_rad: 0.0
+    family: HEJ50-48-30
+    gear: 50
+    armature: 0.0056
+    armature_joint: 0.0126230
+    effort: 30
+    effort_nominal: 11
+    velocity: 21.0
+    damping: 10
+    friction: 0.5
+ankle_model:
+  semantic_to_kinematic_sign:
+    l: [*foot_pitch_l_sign, -1]
+    r: [*foot_pitch_r_sign, 1]
+  semantic_neutral_rad:
+    l: [-0.3294124613732734, 0.0]
+    r: [-0.32944189760250353, 0.0]
+  right_geometry:
+    pitch_axis: [0.0, 1.0, 0.0]
+    roll_axis: [1.0, 0.0, 0.0]
+    upper:
+      P_shaft: [-0.028694, 0.0, 0.253959]
+      n_shaft: [-1.0, 0.0, 0.0]
+      P_crank_0: [-0.050194, -0.056799999999999996, 0.253959]
+      P_anchor_0: [-0.055, -0.06055, -0.015]
+      L: 0.26902800000000004
+    lower:
+      P_shaft: [-0.028694, 0.0, 0.178959]
+      n_shaft: [-1.0, 0.0, 0.0]
+      P_crank_0: [-0.050194, 0.056799999999999996, 0.178959]
+      P_anchor_0: [-0.055, 0.06055, -0.015]
+      L: 0.194055

@@ -409,6 +409,9 @@ class IsaacLabRobot:
 
         self._contact_capacity = contact_capacity_guard(physics, cfg.num_envs, cfg.device)
         self.robot = self.scene["robot"]
+        physical = desc.link_names()
+        self._inertial_bodies = [i for i, n in enumerate(self.robot.body_names) if n in physical]
+        self.gravity_w = tuple(self.sim.cfg.gravity)
         self.imu = self.scene["imu"] if cfg.imu else None
         self.contacts = self.scene["contacts"] if cfg.contacts else None
         # Start every env at the articulation's default (standing) joint state.
@@ -436,6 +439,19 @@ class IsaacLabRobot:
         tc.set_position_index(value=target)
         tc.set_velocity_index(value=torch.zeros_like(target) if velocity is None else velocity)
         tc.set_effort_index(value=torch.zeros_like(target) if effort is None else effort)
+
+    def apply_base_acceleration(self, acceleration_w: torch.Tensor) -> None:
+        """Add -m*a at physical bodies' CoMs. Input is prevalidated [envs, 3].
+
+        WrenchComposer positions=None means the centre of mass, including for
+        is_global=True (pinned Isaac Lab wrench_composer.py). Auxiliary base
+        support links are excluded. Does not change gravity or actual root motion.
+        """
+        ids = self._inertial_bodies
+        mass = self.robot.data.body_mass.torch[:, ids]
+        force = -mass[..., None] * acceleration_w[:, None]
+        self.robot.instantaneous_wrench_composer.add_forces_and_torques_index(
+            forces=force, torques=torch.zeros_like(force), body_ids=ids, is_global=True)
 
     def step(self) -> None:
         self.scene.write_data_to_sim()
