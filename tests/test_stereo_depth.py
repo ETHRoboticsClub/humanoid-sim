@@ -1,6 +1,7 @@
 """Stereo depth errors (sensors/stereo_depth.py) on synthetic depth images: noise that grows with the square of the
-range, disparity in steps, the occlusion band beside a foreground edge and at the image border, no depth on plain
-surfaces, and the stereo geometry of a camera model. No Kit, no description."""
+range and on plain surfaces, spread over neighbouring pixels, disparity in steps, the occlusion band beside a
+foreground edge and at the image border, no depth on plain surfaces, the median filter, and the stereo geometry of a
+camera model. No Kit, no description."""
 
 from __future__ import annotations
 
@@ -8,8 +9,16 @@ import numpy as np
 import pytest
 
 from humanoid_sim.sensors import geometry
-from humanoid_sim.sensors.models import OakDW, RealSenseD435i
-from humanoid_sim.sensors.stereo_depth import disparity_px, occluded, stereo_depth, stereo_pair, texture_std
+from humanoid_sim.sensors.models import Camera, OakDW, RealSenseD435i
+from humanoid_sim.sensors.stereo_depth import (
+    blurred_noise,
+    disparity_px,
+    median_filter,
+    occluded,
+    stereo_depth,
+    stereo_pair,
+    texture_std,
+)
 
 FOCAL_PX = 400.0
 BASELINE_M = 0.05  # f · b = 20 px m
@@ -97,6 +106,49 @@ def test_plain_surfaces_get_no_depth_and_textured_ones_keep_it():
     assert np.isfinite(out[:, 65:]).all()
 
 
+def test_plain_surfaces_get_more_noise_held_within_the_texture_range():
+    depth = np.full((200, 400), 2.0)
+    grey = np.full((200, 400), 128.0)
+    grey[:, 200:] += _rng(1).normal(0.0, 40.0, (200, 200))  # the right half textured, far above the range
+    texture_range, exponent = (0.5, 8.0), 0.5
+    out = stereo_depth(depth, focal_px=FOCAL_PX, baseline_m=BASELINE_M, disparity_sigma_px=SIGMA_PX, rng=_rng(),
+                       reference=grey, texture_exponent=exponent, texture_range=texture_range)
+    d = FOCAL_PX * BASELINE_M / out
+    plain, textured = np.std(d[:, 60:190]), np.std(d[:, 210:])  # past the border band and the patch overlap
+    assert plain == pytest.approx(SIGMA_PX * texture_range[0] ** -exponent, rel=0.05)
+    assert textured == pytest.approx(SIGMA_PX * texture_range[1] ** -exponent, rel=0.05)
+
+
+def test_blurred_noise_keeps_unit_variance_and_correlates_neighbours():
+    for blur_px in (0.0, 1.0, 2.0):
+        e = blurred_noise(_rng(), (300, 300), blur_px)
+        assert np.std(e) == pytest.approx(1.0, rel=0.05)
+        lag1 = np.mean(e[:, 1:] * e[:, :-1]) / np.var(e)
+        # A Gaussian blur of sigma b correlates pixels one apart by exp(-1 / (4 b²)); white noise not at all.
+        expected = np.exp(-1.0 / (4 * blur_px**2)) if blur_px else 0.0
+        assert lag1 == pytest.approx(expected, abs=0.03)
+
+
+def test_the_median_fills_small_holes_and_removes_small_islands():
+    depth = np.full((40, 120), 2.0)
+    depth[20, 60] = np.inf  # a one-pixel hole in the surface
+    depth[:, 90:] = np.inf  # no surface on the right ...
+    depth[10, 105] = 2.0  # ... but for one pixel
+    kw = dict(focal_px=FOCAL_PX, baseline_m=BASELINE_M, disparity_sigma_px=0.0, rng=_rng())
+    raw = stereo_depth(depth, **kw)
+    filtered = stereo_depth(depth, median_px=5, **kw)
+    assert np.isnan(raw[20, 60]) and filtered[20, 60] == pytest.approx(2.0)
+    assert np.isfinite(raw[10, 105]) and np.isnan(filtered[10, 105])
+    np.testing.assert_array_equal(filtered[5:35, 30:85], 2.0)  # the surface whole and unchanged
+
+
+def test_median_filter_is_the_window_median():
+    image = _rng().normal(size=(9, 11))
+    out = median_filter(image, 3)
+    assert out[4, 5] == np.median(image[3:6, 4:7])
+    assert out.shape == image.shape
+
+
 def test_texture_std_is_the_patch_spread():
     grey = np.zeros((20, 20))
     grey[:, 1::2] = 10.0  # alternating columns: every 7 x 7 patch holds 3 or 4 of 7 bright columns
@@ -129,6 +181,30 @@ def test_bad_inputs_are_refused():
     with pytest.raises(ValueError, match="differ in size"):
         stereo_depth(depth, focal_px=FOCAL_PX, baseline_m=BASELINE_M, disparity_sigma_px=0.0, rng=_rng(),
                      reference=np.ones((3, 3)), min_texture=1.0)
+    with pytest.raises(ValueError, match="texture_range"):
+        stereo_depth(depth, focal_px=FOCAL_PX, baseline_m=BASELINE_M, disparity_sigma_px=0.1, rng=_rng(),
+                     reference=np.ones((4, 4)), texture_exponent=0.5)
+    with pytest.raises(ValueError, match="reference image"):
+        stereo_depth(depth, focal_px=FOCAL_PX, baseline_m=BASELINE_M, disparity_sigma_px=0.1, rng=_rng(),
+                     texture_exponent=0.5, texture_range=(1.0, 10.0))
+    with pytest.raises(ValueError, match="noise_blur_px"):
+        stereo_depth(depth, focal_px=FOCAL_PX, baseline_m=BASELINE_M, disparity_sigma_px=0.1, rng=_rng(),
+                     noise_blur_px=-1.0)
+    for median_px in (1, 4, -3):
+        with pytest.raises(ValueError, match="median_px"):
+            stereo_depth(depth, focal_px=FOCAL_PX, baseline_m=BASELINE_M, disparity_sigma_px=0.1, rng=_rng(),
+                         median_px=median_px)
+
+
+@pytest.mark.parametrize("figures, match", [
+    ({"depth_noise_texture_exponent": 0.3}, "depth_noise_texture_range"),
+    ({"depth_noise_texture_exponent": 0.3, "depth_noise_texture_range": (2.0, 1.0)}, "depth_noise_texture_range"),
+    ({"depth_noise_blur_px": -1.0}, ">= 0"),
+    ({"depth_median_px": 4}, "depth_median_px"),
+])
+def test_a_camera_model_with_bad_depth_figures_is_refused(figures, match):
+    with pytest.raises(ValueError, match=match):
+        type("BadCamera", (Camera,), {"streams": ("mono_left", "depth"), **figures})
 
 
 @pytest.mark.parametrize("model", [RealSenseD435i, OakDW])

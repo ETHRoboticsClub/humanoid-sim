@@ -284,7 +284,9 @@ class SensorSession:
                             disparity_step_px=model.depth_disparity_step_px, depth_focal_px=model.depth_focal_px,
                             reference=grey,
                             min_texture=model.depth_min_texture if grey is not None else 0.0,
-                            second_on_right=on_right)
+                            texture_exponent=model.depth_noise_texture_exponent,
+                            texture_range=model.depth_noise_texture_range, noise_blur_px=model.depth_noise_blur_px,
+                            median_px=model.depth_median_px, second_on_right=on_right)
 
     def _record_image(self, key: str, image: np.ndarray, now_ns: int, *, depth: bool) -> None:
         if self.recorder:

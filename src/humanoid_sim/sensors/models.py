@@ -156,11 +156,18 @@ class Camera(Sensor):
     depth_range_m: ClassVar[tuple[float, float] | None] = None
     rolling_shutter: ClassVar[frozenset[str]] = frozenset()
     # Stereo depth errors (sensors/stereo_depth.py), applied when a session asks for them: the matcher's disparity
-    # error (pixels, 1 sigma), the step it reports disparity in (pixels; 0: continuous) and the least grey-level
-    # spread of the reference image it matches on. 0: exact depth.
+    # error (pixels, 1 sigma; with a texture exponent, at a texture of 1 grey level), how it grows on plain surfaces
+    # (sigma * t^-exponent at a reference-image texture t, held within the range; 0: the same everywhere), the blur
+    # that spreads it over neighbouring pixels (pixels, a Gaussian's sigma), the step it reports disparity in
+    # (pixels; 0: continuous), the least grey-level spread of the reference image it matches on and the side of its
+    # median filter (pixels, odd; 0: none). 0: exact depth.
     depth_disparity_sigma_px: ClassVar[float] = 0.0
+    depth_noise_texture_exponent: ClassVar[float] = 0.0
+    depth_noise_texture_range: ClassVar[tuple[float, float] | None] = None
+    depth_noise_blur_px: ClassVar[float] = 0.0
     depth_disparity_step_px: ClassVar[float] = 0.0
     depth_min_texture: ClassVar[float] = 0.0
+    depth_median_px: ClassVar[int] = 0
 
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
@@ -177,9 +184,16 @@ class Camera(Sensor):
             raise ValueError(f"{where}: rolling_shutter {set(cls.rolling_shutter)}: expected streams it has")
         if cls.depth_range_m is not None and not 0 <= cls.depth_range_m[0] < cls.depth_range_m[1]:
             raise ValueError(f"{where}: depth_range_m {cls.depth_range_m}: expected (min, max)")
-        if min(cls.depth_disparity_sigma_px, cls.depth_disparity_step_px, cls.depth_min_texture) < 0:
-            raise ValueError(f"{where}: depth_disparity_sigma_px, depth_disparity_step_px and depth_min_texture must "
-                             f"be >= 0")
+        if min(cls.depth_disparity_sigma_px, cls.depth_noise_texture_exponent, cls.depth_noise_blur_px,
+               cls.depth_disparity_step_px, cls.depth_min_texture) < 0:
+            raise ValueError(f"{where}: depth_disparity_sigma_px, depth_noise_texture_exponent, depth_noise_blur_px, "
+                             f"depth_disparity_step_px and depth_min_texture must be >= 0")
+        tex = cls.depth_noise_texture_range
+        if cls.depth_noise_texture_exponent > 0 and (tex is None or not 0 < tex[0] <= tex[1]):
+            raise ValueError(f"{where}: depth_noise_texture_range {tex}: a texture exponent needs (low, high) grey "
+                             f"levels with 0 < low <= high")
+        if cls.depth_median_px != 0 and (cls.depth_median_px < 3 or cls.depth_median_px % 2 == 0):
+            raise ValueError(f"{where}: depth_median_px {cls.depth_median_px}: expected 0 or an odd number >= 3")
 
     def __init__(self, frame: str, *, width: int, height: int, frame_period_ns: int,
                  intrinsics: dict[str, tuple[float, float, float, float]],
@@ -244,13 +258,21 @@ class OakDW(Camera):
                          "depth": (0.0, 0.0, 0.0)}
     depth_range_m = (0.7, 12.0)  # the vendor's ideal range
     rolling_shutter = frozenset({"rgb"})  # the IMX378 variant
-    # Stereo depth errors as Controls' backend configures the matcher (HIGH_DENSITY preset, sub-pixel off), measured
-    # on the V1's unit (2026-11-02, 60 s of a static lab scene, lab lighting, depth on every 1808 frames): every
-    # reported depth is the device's f * b over a whole number of pixels, so whole-pixel steps; the spread of each
-    # pixel's disparity over time fits a noise of about 0.15 px before rounding (approximate: plain surfaces flicker
-    # more than textured ones, about 0.56 against 0.06 px, and one sigma fits both only roughly). Plain surfaces keep
-    # their depth (95 % of frames below 0.5 grey levels of texture), so no texture threshold.
-    depth_disparity_sigma_px = 0.15
+    # Stereo depth errors as Controls' backend configures the matcher (HIGH_DENSITY preset: sub-pixel off, LR check
+    # on, confidence 245, median 5 x 5, read off stereo.initialConfig on the V1, depthai 2.33), measured on the V1's
+    # unit (2026-11-02, 60 s of a static lab scene, lab lighting, 1808 frames). Every reported depth is the device's
+    # f * b over a whole number of pixels: whole-pixel steps. The noise and its blur are the values with which the
+    # whole chain of sensors/stereo_depth.py (noise, rounding, median), run on the recorded scene, flickers like the
+    # recording: each pixel's flicker over time, per texture of the rectified mono_left (from 0.54 px at 0.4 grey
+    # levels to 0.04 px at 34; 72214 pixels at 0.6-4 m, off depth edges), and the correlation of neighbours' flicker
+    # (0.74, 0.57, 0.36 at 1, 2, 4 px; the fit 0.78, 0.61, 0.37). Texture outside the measured 0.25-48 grey levels
+    # is held at its ends. Plain surfaces keep their depth (95 % of frames below 0.5 grey levels of texture), so no
+    # texture threshold.
+    depth_disparity_sigma_px = 0.4
+    depth_noise_texture_exponent = 0.2
+    depth_noise_texture_range = (0.25, 48.0)
+    depth_noise_blur_px = 3.0
+    depth_median_px = 5
     depth_disparity_step_px = 1.0
 
 
