@@ -98,3 +98,25 @@ def test_native_integrator_preserves_torque_free_slender_body_spin():
         if (t_ns + period_ns) % check_period_ns == 0:
             speed = np.linalg.norm(state.body_qd.numpy()[0, 3:])
             np.testing.assert_allclose(speed, initial_speed, rtol=.01, atol=0.)
+
+
+def test_contact_gap_setting_is_validated_per_solver():
+    from humanoid_sim.physics.model_build import contact_gap_setting
+
+    assert contact_gap_setting({"kamino": {}}, "kamino") is None
+    assert contact_gap_setting({"kamino": {"contact_gap_m": 0.002}}, "kamino") == 0.002
+    assert contact_gap_setting({"mjwarp": {"contacts": "newton", "contact_gap_m": 0.002}}, "mjwarp") == 0.002
+    for bad in (0.0, -0.001, float("nan"), float("inf"), True, "2mm"):
+        with pytest.raises(ValueError, match="contact_gap_m"):
+            contact_gap_setting({"kamino": {"contact_gap_m": bad}}, "kamino")
+    with pytest.raises(ValueError, match="contacts: newton"):  # MJWarp's own collision detection: no setting
+        contact_gap_setting({"mjwarp": {"contacts": "mujoco", "contact_gap_m": 0.002}}, "mjwarp")
+
+
+def test_profile_contact_gaps_are_valid():
+    from humanoid_sim.physics.model_build import contact_gap_setting
+
+    for robot in ("ethrc_v1",):
+        physics = load_profile(robot)["physics"]
+        for name in SOLVERS:
+            contact_gap_setting(physics, name)

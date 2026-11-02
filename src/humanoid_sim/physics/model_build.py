@@ -1,5 +1,6 @@
 """Scoped Newton model construction shared by training and runtime scenes."""
 
+import math
 from contextlib import contextmanager
 
 from humanoid_sim.physics.crank_stops import crank_stop_hook
@@ -60,6 +61,45 @@ def collapse_fixed_joints(builder):
     return mapping
 
 
+def contact_gap_setting(physics: dict, solver: str) -> float | None:
+    """``physics.<solver>.contact_gap_m``: the contact detection gap of every shape in Newton's collision pipeline
+    (positive, metres), or None for the importer's gaps. MJWarp's own collision detection (``contacts: mujoco``)
+    takes no setting."""
+    settings = physics[solver]
+    gap = settings.get("contact_gap_m")
+    if gap is None:
+        return None
+    if isinstance(gap, bool) or not isinstance(gap, (int, float)) or not math.isfinite(gap) or gap <= 0:
+        raise ValueError(f"{solver}.contact_gap_m {gap!r}: a positive length in metres")
+    if solver == "mjwarp" and settings.get("contacts") != "newton":
+        raise ValueError("mjwarp.contact_gap_m sets Newton's collision pipeline: it needs contacts: newton")
+    return float(gap)
+
+
+@contextmanager
+def contact_gap(gap: float | None):
+    """Set every shape's contact gap once the model is final, before the solver and the collision pipeline are
+    built (``PHYSICS_READY``). Both solvers act only on contacts at or below zero margin-shifted distance: MJWarp
+    makes a constraint row only below ``includemargin`` (the summed shape margins, zero here) and Kamino culls
+    speculative contacts, so the gap decides how far apart two shapes are still tested in the narrow phase, not
+    which contacts reach the solver."""
+    if gap is None:
+        yield
+        return
+    from isaaclab.physics import PhysicsEvent
+    from isaaclab_newton.physics import NewtonManager
+
+    def apply(_):
+        NewtonManager.get_model().shape_gap.fill_(gap)
+
+    handle = NewtonManager.register_callback(apply, PhysicsEvent.PHYSICS_READY, name="contact_gap",
+                                             wrap_weak_ref=False)
+    try:
+        yield
+    finally:
+        handle.deregister()
+
+
 @contextmanager
 def model_build(robot: str, physics: dict, solver: str | None = None):
     """Build and reset a scene with its profile's model transformations.
@@ -67,9 +107,16 @@ def model_build(robot: str, physics: dict, solver: str | None = None):
     ``physics.<solver>.collapse_fixed_joints`` merges fixed bodies, accumulating
     their mass and inertia and transforming attached shapes and joints. Body
     selectors and randomization then address the surviving rigid assemblies.
-    The callback is scoped to this build, including when construction raises.
+    ``physics.<solver>.contact_gap_m`` sets every shape's contact gap (:func:`contact_gap`).
+    The callbacks are scoped to this build, including when construction raises.
     """
     solver = solver or physics["solver"]
+    with contact_gap(contact_gap_setting(physics, solver)), _collapse_build(robot, physics, solver) as stops:
+        yield stops
+
+
+@contextmanager
+def _collapse_build(robot: str, physics: dict, solver: str):
     collapse = physics[solver].get("collapse_fixed_joints", False)
     if not isinstance(collapse, bool):
         raise ValueError("collapse_fixed_joints must be a boolean")

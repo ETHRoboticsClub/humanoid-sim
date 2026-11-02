@@ -79,6 +79,10 @@ physics:
     # contact, plus 256 rows for native loops, joint limits and uneven contact load.
     nconmax: 512
     njmax: 2304
+    # Test shape pairs for contact only within 2 mm instead of the importer's 0.1 m. Speculative contacts (still
+    # apart) make no constraint row, so the solver sees the same contacts; at 4096 envs the narrow phase takes
+    # 0.35 instead of 1.25 ms per step and a falling robot fills a third of the contact pool (docs/robot-model.md).
+    contact_gap_m: 0.002
   kamino:
     # NativeState supplies every crank and ball coordinate consistently. Preserve
     # that state through tree FK rather than re-solving it with regularized FK.
@@ -87,6 +91,9 @@ physics:
     # Keep the direct operator within int32 indexing at 4096 worlds. The plant
     # checks actual contacts on device and stops rather than silently dropping any.
     max_contacts_per_world: 144
+    # As for MJWarp: Kamino culls speculative contacts before it reserves capacity, so the gap changes only the
+    # narrow phase's work and Newton's pool, not the contacts solved.
+    contact_gap_m: 0.002
     sparse_jacobian: true
     sparse_dynamics: false
     dynamics_solver: padmm
