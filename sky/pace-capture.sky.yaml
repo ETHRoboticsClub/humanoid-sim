@@ -1,0 +1,53 @@
+# One PACE run on new excitation captures (sky/pace-capture.sh on the node): check-bag, conversion from the
+# description the robot recorded on (Controls' URDF_6) into this one's joint names, windows, a fit on each window
+# with the others held out (and one on all), the holdout report. Launch it with sky/pace-launch.sh, which stages the
+# captures (and an explicit description, when given) into PACE_IN, names the run and fetches the result:
+#   sky/pace-launch.sh ~/ETHRC/data/pace/2026-10-29-adam/exc-<id>
+# Output: outputs/pace-run/ on the node, mirrored to s3://ethrc-rc-humanoid-ckpts/$S3_PREFIX.
+name: humanoid-sim-pace-capture
+workdir: .
+
+resources:
+  cloud: aws
+  cpus: 8+
+  memory: 32+
+  disk_size: 200
+  ordered:  # L40S first; A10G and L4 only when no L40S is to be had
+    - accelerators: L40S:1
+    - accelerators: A10G:1
+    - accelerators: L4:1
+
+envs:
+  ISAACLAB_COMMIT: 32712682b69edd488eea26689da6905c48d31037
+  UV_VERSION: 0.13.1
+  PACE_IN: ""  # the staged input folder on this machine: captures/exc-*, inputs.json, optionally description/
+  S3_PREFIX: ""  # amoec/pace/<date>
+  ROBOT: ethrc_v1
+  LEGACY: urdf6-b14158e  # the description the captures were recorded on (convert-capture --from)
+  ANKLES: cranks  # convert-capture --ankles: cranks, or hold
+  FIT_ANKLES: "1"  # 0: the ankle cranks are left out of every fit (their parameters stay the description's)
+  FRAME_STAMPS: "1"  # replay command frames from their own stamps (the robot API acknowledges only some)
+  BANDS: "3"  # windows of a single chirp
+  WINDOWS: ""  # explicit windows instead, "NAME:START:END ..." in seconds from the first command frame
+  FULL_FIT: "1"  # also fit all windows together
+  NUM_ENVS: "256"
+  GENERATIONS: "40"
+  PARALLEL: "3"  # fits at once on the GPU
+  ONLY: ""  # only the fits whose names match these patterns (fit-<id>-b0, fit-all-<id>, fit-all); empty: all
+  BOUND: "10"  # armature, damping and friction within [1/BOUND, BOUND] of the description's
+  BIAS_BOUND_MRAD: "20"
+  DELAY_MS: "0 20"  # the delay range
+  DELAY_START_MS: ""  # where the delay search starts; empty: the middle of DELAY_MS
+  RATIO_MAX: "1"  # dynamic over static friction within [0, RATIO_MAX]
+  PHYSICS_TESTS: "0"  # 1: the replay and PACE physics tests first (physics-tests.log; the run goes on either way)
+
+file_mounts:
+  /pace/in: ${PACE_IN}
+  /ckpt:
+    source: s3://ethrc-rc-humanoid-ckpts
+    mode: MOUNT_CACHED
+
+setup: bash sky/setup.sh
+run: |
+  export PACE_IN=/pace/in
+  bash sky/pace-capture.sh

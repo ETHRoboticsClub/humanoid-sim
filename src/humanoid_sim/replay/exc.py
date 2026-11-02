@@ -101,11 +101,13 @@ class ExcitationCapture:
         return self.manifest.get("display_name", self.dataset_id)
 
     def gains(self) -> dict[str, DriveGains]:
+        """The P and D gains in force on each drive. Actuators the robot API reports without SI gains (the hands,
+        which the body description does not hold) are left out."""
         g = json.loads((self.root / "gains.json").read_text())
         start, end = g["start"]["actuators"], g["end"]["actuators"]
         out = {}
         for dev, a in start.items():
-            if a["stiffness_nm_per_rad"] is None:  # no position gains, e.g. the hands' actuators
+            if a["stiffness_nm_per_rad"] is None or a["damping_nm_s_per_rad"] is None:  # no SI gains, e.g. the hands' actuators
                 continue
             if (a["raw_p_gain"], a["raw_d_gain"]) != (end[dev]["raw_p_gain"], end[dev]["raw_d_gain"]):
                 raise ValueError(f"{self.dataset_id}: gains of {dev} changed during the capture")

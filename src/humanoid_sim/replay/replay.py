@@ -197,13 +197,39 @@ def _prepare(capture: ExcitationCapture, sim: SimCore, duration_s: float | None,
     return _Run(t_grid, t_meas, demand, real, base)
 
 
+def solver_gains_of(sim: SimCore, stiffness: torch.Tensor, damping: torch.Tensor) -> None:
+    """Run the solver PD at drive gains ``stiffness``, ``damping`` ``[D]`` instead of the description's baseline:
+    the plant's ``k0``, ``d0`` and the articulation's joint stiffness and damping. Target shaping is only
+    guaranteed stable up to twice the solver gains, and a capture may run the drives well above their baseline; at
+    the capture's own gains the shaping leaves the drive's PD to the solver (1:1 drives and native crank shafts
+    exactly; the hinge ankles at their standing Jacobian)."""
+    plant = sim.plant
+    dev, dt = plant.cfg.device, plant.cfg.dtype
+    names = plant.solver_map.joint_names
+    standing = torch.tensor([plant.desc.joints[n].standing_offset_rad if n in plant.desc.joints else 0.0
+                             for n in names], device=dev, dtype=dt)
+    kp, kd = stiffness.to(device=dev, dtype=dt), damping.to(device=dev, dtype=dt)
+    k0, d0 = plant.solver_map.joint_space_gains(kp, kd, standing)
+    plant.drive_stiffness.copy_(kp)
+    plant.drive_damping.copy_(kd)
+    plant.k0.copy_(k0.expand_as(plant.k0))
+    plant.d0.copy_(d0.expand_as(plant.d0))
+    robot = sim.backend.robot
+    a = plant.actuated
+    ids = torch.tensor([robot.joint_names.index(names[i]) for i in a.tolist()], device=robot.device)
+    robot.write_joint_stiffness_to_sim_index(stiffness=plant.k0[:, a].float().to(robot.device), joint_ids=ids)
+    robot.write_joint_damping_to_sim_index(damping=plant.d0[:, a].float().to(robot.device), joint_ids=ids)
+
+
 def _run(capture: ExcitationCapture, sim: SimCore, run: _Run, on_step) -> None:
-    """Every env replays the capture from its first sample; ``on_step(k, feedback)`` after each step."""
+    """Every env replays the capture from its first sample, the solver PD at the capture's gains
+    (:func:`solver_gains_of`); ``on_step(k, feedback)`` after each step."""
     plant = sim.plant
     drives, e, dev, dt = plant.map.drive_names, plant.num_envs, plant.cfg.device, plant.cfg.dtype
     gains = capture.gains()
     kp = torch.tensor([[gains[d].stiffness for d in drives]], dtype=dt, device=dev).expand(e, -1)
     kd = torch.tensor([[gains[d].damping for d in drives]], dtype=dt, device=dev).expand(e, -1)
+    solver_gains_of(sim, kp[0], kd[0])
     pdo = capture.pdo()
     read0 = np.array([sample_linear(pdo[d].t_ns, pdo[d]["native_position_rad"], run.t_grid[:1])[0] for d in drives])
     # Each env starts where its drives read the capture's first sample: truth = reading - the drive's offset.

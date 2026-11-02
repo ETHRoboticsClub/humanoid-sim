@@ -35,7 +35,7 @@ The SkyPilot tasks and the examples below use these three captures:
 | `joints.csv` | Joint-space positions and velocities from Controls' `/rt/joint_states` | No |
 | `imu.csv` | Controls' `/rt/imu`: orientation from the Madgwick filter, angular velocity and specific force, already rotated into the `base_link` frame, and the relay's sample counter `source_seq` | Orientation, angular velocity and `source_seq`, for the moving-base modes |
 | `drives.csv` | Controls' drive status diagnostic aggregate, including winding temperature | No |
-| `gains.json` | The gains in force on each drive at the start and at the end of the capture, as SI values and as raw drive counts | Raw P and D gains |
+| `gains.json` | The gains in force on each drive at the start and at the end of the capture, as SI values and as raw drive counts | Raw P and D gains; actuators listed without SI gains (the hands) are left out |
 
 Every time humanoid-sim reads comes from a `t_source_ros_ns` column: integer nanoseconds on the robot's ROS clock. For the IMU that stamp is the time the host received the sample (see the base modes below). The `t_recv_runtime_ns` columns are on the host's monotonic clock and are never mixed in.
 
@@ -60,7 +60,7 @@ Captures come from the robot API's actuator identification: the `RUN_EXCITATION`
 This is what the code here needs from a capture:
 
 - The robot hangs on the gantry with its feet unloaded. The identification profiles require gantry support. The replay keeps the base's position fixed and at most turns it as the IMU recorded, so it assumes that nothing but the gantry holds the robot.
-- The gains stay the same for the whole capture. `ExcitationCapture.gains()` refuses a capture whose raw gains at the end differ from those at the start. The excitation never changes gains itself; set non-baseline gains with `SET_ACTUATOR_GAINS` before the run. The sim's target shaping is only guaranteed stable up to twice the description's baseline gains (`outside_stable_region` in `src/humanoid_sim/devices/shaping.py`), and the replay does not report a capture that goes beyond that. The present captures run the baseline gains, which `tests/test_exc_reader.py` checks.
+- The gains stay the same for the whole capture. `ExcitationCapture.gains()` refuses a capture whose raw gains at the end differ from those at the start. The excitation never changes gains itself; set non-baseline gains with `SET_ACTUATOR_GAINS` before the run. Every replay runs the solver PD at the capture's own gains (`solver_gains_of` in `src/humanoid_sim/replay/replay.py`), so the target shaping, which is only guaranteed stable up to twice the solver gains (`outside_stable_region` in `src/humanoid_sim/devices/shaping.py`), is not stretched by a capture that runs the drives above their baseline.
 - The capture is complete. A run the robot API ramped down early is stored with `complete: false`, and `ExcitationCapture` refuses it.
 - The IMU stream has no gaps in `source_seq`. The moving-base modes rebuild the IMU sample times from the sequence and raise on a gap. A fixed-base replay does not read the IMU.
 - Every drive in the description has rows in `pdo_feedback.csv` with `position_demand_rad` filled in.
@@ -305,7 +305,7 @@ humanoid-sim pace-selftest [--num-envs 512] [--generations 40]
 
 ### The parameters
 
-In PACE's order, with `separate_dynamic_friction` (`PaceSpace` in `src/humanoid_sim/sysid/pace.py`):
+In PACE's order, with `separate_dynamic_friction` (`PaceSpace` in `src/humanoid_sim/sysid/pace.py`). The per-joint parameters are on the solver's joints: on V1's native USD the body joints and the four ankle crank shafts, where the description puts the cranks' rotor inertia (`joint_dynamics` in `src/humanoid_sim/physics/joint_properties.py`); the ankle hinges keep their damping and friction. An entry whose description value is zero (a hinge's armature, a shaft's damping and friction) cannot be scaled and stays at zero:
 
 | Parameter | Per | Unit | Range | Written to |
 |---|---|---|---|---|
@@ -314,11 +314,11 @@ In PACE's order, with `separate_dynamic_friction` (`PaceSpace` in `src/humanoid_
 | `friction` | joint | Nm | description × [1/`--bound`, `--bound`] | `write_joint_friction_coefficient_to_sim_index` (static) |
 | `bias` | drive | rad | ± `--bias-bound-mrad` | `DriveBank.position_offset = −bias` |
 | `delay` | drive family (`--one-delay`: all drives) | ns | `--delay-ms FROM TO` | the latency of each command frame, per drive through the drive queue |
-| `friction_ratio` | joint | ratio | [0, 1] | `PlantCore.friction_relief = friction · (1 − ratio)` ([drives.md](drives.md#dynamic-friction)) |
+| `friction_ratio` | joint | ratio | [0, `--ratio-max`], default [0, 1] | `PlantCore.friction_relief = friction · (1 − ratio)` ([drives.md](drives.md#dynamic-friction)); above 1 the sliding friction exceeds the static one |
 
 The bias has PACE's sign: the drive's controller sees the true position minus the bias. The bias is per drive, so an ankle's two entries are its cranks'; the other parameters are per joint, an ankle's on its pitch and roll hinges. The delay applies to the commands, PACE's `delay_mode="command"`, one per drive family ([drive models](drives.md#drive-models)) unless `--one-delay`; it takes effect at its exact time through the drive queue, never rounded to physics steps. With `--no-dynamic-friction` the ratio is 1 and not a parameter, PACE's default layout.
 
-A candidate is a point of [-1, 1]^dim: the description's value times `bound^x` for armature, damping and friction, linear over its range for the others. The search starts at the description's values (its friction ratio: 1 while it states no dynamic friction), zero bias and the middle of the delay range, with a step size of 0.3. `--fix PARAM.NAME` holds one entry at its start, for example `bias.maxonHEJ50L_ANK1` for a crank that barely moves; `--skip-drives` leaves drives out of the objective. The objective is the position RMS of the drive readings after the first second, averaged over the fitted captures and the scored drives. Candidates outside the box are evaluated at its edge and penalized, as in `fit-passive`.
+A candidate is a point of [-1, 1]^dim: the description's value times `bound^x` for armature, damping and friction, linear over its range for the others. The search starts at the description's values (its friction ratio: 1 while it states no dynamic friction), zero bias and `--delay-start-ms` (default the middle of the delay range), with a step size of 0.3 measured in the default box (multipliers within 10, bias 20 mrad, delay 20 ms, ratio [0, 1]): a wider box (`--bound`, `--bias-bound-mrad`, `--delay-ms`, `--ratio-max`) moves only its walls, the first steps stay the same size in physical units. The holdout's start values are the same point, so set `--delay-start-ms` when comparing runs with different delay ranges. `--period-ms` sets the physics period (default the profile's). Self-collision is the profile's; `--no-self-collision` turns it off as a diagnostic only, to compare against, since a plant without it is not the one a policy is deployed from. `--fix PARAM.NAME` holds one entry at its start, for example `bias.maxonHEJ50L_ANK1` for a crank that barely moves; `--skip-drives` leaves drives out of the objective. The objective is the position RMS of the drive readings after the first second, averaged over the fitted captures and the scored drives. Candidates outside the box are evaluated at its edge and penalized, as in `fit-passive`.
 
 `--search` picks how the search is split (`fit` in `src/humanoid_sim/sysid/pace.py`):
 
@@ -327,7 +327,7 @@ A candidate is a point of [-1, 1]^dim: the description's value times `bound^x` f
 
 ### Replaying from the commands
 
-The delay is the time from a command frame's stamp to the drive acting on it. An `exc-*` capture records when the controller applied each frame (`acks.csv`, receiver `controller`, state `applied`): the fit replays each frame from that moment and drops frames the controller never applied (`fit_commands` in `src/humanoid_sim/replay/replay.py`), so the fitted delay is each family's `drive_delay_s`, the [drive model](drives.md#drive-models)'s figure, without the software path before the controller. A bag carries no acknowledgements, so its frames are replayed from their stamps and the delay also holds the software path; `fit-pace` refuses to mix the two. Fitting it needs the targets the EtherCAT master sent, not the drives' 0x6062 demand, which already includes the delay. No topic carries the per-drive targets the master writes, so `drive_targets` in `src/humanoid_sim/replay/replay.py` rebuilds them from the joint-space command frames as the master does (Controls `standalone.cpp` `bodyDriveTargets`): `sign · (q + standing_offset)` for a 1:1 drive, and the crank inverse kinematics of the hinges for an ankle. The replay (`source="command"`) submits each frame at its stamp; it takes effect one latency later through the drive queue, as demands do in training. The master's velocity slew is not modeled: it passes a target through unchanged when one bus step reaches it, and the rebuild check ([the capture contract](#the-capture-contract)) shows where it did not.
+The delay is the time from a command frame's stamp to the drive acting on it. An `exc-*` capture records when the controller applied each frame (`acks.csv`, receiver `controller`, state `applied`): the fit replays each frame from that moment and drops frames the controller never applied (`fit_commands` in `src/humanoid_sim/replay/replay.py`), so the fitted delay is each family's `drive_delay_s`, the [drive model](drives.md#drive-models)'s figure, without the software path before the controller. A bag carries no acknowledgements, so its frames are replayed from their stamps and the delay also holds the software path; `fit-pace` refuses to mix the two. `--frame-stamps` (on `fit-pace` and `check-bag`) replays a capture's frames from their own stamps too: the robot API acknowledges only some frames (about a quarter to a half on the present captures, 8 to 13 ms after the frame, later than the drives act on them), so replaying from the acknowledgements drops the other frames. Fitting it needs the targets the EtherCAT master sent, not the drives' 0x6062 demand, which already includes the delay. No topic carries the per-drive targets the master writes, so `drive_targets` in `src/humanoid_sim/replay/replay.py` rebuilds them from the joint-space command frames as the master does (Controls `standalone.cpp` `bodyDriveTargets`): `sign · (q + standing_offset)` for a 1:1 drive, and the crank inverse kinematics of the hinges for an ankle. The replay (`source="command"`) submits each frame at its stamp; it takes effect one latency later through the drive queue, as demands do in training. The master's velocity slew is not modeled: it passes a target through unchanged when one bus step reaches it, and the rebuild check ([the capture contract](#the-capture-contract)) shows where it did not.
 
 ### The capture contract
 
@@ -369,6 +369,51 @@ Judge a fit as for `fit-passive`: `holdout.objective_fit` clearly below `holdout
 ### Self-test
 
 `pace-selftest` checks the model and the fit without the robot. It draws parameters uniformly within ± `--spread` of the box, plants them in every env, and runs a chirp of command frames on a fixed base: every joint sweeps `--f0` to `--f1` Hz about the standing pose with amplitude `--amplitude-rad` (half on the ankle hinges), after one second at rest. It records the drives' readings as a capture, prints the objective at the planted values (near zero) and at the start values, then fits from the start values. `fit-pace.json` adds `planted`, `objective_planted` and `recovery_median_error`: the median absolute log error of armature, damping and friction, the median absolute error of bias and ratio, and the delay error in ns per family. `tests/test_physics.py::test_pace_objective_is_zero_at_planted_parameters` runs the same round trip briefly on the CPU.
+
+## A PACE run on new captures
+
+```bash
+sky/pace-launch.sh ~/ETHRC/data/pace/<date>-<who>/exc-<id> [more captures] [--ankles cranks|hold] [--no-fit-ankles]
+                   [--description-root <humanoid-urdf checkout>] [--generations 40] [--num-envs 256] [--dry]
+                   [--name NAME] [--part PART] [--only PATTERN ...] [--parallel 3]
+                   [--bound 10] [--bias-bound-mrad 20] [--delay-ms 0 20] [--delay-start-ms D] [--ratio-max 1]
+```
+
+One command takes captures from the robot to a holdout report. It stages the captures in `~/ETHRC/runs/<date>-pace/input/` (with `inputs.json`: the captures, this checkout's revision and the description's), runs `sky/pace-capture.sky.yaml` on cluster `sim-pace` (L40S, else A10G, else L4; down after 15 idle minutes), copies the node's `outputs/pace-run/` to `~/ETHRC/runs/<date>-pace/out/` and takes the cluster down. The node also mirrors that folder to `s3://ethrc-rc-humanoid-ckpts/amoec/pace/<date>/` itself, so the result does not depend on the launching machine staying connected. `--dry` runs the same chain with 2 generations of 16 envs into `<date>-pace-dry`, after the replay and PACE physics tests. `--name NAME` makes the run `<date>-NAME` locally and on S3, on cluster `sim-NAME`; `--part PART` puts one launch in the run's `PART/` subfolder on its own cluster `sim-NAME-PART`, and `--only` keeps the fits whose names match its patterns, so one run's fits can be spread over several nodes. The box options are passed to `check-bag` and every `fit-pace`.
+
+On the node (`sky/pace-capture.sh`):
+
+1. `build-asset` for the robot, from the description in the checkout, or from `--description-root`'s `ethrc_v1/` when given (`HUMANOID_SIM_DESCRIPTION_ROOT`). `asset.txt` names the USD; every `fit-pace.json` and replay summary records the description digest, its root, the USD, the asset key and the delivered USD's sha256.
+2. `convert-capture` for each capture whose commands name joints this description does not have (below).
+3. `check-bag` on the converted captures, fixed base, with `--frame-stamps` (`check-bag.txt`).
+4. `segment-capture` into windows (`windows.jsonl`).
+5. A fit per window with the capture's other windows held out (`fits/fit-<id8>-<window>/`) and one on all windows together (`fits/fit-all/`), `--parallel` at a time (`fits/plan.txt` lists them). With several captures, each capture's windows are also fitted together and scored on the other captures' windows (`fits/fit-all-<id8>/`), and `fit-all` takes every capture's windows. With `--no-fit-ankles` the ankle cranks are left out of every objective, so their parameters stay the description's.
+6. The first window replayed at the description's values with the profile's self-collision and without it (`selfcol/summary.txt`), so a plant that is unstable with self-collision shows in numbers instead of being switched off.
+7. `pace-report` over every fit (`report/pace-report.md` and `.json`); the holdout figures come from the per-window fits, `fit-all` adds its values. `STATUS` ends as `DONE` or `FAILED`; `run.log` has everything.
+
+### Captures on an older description
+
+```bash
+humanoid-sim convert-capture <exc-dir>... --out <dir> [--from urdf6-b14158e] [--ankles cranks|hold]
+```
+
+The robot's Controls may run an older description than the one simulated here; while it pins humanoid-urdf URDF_6 (b14158e), its captures name URDF_6's joints. `convert-capture` rewrites `commands.csv` into this description's names and copies everything else unchanged (`convert_capture` in `src/humanoid_sim/replay/convert.py`; `src/humanoid_sim/replay/legacy/urdf6-b14158e-actuators.yaml` is that revision's `actuators.yaml`, byte for byte). The drive targets the robot's master sent are what is kept: a 1:1 joint is matched to the new one by its drive (`torso_axial_rotation` is URDF_6's `waist_upperbody_yaw` with the sign flipped), and an ankle's hinge angles go through URDF_6's crank transmission to the crank targets, then back through this description's transmission. The crank targets therefore survive exactly, whatever the two transmissions' conventions; this description's transmission is only the inverse of the one the replay uses to rebuild them. `--ankles hold` instead holds both ankles at their first frame, so the simulated feet stay still while the real ones moved: use it with `--no-fit-ankles` when the simulated ankle is in question. `conversion.json` beside the capture records the map, the old and new descriptions, and per drive the largest difference between the targets rebuilt from the converted capture and the old master's (zero for every drive with `cranks`).
+
+### Windows
+
+```bash
+humanoid-sim segment-capture <exc-dir>... --out <dir> [--bands 3] [--window NAME:START:END ...] [--min-s 8]
+```
+
+A fit that has seen one excitation can trade parameters against each other and still match it, so each fit is scored on excitation it has not seen. `segment-capture` cuts a capture into windows, in seconds from its first command frame (`plan_windows` in `src/humanoid_sim/replay/segments.py`): explicit `--window`s; else the capture's pieces, where its command frames pause for more than `--gap-s` or its signal clock starts over (a slow segment, a second band); else, for one log chirp, `--bands` windows covering equal shares of its octaves; else equal lengths. Windows shorter than `--min-s` are dropped. Each window is a capture of its own, `<id>-<window>`, its manifest's `segment` naming the window.
+
+### The holdout report
+
+```bash
+humanoid-sim pace-report <fit-dir>... --out <dir>
+```
+
+`pace-report` (`src/humanoid_sim/sysid/pace_report.py`) reads the `fit-pace.json` of fits made on one window each with the others held out. Per joint group (a joint without its side; the ankle cranks together) it gives the holdout position RMS at the description's values and at the fit's, averaged over every fit and window, and how many fits improved it; per fit, the same per held-out window; every searched entry within 2% of its bound; and each armature, damping and friction next to the description's value, the drive family's datasheet armature (`DATASHEET_ARMATURE`) and its spread across fits. A value that only helps the window it was fitted on, that sits at a bound, or that the fits disagree on is not identified by the captures.
 
 ## Running on a GPU with SkyPilot
 

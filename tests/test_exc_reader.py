@@ -10,6 +10,21 @@ ROOT = Path(os.environ.get("HUMANOID_SIM_DATASETS", Path(__file__).resolve().par
 CAPTURES = sorted(ROOT.glob("exc-*")) if ROOT.exists() else []
 
 
+def test_gains_leave_out_actuators_without_si_gains(tmp_path):
+    """The robot API lists the hands' actuators with null SI gains; the body's drives are read as before."""
+    import json
+
+    from humanoid_sim.replay.exc import FORMAT
+
+    (tmp_path / "manifest.json").write_text(json.dumps({"format": FORMAT, "complete": True, "dataset_id": "exc-x"}))
+    body = {"stiffness_nm_per_rad": 100.0, "damping_nm_s_per_rad": 2.0, "raw_p_gain": 100000, "raw_d_gain": 2000}
+    hand = {"stiffness_nm_per_rad": None, "damping_nm_s_per_rad": None, "raw_p_gain": 0, "raw_d_gain": 0}
+    actuators = {"maxonHEJ70AL1": body, "forearm_pronation_l": hand}
+    (tmp_path / "gains.json").write_text(json.dumps({"start": {"actuators": actuators}, "end": {"actuators": actuators}}))
+    gains = ExcitationCapture(tmp_path).gains()
+    assert list(gains) == ["maxonHEJ70AL1"] and gains["maxonHEJ70AL1"].stiffness == 100.0
+
+
 def test_sampling_helpers():
     t = np.array([0, 10, 20], dtype=np.int64)
     v = np.array([0.0, 1.0, 3.0])
