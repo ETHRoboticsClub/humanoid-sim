@@ -6,7 +6,7 @@ it. Needs the Isaac Sim image (``docker/Dockerfile.kit``); training and the kitl
 * :func:`start_kit` starts Kit with cameras enabled, headless or with its window, before the simulation is built.
 * :func:`camera_entities` turns rig cameras' streams (``geometry.camera_spec``) into Isaac Lab cameras on the robot
   body each is mounted on (its rig frame, merged into that body), with the stream's lens: OpenCV's fisheye or
-  pinhole model, which RTX renders natively (``omni:lensdistortion``).
+  pinhole model (rational or not), which RTX renders natively (``omni:lensdistortion``).
 * :func:`splat_entity` places a room's Gaussian splat (``world/splat.py``) for the cameras, :func:`light_entity` a
   dome light for everything else.
 * :class:`KitRender` renders the stage at a plant time: Kit's timeline at that time (RTX lidars fire on it), the
@@ -104,6 +104,9 @@ def _distortion(lens: Lens):
     if lens.distortion_model == "plumb_bob":
         k1, k2, p1, p2, k3 = lens.distortion
         return OpenCvPinholeDistortionCfg(**common, k1=k1, k2=k2, k3=k3, p1=p1, p2=p2)
+    if lens.distortion_model == "rational_polynomial":
+        k1, k2, p1, p2, k3, k4, k5, k6 = lens.distortion
+        return OpenCvPinholeDistortionCfg(**common, k1=k1, k2=k2, k3=k3, k4=k4, k5=k5, k6=k6, p1=p1, p2=p2)
     return OpenCvPinholeDistortionCfg(**common)
 
 

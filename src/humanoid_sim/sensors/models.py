@@ -22,7 +22,8 @@ from typing import ClassVar
 G0 = 9.80665  # m/s², the datasheets' g
 DEG = math.pi / 180.0
 RTX_KINDS = ("camera", "lidar")  # what the RTX sensors (Isaac Sim image) simulate
-DISTORTION_MODELS = {"plumb_bob": 5, "equidistant": 4}  # coefficients: OpenCV's k1 k2 p1 p2 k3, fisheye k1..k4
+# Coefficients, as ROS's camera_info orders them: OpenCV's k1 k2 p1 p2 k3, rational k1 k2 p1 p2 k3 k4 k5 k6, fisheye k1..k4
+DISTORTION_MODELS = {"plumb_bob": 5, "rational_polynomial": 8, "equidistant": 4}
 STREAM_KINDS = ("color", "mono", "depth")
 
 
@@ -202,7 +203,7 @@ class Camera(Sensor):
                  depth_focal_px: float | None = None):
         """Every stream at one resolution and rate; per stream the unit's pinhole calibration ``(fx, fy, cx, cy)`` in
         pixels (OpenCV's: pixel (u, v) centred at u, v), its lens distortion ``(model, coefficients)`` (model
-        ``plumb_bob`` or ``equidistant``; none when absent) and, where the unit's calibration gives it, its optical
+        ``plumb_bob``, ``rational_polynomial`` or ``equidistant``; none when absent) and, where the unit's calibration gives it, its optical
         centre in the camera frame, replacing the model's nominal one. ``depth_focal_px`` is the focal length the
         unit turns disparity back into depth with, where it is not the depth stream's own (None: the stream's)."""
         super().__init__(frame)

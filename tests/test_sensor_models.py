@@ -127,7 +127,7 @@ def test_values_are_checked():
     with pytest.raises(ValueError, match="coefficients"):
         _d435(distortion={"rgb": ("plumb_bob", (0.1, 0.0))})
     with pytest.raises(ValueError, match="coefficients"):
-        _d435(distortion={"rgb": ("rational_polynomial", (0.0,) * 8)})
+        _d435(distortion={"rgb": ("rational_polynomial", (0.0,) * 5)})
     with pytest.raises(ValueError, match="does not have"):
         _d435(stream_offsets_m={"thermal": (0.0, 0.0, 0.0)})
     with pytest.raises(ValueError, match="depth_focal_px"):

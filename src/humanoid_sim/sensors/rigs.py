@@ -32,11 +32,26 @@ def ethrc_v1() -> Rig:
         # The unit turns disparity back into depth with mono_left's fx instead: every depth in 60 s of its depth
         # stream (2026-11-02, sub-pixel off) is 21339 mm px over a whole number, 283.60 px times the 75.243 mm
         # baseline of /tf_static, so it reports depths 0.5 % farther than they are.
+        # The raw streams' lenses are rational polynomials, as their camera_info gives them (2026-11-02: Controls'
+        # backend reads the device's calibration and refits fx, fy, cx, cy, p1, p2 without its thin-prism terms);
+        # depth is rectified, a plain pinhole.
         camera0=OakDW("camera1_link", width=640, height=400, frame_period_ns=33_333_333,
                       intrinsics={"rgb": (283.087462, 282.805448, 325.969479, 198.375709),
                                   "mono_left": (283.604271, 283.556541, 321.744194, 196.769579),
                                   "mono_right": (282.176691, 282.201086, 322.219193, 195.29002),
                                   "depth": (282.187653, 282.203949, 322.194153, 195.345032)},
+                      distortion={"rgb": ("rational_polynomial", (
+                                      2.8050684928894043, 0.7706795334815979, -0.000120536, -2.0345e-05,
+                                      0.01219945028424263, 3.1599576473236084, 1.589902639389038,
+                                      0.10351193696260452)),
+                                  "mono_left": ("rational_polynomial", (
+                                      0.31908977031707764, -0.04265667125582695, 0.000121868, 6.615e-05,
+                                      -0.001490763621404767, 0.6519906520843506, -0.0185304693877697,
+                                      -0.009558772668242455)),
+                                  "mono_right": ("rational_polynomial", (
+                                      7.652671813964844, 2.6182069778442383, 1.8047e-05, 7.6019e-05,
+                                      0.05332671478390694, 8.02845287322998, 5.012196063995361,
+                                      0.39285749197006226))},
                       depth_focal_px=283.604271),
     )
 

@@ -1,6 +1,6 @@
 """Where the G1's cameras and lidar sit and what they see (``sensors/geometry.py``), built from the sensor models and
 the rig: mounts on the bodies of the G1 URDF, each lens against projections worked out by hand for points at known
-angles, and the lidar's pattern against its model's figures."""
+angles, an image resampled from one lens onto another, and the lidar's pattern against its model's figures."""
 
 from __future__ import annotations
 
@@ -61,6 +61,47 @@ def test_a_pinhole_maps_angles_to_pixels():
     # at 1 m (optical y down) at v = 240 - 320 * 0.5.
     uv = lens.project([[0, 0, 2.0], [1.0, 0, 1.0], [0, -0.5, 1.0]])
     np.testing.assert_allclose(uv, [[320, 240], [640, 240], [320, 80]], atol=1e-9)
+
+
+RATIONAL = (0.3, -0.04, 0.0012, -0.0007, -0.0015, 0.65, -0.02, -0.01)  # k1 k2 p1 p2 k3 k4 k5 k6, a wide lens
+
+
+def test_a_rational_lens_is_opencvs_rational_model():
+    k1, k2, p1, p2, k3, k4, k5, k6 = RATIONAL
+    lens = geometry.Lens(640, 400, 280.0, 281.0, 320.0, 200.0, "rational_polynomial", RATIONAL)
+    for x, y in ((0.2, 0.0), (0.0, -0.5), (0.8, 0.6), (-1.1, 0.3)):
+        r2 = x * x + y * y
+        radial = (1 + k1 * r2 + k2 * r2**2 + k3 * r2**3) / (1 + k4 * r2 + k5 * r2**2 + k6 * r2**3)
+        xd = x * radial + 2 * p1 * x * y + p2 * (r2 + 2 * x * x)
+        yd = y * radial + p1 * (r2 + 2 * y * y) + 2 * p2 * x * y
+        (u, v), = lens.project([[2 * x, 2 * y, 2.0]])
+        assert (u, v) == (pytest.approx(280.0 * xd + 320.0), pytest.approx(281.0 * yd + 200.0))
+    # Without its denominator it is plumb_bob.
+    plumb = geometry.Lens(640, 400, 280.0, 281.0, 320.0, 200.0, "plumb_bob", RATIONAL[:5])
+    flat = geometry.Lens(640, 400, 280.0, 281.0, 320.0, 200.0, "rational_polynomial", (*RATIONAL[:5], 0, 0, 0))
+    points = [[0.3, -0.2, 1.0], [-0.9, 0.5, 1.0]]
+    np.testing.assert_allclose(flat.project(points), plumb.project(points))
+
+
+def test_an_image_resampled_onto_a_pinhole_is_what_the_pinhole_sees():
+    lens = geometry.Lens(640, 400, 280.0, 281.0, 320.0, 200.0, "rational_polynomial", RATIONAL)
+    onto = geometry.Lens(640, 400, 260.0, 260.0, 322.0, 198.0)
+    v, u = np.mgrid[0:400, 0:640].astype(float)
+    out = geometry.resample(np.stack([u, v], axis=-1), lens, onto)  # each pixel holds its own place in ``lens``
+    for x, y in ((322, 198), (100, 50), (600, 380)):
+        (eu, ev), = lens.project([[(x - 322.0) / 260.0, (y - 198.0) / 260.0, 1.0]])
+        np.testing.assert_allclose(out[y, x], (eu, ev), atol=1e-9)  # bilinear on a linear ramp is exact
+    same = geometry.Lens(640, 400, 260.0, 260.0, 322.0, 198.0)
+    np.testing.assert_allclose(geometry.resample(u, same, onto), u, atol=1e-9)
+    with pytest.raises(ValueError, match="distortion-free"):
+        geometry.resample(u, onto, lens)
+
+
+def test_the_v1s_raw_streams_have_rational_lenses_and_its_depth_none():
+    spec = geometry.camera_spec(rigs.rig("ethrc_v1").sensors["camera0"])
+    models = {s.name: (s.lens.distortion_model, len(s.lens.distortion)) for s in spec.streams}
+    assert models == {"rgb": ("rational_polynomial", 8), "mono_left": ("rational_polynomial", 8),
+                      "mono_right": ("rational_polynomial", 8), "depth": ("none", 0)}
 
 
 def test_the_zed_minis_streams_are_its_rig_calibration(rig):
