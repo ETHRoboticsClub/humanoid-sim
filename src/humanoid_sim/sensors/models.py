@@ -200,12 +200,15 @@ class Camera(Sensor):
                  intrinsics: dict[str, tuple[float, float, float, float]],
                  distortion: dict[str, tuple[str, tuple[float, ...]]] | None = None,
                  stream_offsets_m: dict[str, tuple[float, float, float]] | None = None,
+                 stream_rotations_xyzw: dict[str, tuple[float, float, float, float]] | None = None,
                  depth_focal_px: float | None = None):
         """Every stream at one resolution and rate; per stream the unit's pinhole calibration ``(fx, fy, cx, cy)`` in
         pixels (OpenCV's: pixel (u, v) centred at u, v), its lens distortion ``(model, coefficients)`` (model
-        ``plumb_bob``, ``rational_polynomial`` or ``equidistant``; none when absent) and, where the unit's calibration gives it, its optical
-        centre in the camera frame, replacing the model's nominal one. ``depth_focal_px`` is the focal length the
-        unit turns disparity back into depth with, where it is not the depth stream's own (None: the stream's)."""
+        ``plumb_bob``, ``rational_polynomial`` or ``equidistant``; none when absent) and, where the unit's
+        calibration gives them, its optical centre in the camera frame, replacing the model's nominal one, and its
+        optical frame's orientation in the camera frame (a unit quaternion x, y, z, w), replacing the nominal one
+        (x right, y down, z forward). ``depth_focal_px`` is the focal length the unit turns disparity back into depth
+        with, where it is not the depth stream's own (None: the stream's)."""
         super().__init__(frame)
         where = f"{type(self).__name__} at {frame!r}"
         if not (isinstance(width, int) and isinstance(height, int)) or width <= 0 or height <= 0:
@@ -213,7 +216,8 @@ class Camera(Sensor):
         if depth_focal_px is not None and not depth_focal_px > 0:
             raise ValueError(f"{where}: depth_focal_px {depth_focal_px}: expected > 0")
         distortion = dict(distortion or {})
-        given = set(intrinsics) | set(distortion) | set(stream_offsets_m or {})
+        rotations = dict(stream_rotations_xyzw or {})
+        given = set(intrinsics) | set(distortion) | set(stream_offsets_m or {}) | set(rotations)
         if given - set(self.streams):
             raise ValueError(f"{where}: calibration for streams a {self.model} does not have: "
                              f"{sorted(given - set(self.streams))}")
@@ -225,11 +229,15 @@ class Camera(Sensor):
                 raise ValueError(f"{where}: distortion {stream!r}: expected (model, coefficients), model one of "
                                  f"{sorted(DISTORTION_MODELS)} with its number of coefficients")
         _check_offsets(stream_offsets_m or {}, self.streams, where)
+        for stream, q in rotations.items():
+            if len(q) != 4 or abs(math.hypot(*q) - 1.0) > 1e-6:
+                raise ValueError(f"{where}: rotation {stream!r}: expected a unit quaternion (x, y, z, w)")
         self.width, self.height = width, height
         self.frame_period_ns = _positive_ns("frame_period_ns", frame_period_ns)
         self.intrinsics = dict(intrinsics)
         self.distortion = distortion
         self.stream_offsets_m = {**self.nominal_offsets_m, **(stream_offsets_m or {})}
+        self.stream_rotations_xyzw = {s: tuple(float(v) for v in q) for s, q in rotations.items()}
         self.depth_focal_px = depth_focal_px
 
     @property

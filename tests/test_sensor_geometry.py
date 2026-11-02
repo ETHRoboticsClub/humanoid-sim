@@ -97,6 +97,42 @@ def test_an_image_resampled_onto_a_pinhole_is_what_the_pinhole_sees():
         geometry.resample(u, onto, lens)
 
 
+def test_a_streams_calibrated_orientation_turns_its_optical_frame_and_its_rtx_camera():
+    from humanoid_sim.sensors.rtx import stream_offset
+
+    yaw = math.radians(2.0)  # the depth view turned 2 deg about the camera's up axis, towards its left
+    turn = np.array([[math.cos(yaw), -math.sin(yaw), 0.0], [math.sin(yaw), math.cos(yaw), 0.0], [0.0, 0.0, 1.0]])
+    q = geometry.quat_xyzw(turn @ geometry.LINK_FROM_OPTICAL)
+    pinhole = (300.0, 300.0, 320.0, 200.0)
+    camera = OakDW("camera_link", width=640, height=400, frame_period_ns=33_333_333,
+                   intrinsics={s: pinhole for s in OakDW.streams}, stream_rotations_xyzw={"depth": q})
+    camera.name = "cam"
+    spec = geometry.camera_spec(camera)
+    depth, left = spec.stream("depth"), spec.stream("mono_left")
+    np.testing.assert_allclose(geometry.quat_matrix(depth.rotation_xyzw), turn @ geometry.LINK_FROM_OPTICAL,
+                               atol=1e-12)
+    np.testing.assert_allclose(geometry.quat_matrix(left.rotation_xyzw), geometry.LINK_FROM_OPTICAL, atol=1e-12)
+    # On a body turned a quarter about z, the RTX camera of the nominal stream looks along the body's y, the turned
+    # one 2 deg further round.
+    mount = geometry.Mount("camera_link", "body", (0.0, 0.0, 0.0), ((0.0, -1.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)))
+    for stream, angle in ((left, 0.0), (depth, yaw)):
+        _, q_rtx = stream_offset(mount, stream)
+        forward = geometry.quat_matrix(q_rtx) @ [1.0, 0.0, 0.0]
+        np.testing.assert_allclose(forward, (-math.sin(angle), math.cos(angle), 0.0), atol=1e-12)
+
+
+def test_a_turned_view_samples_where_its_rays_land():
+    lens = geometry.Lens(640, 400, 280.0, 281.0, 320.0, 200.0, "rational_polynomial", RATIONAL)
+    onto = geometry.Lens(640, 400, 260.0, 260.0, 322.0, 198.0)
+    a = math.radians(1.0)
+    rotation = np.array([[math.cos(a), 0.0, math.sin(a)], [0.0, 1.0, 0.0], [-math.sin(a), 0.0, math.cos(a)]])
+    v, u = np.mgrid[0:400, 0:640].astype(float)
+    out = geometry.resample(np.stack([u, v], axis=-1), lens, onto, rotation)
+    for x, y in ((322, 198), (100, 50), (600, 380)):
+        (eu, ev), = lens.project([rotation @ [(x - 322.0) / 260.0, (y - 198.0) / 260.0, 1.0]])
+        np.testing.assert_allclose(out[y, x], (eu, ev), atol=1e-9)
+
+
 def test_the_v1s_raw_streams_have_rational_lenses_and_its_depth_none():
     spec = geometry.camera_spec(rigs.rig("ethrc_v1").sensors["camera0"])
     models = {s.name: (s.lens.distortion_model, len(s.lens.distortion)) for s in spec.streams}
@@ -163,7 +199,9 @@ def test_a_camera_without_every_stream_placed_is_refused(rig):
     spec = geometry.camera_spec(v1.sensors["camera0"])
     places = {st.name: st.translation_m for st in spec.streams}
     assert places["mono_left"] == places["depth"] == (0.0, 0.0, 0.0)
-    assert places["mono_right"] == (0.0, -OakDW.stereo_baseline_m, 0.0)
+    # The unit's calibration places the right mono about a baseline to the right (y right is negative).
+    assert places["mono_right"][1] < 0
+    assert np.linalg.norm(places["mono_right"]) == pytest.approx(OakDW.stereo_baseline_m, abs=0.001)
     assert {st.name: st.kind for st in spec.streams} == dict(OakDW.stream_kinds)
     assert v1.unsimulated(rtx=True) == []
     # The G1's Mid-360 is simulated with the RTX sensors; with the example cameras so are they.

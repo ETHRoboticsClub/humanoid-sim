@@ -34,7 +34,10 @@ def ethrc_v1() -> Rig:
         # baseline of /tf_static, so it reports depths 0.5 % farther than they are.
         # The raw streams' lenses are rational polynomials, as their camera_info gives them (2026-11-02: Controls'
         # backend reads the device's calibration and refits fx, fy, cx, cy, p1, p2 without its thin-prism terms);
-        # depth is rectified, a plain pinhole.
+        # depth is rectified, a plain pinhole. Each stream's place and orientation are the unit's calibration, as
+        # /tf_static gives them (2026-11-02): mono_left is the camera frame's origin at the nominal orientation; the
+        # rectified depth view is turned 0.38 deg from it, mono_right sits 75.243 mm away, turned 0.12 deg, and rgb
+        # 37.65 mm away, turned 0.78 deg.
         camera0=OakDW("camera1_link", width=640, height=400, frame_period_ns=33_333_333,
                       intrinsics={"rgb": (283.087462, 282.805448, 325.969479, 198.375709),
                                   "mono_left": (283.604271, 283.556541, 321.744194, 196.769579),
@@ -52,6 +55,14 @@ def ethrc_v1() -> Rig:
                                       7.652671813964844, 2.6182069778442383, 1.8047e-05, 7.6019e-05,
                                       0.05332671478390694, 8.02845287322998, 5.012196063995361,
                                       0.39285749197006226))},
+                      stream_offsets_m={"mono_right": (0.0002542755126580528, -0.07524099355566531,
+                                                       0.0004318634125514962),
+                                        "rgb": (0.0004073064796734663, -0.03765055989466586, -0.000130909748825339)},
+                      stream_rotations_xyzw={
+                          "depth": (0.5021788678878597, -0.4976191082071747, 0.5006850616628487, -0.499505832620234),
+                          "mono_right": (-0.4991427636162324, 0.5004618262050996, -0.5004456956959954,
+                                         0.4999485650548041),
+                          "rgb": (0.5022736427256218, -0.5015980737137385, 0.5019821939719118, -0.49409962275329394)},
                       depth_focal_px=283.604271),
     )
 

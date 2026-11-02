@@ -24,7 +24,15 @@ import sys
 
 import numpy as np
 
-from humanoid_sim.sensors.geometry import CameraSpec, Lens, Mount, Stream, quat_xyzw
+from humanoid_sim.sensors.geometry import (
+    LINK_FROM_OPTICAL,
+    CameraSpec,
+    Lens,
+    Mount,
+    Stream,
+    quat_matrix,
+    quat_xyzw,
+)
 
 ROBOT_PRIM = "{ENV_REGEX_NS}/Robot"
 ROBOT_ROOT = "/World/envs/env_0/Robot"
@@ -112,9 +120,11 @@ def _distortion(lens: Lens):
 
 def stream_offset(mount: Mount, stream: Stream) -> tuple[tuple, tuple]:
     """The stream's camera in its body: position, and orientation (x, y, z, w) in Isaac Lab's ``world`` camera
-    convention (x forward, z up), which is the camera frame's; every stream of a camera looks along its x axis."""
+    convention (x forward, z up), which is the camera frame's for a stream at its nominal orientation; a stream the
+    unit's calibration turns looks along its own optical axis."""
     position = mount.R @ np.asarray(stream.translation_m) + np.asarray(mount.translation_m)
-    return tuple(float(v) for v in position), quat_xyzw(mount.R)
+    turned = quat_matrix(stream.rotation_xyzw) @ LINK_FROM_OPTICAL.T  # the stream's world convention in the camera
+    return tuple(float(v) for v in position), quat_xyzw(mount.R @ turned)
 
 
 def body_paths(usd_path, bodies) -> dict[str, str]:

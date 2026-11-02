@@ -20,7 +20,7 @@ Each sensor sits at its rig frame, composed through the URDF's fixed joints onto
 
 ### Cameras
 
-`sensors/geometry.py` builds each stream from the camera instance (`camera_spec`); `sensors/rtx.py` puts an Isaac Lab camera for it on the body (`camera_entities`), with the stream's OpenCV pinhole (rational or not) or fisheye model, which RTX renders natively. The V1's OAK-D-W raw streams (rgb and the mono pair) have the rational polynomial lenses of the unit's camera_info; its depth is rectified, a plain pinhole. Grey streams are the BT.601 luma of the colour render; depth is the distance along the optical axis, written as millimetres within the model's range (0 outside it).
+`sensors/geometry.py` builds each stream from the camera instance (`camera_spec`); `sensors/rtx.py` puts an Isaac Lab camera for it on the body (`camera_entities`), with the stream's OpenCV pinhole (rational or not) or fisheye model, which RTX renders natively. The V1's OAK-D-W raw streams (rgb and the mono pair) have the rational polynomial lenses of the unit's camera_info; its depth is rectified, a plain pinhole. Each stream sits where the unit's calibration places it and looks along its own optical axis (`stream_rotations_xyzw`): the V1's depth view is turned 0.38° from mono_left, as Controls' `/tf_static` gives it. Grey streams are the BT.601 luma of the colour render; depth is the distance along the optical axis, written as millimetres within the model's range (0 outside it).
 
 ### Stereo depth errors
 

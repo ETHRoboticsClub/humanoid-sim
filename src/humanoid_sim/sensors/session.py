@@ -272,7 +272,7 @@ class SensorSession:
     def _stereo_depth(self, cam, depth, image: np.ndarray, frames: dict[str, np.ndarray]) -> np.ndarray:
         """The depth ``image`` as the stereo camera ``cam`` reports it, its reference imager's frame of this render
         among ``frames`` (the camera's streams before ``depth``)."""
-        from humanoid_sim.sensors.geometry import resample
+        from humanoid_sim.sensors.geometry import quat_matrix, resample
         from humanoid_sim.sensors.stereo_depth import stereo_depth, stereo_pair
 
         model = self.camera_models[cam.camera_id]
@@ -280,8 +280,10 @@ class SensorSession:
             return image
         reference, baseline_m, on_right = stereo_pair(cam.streams, depth, model.stereo_baseline_m)
         grey = frames.get(reference) if reference is not None else None
-        if grey is not None:  # the matcher sees the reference imager rectified: on the depth image's lens
-            grey = resample(grey, cam.stream(reference).lens, depth.lens)
+        if grey is not None:  # the matcher sees the reference imager rectified: on the depth image's lens and axes
+            ref = cam.stream(reference)
+            rotation = quat_matrix(ref.rotation_xyzw).T @ quat_matrix(depth.rotation_xyzw)
+            grey = resample(grey, ref.lens, depth.lens, rotation)
         return stereo_depth(image, focal_px=depth.lens.fx_px, baseline_m=baseline_m,
                             disparity_sigma_px=model.depth_disparity_sigma_px, rng=self.rng,
                             disparity_step_px=model.depth_disparity_step_px, depth_focal_px=model.depth_focal_px,

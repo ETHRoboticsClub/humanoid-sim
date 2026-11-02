@@ -132,6 +132,12 @@ def test_values_are_checked():
         _d435(stream_offsets_m={"thermal": (0.0, 0.0, 0.0)})
     with pytest.raises(ValueError, match="depth_focal_px"):
         _d435(depth_focal_px=0.0)
+    with pytest.raises(ValueError, match="unit quaternion"):
+        _d435(stream_rotations_xyzw={"depth": (0.0, 0.0, 1.0)})
+    with pytest.raises(ValueError, match="unit quaternion"):
+        _d435(stream_rotations_xyzw={"depth": (0.5, 0.5, 0.5, 0.6)})
+    with pytest.raises(ValueError, match="does not have"):
+        _d435(stream_rotations_xyzw={"thermal": (0.0, 0.0, 0.0, 1.0)})
     with pytest.raises(ValueError, match="bias_correlation_time_ns"):
         type("Bad", (Imu,), {"bias_correlation_time_ns": 0})
     with pytest.raises(ValueError, match="gyro_noise_density"):
