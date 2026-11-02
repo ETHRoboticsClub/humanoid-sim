@@ -155,6 +155,12 @@ class Camera(Sensor):
     nominal_offsets_m: ClassVar[Mapping[str, tuple[float, float, float]]] = MappingProxyType({})
     depth_range_m: ClassVar[tuple[float, float] | None] = None
     rolling_shutter: ClassVar[frozenset[str]] = frozenset()
+    # Stereo depth errors (sensors/stereo_depth.py), applied when a session asks for them: the matcher's disparity
+    # error (pixels, 1 sigma), the step it reports disparity in (pixels; 0: continuous) and the least grey-level
+    # spread of the reference image it matches on. 0: exact depth.
+    depth_disparity_sigma_px: ClassVar[float] = 0.0
+    depth_disparity_step_px: ClassVar[float] = 0.0
+    depth_min_texture: ClassVar[float] = 0.0
 
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
@@ -171,6 +177,9 @@ class Camera(Sensor):
             raise ValueError(f"{where}: rolling_shutter {set(cls.rolling_shutter)}: expected streams it has")
         if cls.depth_range_m is not None and not 0 <= cls.depth_range_m[0] < cls.depth_range_m[1]:
             raise ValueError(f"{where}: depth_range_m {cls.depth_range_m}: expected (min, max)")
+        if min(cls.depth_disparity_sigma_px, cls.depth_disparity_step_px, cls.depth_min_texture) < 0:
+            raise ValueError(f"{where}: depth_disparity_sigma_px, depth_disparity_step_px and depth_min_texture must "
+                             f"be >= 0")
 
     def __init__(self, frame: str, *, width: int, height: int, frame_period_ns: int,
                  intrinsics: dict[str, tuple[float, float, float, float]],
@@ -230,6 +239,14 @@ class OakDW(Camera):
                          "depth": (0.0, 0.0, 0.0)}
     depth_range_m = (0.7, 12.0)  # the vendor's ideal range
     rolling_shutter = frozenset({"rgb"})  # the IMX378 variant
+    # Stereo depth errors as Controls' backend configures the matcher (HIGH_DENSITY preset, sub-pixel off), measured
+    # on the V1's unit (2026-11-02, 60 s of a static lab scene, lab lighting, depth on every 1808 frames): every
+    # reported depth is the device's f * b over a whole number of pixels, so whole-pixel steps; the spread of each
+    # pixel's disparity over time fits a noise of about 0.15 px before rounding (approximate: plain surfaces flicker
+    # more than textured ones, about 0.56 against 0.06 px, and one sigma fits both only roughly). Plain surfaces keep
+    # their depth (95 % of frames below 0.5 grey levels of texture), so no texture threshold.
+    depth_disparity_sigma_px = 0.15
+    depth_disparity_step_px = 1.0
 
 
 class RealSenseD435i(Camera):
@@ -248,6 +265,12 @@ class RealSenseD435i(Camera):
                          "depth": (0.0, 0.0, 0.0)}
     depth_range_m = (0.28, 10.0)
     rolling_shutter = frozenset({"rgb"})  # the infrared pair is global shutter, as realsense_backend.py declares
+    # Stereo depth errors, modeled until the lab unit is measured: the D400 datasheet's RMS error formula with its
+    # typical sub-pixel error, 0.08 px, its sub-pixel disparity taken as continuous. Controls turns the IR projector
+    # off (realsense_backend.py _configure_depth), so plain surfaces get no depth, below a texture threshold chosen
+    # near an 8-bit imager's read noise.
+    depth_disparity_sigma_px = 0.08
+    depth_min_texture = 2.0
 
 
 class ZedMini(Camera):

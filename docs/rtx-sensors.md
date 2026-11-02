@@ -22,6 +22,19 @@ Each sensor sits at its rig frame, composed through the URDF's fixed joints onto
 
 `sensors/geometry.py` builds each stream from the camera instance (`camera_spec`); `sensors/rtx.py` puts an Isaac Lab camera for it on the body (`camera_entities`), with the stream's OpenCV pinhole or fisheye model, which RTX renders natively. Grey streams are the BT.601 luma of the colour render; depth is the distance along the optical axis, written as millimetres within the model's range (0 outside it).
 
+### Stereo depth errors
+
+By default the depth is exact. With `depth_noise` (`SessionCfg.depth_noise`, `--depth-noise` on `examples/rtx_sensors.py` and `render-runtime`) each stereo camera's depth is what its matcher would report (`sensors/stereo_depth.py`), from the figures of its model (`sensors/models.py`):
+
+| Error | Model | D435i | OAK-D-W |
+|---|---|---|---|
+| Noise | Gaussian on the disparity `d = f b / z`, so the depth error grows with the square of the range: `σ_z ≈ z² σ_d / (f b)` (the D400 datasheet's RMS error formula) | `σ_d` 0.08 px: about 2 cm at 2 m, 12 cm at 5 m (modeled) | `σ_d` 0.15 px (measured, approximate) |
+| Steps | The noisy disparity rounded to `depth_disparity_step_px`, so the depth takes only the values `f b / k` | none: sub-pixel, taken as continuous | whole pixels (measured; sub-pixel is off): 1.93 or 2.12 m near 2 m, 4.27 or 5.34 m near 5 m |
+| Occlusion | No depth where the second imager cannot see: a band beside each foreground edge (`d_near − d_far` pixels wide, on the side away from the second imager) and the image border on that side | yes | yes |
+| No texture | No depth where the reference imager's 7 x 7 patch spreads less than `depth_min_texture` grey levels | 2 grey levels (modeled; Controls turns its IR projector off) | none (measured: plain surfaces keep their depth, noisier) |
+
+The OAK-D-W's figures were measured on the V1's unit with the matcher as Controls configures it (`HIGH_DENSITY`, sub-pixel off), from 60 s of a static lab scene: every reported depth is the device's `f b` over a whole number of pixels, and the flicker of each pixel's disparity fits a noise of about 0.15 px before rounding, more on plain surfaces than on textured ones. Turning sub-pixel on in Controls would make the step 1/8 px. The D435i's are modeled until a unit is measured. The errors are drawn from the session's `seed`. Pixels without depth are 0 in the published 16UC1 image, as the cameras report them.
+
 Two Isaac Lab 3.0 behaviours are handled in `sensors/rtx.py`:
 
 - A camera without a colour output (a depth stream) turns colour rendering off for the whole app (`/rtx/sdg/force/disableColorRender`), and every colour camera then renders black. `KitRender` turns it back on before each render.
@@ -137,7 +150,8 @@ A render serves every sensor due; the cameras render every 33 ms of plant time, 
 
 ## What is not modeled
 
-- Camera exposure, noise, motion blur and rolling shutter: every frame is a global-shutter render at the frame's plant time, every camera at one fixed exposure: RTX's auto exposure off and its tone mapping set by `rtx.EXPOSURE` (ACES, ISO 100, 1/50 s at f/5: Isaac Sim 6.2's defaults, pinned so a Kit upgrade cannot change how bright a room renders); the summary's `rtx_post` records the values Kit ran with. The D435i's infrared imagers see visible light, without the projector's pattern; its depth is the exact distance, without stereo matching.
+- Camera exposure, noise, motion blur and rolling shutter: every frame is a global-shutter render at the frame's plant time, every camera at one fixed exposure: RTX's auto exposure off and its tone mapping set by `rtx.EXPOSURE` (ACES, ISO 100, 1/50 s at f/5: Isaac Sim 6.2's defaults, pinned so a Kit upgrade cannot change how bright a room renders); the summary's `rtx_post` records the values Kit ran with. The D435i's infrared imagers see visible light, without the projector's pattern.
+- Stereo depth is exact unless `depth_noise` is on, and then it has the errors above only: no correlation of the noise across the matcher's block, no extra noise on plain surfaces, no widening of foreground edges by the matcher's window, no grazing-angle failures or flying pixels at edges, and none of the cameras' own post-processing filters.
 - With the ZED Mini's fisheye calibration, RTX leaves the corners of the image, beyond about 46 deg off axis, empty (light grey).
 - The Mid-360's real rosette, its reflectivity-dependent reach and intensities. Within one render the lidar sees the scene as it is at that render (Kit's motion BVH is off), so a moving robot's sweep is built from three renders.
 - The D435i on the G1 has no `<mount>_camera` link in the description, so Controls places it at a default mount; the ZED Mini mount's pitch is assumed level (the G1 URDF's `camera0_camera`).

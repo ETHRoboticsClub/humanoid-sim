@@ -30,6 +30,7 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 | `test_solvers.py` | Solver selection from the profile and its overrides, and the errors for unknown or unconfigured solvers | |
 | `test_scan.py` | A scan's look: each face corner's position and the texel it shows, and the floor quad with its texture, against a MuJoCo world built as Controls builds its `hangar_scan`; the floor on the boxes' ground; the live detail's merged vertices and colours; the descriptor's digests; refused files | |
 | `test_static_boxes.py` | Static boxes: the file read and placed where Controls' MuJoCo hangar places them (corner by corner against MuJoCo's kinematics, which needs the `kinematics-check` extra), spawn clearance, refused files, the drawn mesh; in the solver, one shared set of box shapes at the same corners, robots in every env standing on a box, and the runtime host standing the robot among boxes | 3 tests `physics` |
+| `test_stereo_depth.py` | Stereo depth errors on synthetic depth images: noise growing with the square of the range, disparity in steps, the occlusion band at a foreground edge and the image border, no depth on plain surfaces, a camera model's stereo geometry | |
 | `test_supports.py` | Gantry programs, and rope tension and cable length on every robot | the rope tests `physics` |
 | `test_sysid.py` | The passive-fit search space and CMA-ES | |
 | `test_train_env.py` | The Train-Time API in a manager-based Isaac Lab environment with two robots, for every robot | `physics` |
