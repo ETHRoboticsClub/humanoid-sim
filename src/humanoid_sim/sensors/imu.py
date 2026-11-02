@@ -14,6 +14,9 @@ samples, newest first, each with its measurement time and its host-receipt stamp
   (uniform per burst), stamped on receipt ``in_burst_spacing_ns`` apart. A consumer that reads "the latest
   sample" sees it up to one burst period late. A sample is held at least ``latency_ns`` (per env, set by the
   training plant; 0 by default) after its measurement, the host's path the burst model leaves out.
+* **Output field.** ``lsb`` (per axis, set by the training plant; 0, unquantized, by default): each sample is
+  rounded to whole counts of it and saturates at a signed 16-bit count, as the host decodes the sensor's output.
+  The runtime leaves it at 0: its client encodes the samples into the sensor's frames itself.
 
 Everything is batched over envs on the device; the step loop has a fixed trip count, so no host syncs. State is
 updated in place and the step time may be a device tensor, so a step can be captured in a CUDA graph.
@@ -105,6 +108,8 @@ class ImuDelivery:
         # Measurement to the earliest delivery, written by the plant's randomization; size ``pending`` for its
         # largest value with pending_slots.
         self.latency_ns = torch.zeros(e, **i64)
+        # The output field's resolution per axis (gyro then accelerometer; 0: unquantized), written by the plant.
+        self.lsb = torch.zeros(6, **f)
         # Sample clock and delivery schedule.
         self.next_sample = torch.zeros(e, **i64)
         self.next_burst = torch.zeros(e, **i64)
@@ -202,6 +207,8 @@ class ImuDelivery:
         acc = (r @ ideal[:, 3:].unsqueeze(-1)).squeeze(-1) + self.accel_bias
         model_bias = (self.turn_on + self.drift) * self._model_errors
         sample = torch.cat([gyro, acc], dim=1) + model_bias + self._normal(self.num_envs) * self._sigma
+        counts = torch.round(sample / self.lsb.clamp(min=torch.finfo(self.dtype).tiny)).clamp(-32768, 32767)
+        sample = torch.where(self.lsb > 0, counts * self.lsb, sample)
         self.seq.add_(due.long())
         full = due & (self.pending_count >= self.cfg.pending)
         self._drop_oldest_pending(full)
