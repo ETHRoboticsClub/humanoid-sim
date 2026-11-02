@@ -9,8 +9,9 @@ Orientation: base yaw, pitch and roll (``R = Rz Ry Rx``) in the filter's gravity
 has no heading reference, so the yaw at the first sample is removed. Rates are the Euler-angle rates of the
 measured angular velocity. The filter's tilt leans with linear acceleration, so ``yaw`` mode keeps only the
 yaw (base upright). On the excitation captures the gantry swings mostly in yaw (tens of degrees), and yaw
-alone gives the best replay; the base's linear acceleration is not replayed (its specific force carries
-vibration the base does not follow rigidly).
+alone gave the best replay in the original comparison. Default replay ignores linear acceleration;
+opt-in equivalent loading is prepared in replay/inertial.py with explicit filtering because specific force
+also carries vibration the base does not follow rigidly.
 """
 
 from __future__ import annotations

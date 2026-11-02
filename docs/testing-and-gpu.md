@@ -251,3 +251,5 @@ A replay fetched this way can be viewed locally with `humanoid-sim view-replay` 
 ### GPU types
 
 Use one A10G, L4 or L40S. The `e2e` task asks for an A10G or an L4; the other tasks ask for an L40S. To choose the GPU at launch, pass `--gpus`, for example `sky launch --gpus A10G:1 ...`. Anything larger, such as an A100 or H100, or more than one GPU, needs sign-off before you launch it.
+
+SysID fitting SkyPilot tasks (`pace`, `sysid`, `pace-capture`) are maintained in humanoid-learning. Simulator tests here cover the plant and physical replay.

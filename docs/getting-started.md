@@ -14,9 +14,6 @@ humanoid-sim runs in three places. The contract tests and the viewers run native
 | CUDA-graph tests | No | No | Image | `e2e` task |
 | Replay a capture | arm64 image, short runs | Image, short runs | Image | `replay` and `e2e` tasks |
 | View a replay in Rerun | Native | Native | Native | Fetch the output and view it locally |
-| `fit-passive`, `fit-delay` | Small runs only | Small runs only | Image | `sysid` task (`fit-passive`) |
-| `check-bag` | Native | Native | Native | Not needed |
-| `fit-pace`, `pace-selftest` | Small runs only | Small runs only | Image | `pace` task |
 | Training environment | arm64 image, a few envs | Image, a few envs | Image | `bench` and `e2e` tasks benchmark it |
 | Benchmarks | Runs; the numbers mean little | Runs; the numbers mean little | Image | `bench` and `e2e` tasks |
 | Serve the runtime to Controls | arm64 image, below real time | Image, below real time | Image, real time | Only with the client on the same node |
@@ -76,12 +73,11 @@ The core dependencies are numpy, torch and PyYAML. Each extra adds a group of op
 | `dev` | pytest, ruff | Running the tests and the linter |
 | `newton` | Newton, Warp, newton-usd-schemas, usd-core, trimesh, scipy, pycollada and resolve-robotics-uri-py | Host kinematics: the replay and runtime viewers, model checks and the kinematics tests. Newton here never steps physics. |
 | `viz` | rerun-sdk, pyarrow | `humanoid-sim view-replay`, `humanoid-sim view-runtime` and Rerun signal logs |
-| `bag` | rosbags | Reading Controls' rosbag2 recordings (`check-bag` and `fit-pace` on a bag, `tests/test_bag_reader.py`). The image and the GPU nodes install it. |
 | `kinematics-check` | MuJoCo | Cross-checking kinematics against Controls' MJCF by hand. No test or command needs it. |
 
 `uv sync` installs exactly the extras you name and removes the others, so name every extra you want in one command. `uv run <command>` runs a command in that environment and leaves the installed extras in place.
 
-None of the extras installs Isaac Lab. The commands that need it (`build-asset`, `replay`, `bench`, `serve`, `fit-passive`, `fit-delay`, `fit-pace`, `pace-selftest`) fail natively and must run in the image or on a GPU node. `view-replay` and `view-runtime` run natively with the `newton` and `viz` extras. The example runtime client, `examples/runtime_client.py`, needs only the core dependencies; like `view-runtime`, it must run on the machine the host runs on.
+None of the extras installs Isaac Lab. The commands that need it (`build-asset`, `replay`, `bench`, `serve`) fail natively and must run in the image or on a GPU node. `view-replay` and `view-runtime` run natively with the `newton` and `viz` extras. The example runtime client, `examples/runtime_client.py`, needs only the core dependencies; like `view-runtime`, it must run on the machine the host runs on.
 
 ## Run the CPU contract tests
 
@@ -154,7 +150,6 @@ This runs on the CPU and needs no GPU. Each command prints the path of the USD i
 | Variant | Used by |
 |---|---|
 | Plain (`build-asset`) | Training, benchmarks, the runtime, most physics tests, `view-replay`, `view-runtime` |
-| `--base-joints` | `replay`, `fit-passive` and `fit-delay` with a moving base (the default, `--base yaw`) |
 
 The `--base-joints` variant adds yaw, pitch and roll joints above the base so a replay can turn the robot the way the capture's IMU says it turned. [robot-model.md](robot-model.md) explains the build.
 
@@ -242,3 +237,5 @@ uv run rerun outputs/runtime.rrd
 ```
 
 [runtime.md](runtime.md) describes the segment, the session, the commands and the viewer. [visualization.md](visualization.md) shows the viewers. [controls-integration.md](controls-integration.md) describes how Controls connects to the runtime.
+
+Fitting CLI and GPU tasks moved to humanoid-learning; run `python -m humanoid_learning.sysid --help` there.

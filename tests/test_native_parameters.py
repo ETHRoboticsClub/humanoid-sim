@@ -1,13 +1,11 @@
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 
 from humanoid_sim.core import PlantCfg, PlantCore
 from humanoid_sim.model.description import Description
 from humanoid_sim.physics.joint_properties import joint_dynamics
-from humanoid_sim.sysid.pace import PaceSpace, blocks, start_values, structural_fixed, write
 from humanoid_sim.train.plant import RobotPlant
 from humanoid_sim.transmissions.drive_map import native_joint_names
 
@@ -18,39 +16,6 @@ def native_plant():
     return core
 
 
-def test_native_sysid_writes_physical_inventory_and_preserves_zero_inertia():
-    core = native_plant()
-    names = list(reversed(core.solver_map.joint_names))
-    written = {}
-
-    def record(**kwargs):
-        ids = kwargs.pop("joint_ids")
-        for key, value in kwargs.items():
-            written[key] = dict(zip([names[index] for index in ids.tolist()], value[0].tolist(), strict=True))
-
-    robot = SimpleNamespace(device="cpu", joint_names=names,
-                            write_joint_armature_to_sim_index=record,
-                            write_joint_viscous_friction_coefficient_to_sim_index=record,
-                            write_joint_friction_coefficient_to_sim_index=record)
-    start = start_values(core.desc, core.solver_map.joint_names)
-    space = PaceSpace(core.solver_map.joint_names, core.map.drive_names, start, fixed=structural_fixed(start))
-    values = space.decode(np.ones((2, space.dim)))
-    write(SimpleNamespace(plant=core, backend=SimpleNamespace(robot=robot)), space, values)
-    for linkage in core.desc.linkages:
-        for name in linkage.joints:
-            assert written["armature"][name] == 0
-        spec = core.desc.ankle_model.payload["sides"][linkage.side]
-        for key in ("upper", "lower"):
-            name = spec["usd_joints"][key]
-            assert written["armature"][name] == pytest.approx(joint_dynamics(core.desc)["armature"][core.solver_map.joint_names.index(name)] * 10)
-    torch.testing.assert_close(core.friction_relief, torch.as_tensor(
-        values["friction"] * (1 - values["friction_ratio"]), dtype=core.cfg.dtype))
-    partitions = blocks(space, core, list(range(len(space.drives))))
-    covered = np.concatenate([indices for indices, _ in partitions])
-    free = np.ones(space.dim, dtype=bool)
-    for name, mask in space.fixed.items():
-        free[space.slices()[name]] &= ~mask
-    assert sorted(covered.tolist()) == np.flatnonzero(free).tolist()
 
 
 def test_training_randomization_writes_native_ids_and_projects_relief():

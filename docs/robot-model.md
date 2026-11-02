@@ -133,11 +133,11 @@ EOF
 
 ### Identity and hash checks
 
-`Description.digest` is a sha256 over the file name and bytes of `URDF_6.urdf` and `actuators.yaml` (`description_digest` in `src/humanoid_sim/runtime/abi/plant_abi.py`). `Description.revision` is the git commit of the description root, or `None` outside a git checkout. `Description.identity()` returns the robot id, digest and revision. It is recorded in every `asset.json`, in the results of `replay`, `fit-delay` and `fit-passive`, and in the runtime segment's header and metadata.
+`Description.digest` is a sha256 over the file name and bytes of `URDF_6.urdf` and `actuators.yaml` (`description_digest` in `src/humanoid_sim/runtime/abi/plant_abi.py`). `Description.revision` is the git commit of the description root, or `None` outside a git checkout. `Description.identity()` returns the robot id, digest and revision. It is recorded in every `asset.json`, in the results of `replay` and humanoid-learning fitting, and in the runtime segment's header and metadata.
 
 humanoid-sim has no expected digest built in. The digest is compared where two parties must agree on the description:
 
-- It is part of the asset key (see [Output directory](#output-directory-and-assetjson)). Every command that loads the robot (`replay`, `view-replay`, `view-runtime`, `bench`, `fit-delay`, `fit-passive`, `serve`) looks up the asset built from the current description and profile, and stops with `asset ... is not built for this description and profile` when there is none. `--usd PATH` (a global option, before the subcommand) skips that lookup.
+- It is part of the asset key (see [Output directory](#output-directory-and-assetjson)). Every command that loads the robot (`replay`, `view-replay`, `view-runtime`, `bench`, `serve`) looks up the asset built from the current description and profile, and stops with `asset ... is not built for this description and profile` when there is none. `--usd PATH` (a global option, before the subcommand) skips that lookup.
 - The runtime host writes it into the segment header. A client that passes its own digest to `Segment.open` (`plant_abi.py`) refuses a segment whose digest differs ("the sim and the client read different descriptions"). See [controls-integration.md](controls-integration.md).
 
 The digest covers `URDF_6.urdf` and `actuators.yaml` only. The home pose table is covered by the description's git revision, which is recorded next to the digest, and the mesh files by neither: after a change to an STL alone, rebuild with `humanoid-sim build-asset --force`.
@@ -210,7 +210,7 @@ The self-collision sets are keyed by a joint: a set holds every body at or below
 
 `--base-joints` builds a separate asset with three revolute joints between a new world-fixed root link `base_world` and the robot's root `base_link`: `base_yaw` about z, `base_pitch` about y and `base_roll` about x, in that order (`R = Rz(yaw) Ry(pitch) Rx(roll)`, `BASE_JOINTS` in `src/humanoid_sim/model/urdf.py`). The added links weigh 1 g each and have no colliders. At spawn the root is fixed and the three joints follow position and velocity targets through a stiff PD (`BASE_JOINT_STIFFNESS`, `BASE_JOINT_DAMPING` in `src/humanoid_sim/physics/isaaclab.py`).
 
-This is the asset `replay`, `fit-delay` and `fit-passive` use with `--base yaw` (the default) or `--base orientation`: the robot hangs on a gantry while the base turns as the capture's IMU recorded. `--base fixed` uses the plain asset with its root fixed. See [replay-and-sysid.md](replay-and-sysid.md).
+This is the asset `replay` and humanoid-learning fitting use with `--base yaw` (the default) or `--base orientation`: the robot hangs on a gantry while the base turns as the capture's IMU recorded. `--base fixed` uses the plain asset with its root fixed. See [replay-and-sysid.md](replay-and-sysid.md).
 
 ### Output directory and asset.json
 
@@ -464,5 +464,5 @@ Then:
 
 3. Rebuild both assets in the Isaac Lab image (`humanoid-sim build-asset` and `humanoid-sim build-asset --base-joints`). Any change to `actuators.yaml` changes the description digest and with it the asset key, even for values such as friction that are applied at spawn, so commands refuse to run until the new asset exists. A change to a mesh file alone does not change the key; use `--force`.
 4. Re-run the checks: `uv run pytest -m "not physics"` on the host (model build, mirror map, ankle transmission, device layer) and the physics tests (`pytest -m physics`) in the image, as [testing-and-gpu.md](testing-and-gpu.md) describes. The physics tests skip when the asset for the current description is not built.
-5. Check the effect against the robot: replay an excitation capture (`humanoid-sim replay <exc-dir>`) and compare the position error before and after, or refit the passive parameters with `humanoid-sim fit-passive`. A fit reports values against the description's and writes nothing back; fitted values go into `actuators.yaml` by hand, with their source. See [replay-and-sysid.md](replay-and-sysid.md).
+5. Check the effect against the robot: replay an excitation capture (`humanoid-sim replay <exc-dir>`) and compare the position error before and after, or refit the passive parameters with humanoid-learning's `fit-passive`. A fit reports values against the description's and writes nothing back; fitted values go into `actuators.yaml` by hand, with their source. See [replay-and-sysid.md](replay-and-sysid.md).
 6. Restart `humanoid-sim serve`. Controls must read the same description, or attaching fails on the digest check.
