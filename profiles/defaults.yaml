@@ -19,7 +19,9 @@ poses:
   # The pose every runtime session starts in (`serve --pose` overrides): home or standing.
   start: home
 
-# Drive feedback as reported. Without devices.encoders the training plant reports exact values.
+# Drive feedback as reported. Without devices.encoders the training plant reports exact values; without
+# devices.feedback_noise it adds no velocity dither or torque noise, and without devices.feedback_sampling it reports
+# the present state at every physics step instead of the drive's last sample.
 devices: {}
 
 physics:

@@ -301,6 +301,17 @@ class Description:
             raise ValueError(f"{self.robot}: {family} drive_delay_s {value!r} must be finite and non-negative")
         return round(value * 1e9)
 
+    def control_period_ns(self) -> int | None:
+        """The robot's bus cycle (``backend.control_period_s``) in integer ns: one exchange of its controller with
+        its drives. None when the description records none."""
+        value = self.table.get("backend", {}).get("control_period_s")
+        if value is None:
+            return None
+        value = float(value)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{self.robot}: backend control_period_s {value!r} must be finite and positive")
+        return round(value * 1e9)
+
     def family_value(self, family: str, key: str, default=None):
         """A motor family's ``key``, or ``default`` when the family does not record it."""
         return self.table.get("families", {}).get(family, {}).get(key, default)

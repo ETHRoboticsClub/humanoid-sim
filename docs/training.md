@@ -47,9 +47,12 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `robot` | `"ethrc_v1"` | Profile (`profiles/ethrc_v1.yaml`) and description to load |
 | `randomization` | `[]` | Randomization specs, as dicts or `ParamSpec`; see [Randomization](#randomization) |
 | `level` | `1.0` | Initial randomization level |
-| `seed` | `0` | Seed of the randomizer; the IMU model uses `seed + 1` and the encoder jitter `seed + 2` |
+| `seed` | `0` | Seed of the randomizer; the IMU model uses `seed + 1`, the encoder jitter and feedback noise `seed + 2`, the feedback sampler `seed + 3` |
 | `feedback_history` | `16` | Physics steps of drive feedback kept in `Measured.history` |
 | `reporting` | `True` | Quantize the measured drive feedback the way the drives report it |
+| `feedback_noise` | `True` | With `reporting`: add the drives' measured velocity dither and torque noise ([Reporting in training](sensors.md#reporting-in-training)) |
+| `feedback_sampling` | `True` | Hold the measured drive feedback between the drive's samples, 3.0 to 7.5 ms apart ([Feedback age](sensors.md#feedback-age)); needs the profile's `devices.feedback_sampling` |
+| `command_jitter_ns` | `0` | Move each demand's arrival at each drive by a uniform integer draw in +-this many ns (generator seeded `seed + 4`). Off: no measurement of the per-cycle jitter yet. Arrivals stay in order |
 | `cuda_graph` | `False` | Capture drive feedback, target shaping and IMU delivery on CUDA |
 | `compile` | `False` | Fuse the captured drive and IMU math with `torch.compile`; requires `cuda_graph` |
 | `queue_capacity` | `8` | Demands in flight per env; needs at least (max latency + drive delay) / demand period + 1 |
@@ -169,7 +172,7 @@ def plant(env):
 
 
 def actor_obs(env):
-    m = plant(env).measured()  # one call: the encoder jitter is drawn per call
+    m = plant(env).measured()  # one call: the reporting noise is drawn per call
     return torch.cat([m.drive.position_rad, m.drive.velocity_rad_s, m.imu.gyro[:, 0], m.imu.specific_force[:, 0]],
                      dim=1)
 
@@ -292,7 +295,7 @@ The [baseline gains](glossary.md#baseline-gains) (`plant.core.drive_stiffness`, 
 | `history_ns` | `[E, H]` int64 | Plant time of each history entry; -1 where nothing was recorded since the last reset |
 | `imu` | `ImuSamples` or `None` | Raw IMU samples received so far, newest first |
 
-With `reporting=True` the drive values are quantized the way Controls' fake EtherCAT drive (`Epos4Slave.cpp`) reports them, in `src/humanoid_sim/devices/reporting.py`. The position is the drive's own reading in whole encoder counts, so it includes the drive's `encoder_offset`, plus a random -1, 0 or +1 count on every read. The velocity is whole counts per controller sample at 2.5 kHz, converted back to rad/s. The applied torque is in whole mNm; the demanded torque passes through. Values stay in rad, rad/s and Nm. With `reporting=False` only the offset is added.
+With `reporting=True` the drive values are quantized the way Controls' fake EtherCAT drive (`Epos4Slave.cpp`) reports them, in `src/humanoid_sim/devices/reporting.py`. The position is the drive's own reading in whole encoder counts, so it includes the drive's `encoder_offset`, plus a random -1, 0 or +1 count on every read. The velocity is whole counts per controller sample at 2.5 kHz, converted back to rad/s, with the measured dither. The applied torque is in whole mNm, with the measured noise; the demanded torque passes through. The values are held between the drive's samples (`feedback_sampling`). Values stay in rad, rad/s and Nm. With `reporting=False` only the offset is added.
 
 | Drive family | Drives | Counts per rev | Position step | Velocity step |
 |---|---|---|---|---|
@@ -520,7 +523,7 @@ The plant's steady-state work (`submit`, `pre_physics`, `measured`, `truth`, `re
 
 - The solver uses the larger friction of the two shapes in contact (MJWarp always, Kamino as the profile configures it). When `friction` is randomized on the robot, give the ground zero friction (`robot_scene_cfg(..., ground_friction=0.0)` or `heightfield_terrain_cfg(..., friction=0.0)`); with the profile's ground friction of 1.0 every robot value below 1 has no effect.
 - Take targets and action offsets from `data.default_joint_pos`, not from `standing_offset_rad`: the scene spawns in the home pose, and the standing pose is only used when a scene asks for it. See [The initial pose](#the-initial-pose).
-- The encoder jitter is drawn on every `measured()` call, for `drive` and for `history`. Two observation terms that each call `measured()` see different jitter in the same step; read it once in one term, as `actor_obs` does.
+- The encoder jitter, velocity dither and torque noise are drawn on every `measured()` call for `drive`, once per entry for `history`. With `feedback_sampling` the value of a sample the drive has not renewed repeats, noise included. Two observation terms that each call `measured()` can see different noise in the same step when a new sample is due; read it once in one term, as `actor_obs` does.
 - `history[:, 0]` is one physics step older than `drive`. The history and the IMU are sampled at the start of each physics step, so after an env step their newest entries are from `plant.t_ns - plant.period_ns`, while `drive` is the state now. Use `history_ns` for the times.
 - After a reset, the history and IMU buffers keep the previous episode's values until they are overwritten; only `history_ns`, `sample_ns`, `stamp_ns`, `seq` and `count` mark them empty. The observation computed right after a reset, in the same env step, always has `count == 0`, and the first burst can take more than one policy period to arrive. Mask on `history_ns >= 0` and `stamp_ns >= 0` where it matters.
 - `measured().imu` is the delivery model's buffer, updated in place every physics step. Clone it to keep it.
