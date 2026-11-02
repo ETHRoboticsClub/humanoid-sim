@@ -42,6 +42,21 @@ def test_algorithm_bridge_preserves_other_solver_parameters(options):
     assert dataclasses.asdict(configured) == dataclasses.asdict(baseline)
 
 
+@pytest.mark.parametrize("device, algorithm", [("cuda:0", "bilateral_reduced"), ("cuda", "bilateral_reduced"),
+                                               ("cpu", "full")])
+def test_cpu_runs_the_full_padmm_the_reduced_profile_tunes(device, algorithm):
+    from humanoid_sim.physics.isaaclab import solver_cfg
+
+    reduced = {"algorithm": "bilateral_reduced", "reduced_ordering": "rcm", "reduced_dynamic_pattern": True,
+               "reduced_sparse_diagnostics": True, "reduced_lazy_preconditioning": True}
+    settings = {"integrator": "euler", "iterations": 19, "max_contacts_per_world": 3,
+                "use_graph_conditionals": True, "padmm": {"rho_0": 0.08} | reduced}
+    padmm = solver_cfg("kamino", settings, device=device).to_solver_config().padmm
+    assert padmm.algorithm == algorithm
+    assert padmm.rho_0 == pytest.approx(0.08)
+    assert padmm.reduced_lazy_preconditioning == (algorithm != "full")
+
+
 @pytest.mark.parametrize("changed, constructor, message", [
     ({"algorithm": "unknown"}, {}, "explicit PADMM algorithm"),
     ({"reduced_capacity": 33}, {}, "reduced_capacity"),
