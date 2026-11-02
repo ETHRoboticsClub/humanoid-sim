@@ -146,15 +146,19 @@ class BagCapture:
         states = before[-1:] + during
         if not states:
             raise ValueError(f"{self.root}: no {GAINS_TOPIC} message at or after the feedback starts")
+        # Judged on the streaming drives only: `applied` and `failed` cover every listed drive, unpowered hands too.
+        streaming = {d for d, tr in self.pdo().items() if np.isfinite(tr["native_position_rad"]).any()}
         ref = None
         for m in states:
-            if m.failed or m.failed_motors or not m.applied or not all(m.motor_applied) or m.ramp_remaining_s > 0:
+            applied = dict(zip(m.motors, m.motor_applied, strict=True))
+            if (streaming & set(m.failed_motors) or not all(applied.get(d, False) for d in streaming)
+                    or m.ramp_remaining_s > 0):
                 raise ValueError(f"{self.root}: gains not applied, ramping or failed during the recording")
             pairs = {d: (float(kp), float(kd)) for d, kp, kd in
                      zip(m.motors, m.kp_nm_per_rad, m.kd_nm_s_per_rad, strict=True)}
             if ref is None:
                 ref = pairs
-            elif pairs != ref:
+            elif any(pairs.get(d) != ref.get(d) for d in streaming):
                 raise ValueError(f"{self.root}: gains changed during the recording")
         missing = sorted(set(self.pdo()) - set(ref))
         if missing:
