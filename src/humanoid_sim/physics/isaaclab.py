@@ -30,7 +30,8 @@ from humanoid_sim.world.boxes import StaticBoxes
 
 # Base-joint PD. Each joint carries the whole robot (a few kg m² about yaw, ~10 about pitch and roll at the
 # pelvis), so 1e5 Nm/rad holds a 30 Nm waist reaction to 0.3 mrad and stays below the explicit-stiffness
-# limit 4 I / dt² at 4 ms; the damping is implicit (MJWarp implicitfast, Kamino's implicit PD) and near critical.
+# limit 4 I / dt² at 4 ms; the damping is near critical. MJWarp's rk4 integrates it explicitly, stable while
+# d dt / I stays under about 2.8 (Kamino's PD and MJWarp's implicitfast treat it implicitly).
 BASE_JOINT_STIFFNESS = 1e5
 BASE_JOINT_DAMPING = 2e3
 

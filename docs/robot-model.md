@@ -385,7 +385,7 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `physics.period_ns` | `SimCore`, `RobotPlant`, `robot_sim_cfg` | Physics step: 1000000 ns for native V1, 4000000 ns for G1. `replay --period-ms` sets it for replays. |
 | `physics.solver` | `solver_settings` | The Newton solver that steps the robot: `mjwarp` (the default) or `kamino` (beta). The global option `--solver` and `robot_sim_cfg(solver=...)` override it; the solver needs its own block below. |
 | `physics.self_collision` | `SimCore`, `robot_scene_cfg` | Self-collision on the spawned articulation. |
-| `physics.mjwarp.integrator` | `solver_cfg` | MJWarp integrator: native V1 uses `rk4`; the general default is `implicitfast`. `replay --integrator` overrides it. |
+| `physics.mjwarp.integrator` | `solver_cfg` | MJWarp integrator: `rk4` for every robot. The first-order integrators (`euler`, `implicit`, `implicitfast`) do not conserve angular momentum under fast joint motion at 4 ms (`tests/test_angular_momentum.py`). `replay --integrator` overrides it. |
 | `physics.mjwarp.cone` | `solver_cfg` | Friction cone model, `pyramidal`. |
 | `physics.mjwarp.iterations`, `.ls_iterations` | `solver_cfg` | Solver and line-search iteration limits. |
 | `physics.mjwarp.njmax`, `.nconmax` | `solver_cfg` | MJWarp buffers: constraint rows per world (a maximum) and contacts per world (an average; the pool is shared by all worlds). |
