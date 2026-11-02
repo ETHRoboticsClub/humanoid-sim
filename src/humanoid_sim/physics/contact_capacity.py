@@ -4,39 +4,33 @@ import torch
 import warp as wp
 
 
-@wp.kernel
-def _count_contacts(count: wp.array[int], shape_a: wp.array[int], shape_b: wp.array[int],
-                    shape_world: wp.array[int], per_world: wp.array[int]):
-    i = wp.tid()
-    if i < count[0]:
-        world = wp.max(shape_world[shape_a[i]], shape_world[shape_b[i]])
-        if world >= 0:
-            wp.atomic_add(per_world, world, 1)
-
-
 class ContactCapacityGuard:
     """Fail instead of continuing with contacts beyond Kamino's per-world cap.
 
-    Newton's collision pool precedes Kamino's truncated per-world buffers. Count
-    that pool with a device kernel; the asynchronous assertion adds no host sync.
+    Kamino's Newton-to-Kamino conversion culls speculative contacts (positive margin-shifted distance), reserves
+    per-world capacity for the rest and raises a device flag for every contact it drops; the flag is cleared before
+    each conversion. The guard asserts on that flag after each step, so it counts exactly the contacts Kamino keeps.
+    Counting Newton's whole pool instead also counts the speculative contacts within the shapes' contact gap and
+    stops on falls that fit. The asynchronous assertion adds no host sync.
     """
 
-    def __init__(self, manager, num_envs: int, capacity: int, device):
-        self.manager = manager
-        self.capacity = capacity
-        self.counts = wp.zeros(num_envs, dtype=int, device=str(device))
-        self._counts_torch = wp.to_torch(self.counts)
+    def __init__(self, overflow: wp.array):
+        self._overflow = wp.to_torch(overflow)
 
     def check(self):
-        contacts = self.manager.get_contacts()
-        if contacts is None:
-            return
-        self.counts.zero_()
-        wp.launch(_count_contacts, dim=contacts.rigid_contact_shape0.shape[0], inputs=[
-            contacts.rigid_contact_count, contacts.rigid_contact_shape0, contacts.rigid_contact_shape1,
-            self.manager.get_model().shape_world, self.counts], device=self.counts.device)
-        torch._assert_async((self._counts_torch <= self.capacity).all(),
-                            "Kamino contact capacity exceeded; increase max_contacts_per_world")
+        torch._assert_async(self._overflow[0] == 0, "Kamino contact capacity exceeded; increase max_contacts_per_world")
+
+
+def kamino_overflow_flag(solver) -> wp.array | None:
+    """The overflow flag of ``solver``'s Kamino contact buffers, or None when the model admits no contacts."""
+    contacts = getattr(solver, "_contacts_kamino", None)
+    if contacts is None:
+        return None
+    flag = getattr(getattr(contacts, "_data", None), "_contact_overflow_warning_emitted", None)
+    if flag is None:
+        raise RuntimeError("Kamino's contacts expose no overflow flag: revalidate the contact capacity guard "
+                           "against this Newton")
+    return flag
 
 
 def contact_capacity_guard(physics: dict, num_envs: int, device):
@@ -46,4 +40,5 @@ def contact_capacity_guard(physics: dict, num_envs: int, device):
         return None
     from isaaclab_newton.physics import NewtonManager
 
-    return ContactCapacityGuard(NewtonManager, num_envs, int(physics["kamino"]["max_contacts_per_world"]), device)
+    flag = kamino_overflow_flag(NewtonManager._solver)
+    return None if flag is None else ContactCapacityGuard(flag)
