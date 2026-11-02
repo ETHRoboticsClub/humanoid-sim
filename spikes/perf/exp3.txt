@@ -1,0 +1,9 @@
+# MJWarp buffers sized to measured occupancy (max 418 rows per world; 36 contacts per world at 0.1 m gap, 12 at 2 mm)
+mj-rk4-1ms-buf            --solver mjwarp --steps 600 --overrides {"mjwarp":{"njmax":1024}}
+mj-rk4-1ms-gap2mm-buf     --solver mjwarp --steps 600 --contact-gap 0.002 --overrides {"mjwarp":{"njmax":1024,"nconmax":96}} --profile 20
+mj-rk4-1ms-gap2mm-buf512  --solver mjwarp --steps 600 --contact-gap 0.002 --overrides {"mjwarp":{"njmax":512,"nconmax":64}}
+rec-mj-gap2mm-buf         --solver mjwarp --num-envs 1024 --steps 2000 --excite 0.4 --contact-gap 0.002 --overrides {"mjwarp":{"njmax":1024,"nconmax":96}} --record outputs/perf/rec-mj-gap2mm-buf.npz
+rec-mj-base-strong        --solver mjwarp --num-envs 1024 --steps 3000 --excite 0.8 --record outputs/perf/rec-mj-base-strong.npz
+rec-mj-gap2mm-strong      --solver mjwarp --num-envs 1024 --steps 3000 --excite 0.8 --contact-gap 0.002 --record outputs/perf/rec-mj-gap2mm-strong.npz
+mj-impl-2ms-gap2mm-buf    --solver mjwarp --steps 300 --period-ms 2 --integrator implicitfast --contact-gap 0.002 --overrides {"mjwarp":{"njmax":1024,"nconmax":96}}
+kam-red-2ms-gap2mm        --solver kamino --steps 300 --period-ms 2 --contact-gap 0.002

@@ -1,0 +1,16 @@
+# name  perf_bench args (4096 envs; 600 steps at 1 ms, 300 at 2 ms: the same 0.6 s simulated)
+mj-rk4-1ms        --solver mjwarp --steps 600 --phases --profile 20
+kam-red-1ms       --solver kamino --steps 600 --phases --profile 20
+master-kam-1ms    --solver kamino --steps 600 --phases
+mj-rk4-1ms-noself --solver mjwarp --steps 600 --no-self-collision
+kam-red-1ms-noself --solver kamino --steps 600 --no-self-collision
+mj-euler-1ms      --solver mjwarp --steps 600 --integrator euler
+mj-implicitfast-1ms --solver mjwarp --steps 600 --integrator implicitfast
+mj-rk4-2ms        --solver mjwarp --steps 300 --period-ms 2
+mj-euler-2ms      --solver mjwarp --steps 300 --period-ms 2 --integrator euler
+mj-implicitfast-2ms --solver mjwarp --steps 300 --period-ms 2 --integrator implicitfast
+kam-red-2ms       --solver kamino --steps 300 --period-ms 2
+master-kam-2ms    --solver kamino --steps 300 --period-ms 2
+mj-rk4-1ms-nograph --solver mjwarp --steps 200 --no-cuda-graph --no-plant-graph --phases --profile 10
+kam-red-1ms-nograph --solver kamino --steps 200 --no-cuda-graph --no-plant-graph --phases --profile 10
+mj-rk4-1ms-8192   --solver mjwarp --steps 600 --num-envs 8192

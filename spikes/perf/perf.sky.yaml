@@ -1,0 +1,23 @@
+# Perf matrix on one L40S: sky launch -y -d -c sim-perf -i 10 spikes/perf/perf.sky.yaml (from the repo root)
+# MATRIX: perf_bench lines (spikes/perf/matrix.sh); RUNS: optional replays "solver:period_ms:integrator ..." of /home/ubuntu/caps/exc-*
+name: sim-perf
+workdir: .
+resources:
+  cloud: aws
+  accelerators: L40S:1
+  cpus: 8+
+  memory: 32+
+  disk_size: 200
+envs:
+  ISAACLAB_COMMIT: 32712682b69edd488eea26689da6905c48d31037
+  UV_VERSION: 0.13.1
+  MATRIX: spikes/perf/baseline.txt
+  RUNS: ""
+  PROFILE_TAG: ""
+  PYTEST: ""
+setup: bash sky/setup.sh
+run: |
+  mkdir -p outputs
+  bash spikes/perf/matrix.sh "$MATRIX" 2>&1 | tee -a outputs/perf-matrix.log
+  if [ -n "$PYTEST" ]; then (export PATH="$HOME/.local/bin:$HOME/il-venv/bin:$PATH"; humanoid-sim build-asset --base-joints | tail -1; pytest -q $PYTEST > outputs/perf/pytest${PROFILE_TAG:+-$PROFILE_TAG}.log 2>&1; tail -5 outputs/perf/pytest${PROFILE_TAG:+-$PROFILE_TAG}.log); fi
+  if [ -n "$RUNS" ]; then CAPS="/home/ubuntu/caps/exc-*" bash spikes/perf/replays.sh 2>&1 | tee -a outputs/perf-replays.log; fi

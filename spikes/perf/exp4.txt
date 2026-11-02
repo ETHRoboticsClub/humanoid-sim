@@ -1,0 +1,5 @@
+# Kamino accuracy, like for like: both at max_contacts_per_world 512 (the 0.1 m gap trips the 144 guard under falls)
+rec-kam-cap512-base-a   --solver kamino --num-envs 1024 --steps 2000 --excite 0.4 --overrides {"kamino":{"max_contacts_per_world":512}} --record outputs/perf/rec-kam-cap512-base-a.npz
+rec-kam-cap512-base-b   --solver kamino --num-envs 1024 --steps 2000 --excite 0.4 --overrides {"kamino":{"max_contacts_per_world":512}} --record outputs/perf/rec-kam-cap512-base-b.npz
+rec-kam-cap512-gap2mm   --solver kamino --num-envs 1024 --steps 2000 --excite 0.4 --contact-gap 0.002 --overrides {"kamino":{"max_contacts_per_world":512}} --record outputs/perf/rec-kam-cap512-gap2mm.npz
+rec-kam-gap2mm-b        --solver kamino --num-envs 1024 --steps 2000 --excite 0.4 --contact-gap 0.002 --record outputs/perf/rec-kam-gap2mm-b.npz

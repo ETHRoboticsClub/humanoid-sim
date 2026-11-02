@@ -1,0 +1,12 @@
+# Contact gap and broad phase: speed (4096 envs, 1 ms, 600 steps)
+mj-rk4-1ms-gap2mm   --solver mjwarp --steps 600 --contact-gap 0.002 --profile 20
+kam-red-1ms-gap2mm  --solver kamino --steps 600 --contact-gap 0.002 --profile 20
+mj-rk4-1ms-sap      --solver mjwarp --steps 600 --broad-phase sap
+mj-rk4-1ms-nxn      --solver mjwarp --steps 600 --broad-phase nxn
+# Accuracy records: 1024 envs, 2 s, drives excited by 0.4 rad sines (falls, self and ground contacts)
+rec-mj-base-a       --solver mjwarp --num-envs 1024 --steps 2000 --excite 0.4 --record outputs/perf/rec-mj-base-a.npz
+rec-mj-base-b       --solver mjwarp --num-envs 1024 --steps 2000 --excite 0.4 --record outputs/perf/rec-mj-base-b.npz
+rec-mj-gap2mm       --solver mjwarp --num-envs 1024 --steps 2000 --excite 0.4 --contact-gap 0.002 --record outputs/perf/rec-mj-gap2mm.npz
+rec-kam-base-a      --solver kamino --num-envs 1024 --steps 2000 --excite 0.4 --record outputs/perf/rec-kam-base-a.npz
+rec-kam-base-b      --solver kamino --num-envs 1024 --steps 2000 --excite 0.4 --record outputs/perf/rec-kam-base-b.npz
+rec-kam-gap2mm      --solver kamino --num-envs 1024 --steps 2000 --excite 0.4 --contact-gap 0.002 --record outputs/perf/rec-kam-gap2mm.npz

@@ -1,0 +1,7 @@
+# Integrator and period: accuracy records against rec-mj-base-a (RK4, 1 ms) and rec-kam-base-a (1 ms), same excitation
+rec-mj-euler-1ms        --solver mjwarp --num-envs 1024 --steps 2000 --excite 0.4 --integrator euler --record outputs/perf/rec-mj-euler-1ms.npz
+rec-mj-implicitfast-1ms --solver mjwarp --num-envs 1024 --steps 2000 --excite 0.4 --integrator implicitfast --record outputs/perf/rec-mj-implicitfast-1ms.npz
+rec-mj-rk4-2ms          --solver mjwarp --num-envs 1024 --steps 1000 --period-ms 2 --excite 0.4 --record outputs/perf/rec-mj-rk4-2ms.npz
+rec-mj-implicitfast-2ms --solver mjwarp --num-envs 1024 --steps 1000 --period-ms 2 --excite 0.4 --integrator implicitfast --record outputs/perf/rec-mj-implicitfast-2ms.npz
+rec-mj-euler-2ms        --solver mjwarp --num-envs 1024 --steps 1000 --period-ms 2 --excite 0.4 --integrator euler --record outputs/perf/rec-mj-euler-2ms.npz
+rec-kam-2ms             --solver kamino --num-envs 1024 --steps 1000 --period-ms 2 --excite 0.4 --record outputs/perf/rec-kam-2ms.npz

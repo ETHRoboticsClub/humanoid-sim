@@ -1,0 +1,10 @@
+# The branch as committed (profile contact_gap_m 0.002, exact Kamino guard): speed and falls at the profile's capacity
+v-mj-rk4-1ms          --solver mjwarp --steps 600 --phases --profile 20
+v-kam-red-1ms         --solver kamino --steps 600 --phases --profile 20
+v-mj-rk4-2ms          --solver mjwarp --steps 300 --period-ms 2
+v-kam-red-2ms         --solver kamino --steps 300 --period-ms 2
+rec-v-kam-strong      --solver kamino --num-envs 1024 --steps 3000 --excite 0.8 --record outputs/perf/rec-v-kam-strong.npz
+rec-v-mj-strong       --solver mjwarp --num-envs 1024 --steps 3000 --excite 0.8 --record outputs/perf/rec-v-mj-strong.npz
+rec-v-kam-1ms         --solver kamino --num-envs 1024 --steps 2000 --excite 0.4 --record outputs/perf/rec-v-kam-1ms.npz
+rec-v-kam-2ms         --solver kamino --num-envs 1024 --steps 1000 --period-ms 2 --excite 0.4 --record outputs/perf/rec-v-kam-2ms.npz
+rec-v-mj-1ms          --solver mjwarp --num-envs 1024 --steps 2000 --excite 0.4 --record outputs/perf/rec-v-mj-1ms.npz
