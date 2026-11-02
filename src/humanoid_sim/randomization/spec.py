@@ -2,7 +2,10 @@
 
 A :class:`ParamSpec` draws one plant parameter per env for a selection of joints, bodies or drives:
 
-* ``dist``: ``uniform`` and ``log_uniform`` take ``(low, high)``, ``normal`` takes ``(mean, std)``;
+* ``dist``: ``uniform`` and ``log_uniform`` take ``(low, high)``, ``normal`` takes ``(mean, std)``. A vector
+  parameter (``body_com`` and the IMU's per-axis parameters) may instead give one such pair per axis x, y, z,
+  e.g. ``[[-0.03, 0.12], [-0.03, 0.03], [-0.03, 0.03]]`` (``select`` still picks IMU axes; their pairs are
+  taken by axis); a plain pair applies to every axis;
 * ``op``: how a draw combines with the current value: ``scale`` (×), ``add`` (+) or ``set`` (=). Specs apply in
   order, so ``body_mass`` can be scaled on every body and then get a payload added on one;
 * level: a curriculum level in [0, 1] shrinks every draw toward its identity (1 for ``scale``, 0 for ``add``,
@@ -28,6 +31,7 @@ from dataclasses import dataclass
 DISTRIBUTIONS = ("uniform", "log_uniform", "normal", "discrete_uniform")
 OPS = ("scale", "add", "set")
 SCOPES = ("startup", "reset")
+AXES = ("x", "y", "z")
 
 
 @dataclass(frozen=True)
@@ -52,11 +56,12 @@ PARAMS: dict[str, Param] = {
     "drive_stiffness": Param("device", "drive", doc="drive's realized P gain over the demanded one"),
     "drive_damping": Param("device", "drive", doc="drive's realized D gain over the demanded one"),
     "torque_limit": Param("device", "drive", doc="scale of the torque-speed envelope and torque cap"),
-    "latency": Param("device", "drive", unit="s", doc="latency before the drive (the controller's path), demand sent → staged; the drive's own delay follows"),
+    "latency": Param("device", "drive", unit="s", doc="latency before the drive (the controller's path), demand sent → staged; the drive's own delay follows. Nominal: the profile's devices.command_path less the drive's delay, else 0"),
     "encoder_offset": Param("device", "drive", unit="rad", doc="drive's position reading minus the truth"),
     "imu_gyro_bias": Param("device", "axis", unit="rad/s", doc="gyro bias, sensor frame"),
     "imu_accel_bias": Param("device", "axis", unit="m/s²", doc="accelerometer bias, sensor frame"),
     "imu_misalignment": Param("device", "axis", unit="rad", doc="sensor rotation from its mount, rotation vector"),
+    "imu_latency": Param("device", "env", unit="s", doc="IMU sample measured → its earliest delivery to the host. Nominal: the profile's devices.imu_path, else 0"),
 }
 
 _SELECTORS = {"body": "bodies", "joint": "joints", "drive": "drives", "shape": "shapes"}
@@ -66,7 +71,7 @@ _SELECTORS = {"body": "bodies", "joint": "joints", "drive": "drives", "shape": "
 class ParamSpec:
     param: str
     dist: str
-    range: tuple[float, float]
+    range: tuple  # (low, high), or one (low, high) per axis of a vector parameter
     op: str
     select: str = ".*"  # regex over the target's names (bodies, joints or drives); full match
     scope: str | None = None  # None: by kind (physics at startup, device at reset); "startup" for device ones
@@ -86,9 +91,19 @@ class ParamSpec:
             raise ValueError(f"{self.param}: scope {self.scope!r}; expected one of {SCOPES}")
         if self.kind == "physics" and self.scope == "reset":
             raise ValueError(f"{self.param} is a solver parameter: drawn at startup and on level changes only")
-        if len(self.range) != 2:
-            raise ValueError(f"{self.param}: range needs two numbers")
-        lo, hi = self.range
+        pairs = self.axis_ranges
+        if pairs is None:
+            pairs = [self._pair(self.range)]
+        else:
+            p = PARAMS[self.param]
+            width = p.width if p.width > 1 else len(AXES) if p.target == "axis" else 1
+            if width == 1:
+                raise ValueError(f"{self.param}: per-axis range on a scalar parameter")
+            if len(pairs) != width:
+                raise ValueError(f"{self.param}: per-axis range needs {width} pairs, got {len(pairs)}")
+            if p.target == "axis" and not self.per_target:
+                raise ValueError(f"{self.param}: per-axis range needs per_target")
+            pairs = [self._pair(p) for p in self.range]
         if self.buckets is not None and (self.kind != "physics" or isinstance(self.buckets, bool)
                                         or not isinstance(self.buckets, int) or self.buckets < 1):
             raise ValueError(f"{self.param}: buckets must be a positive integer for a physics parameter")
@@ -97,16 +112,30 @@ class ParamSpec:
 
             if self.quantum is None or not math.isfinite(self.quantum) or self.quantum <= 0:
                 raise ValueError(f"{self.param}: discrete_uniform needs a positive quantum")
-            count = (hi - lo) / self.quantum
-            if not math.isfinite(count) or not math.isclose(count, round(count), abs_tol=1e-9):
-                raise ValueError(f"{self.param}: range must contain a whole number of quanta")
+            for lo, hi in pairs:
+                count = (hi - lo) / self.quantum
+                if not math.isfinite(count) or not math.isclose(count, round(count), abs_tol=1e-9):
+                    raise ValueError(f"{self.param}: range must contain a whole number of quanta")
         elif self.quantum is not None:
             raise ValueError(f"{self.param}: quantum only applies to discrete_uniform")
-        if self.dist != "normal" and lo > hi:
-            raise ValueError(f"{self.param}: range low {lo} > high {hi}")
-        if self.dist == "log_uniform" and lo <= 0:
-            raise ValueError(f"{self.param}: log_uniform needs a positive range")
+        for lo, hi in pairs:
+            if self.dist != "normal" and lo > hi:
+                raise ValueError(f"{self.param}: range low {lo} > high {hi}")
+            if self.dist == "log_uniform" and lo <= 0:
+                raise ValueError(f"{self.param}: log_uniform needs a positive range")
         re.compile(self.select)
+
+    def _pair(self, pair) -> tuple[float, float]:
+        if isinstance(pair, (str, bytes)) or not hasattr(pair, "__len__") or len(pair) != 2:
+            raise ValueError(f"{self.param}: range needs two numbers")
+        return pair[0], pair[1]
+
+    @property
+    def axis_ranges(self) -> list | None:
+        """The per-axis ranges, or ``None`` for a single pair shared by every axis."""
+        if len(self.range) and hasattr(self.range[0], "__len__"):
+            return list(self.range)
+        return None
 
     @property
     def kind(self) -> str:
@@ -131,8 +160,12 @@ class ParamSpec:
         stray = set(d) & (set(_SELECTORS.values()) - {key})
         if stray:
             raise ValueError(f"{name}: selector {sorted(stray)} does not apply to a {PARAMS[name].target} parameter")
-        return cls(param=name, select=select, dist=d.pop("dist"), range=tuple(float(v) for v in d.pop("range")),
+        return cls(param=name, select=select, dist=d.pop("dist"), range=_floats(d.pop("range")),
                    op=d.pop("op"), **d)
+
+
+def _floats(r):
+    return tuple(tuple(float(v) for v in a) if hasattr(a, "__len__") else float(a) for a in r)
 
 
 def parse_specs(items: list[dict] | None) -> list[ParamSpec]:

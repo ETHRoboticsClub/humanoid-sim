@@ -297,7 +297,16 @@ def cmd_fit_pace(args) -> int:
 
     from humanoid_sim.replay.replay import fit_commands
     from humanoid_sim.sim import SimCore
-    from humanoid_sim.sysid.pace import PaceSpace, blocks, evaluate, fit, save, start_values, structural_fixed
+    from humanoid_sim.sysid.pace import (
+        PaceSpace,
+        blocks,
+        evaluate,
+        fit,
+        ranged_start,
+        save,
+        start_values,
+        structural_fixed,
+    )
 
     captures = [open_capture(c, frame_stamps=args.frame_stamps) for c in args.captures]
     held = [open_capture(c, frame_stamps=args.frame_stamps) for c in args.holdout]
@@ -319,12 +328,16 @@ def cmd_fit_pace(args) -> int:
                   self_collision=False if args.no_self_collision else None)
     plant = sim.plant
     joints, drives = list(plant.solver_map.joint_names), list(plant.map.drive_names)
-    kw = dict(log_bound=math.log(args.bound), bias_bound_rad=args.bias_bound_mrad / 1e3,
+    ranges = {p: (float(lo), float(hi)) for p, lo, hi in args.range}
+    try:
+        start, log_bound = ranged_start(start_values(sim.desc, joints), ranges, math.log(args.bound))
+    except ValueError as e:
+        raise SystemExit(f"--range: {e}") from None
+    kw = dict(log_bound=log_bound, bias_bound_rad=args.bias_bound_mrad / 1e3,
               delay_bounds_ns=tuple(int(round(v * 1e6)) for v in args.delay_ms),
               ratio_bounds=(0.0, args.ratio_max), separate_dynamic_friction=not args.no_dynamic_friction,
               delay_start_ns=None if args.delay_start_ms is None else int(round(args.delay_start_ms * 1e6)),
               delay_groups=None if args.one_delay else [sim.desc.drives[d].family for d in drives])
-    start = start_values(sim.desc, joints)
     fixed = structural_fixed(start, ratio=not args.no_dynamic_friction)
     sizes = PaceSpace(joints, drives, start, fixed=fixed, **kw).sizes
     for item in args.fix:
@@ -356,7 +369,8 @@ def cmd_fit_pace(args) -> int:
                              "delay_start_ms": args.delay_start_ms,
                              "friction_ratio": [0.0, args.ratio_max]},
                      "generations": args.generations, "duration_s": args.duration, "seed": args.seed,
-                     "scored": [drives[i] for i in scored], "fixed": sorted(args.fix), "wall_s": time.time() - t,
+                     "scored": [drives[i] for i in scored], "fixed": sorted(args.fix), "ranges": ranges,
+                     "wall_s": time.time() - t,
                      "command_rebuild": rebuild, "delay_reference": reference, **_plant_identity(sim, usd),
                      "self_collision": not args.no_self_collision and bool(sim.profile["physics"]["self_collision"]),
                      "frame_stamps": args.frame_stamps, "solver": sim.solver, "integrator": sim.integrator}
@@ -679,6 +693,8 @@ def main(argv: list[str] | None = None) -> int:
     be.add_argument("--steps", type=int, default=1000)
     be.add_argument("--device", default="cuda:0")
     be.add_argument("--integrator", default=None)
+    be.add_argument("--period-ms", type=float, default=None,
+                    help="physics period for --train (default: the profile's); must divide the 20 ms policy period")
     be.add_argument("--no-self-collision", action="store_true")
     be.add_argument("--train", action="store_true", help="Train-Time API scene: RobotPlant, IMU, contacts")
     be.add_argument("--runtime", action="store_true", help="the real-time host's whole step, unpaced")
@@ -768,6 +784,9 @@ def main(argv: list[str] | None = None) -> int:
     fpc.add_argument("--seed", type=int, default=0)
     fpc.add_argument("--bound", type=float, default=10.0,
                      help="armature, damping and friction stay within [1/bound, bound] of the description's")
+    fpc.add_argument("--range", nargs=3, action="append", default=[], metavar=("PARAM", "LOW", "HIGH"),
+                     help="search armature, damping or friction in this absolute box from its geometric middle, "
+                          "not around the description's value (which may be an earlier fit's)")
     fpc.add_argument("--bias-bound-mrad", type=float, default=20.0, help="encoder bias within ± this")
     fpc.add_argument("--delay-ms", nargs=2, type=float, default=[0.0, 20.0], metavar=("FROM", "TO"),
                      help="command delay range")

@@ -13,6 +13,8 @@
 # The authoritative topic name; the EtherCAT master, the simulator and the
 # consumers reference this constant rather than their own literal.
 string TOPIC="/ethrc/drive_feedback"
+# The publishing period, the 200 Hz above.
+uint64 PERIOD_NS=5000000
 # Writer history: 200 ms at 200 Hz, longer than a NACK round trip under load.
 uint16 REPAIR_DEPTH=40
 

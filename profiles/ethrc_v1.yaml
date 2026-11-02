@@ -16,6 +16,10 @@ model:
   weld_unlisted_joints: true
   # Preserve the delivered crank/rod loops; only uncommanded hand joints are welded.
   ankle_representation: native
+  # Each ankle rod hangs between two balls, which leaves its spin about its own axis free on ~1e-5 kg m^2: an
+  # undamped mode that spun the rods past 1600 rad/s and to NaN at 2 ms. The rod's open ball becomes a universal
+  # joint with that spin locked; it carries no load (model/usd.py).
+  rod_joints: universal
   collision_hulls: per_mesh
   # Hand joints are welded above: shapes within each resulting rigid assembly
   # must not generate self-contacts between its non-adjacent component bodies.
@@ -45,6 +49,16 @@ devices:
     HEJ90-48-140: {counts_per_revolution: 4096}
     HEJ70-48-50: {counts_per_revolution: 16384}
     HEJ50-48-30: {counts_per_revolution: 16384}
+  # Controls' command path, a frame's stamp to the drive's position demand starting to move, mean: the plant puts
+  # this less each drive's own delay (drive_delay_s) before the drive, as the nominal `latency`
+  # (Controls scripts/sim/command_delay.py over the 2026-10-28 excitation datasets, controls 462dac7d9: 6.6 ms
+  # mean, 3.6-10.0 ms p5-p95, 18 1:1 joints; the ankle cranks are unmeasured and go through the same callback).
+  command_path: {frame_to_drive_ns: 6600000}
+  # The IMU's path past its CAN receipt stamp to the controller's topic, mean: the training plant holds each sample
+  # this long before delivery (passive /rt/imu subscriber on the idle V1, 2026-10-31, 24000 samples: 2.09 ms mean,
+  # 1.25-5.12 ms p5-p95, Madgwick and the relay 0.6 ms of it). The MTi's own delay before the stamp is unmeasured
+  # (the datasheet gives none); the rig's random delivery phase, 0-2.5 ms, stands in for it.
+  imu_path: {sample_to_host_ns: 2100000}
 
 solver_gains: baseline        # constant per-episode PD = humanoid-urdf baseline_position_gains (native ankle shafts use crank gains)
 
@@ -76,9 +90,23 @@ physics:
     sparse_jacobian: true
     sparse_dynamics: false
     dynamics_solver: padmm
+    # Reduced bilateral elimination with RCM ordering and lazy preconditioning: the same converged constraint
+    # problem, timestep and tolerances as the full PADMM, about 6.7x faster for 4096 worlds with self-collision
+    # (5.1 vs 34 s per Matias training iteration on an RTX PRO 6000). Its finite iterates differ, hence the higher
+    # iteration cap for difficult solves.
+    iterations: 250
     linear_solver: LLTB
-    linear_solver_kwargs: {}
-    padmm: {rho_0: 0.05}
+    linear_solver_kwargs: {solve_block_dim: 256, solve_max_registers: 48}
+    matrix_preconditioner_stride: 1024
+    tracked_active_clear: true
+    padmm:
+      rho_0: 0.05
+      algorithm: bilateral_reduced
+      reduced_capacity: 96
+      reduced_ordering: rcm
+      reduced_dynamic_pattern: true
+      reduced_sparse_diagnostics: true
+      reduced_lazy_preconditioning: true
     # Keep PADMM iterations as CUDA graph loops instead of unrolling
     # every iteration into a graph too large for the native 4096-world batch.
     use_graph_conditionals: true

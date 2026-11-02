@@ -174,13 +174,13 @@ docker run --rm -v "$PWD":/workspace/humanoid-sim -v "$(dirname "$PWD")/datasets
   replay /workspace/datasets/humanoid-v1/exc-503fc128aaf14405a0c2418d63ff9a60 --device cpu --duration 5
 ```
 
-`replay` defaults to `--device cuda:0`, so on a machine without a GPU pass `--device cpu`. `--duration` keeps the run short; on the CPU device it runs well below real time. The command prints a JSON line with the wall and simulated time, then the position error of each drive against the capture. It writes `trace.npz` and `summary.json` to `outputs/replay/exc-503fc128aaf14405a0c2418d63ff9a60_mjwarp_implicitfast_4000us_base-yaw/`.
+`replay` defaults to `--device cuda:0`, so on a machine without a GPU pass `--device cpu`. `--duration` keeps the run short; on the CPU device it runs well below real time. The command prints a JSON line with the wall and simulated time, then the position error of each drive against the capture. It writes `trace.npz` and `summary.json` to `outputs/replay/exc-503fc128aaf14405a0c2418d63ff9a60_mjwarp_rk4_4000us_base-yaw/`.
 
 View the result natively, with the `newton` and `viz` extras installed:
 
 ```bash
 uv run humanoid-sim view-replay \
-  outputs/replay/exc-503fc128aaf14405a0c2418d63ff9a60_mjwarp_implicitfast_4000us_base-yaw --save replay.rrd
+  outputs/replay/exc-503fc128aaf14405a0c2418d63ff9a60_mjwarp_rk4_4000us_base-yaw --save replay.rrd
 uv run rerun replay.rrd
 ```
 

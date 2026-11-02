@@ -150,7 +150,59 @@ def test_native_asset_preserves_closures_and_authors_shaft_limits(desc, tmp_path
             joint = UsdPhysics.RevoluteJoint(p)
             assert np.radians([joint.GetLowerLimitAttr().Get(), joint.GetUpperLimitAttr().Get()]) == pytest.approx(
                 desc.drives[drive].shaft_limits, abs=1e-6)
+            assert list(p.GetAttribute("mjc:solreflimit").Get()) == pytest.approx(
+                profile["physics"]["mjwarp"]["ankle_stop_solref"])
     assert source.digest() == source_hash
+
+
+
+def test_universal_rods_lock_only_the_spin_about_their_own_axis(desc, tmp_path):
+    from pxr import Gf, Usd, UsdPhysics
+
+    profile = load_profile(desc.robot)
+    profile["model"]["rod_joints"] = "universal"
+    stage = Usd.Stage.Open(str(build_asset(desc, profile, tmp_path)))
+    rods = NativeState(desc).rods
+    for name, *_, rod_vector, _ in rods:
+        prim = next(p for p in stage.Traverse() if p.GetName() == name)
+        joint = UsdPhysics.Joint(prim)
+        assert prim.GetTypeName() == "PhysicsJoint" and not joint.GetExcludeFromArticulationAttr().Get()
+        limits = {axis: (UsdPhysics.LimitAPI(prim, axis).GetLowAttr().Get(),
+                         UsdPhysics.LimitAPI(prim, axis).GetHighAttr().Get()) for axis in
+                  ("transX", "transY", "transZ", "rotX", "rotY", "rotZ")}
+        assert all(low > high for axis, (low, high) in limits.items() if axis not in ("rotX", "rotY"))
+        assert all(low < high for axis, (low, high) in limits.items() if axis in ("rotX", "rotY"))
+        # The locked Z of the new frame lies along the rod, in the frame the source joint used on the rod.
+        source = desc.usd_model.joints[name]
+        old, new = (np.asarray(Gf.Matrix3d(Gf.Rotation(Gf.Quatd(a.Get()))).GetTranspose())
+                    for a in (source.GetLocalRot1Attr(), joint.GetLocalRot1Attr()))
+        rod = old @ (rod_vector.numpy() / np.linalg.norm(rod_vector.numpy()))
+        assert new[:, 2] == pytest.approx(rod, abs=1e-6)
+    assert len(rods) == len(desc.linkages) * 2
+
+
+def test_universal_rods_refuse_a_ball_that_already_carries_armature(tmp_path):
+    from pxr import Sdf, Usd
+
+    desc = Description.load()  # its own stage: the edit stays in this description's session layer
+    profile = load_profile(desc.robot)
+    profile["model"]["rod_joints"] = "universal"
+    name = NativeState(desc).rods[0][0]
+    stage = desc.usd_model.stage
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        desc.usd_model.joints[name].GetPrim().CreateAttribute("newton:armature", Sdf.ValueTypeNames.Float).Set(1e-4)
+    with pytest.raises(ValueError, match="armature"):
+        build_asset(desc, profile, tmp_path)
+
+
+def test_universal_rods_near_their_singularity_are_refused(desc, tmp_path, monkeypatch):
+    from humanoid_sim.model import usd
+
+    profile = load_profile(desc.robot)
+    profile["model"]["rod_joints"] = "universal"
+    monkeypatch.setattr(usd, "UNIVERSAL_MARGIN_RAD", 1e-3)
+    with pytest.raises(ValueError, match="second axis"):
+        build_asset(desc, profile, tmp_path)
 
 
 @pytest.mark.physics

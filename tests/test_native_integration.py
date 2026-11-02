@@ -31,6 +31,7 @@ def test_build_preserves_closed_chain_and_inertias(native):
     source = Usd.Stage.Open(str(desc.usd_path))
     built = Usd.Stage.Open(str(path))
     closures = []
+    universal = set(asset_meta(path)["universal_rod_joints"])
     for prim in source.Traverse():
         other = built.GetPrimAtPath(prim.GetPath().ReplacePrefix(
             source.GetDefaultPrim().GetPath(), Sdf.Path("/Robot/Geometry")))
@@ -38,8 +39,12 @@ def test_build_preserves_closed_chain_and_inertias(native):
             for name in ("mass", "centerOfMass", "diagonalInertia", "principalAxes"):
                 assert other.GetAttribute(f"physics:{name}").Get() == prim.GetAttribute(f"physics:{name}").Get()
         if prim.IsA(UsdPhysics.SphericalJoint):
-            assert other.IsA(UsdPhysics.SphericalJoint)
-            for name in ("localPos0", "localPos1", "localRot0", "localRot1", "excludeFromArticulation"):
+            # A universal rod joint keeps the ball's centre; its frame turns (test_native_usd).
+            kept = ("localPos0", "localPos1", "excludeFromArticulation")
+            if prim.GetName() not in universal:
+                assert other.IsA(UsdPhysics.SphericalJoint)
+                kept += ("localRot0", "localRot1")
+            for name in kept:
                 assert other.GetAttribute(f"physics:{name}").Get() == prim.GetAttribute(f"physics:{name}").Get()
             if UsdPhysics.Joint(prim).GetExcludeFromArticulationAttr().Get():
                 closures.append(str(other.GetPath()))
@@ -183,6 +188,11 @@ def test_native_reset_velocities_follow_pose_derivatives(native):
         for name in crank_names:
             torch.testing.assert_close(rates[name], (after[name] - before[name]) / 2e-6, atol=1e-8, rtol=0)
     for name, *_ in state.rods:
+        if name in state.universal:  # two angles, rates their derivatives
+            reported = torch.stack([rates[f"{name}:{axis}"] for axis in range(2)], dim=-1)
+            torch.testing.assert_close(reported, (following_balls[name] - previous_balls[name]) / 2e-6,
+                                       atol=1e-8, rtol=0)
+            continue
         previous, following = previous_balls[name].numpy(), following_balls[name].numpy()
         relative_vector = (previous[:, 3:] * following[:, :3] - following[:, 3:] * previous[:, :3]
                            + np.cross(previous[:, :3], following[:, :3]))

@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from humanoid_sim.sysid.pace import PaceSpace
+from humanoid_sim.sysid.pace import PaceSpace, ranged_start
 
 J = ["a", "b"]
 D = ["da", "db"]
@@ -75,6 +75,21 @@ def test_structural_zeros_and_their_friction_ratio_are_fixed():
     v = s.decode(np.ones((1, s.dim)))
     assert v["armature"][0].tolist() == [0.0, pytest.approx(2.0)] and v["friction"][0, 1] == 0.0
     PaceSpace(J, D, start, fixed=structural_fixed(start, ratio=False), separate_dynamic_friction=False)
+
+
+def test_a_range_replaces_the_description_values_with_an_absolute_box():
+    start = START | {"friction": np.array([0.0, 0.4])}
+    s, bounds = ranged_start(start, {"damping": (0.01, 100.0), "friction": (0.1, 10.0)}, math.log(10.0))
+    assert np.allclose(s["damping"], 1.0) and s["friction"].tolist() == [0.0, 1.0]  # a structural zero stays
+    assert np.allclose(s["armature"], START["armature"]) and bounds["armature"] == pytest.approx(math.log(10.0))
+    space = PaceSpace(J, D, s, log_bound=bounds, fixed={"friction": np.array([True, False])})
+    assert np.allclose(space.bounds(4_000_000)[space.slices()["damping"]], [[0.01, 100.0]] * 2)
+    v = space.decode(np.ones((1, space.dim)))
+    assert np.allclose(v["friction"][0], [0.0, 10.0]) and np.allclose(v["armature"][0], 10 * START["armature"])
+    with pytest.raises(ValueError, match="range"):
+        ranged_start(START, {"damping": (1.0, 0.5)}, 1.0)
+    with pytest.raises(ValueError, match="range"):
+        ranged_start(START, {"bias": (0.1, 1.0)}, 1.0)
 
 
 def test_pace_bounds_and_params_put_the_delay_in_steps():

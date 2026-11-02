@@ -17,7 +17,8 @@ The benchmarks need Isaac Lab, so they run in the Docker image or on a GPU node,
 | `--num-envs` | 1 | default, `--train` | Number of robots simulated in parallel |
 | `--steps` | 1000 | all | Physics steps timed after the warm-up; each step is 4 ms of simulated time |
 | `--device` | `cuda:0` | all | `cuda:N`, or `cpu` for Warp's CPU device |
-| `--integrator` | the profile's (`implicitfast`) | default | MJWarp integrator |
+| `--integrator` | the profile's | default, `--train` | Integrator of the selected solver |
+| `--period-ms` | the profile's | `--train` | Physics period; it must divide the 20 ms policy period. Compare runs at the same simulated time (`--steps` x period) |
 | `--no-self-collision` | off | default, `--train` | Turn off contacts between the robot's own bodies |
 | `--train` | off | | Run the training workload |
 | `--runtime` | off | | Run the runtime workload; it takes precedence over `--train` |
@@ -78,7 +79,7 @@ The training workload builds the scene a training environment uses ([training.md
 | Encoder offsets | Between -0.026 and 0.026 rad on every drive, plus between -0.14 and 0.14 rad on the left ankle's crank drives (the V1's) |
 | IMU gyro bias | Standard deviation 0.0015 rad/s |
 
-The robots start in the home pose (the scene's default) and hold it. The V1 stands; the G1 tips over within about 1.3 s of every reset ([training.md](training.md#the-initial-pose)), so its robots spend much of the run on the ground and `fraction_envs_up` stays low. Every 20 ms the benchmark reads `measured()` and `truth()`, resets about one in fifty robots as if their episodes had ended (`RobotPlant.reset` back to the default state: joints, base pose and velocity, drives off, sensors emptied, device parameters drawn again), and submits a demand for the home pose for every robot. Every 4 ms it runs the plant, writes the scene to the simulation, steps physics and updates the scene. As in the default workload, 50 warm-up steps are not timed.
+The plant runs compiled and captured as CUDA graphs on CUDA, as training runs it. The robots start in the home pose (the scene's default) and hold it. The V1 stands; the G1 tips over within about 1.3 s of every reset ([training.md](training.md#the-initial-pose)), so its robots spend much of the run on the ground and `fraction_envs_up` stays low. Every 20 ms the benchmark reads `measured()` and `truth()`, resets about one in fifty robots as if their episodes had ended (`RobotPlant.reset` back to the default state: joints, base pose and velocity, drives off, sensors emptied, device parameters drawn again), and submits a demand for the home pose for every robot. Every 4 ms it runs the plant, writes the scene to the simulation, steps physics and updates the scene. As in the default workload, 50 warm-up steps are not timed.
 
 | Field | Meaning |
 |---|---|
@@ -90,6 +91,8 @@ The robots start in the home pose (the scene's default) and hold it. The V1 stan
 | `host_syncs` | `none (torch sync debug mode)` on CUDA, `n/a` on the CPU |
 | `checksum_finite` | `true` when every value read from `measured()` and `truth()` stayed finite (no NaN or infinity) |
 | `fraction_envs_up` | Share of robots whose base is above 3/4 of its standing height at the end |
+| `solver`, `period_ns`, `integrator` | The physics settings the run used |
+| `peak_body_ang_vel_rad_s` | Fastest angular speed of any body over the timed steps; a light body spinning up (or `NaN`) shows a setting is unstable |
 
 ## Runtime benchmark (`--runtime`)
 

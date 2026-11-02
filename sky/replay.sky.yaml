@@ -20,7 +20,7 @@ envs:
   ISAACLAB_COMMIT: 32712682b69edd488eea26689da6905c48d31037
   UV_VERSION: 0.13.1
   # period_ms:integrator pairs, run for every capture
-  RUNS: "4:implicitfast 4:euler 1:implicitfast"
+  RUNS: "4:rk4 4:implicitfast 1:rk4"
 
 setup: bash sky/setup.sh
 

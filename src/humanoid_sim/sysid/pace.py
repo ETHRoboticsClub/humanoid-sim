@@ -18,15 +18,16 @@ The parameters, in PACE's order with ``separate_dynamic_friction``, per solver j
   [0, 1] by default; a wider range lets the sliding friction exceed the static one (negative relief).
 
 A candidate is a point of ``[-1, 1]^dim``: ``start · bound^x`` for armature, damping and friction (start values
-from the description's solver dynamics, :func:`start_values`), linear between its bounds for the others. An entry
-whose start is zero cannot be scaled and is fixed there (:func:`structural_fixed`), with its friction ratio when its
-friction is zero: on the native USD that is the ankle hinges' armature (the rotor inertia is on the crank shafts) and the shafts' damping and
-friction (the description puts the ankles' on the hinges). The search starts at :meth:`PaceSpace.x0`: the
-description's values (its friction ratio, 1 where it states no dynamic friction), zero bias and
-:attr:`PaceSpace.delay_start_ns` (by default the middle of the delay range); a fixed entry stays there. A candidate outside the box is evaluated at its edge and
-penalized by its squared distance from it, as in :mod:`humanoid_sim.sysid.passive`. The search's first steps are
-the same size in physical units whatever the box (:meth:`PaceSpace.step_scale`), so a wider box only moves the
-walls.
+from the description's solver dynamics, :func:`start_values`, or the geometric middle of an absolute range from
+:func:`ranged_start`, so a fit need not be bounded by an earlier fit's values in the description), linear between its
+bounds for the others. An entry whose start is zero cannot be scaled and is fixed there (:func:`structural_fixed`),
+with its friction ratio when its friction is zero: on the native USD that is the ankle hinges' armature (the rotor
+inertia is on the crank shafts) and the shafts' damping and friction (the description puts the ankles' on the
+hinges). The search starts at :meth:`PaceSpace.x0`: the description's values (its friction ratio, 1 where it states
+no dynamic friction), zero bias and :attr:`PaceSpace.delay_start_ns` (by default the middle of the delay range); a
+fixed entry stays there. A candidate outside the box is evaluated at its edge and penalized by its squared distance
+from it, as in :mod:`humanoid_sim.sysid.passive`. The search's first steps are the same size in physical units
+whatever the box (:meth:`PaceSpace.step_scale`), so a wider box only moves the walls.
 
 Nothing is written back: the values are robot facts and land in humanoid-urdf.
 """
@@ -49,7 +50,7 @@ class PaceSpace:
     joints: list[str]  # the plant's solver joint order (``solver_map.joint_names``)
     drives: list[str]  # the plant's drive order
     start: dict[str, np.ndarray]  # armature, damping, friction [J]; friction_ratio [J] (default 1)
-    log_bound: float = math.log(10.0)  # multipliers on the start values in [1/10, 10]
+    log_bound: float | dict[str, float] = math.log(10.0)  # multipliers on the start values in [1/10, 10]; per param
     bias_bound_rad: float = 0.02
     delay_bounds_ns: tuple[int, int] = (0, 20_000_000)
     ratio_bounds: tuple[float, float] = (0.0, 1.0)
@@ -67,6 +68,8 @@ class PaceSpace:
             fixed = np.asarray(self.fixed.get(p, np.zeros(j, dtype=bool)))
             if (values < 0).any() or ((values == 0) & ~fixed).any():
                 raise ValueError(f"start {p} must be positive unless explicitly fixed at zero")
+            if not self.log_bound_of(p) > 0:
+                raise ValueError(f"log bound of {p} must be positive")
         self.start = dict(self.start)
         self.start.setdefault("friction_ratio", np.ones(j))
         lo, hi = self.ratio_bounds
@@ -81,6 +84,9 @@ class PaceSpace:
         for name, mask in self.fixed.items():
             if name not in self.sizes or np.asarray(mask).shape != (self.sizes[name],):
                 raise ValueError(f"fixed {name!r}: a mask over one of {sorted(self.sizes)}")
+
+    def log_bound_of(self, param: str) -> float:
+        return self.log_bound[param] if isinstance(self.log_bound, dict) else self.log_bound
 
     @property
     def groups(self) -> list[str]:
@@ -133,7 +139,7 @@ class PaceSpace:
         delay 20 ms, ratio [0, 1])."""
         s, out = self.slices(), np.ones(self.dim)
         for p in LOG_PARAMS:
-            out[s[p]] = math.log(10.0) / self.log_bound
+            out[s[p]] = math.log(10.0) / self.log_bound_of(p)
         out[s["bias"]] = 0.02 / self.bias_bound_rad
         lo, hi = self.delay_bounds_ns
         out[s["delay"]] = 20e6 / (hi - lo) if hi > lo else 1.0
@@ -153,7 +159,8 @@ class PaceSpace:
         for name, mask in self.fixed.items():
             idx = np.arange(self.dim)[s[name]][np.asarray(mask, dtype=bool)]
             x[:, idx] = x0[idx]
-        out = {p: np.asarray(self.start[p])[None] * np.exp(x[:, s[p]] * self.log_bound) for p in LOG_PARAMS}
+        out = {p: np.asarray(self.start[p])[None] * np.exp(x[:, s[p]] * self.log_bound_of(p))
+               for p in LOG_PARAMS}
         out["bias"] = x[:, s["bias"]] * self.bias_bound_rad
         lo, hi = self.delay_bounds_ns
         out["delay"] = np.round(lo + (x[:, s["delay"]] + 1) / 2 * (hi - lo)).astype(np.int64)
@@ -180,7 +187,8 @@ class PaceSpace:
         rows = []
         for p in LOG_PARAMS:
             start = np.asarray(self.start[p])
-            rows += list(zip(start * math.exp(-self.log_bound), start * math.exp(self.log_bound), strict=True))
+            b = self.log_bound_of(p)
+            rows += list(zip(start * math.exp(-b), start * math.exp(b), strict=True))
         rows += [(-self.bias_bound_rad, self.bias_bound_rad)] * len(self.drives)
         rows.append(tuple(b / period_ns for b in self.delay_bounds_ns))
         if self.separate_dynamic_friction:
@@ -229,6 +237,20 @@ def start_values(desc, joints: list[str]) -> dict[str, np.ndarray]:
     dynamic = np.asarray(dynamics["dynamic_friction"])[indices]
     out["friction_ratio"] = np.where(out["friction"] > 0, dynamic / np.maximum(out["friction"], 1e-12), 1.0)
     return out
+
+
+def ranged_start(start: dict[str, np.ndarray], ranges: dict[str, tuple[float, float]],
+                 log_bound: float) -> tuple[dict[str, np.ndarray], dict[str, float]]:
+    """Start values and per-parameter log bounds with each ranged parameter's box ``[low, high]`` the same for every
+    joint and its start the box's geometric middle; a structural zero stays zero. Unranged ones keep ``start`` and
+    ``log_bound``."""
+    out, bounds = dict(start), {p: log_bound for p in JOINT_PARAMS}
+    for p, (lo, hi) in ranges.items():
+        if p not in JOINT_PARAMS or not 0 < lo < hi:
+            raise ValueError(f"range {p} {lo} {hi}: one of {JOINT_PARAMS} with 0 < low < high")
+        out[p] = np.where(np.asarray(start[p]) == 0, 0.0, math.sqrt(lo * hi))
+        bounds[p] = 0.5 * math.log(hi / lo)
+    return out, bounds
 
 
 def structural_fixed(start: dict[str, np.ndarray], *, ratio: bool = True) -> dict[str, np.ndarray]:

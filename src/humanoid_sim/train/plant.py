@@ -27,7 +27,8 @@ description's; drive order is the description's drive order. No host syncs in st
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, replace
 
 import torch
 
@@ -39,7 +40,7 @@ from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.randomization import PARAMS, ParamSpec, Randomizer, parse_specs
 from humanoid_sim.sensors import rigs
-from humanoid_sim.sensors.imu import ImuDelivery, ImuSamples
+from humanoid_sim.sensors.imu import ImuDelivery, ImuSamples, pending_slots
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.supports import Gantry
 
@@ -77,6 +78,54 @@ class Truth:
     contact_forces_w: torch.Tensor | None  # [E, B, 3] net force per body
 
 
+def command_latency_ns(profile: dict, drive_delay_ns: torch.Tensor) -> torch.Tensor:
+    """Each drive's nominal latency before it ``[D]`` (int ns): the profile's measured ``devices.command_path``
+    ``frame_to_drive_ns`` less the drive's own delay; zero without one (an ideal controller path)."""
+    path = profile["devices"].get("command_path")
+    if path is None:
+        return torch.zeros_like(drive_delay_ns)
+    total = path["frame_to_drive_ns"]
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise ValueError(f"devices.command_path.frame_to_drive_ns {total!r}: expected a non-negative integer of ns")
+    out = total - drive_delay_ns
+    if (out < 0).any():
+        raise ValueError(f"devices.command_path.frame_to_drive_ns {total} is shorter than a drive's own delay "
+                         f"({int(drive_delay_ns.max())} ns)")
+    return out
+
+
+def imu_latency_ns(profile: dict) -> int:
+    """The IMU's nominal latency (int ns): the profile's measured ``devices.imu_path`` ``sample_to_host_ns``; zero
+    without one (samples reach the consumer as delivered)."""
+    path = profile["devices"].get("imu_path")
+    if path is None:
+        return 0
+    total = path["sample_to_host_ns"]
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise ValueError(f"devices.imu_path.sample_to_host_ns {total!r}: expected a non-negative integer of ns")
+    return total
+
+
+def imu_latency_bounds(specs, nominal_ns: int) -> tuple[float, float]:
+    """The least and greatest ``imu_latency`` (ns) the specs can draw around ``nominal_ns``, in their order."""
+    lo = hi = float(nominal_ns)
+    for s in specs:
+        if s.param != "imu_latency":
+            continue
+        if s.dist == "normal":
+            raise ValueError("imu_latency needs a bounded distribution (uniform, log_uniform or discrete_uniform)")
+        a, b = (v * NS_PER_S for v in s.range) if s.op != "scale" else s.range
+        if s.op == "scale":
+            if a < 0:
+                raise ValueError("imu_latency: a scale below 0")
+            lo, hi = lo * a, hi * b
+        elif s.op == "add":
+            lo, hi = lo + a, hi + b
+        else:
+            lo, hi = a, b
+    return lo, hi
+
+
 class RobotPlant:
     def __init__(self, robot, cfg: TrainPlantCfg | None = None, *, imu=None, contacts=None, physics_manager=None):
         """``robot``: the scene's articulation; ``imu`` / ``contacts``: its sensors (optional);
@@ -93,6 +142,7 @@ class RobotPlant:
         self.joints = list(self.desc.joints)
         self.joint_ids = torch.tensor([robot.joint_names.index(n) for n in self.joints], device=self.device)
         self.native_state = None
+        self._native_ids = None  # solver joint ids of the native DOFs, built on the first write
         physical = None
         if self.profile["model"].get("ankle_representation") == "native":
             from humanoid_sim.model.native_state import NativeState
@@ -109,11 +159,12 @@ class RobotPlant:
         self.drives = self.core.map.drive_names
         d = len(self.drives)
         self.t_ns = 0
-        self.latency_ns = torch.zeros(e, d, dtype=torch.int64, device=self.device)  # before the drive, randomized
         models = drive_models(self.desc)
         self.drive_models = [models[n] for n in self.drives]
         self.drive_delay_ns = torch.tensor([m.drive_delay_ns for m in self.drive_models], dtype=torch.int64,
                                            device=self.device)
+        self.command_latency_ns = command_latency_ns(self.profile, self.drive_delay_ns)  # [D] nominal
+        self.latency_ns = self.command_latency_ns.expand(e, -1).clone()  # before the drive, randomized
         self._targets = robot.data.default_joint_pos.torch.clone()
         self._physics_manager = physics_manager
         harness = self.profile["support"]["harness"]
@@ -133,17 +184,34 @@ class RobotPlant:
 
             self.reporting = DriveReporting.for_drives(self.desc, self.drives, self.profile, device=self.device,
                                                        seed=cfg.seed + 2)
+        specs = parse_specs(cfg.randomization)
+        self.imu_latency_ns = imu_latency_ns(self.profile)  # nominal
         self.imu = None
         if imu is not None:
-            self.imu = ImuDelivery(rigs.imu(self.desc).delivery_cfg(), e,
-                                   device=self.device, seed=cfg.seed + 1)
+            lo, hi = imu_latency_bounds(specs, self.imu_latency_ns)
+            if lo < 0:
+                raise ValueError(f"imu_latency can draw {lo} ns; a latency is not negative")
+            sensor = rigs.imu(self.desc)
+            delivery = sensor.delivery_cfg()
+            pending = max(delivery.pending, pending_slots(delivery, math.ceil(hi), self.period_ns))
+            self.imu = ImuDelivery(replace(delivery, pending=pending), e, device=self.device, seed=cfg.seed + 1)
             self.imu.reset(torch.arange(e, device=self.device), 0)
+            self.imu.latency_ns.fill_(self.imu_latency_ns)
+            if sensor.output_lsb is not None:  # the host decodes counts; the runtime's client does this itself
+                gyro_lsb, accel_lsb = sensor.output_lsb
+                self.imu.lsb.copy_(torch.tensor([gyro_lsb] * 3 + [accel_lsb] * 3, device=self.device))
 
-        specs = parse_specs(cfg.randomization)
         self._nominal_physics = self._read_physics()
         nominal = {name: v for name, v in self._nominal_physics.items()} | self._device_nominal()
         self._ratio = nominal["joint_friction_ratio"]
         used = {s.param for s in specs}
+        if any(s.param == "latency" and s.op == "scale" for s in specs) and "command_path" not in self.profile["devices"]:
+            raise ValueError(f"{cfg.robot}: scaling latency needs the profile's devices.command_path")
+        if "imu_latency" in used:
+            if self.imu is None:
+                raise ValueError("randomizing imu_latency needs the IMU")
+            if any(s.param == "imu_latency" and s.op == "scale" for s in specs) and "imu_path" not in self.profile["devices"]:
+                raise ValueError(f"{cfg.robot}: scaling imu_latency needs the profile's devices.imu_path")
         if {"friction", "shape_friction"} <= used:
             raise ValueError("choose per-env friction or per-shape friction, not both")
         self.randomizer = Randomizer(specs, {k: v for k, v in nominal.items() if k in used},
@@ -211,9 +279,11 @@ class RobotPlant:
                                 for n in self.core.solver_map.joint_names], device=self.device)
         ratio = torch.where(static > 0, dynamic / static.clamp(min=1e-12), torch.ones_like(static))
         return {"drive_stiffness": ones, "drive_damping": ones.clone(), "torque_limit": ones.clone(),
-                "latency": torch.zeros_like(ones), "encoder_offset": torch.zeros_like(ones),
+                "latency": (self.command_latency_ns / NS_PER_S).to(ones.dtype).expand(e, -1).clone(),
+                "encoder_offset": torch.zeros_like(ones),
                 "joint_friction_ratio": ratio.expand(e, -1).clone(),
-                "imu_gyro_bias": zeros3, "imu_accel_bias": zeros3.clone(), "imu_misalignment": zeros3.clone()}
+                "imu_gyro_bias": zeros3, "imu_accel_bias": zeros3.clone(), "imu_misalignment": zeros3.clone(),
+                "imu_latency": torch.full((e, 1), self.imu_latency_ns / NS_PER_S, device=self.device)}
 
     def _shape_friction(self) -> torch.Tensor:
         import warp as wp
@@ -276,6 +346,8 @@ class RobotPlant:
                                  ("imu_misalignment", self.imu.misalignment)):
                 if name in v:
                     target[env_ids] = v[name][env_ids].to(target.dtype)
+            if "imu_latency" in v:
+                self.imu.latency_ns[env_ids] = (v["imu_latency"][env_ids, 0] * NS_PER_S).round().to(torch.int64)
 
     def attach_log(self, log) -> None:
         """Log signals into ``log`` (a :class:`~humanoid_sim.signals.log.SignalLog`) from now on."""
@@ -322,7 +394,9 @@ class RobotPlant:
             return
         values, rates = self.native_state.dofs(q, qd)
         names = list(values)
-        ids = torch.tensor([self.robot.joint_names.index(n) for n in names], device=self.device)
+        if self._native_ids is None:  # a host-to-device copy, kept out of the steady-state reset
+            self._native_ids = torch.tensor([self.robot.joint_names.index(n) for n in names], device=self.device)
+        ids = self._native_ids
         self.robot.write_joint_state_to_sim_index(
             position=torch.stack([values[n] for n in names], -1).to(q.dtype),
             velocity=torch.stack([rates[n] for n in names], -1).to(qd.dtype), joint_ids=ids, env_ids=env_ids)

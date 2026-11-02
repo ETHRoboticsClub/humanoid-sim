@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from humanoid_sim.model.description import Description
-from humanoid_sim.model.native_state import NativeState, _quat_between, _relative_quat, _rotvec
+from humanoid_sim.model.native_state import NativeState
 
 
 class WholeTreeState(NativeState):
@@ -18,7 +18,7 @@ class WholeTreeState(NativeState):
             target = poses[foot][:, :3, :3] @ foot_point + poses[foot][:, :3, 3]
             wanted = (joint[:, :3, :3].transpose(-1, -2)
                       @ (target - joint[:, :3, 3]).unsqueeze(-1)).squeeze(-1)
-            balls[name] = _quat_between(rod_vector, wanted)
+            balls[name] = self.closing(name, rod_vector, wanted)
         return values, balls
 
     def dofs(self, q, qd):
@@ -29,12 +29,10 @@ class WholeTreeState(NativeState):
             velocity = torch.func.jvp(transmission.shafts, (q[:, cols],), (qd[:, cols],))[1]
             rates.update({name: velocity[:, i] for i, name in enumerate(names)})
         _, derivatives = torch.func.jvp(lambda pose: self.coordinates(pose)[1], (q,), (qd,))
-        for name, quat in balls.items():
-            position = _rotvec(quat)
-            velocity = 2 * _relative_quat(derivatives[name], quat)[..., :3]
-            for axis in range(3):
-                values[f"{name}:{axis}"] = position[:, axis]
-                rates[f"{name}:{axis}"] = velocity[:, axis]
+        for name, coordinates in balls.items():
+            for axis, (position, velocity) in enumerate(self.closing_dofs(name, coordinates, derivatives[name])):
+                values[f"{name}:{axis}"] = position
+                rates[f"{name}:{axis}"] = velocity
         return values, rates
 
 

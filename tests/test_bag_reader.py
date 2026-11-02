@@ -35,7 +35,8 @@ def _header(store, t):
     return store.types["std_msgs/msg/Header"](stamp=_stamp(store, t), frame_id="")
 
 
-def _write(path, *, plugin="SQLITE3", gains=((320.0, 12.0), (480.0, 9.0)), change_at=None, n=100, defs=True):
+def _write(path, *, plugin="SQLITE3", gains=((320.0, 12.0), (480.0, 9.0)), change_at=None, n=100, defs=True,
+           unpowered=False):
     from rosbags.rosbag2 import StoragePlugin, Writer
 
     store = _store()
@@ -51,17 +52,20 @@ def _write(path, *, plugin="SQLITE3", gains=((320.0, 12.0), (480.0, 9.0)), chang
         def frame(t, kind, joints, q):
             return T["msg_ethrc/msg/BodyControlFrame"](
                 header=_header(store, t), body_mode=0, kind=kind, clear_latches=False, robot_id="", authority_runtime_id="",
-                component_session_id="", grant_id="", source_id="", sequence=1, input_sequence=0, valid_for_ns=0,
-                joint_ids=joints, positions_rad=np.asarray(q, dtype=np.float64), require_exact_positions=False,
-                hold_joint_ids=[], stop_profile_id="")
+                component_session_id="", grant_id="", source_id="", control_scope="body", sequence=1,
+                input_sequence=0, valid_for_ns=0, joint_ids=joints, positions_rad=np.asarray(q, dtype=np.float64),
+                velocities_rad_s=np.zeros(0), require_exact_positions=False, hold_joint_ids=[], stop_profile_id="")
 
         def gains_msg(t, pairs):
             f = np.array
+            # An unpowered hand drive is listed but never carries its gains, so `applied` stays false.
+            motors, pairs = (DRIVES + ["wrist_flexion_r"], [*pairs, (0.0, 0.0)]) if unpowered else (DRIVES, pairs)
             return T["msg_ethrc/msg/DriveGains"](
-                header=_header(store, t), holder="", applied=True, failed=False, motors=DRIVES,
+                header=_header(store, t), holder="", applied=not unpowered, failed=False, motors=motors,
                 kp_nm_per_rad=f([p[0] for p in pairs]), kd_nm_s_per_rad=f([p[1] for p in pairs]),
                 baseline_kp_nm_per_rad=f([p[0] for p in pairs]), baseline_kd_nm_s_per_rad=f([p[1] for p in pairs]),
-                motor_applied=np.ones(2, dtype=bool), failed_motors=[], target_kp_nm_per_rad=f([p[0] for p in pairs]),
+                motor_applied=np.array([d in DRIVES for d in motors]), failed_motors=[],
+                target_kp_nm_per_rad=f([p[0] for p in pairs]),
                 target_kd_nm_s_per_rad=f([p[1] for p in pairs]), ramp_remaining_s=0.0, kp_resolution_nm_per_rad=0.0,
                 kd_resolution_nm_s_per_rad=0.0)
 
@@ -113,6 +117,11 @@ def test_reads_feedback_gains_and_imu(tmp_path, plugin, defs):
     assert c.joints == ["knee_l", "knee_r"] and len(c.t_ns) == 25 and c.t_ns[1] - c.t_ns[0] == 4 * PERIOD
     assert c.positions_rad[1].tolist() == [0.04, -0.04]
     assert cap.dataset_id.startswith("bag-") and cap.dataset_id == BagCapture(tmp_path / "bag").dataset_id
+
+
+def test_gains_ignore_listed_drives_that_do_not_stream(tmp_path):
+    g = BagCapture(_write(tmp_path / "bag", unpowered=True)).gains()
+    assert g["maxonHEJ90L1"].stiffness == 320.0
 
 
 def test_refuses_changing_gains_and_missing_drives(tmp_path):

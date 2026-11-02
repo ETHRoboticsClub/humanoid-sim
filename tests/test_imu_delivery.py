@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from humanoid_sim.sensors.imu import ImuDelivery, ImuDeliveryCfg, rotvec_matrix
+from humanoid_sim.sensors.imu import ImuDelivery, ImuDeliveryCfg, pending_slots, rotvec_matrix
 
 STEP = 4_000_000
 CFG = ImuDeliveryCfg(sample_period_ns=2_740_000, burst_period_ns=(13_900_000, 17_600_000), in_burst_spacing_ns=13_000,
@@ -158,3 +158,44 @@ def test_noise_off_also_drops_the_models_bias():
     z = torch.zeros(3, 3, dtype=torch.float64)
     _run(imu, 20, lambda t: (z, z))
     assert torch.allclose(imu.samples.gyro[:, 0], torch.full((3, 3), 0.5, dtype=torch.float64), atol=1e-12)
+
+
+def test_a_latency_holds_each_sample_at_least_that_long_per_env():
+    cfg = ImuDeliveryCfg(**{**CFG.__dict__, "sample_period_ns": 2_500_000, "burst_period_ns": (2_500_000, 2_500_000),
+                            "in_burst_spacing_ns": 0})
+    latency = torch.tensor([0, 1_000_000, 2_100_000, 5_000_000, 12_000_000, 60_000_000])
+    e = len(latency)
+    cfg = ImuDeliveryCfg(**{**cfg.__dict__, "pending": pending_slots(cfg, int(latency.max()), STEP)})
+    imu = ImuDelivery(cfg, e, dtype=torch.float64)
+    imu.reset(torch.arange(e), 0, torch.zeros(e, 6, dtype=torch.float64))
+    imu.latency_ns.copy_(latency)
+    _run(imu, 250, lambda t: (torch.zeros(e, 3, dtype=torch.float64), torch.zeros(e, 3, dtype=torch.float64)))
+    s = imu.samples
+    age = s.stamp_ns - s.sample_ns
+    assert (age >= latency.unsqueeze(1)).all()
+    # Bursts every sample period: at most one period beyond the latency, and none missed.
+    assert (age < latency.unsqueeze(1) + cfg.burst_period_ns[1]).all()
+    assert (s.seq[:, :-1] == s.seq[:, 1:] + 1).all()
+
+
+def test_an_output_field_rounds_each_sample_to_whole_counts_and_saturates():
+    imu = ImuDelivery(CFG, 2)
+    imu.reset(torch.arange(2), 0, torch.zeros(2, 6))
+    lsb = torch.tensor([2.0**-9] * 3 + [2.0**-8] * 3)
+    imu.lsb.copy_(lsb)
+    g = torch.tensor([[0.3e-3, 1.1e-3, -40.0], [-3.0e-3, 1.0, 70.0]])
+    f = torch.tensor([[0.0, 1.0e-3, 9.80665], [-200.0, 0.5, 3.0e-3]])
+    _run(imu, 10, lambda t: (g, f))
+    got = torch.cat([imu.samples.gyro[:, 0], imu.samples.specific_force[:, 0]], dim=1)
+    want = torch.round(torch.cat([g, f], dim=1) / lsb).clamp(-32768, 32767) * lsb
+    assert torch.equal(got, want)
+    assert got[1, 2].item() == 32767 * 2.0**-9 and got[1, 3].item() == -32768 * 2.0**-8  # saturated
+    assert torch.equal(torch.round(got / lsb), got / lsb)  # on the grid
+
+
+def test_without_an_output_field_samples_are_not_quantized():
+    imu = ImuDelivery(CFG, 1)
+    imu.reset(torch.arange(1), 0, torch.zeros(1, 6))
+    g, f = torch.tensor([[0.3e-3, 1.1e-3, -0.7e-3]]), torch.tensor([[1e-3, 2e-3, 9.80665]])
+    _run(imu, 10, lambda t: (g, f))
+    assert torch.equal(imu.samples.gyro[:, 0], g) and torch.equal(imu.samples.specific_force[:, 0], f)
