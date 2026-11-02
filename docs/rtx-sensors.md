@@ -30,6 +30,7 @@ By default the depth is exact. With `depth_noise` (`SessionCfg.depth_noise`, `--
 |---|---|---|---|
 | Noise | Gaussian on the disparity `d = f b / z`, so the depth error grows with the square of the range: `σ_z ≈ z² σ_d / (f b)` (the D400 datasheet's RMS error formula) | `σ_d` 0.08 px: about 2 cm at 2 m, 12 cm at 5 m (modeled) | `σ_d` 0.15 px (measured, approximate) |
 | Steps | The noisy disparity rounded to `depth_disparity_step_px`, so the depth takes only the values `f b / k` | none: sub-pixel, taken as continuous | whole pixels (measured; sub-pixel is off): 1.93 or 2.12 m near 2 m, 4.27 or 5.34 m near 5 m |
+| Scale | The disparity turned back into depth with the unit's `depth_focal_px` (the rig's camera instance) instead of the depth stream's own focal length, so every depth is off by their ratio | none | the V1's unit: 283.60 px (mono_left's fx) against the stream's 282.19, 0.5 % farther (measured) |
 | Occlusion | No depth where the second imager cannot see: a band beside each foreground edge (`d_near − d_far` pixels wide, on the side away from the second imager) and the image border on that side | yes | yes |
 | No texture | No depth where the reference imager's 7 x 7 patch spreads less than `depth_min_texture` grey levels | 2 grey levels (modeled; Controls turns its IR projector off) | none (measured: plain surfaces keep their depth, noisier) |
 

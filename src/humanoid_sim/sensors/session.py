@@ -281,7 +281,8 @@ class SensorSession:
         grey = frames.get(reference) if reference is not None else None
         return stereo_depth(image, focal_px=depth.lens.fx_px, baseline_m=baseline_m,
                             disparity_sigma_px=model.depth_disparity_sigma_px, rng=self.rng,
-                            disparity_step_px=model.depth_disparity_step_px, reference=grey,
+                            disparity_step_px=model.depth_disparity_step_px, depth_focal_px=model.depth_focal_px,
+                            reference=grey,
                             min_texture=model.depth_min_texture if grey is not None else 0.0,
                             second_on_right=on_right)
 

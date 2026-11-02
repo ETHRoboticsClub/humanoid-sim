@@ -46,6 +46,15 @@ def test_whole_pixel_steps_leave_only_the_depths_of_whole_disparities():
     assert np.abs(eighth[seen] - depth[seen]).max() < np.abs(exact[seen] - depth[seen]).max() / 4
 
 
+def test_another_depth_focal_length_scales_every_depth_by_the_ratio():
+    depth = np.full((10, 100), 2.0)
+    out = stereo_depth(depth, focal_px=FOCAL_PX, baseline_m=BASELINE_M, disparity_sigma_px=0.0, rng=_rng(),
+                       depth_focal_px=FOCAL_PX * 1.005)
+    seen = np.isfinite(out)
+    assert seen.any()
+    np.testing.assert_allclose(out[seen], 2.0 * 1.005)
+
+
 def test_without_errors_the_depth_is_exact_where_the_second_imager_sees():
     depth = np.full((10, 100), 2.0)
     out = stereo_depth(depth, focal_px=FOCAL_PX, baseline_m=BASELINE_M, disparity_sigma_px=0.0, rng=_rng())
@@ -108,6 +117,9 @@ def test_bad_inputs_are_refused():
     depth = np.ones((4, 4))
     with pytest.raises(ValueError, match="baseline"):
         stereo_depth(depth, focal_px=FOCAL_PX, baseline_m=0.0, disparity_sigma_px=0.1, rng=_rng())
+    with pytest.raises(ValueError, match="focal lengths"):
+        stereo_depth(depth, focal_px=FOCAL_PX, baseline_m=BASELINE_M, disparity_sigma_px=0.1, rng=_rng(),
+                     depth_focal_px=0.0)
     with pytest.raises(ValueError, match="disparity_step_px"):
         stereo_depth(depth, focal_px=FOCAL_PX, baseline_m=BASELINE_M, disparity_sigma_px=0.1, rng=_rng(),
                      disparity_step_px=-1.0)

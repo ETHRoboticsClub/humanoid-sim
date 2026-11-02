@@ -16,6 +16,7 @@ from humanoid_sim.sensors.models import (
     ZedMini,
 )
 
+
 def ethrc_v1() -> Rig:
     return Rig(
         # 400 Hz over CAN (Controls ethrc_mti_can), each sample reaching the host as it is sent: kernel stamps of
@@ -28,11 +29,15 @@ def ethrc_v1() -> Rig:
         # As Controls' camera service opens it, with the unit's calibration (camera_info on the V1: rgb and mono_left
         # 2026-10-20, mono_right and depth 2026-11-02, unchanged rgb and mono_left). Depth is on the rectified left
         # image, whose camera matrix DepthAI takes from the right imager: close to mono_right's, not mono_left's.
+        # The unit turns disparity back into depth with mono_left's fx instead: every depth in 60 s of its depth
+        # stream (2026-11-02, sub-pixel off) is 21339 mm px over a whole number, 283.60 px times the 75.243 mm
+        # baseline of /tf_static, so it reports depths 0.5 % farther than they are.
         camera0=OakDW("camera1_link", width=640, height=400, frame_period_ns=33_333_333,
                       intrinsics={"rgb": (283.087462, 282.805448, 325.969479, 198.375709),
                                   "mono_left": (283.604271, 283.556541, 321.744194, 196.769579),
                                   "mono_right": (282.176691, 282.201086, 322.219193, 195.29002),
-                                  "depth": (282.187653, 282.203949, 322.194153, 195.345032)}),
+                                  "depth": (282.187653, 282.203949, 322.194153, 195.345032)},
+                      depth_focal_px=283.604271),
     )
 
 

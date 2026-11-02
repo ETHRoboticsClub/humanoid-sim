@@ -10,6 +10,8 @@ depth errors follow from that, and this module applies them to an exact depth im
 * **Steps.** A matcher reports ``d`` in steps (the model's ``depth_disparity_step_px``): whole pixels without
   sub-pixel refinement, so the depth takes only the values ``f · b / k`` (at 2 m with ``f · b`` = 21 px m, 1.93 m or
   2.12 m). The noisy disparity is rounded to the nearest step; 0 leaves it continuous.
+* **Scale.** A camera can turn disparity back into depth with another focal length than the one its rectified images
+  have (the camera's ``depth_focal_px``): every depth it reports is then off by their ratio.
 * **Occlusion.** A pixel the second imager cannot see has no match: the band beside a foreground edge, on the side
   away from the second imager (``d_near − d_far`` pixels wide), and the image border on that side, where the second
   imager's view ends. A pixel is occluded when a nearer pixel on the second imager's side lands on or past it in
@@ -86,14 +88,17 @@ def stereo_pair(streams, depth, baseline_m: float) -> tuple[str | None, float, b
 
 
 def stereo_depth(depth_m: np.ndarray, *, focal_px: float, baseline_m: float, disparity_sigma_px: float,
-                 rng: np.random.Generator, disparity_step_px: float = 0.0, reference: np.ndarray | None = None,
-                 min_texture: float = 0.0, second_on_right: bool = True) -> np.ndarray:
+                 rng: np.random.Generator, disparity_step_px: float = 0.0, depth_focal_px: float | None = None,
+                 reference: np.ndarray | None = None, min_texture: float = 0.0,
+                 second_on_right: bool = True) -> np.ndarray:
     """The depth (m) a stereo camera reports for the exact depth ``depth_m`` ``[H, W]``: noisy through its disparity,
-    rounded to its ``disparity_step_px`` (0: continuous), NaN where its second imager is occluded or its reference
-    image ``reference`` (grey, ``[H, W]``) has less texture than ``min_texture``. ``baseline_m`` and ``focal_px`` are
-    the depth stream's."""
-    if baseline_m <= 0 or focal_px <= 0:
-        raise ValueError(f"stereo depth needs a positive baseline and focal length, got {baseline_m}, {focal_px}")
+    rounded to its ``disparity_step_px`` (0: continuous), turned back into depth with ``depth_focal_px`` (None:
+    ``focal_px``), NaN where its second imager is occluded or its reference image ``reference`` (grey, ``[H, W]``)
+    has less texture than ``min_texture``. ``baseline_m`` and ``focal_px`` are the depth stream's."""
+    depth_focal_px = focal_px if depth_focal_px is None else depth_focal_px
+    if baseline_m <= 0 or focal_px <= 0 or depth_focal_px <= 0:
+        raise ValueError(f"stereo depth needs a positive baseline and focal lengths, got {baseline_m}, {focal_px}, "
+                         f"{depth_focal_px}")
     if disparity_step_px < 0:
         raise ValueError(f"disparity_step_px must be >= 0, got {disparity_step_px}")
     d = disparity_px(depth_m, focal_px, baseline_m)
@@ -108,4 +113,4 @@ def stereo_depth(depth_m: np.ndarray, *, focal_px: float, baseline_m: float, dis
         if reference.shape[:2] != d.shape:
             raise ValueError(f"reference image {reference.shape[:2]} and depth {d.shape} differ in size")
         valid &= texture_std(reference) >= min_texture
-    return np.where(valid, focal_px * baseline_m / np.where(valid, noisy, 1.0), np.nan)
+    return np.where(valid, depth_focal_px * baseline_m / np.where(valid, noisy, 1.0), np.nan)
