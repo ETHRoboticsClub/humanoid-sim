@@ -24,6 +24,14 @@ reset the simulation inside :func:`crank_stop_hook`.
 Kamino has no tendons; it bounds the hinges by their box.
 
 The stops' stiffness is not measured (modeled); their positions are the description's.
+
+Per-env stiffness and damping (the randomization parameters ``crank_stop_stiffness`` and ``crank_stop_damping``,
+:class:`StopSolref`): on MJWarp the stops' ``solref`` is written per world, to the tendons' limit solref or, for a
+native USD, to its crank joints' raw ``solreflimit``. MuJoCo's constraint has stiffness ``k = 1 / (d_max² τ² ζ²)`` and
+damping ``b = 2 / (d_max τ)`` for the time constant ``τ`` and damping ratio ``ζ`` of ``solref`` (``d_max`` the impedance
+at full penetration), so scaling ``k`` by ``s`` and ``b`` by ``c`` is ``τ' = τ / c`` and ``ζ' = ζ c / √s``
+(:func:`scaled_solref`). MuJoCo raises a time constant below twice the step to that, so a stop at the profile's
+``ankle_stop_solref`` cannot get stiffer by shortening it. Kamino's stops are hard constraints and take no setting.
 """
 
 from __future__ import annotations
@@ -32,6 +40,7 @@ import contextlib
 from dataclasses import dataclass
 
 import numpy as np
+import torch
 
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.urdf import PreparedUrdf
@@ -44,6 +53,7 @@ AXES_MEET_TOLERANCE_M = 1e-5
 AXES_PERPENDICULAR_TOLERANCE = 1e-5
 SITE_RADIUS_M = 0.004  # drawn size of the sites (they take no part in the physics)
 TENDON_LABEL = "crank_stop"
+RAW_SOLREF_MODE = 1  # newton's SOLREF_MODE_RAW: the joint's authored mujoco.solreflimit goes to MuJoCo unchanged
 # Callback order of the tendons' release at PHYSICS_READY: before Isaac Lab's assets initialize (their order is 10).
 RELEASE_ORDER = 0
 
@@ -335,3 +345,92 @@ def check_crank_stops(robot: str, physics: dict) -> int:
                            f"asks for {expected}: build the scene inside humanoid_sim.physics.crank_stops."
                            "crank_stop_hook")
     return found
+
+
+def scaled_solref(solref: torch.Tensor, stiffness: torch.Tensor, damping: torch.Tensor) -> torch.Tensor:
+    """MuJoCo ``solref`` ``[E, K, 2]`` with the constraint's stiffness scaled by ``stiffness`` and its damping by
+    ``damping`` (both ``[E, 1]``, positive). Time-constant form (``τ, ζ > 0``): ``τ' = τ / damping`` and
+    ``ζ' = ζ damping / √stiffness``. Direct form (``-k, -b``): ``-k stiffness, -b damping``. ``(0, 0)``, MuJoCo's
+    "take the model default", has nothing to scale and raises."""
+    for name, scale in (("stiffness", stiffness), ("damping", damping)):
+        if not bool((torch.isfinite(scale) & (scale > 0)).all()):
+            raise ValueError(f"crank_stop_{name} must be positive and finite")
+    s, c = stiffness.unsqueeze(-1), damping.unsqueeze(-1)
+    tau, zeta = solref[..., :1], solref[..., 1:]
+    if bool(((tau == 0) | (zeta == 0)).any()) or bool(((tau > 0) != (zeta > 0)).any()):
+        raise ValueError("the crank stops' solref must be two positive numbers (time constant, damping ratio) "
+                         "or two negative ones (stiffness, damping)")
+    direct = tau < 0
+    return torch.cat([torch.where(direct, tau * s, tau / c), torch.where(direct, zeta * c, zeta * c / s.sqrt())],
+                     dim=-1)
+
+
+class StopSolref:
+    """The running MJWarp model's crank-stop ``solref``, ``[E, K, 2]`` (K stops per env), readable and writable.
+
+    ``kind`` is ``tendons`` (the URDF's spatial tendons of :func:`crank_stop_hook`) or ``native`` (the crank joints'
+    raw ``solreflimit`` authored into the USD). ``write`` takes effect after ``flag`` is given to the physics
+    manager's ``add_model_change``."""
+
+    def __init__(self, robot, model, desc: Description, num_envs: int):
+        import warp as wp
+
+        self._wp = wp
+        self.num_envs = num_envs
+        if desc.usd_path is not None:
+            from humanoid_sim.transmissions.drive_map import native_joint_names
+
+            names = native_joint_names(desc)[len(desc.joints):]  # the crank joints follow the semantic ones
+            self.kind, self._view, self._model = "native", robot._root_view, model
+            self._ids = torch.tensor([robot.joint_names.index(n) for n in names])
+            self._solref = "mujoco.solreflimit"
+            mode = wp.to_torch(self._view.get_attribute("mujoco.solreflimit_mode", model))[:, 0, self._ids]
+            if bool((mode != RAW_SOLREF_MODE).any()):
+                raise RuntimeError(f"the crank joints {names} do not carry a raw solreflimit "
+                                   f"(mode {mode.unique().tolist()}); the built USD has no mjc:solreflimit on them")
+            from newton import ModelFlags
+
+            self.flag = ModelFlags.JOINT_DOF_PROPERTIES
+        else:
+            rows = _stop_rows(model)
+            if not rows or len(rows) % num_envs:
+                raise RuntimeError(f"{len(rows)} crank-stop tendons for {num_envs} envs: build the scene inside "
+                                   "humanoid_sim.physics.crank_stops.crank_stop_hook with ankle_stops: cranks")
+            self.kind = "tendons"
+            self._array = wp.to_torch(model.mujoco.tendon_solref_limit)
+            self._rows = torch.tensor(rows, device=self._array.device).reshape(num_envs, -1)
+            world = getattr(model.mujoco, "tendon_world", None)
+            if world is not None:
+                owner = wp.to_torch(world)[self._rows]
+                if not bool((owner == torch.arange(num_envs, device=owner.device)[:, None]).all()):
+                    raise RuntimeError("the crank-stop tendons are not in world order")
+            from newton import ModelFlags
+
+            self.flag = ModelFlags.TENDON_PROPERTIES
+
+    def read(self) -> torch.Tensor:
+        if self.kind == "tendons":
+            return self._array[self._rows].clone()
+        full = self._wp.to_torch(self._view.get_attribute(self._solref, self._model))
+        return full[:, 0, self._ids.to(full.device)].clone()
+
+    def write(self, solref: torch.Tensor) -> None:
+        if self.kind == "tendons":
+            self._array[self._rows] = solref.to(self._array.dtype)
+            return
+        full = self._wp.to_torch(self._view.get_attribute(self._solref, self._model)).clone()
+        full[:, 0, self._ids.to(full.device)] = solref.to(full.dtype)
+        self._view.set_attribute(self._solref, self._model, self._wp.from_torch(full.contiguous(), dtype=self._wp.vec2))
+
+
+def check_stop_solref_support(robot: str, physics: dict, solver: str) -> None:
+    """Raise unless the running solver has crank stops whose stiffness can be randomized: MJWarp, on a robot with
+    ankle linkages, as tendons (``ankle_stops: cranks``) or as the native USD's crank joint limits."""
+    desc = Description.load(robot)
+    if solver != "mjwarp":
+        raise ValueError(f"{solver} has no crank-stop stiffness to randomize: its stops are hard constraints. "
+                         "crank_stop_stiffness and crank_stop_damping need MJWarp")
+    if not desc.linkages:
+        raise ValueError(f"{robot} has no ankle linkages, hence no crank stops")
+    if desc.usd_path is None and ankle_stops_setting(physics, solver) != "cranks":
+        raise ValueError("crank-stop stiffness needs the stops as tendons: physics.mjwarp.ankle_stops: cranks")

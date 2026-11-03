@@ -53,6 +53,12 @@ PARAMS: dict[str, Param] = {
     "joint_friction_ratio": Param("device", "joint", doc="dynamic over static Coulomb joint friction, in [0, 1]"),
     "friction": Param("physics", "env", doc="friction coefficient of every robot shape"),
     "shape_friction": Param("physics", "shape", doc="Coulomb friction coefficient per robot collision shape"),
+    "restitution": Param("physics", "env", doc="restitution coefficient of every robot shape, in [0, 1]; Kamino only, "
+                                               "MuJoCo's contacts have none"),
+    "crank_stop_stiffness": Param("physics", "env", doc="stiffness of the ankle cranks' stops over the profile's "
+                                                        "ankle_stop_solref; MJWarp only (Kamino's stops are hard)"),
+    "crank_stop_damping": Param("physics", "env", doc="damping of the ankle cranks' stops over the profile's "
+                                                      "ankle_stop_solref; MJWarp only (Kamino's stops are hard)"),
     "drive_stiffness": Param("device", "drive", doc="drive's realized P gain over the demanded one"),
     "drive_damping": Param("device", "drive", doc="drive's realized D gain over the demanded one"),
     "torque_limit": Param("device", "drive", doc="scale of the torque-speed envelope and torque cap"),

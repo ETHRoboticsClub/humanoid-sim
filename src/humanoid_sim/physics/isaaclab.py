@@ -271,7 +271,8 @@ def contact_sensor_cfg(history: int = 3, air_time: bool = True):
 
 
 def ground_cfg(friction: float):
-    """Flat ground at z = 0. Both solvers take the larger friction of a contact's two shapes."""
+    """Flat ground at z = 0. Both solvers take the larger friction of a contact's two shapes, and Kamino the larger
+    restitution (MJWarp has none): the ground's 0 leaves a randomized robot ``restitution`` in charge."""
     import isaaclab.sim as sim_utils
     from isaaclab.assets import AssetBaseCfg
     from isaaclab.sim.spawners.materials import RigidBodyMaterialBaseCfg
@@ -311,7 +312,7 @@ def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None, de
                       sparse_jacobian=settings.get("sparse_jacobian"),
                       sparse_dynamics=settings.get("sparse_dynamics", False),
                       max_contacts_per_world=settings["max_contacts_per_world"],
-                      materials=KaminoMaterialsCfg(friction_mix_mode="max"))
+                      materials=KaminoMaterialsCfg(friction_mix_mode="max", restitution_mix_mode="max"))
         method = settings.get("dynamics_solver", "padmm")
         if method == "dvi":
             return KaminoDVISolverCfg(**common, dynamics_solver_cfg=KaminoDVICfg(

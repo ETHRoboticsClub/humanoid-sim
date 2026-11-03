@@ -38,6 +38,7 @@ from humanoid_sim.devices.feedback import DriveFeedback
 from humanoid_sim.devices.models import drive_models
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
+from humanoid_sim.physics.crank_stops import scaled_solref
 from humanoid_sim.randomization import PARAMS, ParamSpec, Randomizer, parse_specs
 from humanoid_sim.sensors import rigs
 from humanoid_sim.sensors.imu import ImuDelivery, ImuSamples, pending_slots
@@ -127,6 +128,8 @@ def imu_latency_bounds(specs, nominal_ns: int) -> tuple[float, float]:
 
 
 class RobotPlant:
+    _stops = None  # StopSolref when crank_stop_stiffness or crank_stop_damping is randomized
+
     def __init__(self, robot, cfg: TrainPlantCfg | None = None, *, imu=None, contacts=None, physics_manager=None):
         """``robot``: the scene's articulation; ``imu`` / ``contacts``: its sensors (optional);
         ``physics_manager``: ``env.sim.physics_manager`` (needed to randomize shape friction)."""
@@ -219,7 +222,7 @@ class RobotPlant:
                                       "drive": self.drives,
                                       "shape": [f"shape_{i}" for i in range(nominal.get("shape_friction", torch.empty(e, 0)).shape[1])]},
                                      num_envs=e, device=self.device, seed=cfg.seed, level=cfg.level)
-        from humanoid_sim.physics.crank_stops import check_crank_stops
+        from humanoid_sim.physics.crank_stops import StopSolref, check_crank_stops
         from humanoid_sim.physics.isaaclab import (
             apply_heightfield_base,
             apply_joint_limits,
@@ -230,6 +233,7 @@ class RobotPlant:
         if used & {"friction", "shape_friction"} and physics_manager is None:
             raise ValueError("randomizing friction needs the physics manager (env.sim.physics_manager)")
         self._solver = running_solver()
+        self._contact_knobs(used)
         check_crank_stops(cfg.robot, self.profile["physics"])
         apply_joint_limits(self.profile["physics"])
         apply_loop_closure(self.profile["physics"])
@@ -237,6 +241,9 @@ class RobotPlant:
         from humanoid_sim.physics.contact_capacity import contact_capacity_guard
 
         self._contact_capacity = contact_capacity_guard(self.profile["physics"], e, self.device)
+        if used & {"crank_stop_stiffness", "crank_stop_damping"}:
+            self._stops = StopSolref(robot, physics_manager.get_model(), self.desc, e)
+            self._stops_solref0 = self._stops.read()
         self._write_physics()
         self._write_device(torch.arange(e, device=self.device))
         self._drive_graph = None
@@ -268,6 +275,9 @@ class RobotPlant:
             mu = self._shape_friction()
             out["friction"] = mu[:, :1].clone()
             out["shape_friction"] = mu.clone()
+            out["restitution"] = self._shape_restitution()[:, :1].clone()
+        out["crank_stop_stiffness"] = torch.ones(self.num_envs, 1, device=self.device)
+        out["crank_stop_damping"] = torch.ones(self.num_envs, 1, device=self.device)
         return out
 
     def _device_nominal(self) -> dict[str, torch.Tensor]:
@@ -290,6 +300,25 @@ class RobotPlant:
 
         model = self._physics_manager.get_model()
         return wp.to_torch(self.robot._root_view.get_attribute("shape_material_mu", model)[:, 0])
+
+    def _shape_restitution(self) -> torch.Tensor:
+        import warp as wp
+
+        model = self._physics_manager.get_model()
+        return wp.to_torch(self.robot._root_view.get_attribute("shape_material_restitution", model)[:, 0])
+
+    def _contact_knobs(self, used: set[str]) -> None:
+        """Raise unless the running solver can randomize the contact and stop parameters the specs use."""
+        knobs = used & {"restitution", "crank_stop_stiffness", "crank_stop_damping"}
+        if knobs and self._physics_manager is None:
+            raise ValueError(f"randomizing {sorted(knobs)} needs the physics manager (env.sim.physics_manager)")
+        if "restitution" in used and self._solver != "kamino":
+            raise ValueError(f"{self._solver} has no contact restitution (MuJoCo's contacts do not bounce); "
+                             "randomizing restitution needs Kamino")
+        if used & {"crank_stop_stiffness", "crank_stop_damping"}:
+            from humanoid_sim.physics.crank_stops import check_stop_solref_support
+
+            check_stop_solref_support(self.cfg.robot, self.profile["physics"], self._solver)
 
     def _write_physics(self) -> None:
         """Write every randomized solver parameter, all envs (startup and level changes only)."""
@@ -326,6 +355,19 @@ class RobotPlant:
             mu = self._shape_friction()
             mu[:] = v["shape_friction" if "shape_friction" in v else "friction"].to(mu.dtype)
             self._physics_manager.add_model_change(ModelFlags.SHAPE_PROPERTIES)
+        if "restitution" in v:
+            from newton import ModelFlags
+
+            if not bool(((v["restitution"] >= 0) & (v["restitution"] <= 1)).all()):
+                raise ValueError("restitution must be in [0, 1]")
+            bounce = self._shape_restitution()
+            bounce[:] = v["restitution"].to(bounce.dtype)
+            self._physics_manager.add_model_change(ModelFlags.SHAPE_PROPERTIES)
+        if self._stops is not None:
+            ones = torch.ones_like(self._nominal_physics["crank_stop_stiffness"])
+            self._stops.write(scaled_solref(self._stops_solref0, v.get("crank_stop_stiffness", ones),
+                                            v.get("crank_stop_damping", ones)))
+            self._physics_manager.add_model_change(self._stops.flag)
 
     def _write_device(self, env_ids: torch.Tensor) -> None:
         v, bank = self.randomizer.values, self.core.bank
