@@ -1,11 +1,11 @@
 # The world around the robot
 
-Around the robot, humanoid-sim has a ground (a flat plane, or in training a heightfield terrain, a surface given as a grid of heights), optional static boxes standing on it (a room's walls and furniture, such as Controls' hangar), an optional [support](glossary.md#support) that holds the robot up, and external [disturbances](glossary.md#disturbance). The code is in `src/humanoid_sim/world/` and in the scene builders that use it: `robot_scene_cfg` for training (`src/humanoid_sim/train/scene.py`) and `SimCore` (`src/humanoid_sim/sim.py`) for replays and the real-time runtime.
+Around the robot, humanoid-sim has a ground (a flat plane, or a heightfield terrain, a surface given as a grid of heights), optional static boxes standing on it (a room's walls and furniture, such as Controls' hangar), an optional [support](glossary.md#support) that holds the robot up, and external [disturbances](glossary.md#disturbance). The code is in `src/humanoid_sim/world/` and in the scene builders that use it: `robot_scene_cfg` for training (`src/humanoid_sim/train/scene.py`) and `SimCore` (`src/humanoid_sim/sim.py`) for replays and the real-time runtime.
 
 | Feature | Training | Replay | Runtime (`serve`) |
 |---|---|---|---|
 | Flat ground | default; friction set by `ground_friction` | profile friction | profile friction |
-| Heightfield terrain | `robot_scene_cfg(..., terrain=...)` | none | none |
+| Heightfield terrain | `robot_scene_cfg(..., terrain=...)` | `SimCore(..., terrain=...)`, `replay --terrain FILE` | `serve --terrain FILE` |
 | Static boxes (walls, furniture) | `robot_scene_cfg(..., scene=...)` | none | `--scene` and `--spawn` |
 | Start pose | `robot_scene_cfg(..., pose=...)`: `"home"` (default) or `"standing"` | the capture's first measured drive positions | the profile's `poses.start` (V1 `standing`, G1 `home`) or `--pose`; `RESET` can pick either |
 | Free base | always | none | `--support free` |
@@ -67,7 +67,30 @@ terrain = heightfield_terrain_cfg({
 cfg.scene = robot_scene_cfg(4096, usd, terrain=terrain)
 ```
 
-`cfg` and `usd` are the env config and robot USD from [training.md](training.md#a-minimal-environment). When a terrain is given, the scene has no flat ground and `ground_friction` is ignored.
+`cfg` and `usd` are the env config and robot USD from [training.md](training.md#a-minimal-environment). When a terrain is given, the scene has no flat ground and `ground_friction` is ignored. Replays and the runtime take the same config ([below](#terrain-in-replays-and-the-runtime)).
+
+### Terrain in replays and the runtime
+
+Replays and the runtime host build the terrain the way training does, from the same config object: `SimCore(usd, ..., terrain=cfg)`, `RuntimeHost(..., terrain=cfg)`, with `cfg` what `heightfield_terrain_cfg` returned (or a `Terrain`, which also records the file it came from). Nothing about the surface is generated a second time or differently: the importer, the generator, the collision geometry and, on MJWarp's own contacts, the solid base are training's. A policy trained on a tile layout can therefore be checked on the same ground, through the full Controls stack, by passing the same tiles and seed. Generators and curricula stay with the task; this repo takes the finished config or a file.
+
+The command line takes a file, `serve --terrain FILE` and `replay --terrain FILE` (`load_terrain` in `src/humanoid_sim/world/terrain_io.py`), of two kinds:
+
+| File | Holds | Becomes |
+|---|---|---|
+| `.npz` of heights | `heights` `[n, n]` (m, the surface at the grid points) and `horizontal_scale_m` (the grid spacing). `write_heightfield_file` writes one. | One tile, `(n - 1) * horizontal_scale_m` on a side, centred at the world origin, flat at z = 0 for 4 m around it (the border), friction 1.0, heights to the millimetre. Make its edges meet z = 0, or the apron starts with a step. |
+| `.json` of tiles | `size_m`, `rows`, `cols`, `border_m`, `curriculum`, and optionally `friction`, `horizontal_scale_m`, `vertical_scale_m`, `seed`, as for `heightfield_terrain_cfg`, and `tiles`: `{name: {"type": "HfRandomUniformTerrainCfg", ...fields}}` of Isaac Lab's heightfield sub-terrain configs (lists become tuples) | `heightfield_terrain_cfg` called with them. Set `seed` for the same ground every time (see below). |
+
+A task whose generator is its own (humanoid-learning's) writes a heights file from it, or builds the config in Python.
+
+Seeds. Isaac Lab's height-field functions (random bumps, stepping stones, discrete obstacles) draw their heights from NumPy's global random state, which the generator's `seed` does not set (it seeds the draws of tile types and difficulties). A `SimCore` therefore seeds NumPy's global generator with the config's `seed`, when it has one, before it builds the scene, so the same config is the same ground in every replay and runtime session. To get the very ground a training run saw, the training process has to seed NumPy the same way before it builds its scene (`np.random.seed(seed)`), or hand over a heights file.
+
+Where the robot starts. Every env starts at its tile's origin, the highest point of the tile within 1 m of its centre, as in training; a replay's `base_height_m` is measured from that point, and `SimCore.env_origins` gives it. Replays and the runtime have one robot on the first tile (row 0, column 0), so a file with several tiles starts the robot on the first. The terrain is centred on the world origin, so the start is the world origin for a one-tile file and elsewhere for a grid; the truth is in that world frame. `SimCore.ground` and the host read the surface back from the scene (`Ground`, NumPy, a vertical ray through the generated triangles), so they stand a robot on the ground that is really there, whatever generated it.
+
+The runtime starts the robot standing, as on flat ground, but on the terrain "standing height" is a function of where the feet are. `rest_base_height` puts the upright base at the height where every collision shape just clears the surface under it (a sole box on a grid of points 1 cm apart, a foot sphere by its bottom, a hull by its vertices) plus the 1 mm standing clearance, so no foot starts inside the ground and the other, on lower ground, starts above it. A suspended session adds its 0.3 m lift on top. Every named pose (`RESET`, a new session, `SET_SUPPORT` `free` letting the robot down where it hung) does the same at the robot's own x, y and heading.
+
+What the runtime tells its clients. The descriptor's `terrain` is null on flat ground; else the file and its SHA-256, the layout the config states (`size_m`, `rows`, `cols`, `border_m`, `curriculum`, `horizontal_scale_m`, `vertical_scale_m`, `seed`, `tiles`, `friction`), `spawn_m` (x, y, z of the start, in the world frame) and `extent_m` (the mesh's x and y ranges). `serve --trajectory` copies the block into the recording's header, so a recording says which ground it was made on. Rendering sensors from such a recording, or from a live session, is refused: the render scene has the flat ground only.
+
+Refused: a terrain with static boxes (they stand on the flat ground) and, in the runtime, with a gantry crane (placed in the room's frame).
 
 ### Which pipeline collides the robot
 
@@ -382,6 +405,6 @@ A `RESET` command clears all active disturbances. Faults (`INJECT_FAULT`: encode
 - A room collides as boxes only. Its scan is drawn as a textured mesh but never collided, the Gaussian splat of the hangar is drawn only by the RTX cameras ([rtx-sensors.md](rtx-sensors.md)), and there are no other static shapes (cylinders, meshes).
 - Static boxes stand on the flat ground; they cannot be combined with a heightfield terrain, and every environment of a scene with boxes starts at the spawn point.
 - There is no triangle-mesh terrain (stairs with vertical risers, mesh obstacles), for the collision reason above.
-- Replays and the runtime have no terrain; they always use the flat ground at the profile's friction.
+- Replays and the runtime start one robot on the first tile of a terrain; there is no choice of tile, no terrain curriculum, and the sensor render scene (cameras, lidar) and `view-runtime` draw the flat ground only.
 - The training scene has no fixed-base or base-joint option; supports in training are limited to a `Gantry` your task applies.
 - A gantry crane is its rope's top only: the frame, bridge and hook do not collide, the rope has no mass and is drawn as a line, and the crane follows its command whatever the rope pulls.

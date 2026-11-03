@@ -34,6 +34,8 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 | `test_stereo_depth.py` | Stereo depth errors on synthetic depth images: noise growing with the square of the range and on plain surfaces, spread over neighbouring pixels, disparity in steps, the occlusion band at a foreground edge and the image border, no depth on plain surfaces, the median filter, a camera model's stereo geometry and its refused figures | |
 | `test_supports.py` | Gantry programs, and rope tension and cable length on every robot | the rope tests `physics` |
 | `test_sysid.py` | The passive-fit search space and CMA-ES | |
+| `test_terrain_io.py` | Terrain files and the ground height: the height of a triangle mesh under a point, a robot's shapes rested on uneven ground (a bump under the middle of a sole, the heading, the terrain's edge), heights file reading and refusals, the V1's and the G1s' standing height on a plane | |
+| `test_terrain_runtime.py` | Terrain in replays and the runtime: the surface a `SimCore` builds from the tiles training passes, or from them as a spec file, equals the training scene's, a heights file is the terrain it holds, replay robots start above the tile origin, the runtime stands on the ground under its feet and names the terrain in the descriptor and the trajectory | `physics` |
 | `test_train_env.py` | The Train-Time API in a manager-based Isaac Lab environment with two robots, for every robot | `physics` |
 | `test_world.py` | For every robot: landing on a bumpy heightfield and staying on top, force pushes, and holding the home pose on flat ground, which stands only when the ankles are stiffer than the body's toppling stiffness (the V1 stands, the G1 tips over) | `physics` |
 

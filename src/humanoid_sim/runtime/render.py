@@ -95,6 +95,8 @@ class RuntimeRender:
         self.seg = abi.Segment.open(self.path, wait_s=wait_s,
                                     max_heartbeat_age_ns=abi.HEARTBEAT_TIMEOUT_NS, **self._identity)
         record = self.seg.descriptor()
+        if record.get("terrain"):
+            raise ValueError("the host runs on a terrain; the sensor render scene has the flat ground only")
         scene, spawn, scan_mesh = host_scene(record.get("scene"))
         cfg = dataclasses.replace(cfg, physics=False, scene=cfg.scene or scene,
                                   spawn_m=cfg.spawn_m if cfg.scene else spawn,
