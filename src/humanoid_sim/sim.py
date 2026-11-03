@@ -43,14 +43,15 @@ import torch
 
 from humanoid_sim.core import PlantCfg, PlantCore
 from humanoid_sim.devices.feedback import DriveFeedback
+from humanoid_sim.devices.protection import profile_response
 from humanoid_sim.model.asset import check_asset_robot, load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.urdf import BASE_JOINTS
 from humanoid_sim.physics.joint_properties import joint_properties
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
-from humanoid_sim.world.terrain_io import Terrain, as_terrain
 from humanoid_sim.world.objects import WorldObjects
+from humanoid_sim.world.terrain_io import Terrain, as_terrain
 
 
 class SimCore:
@@ -94,6 +95,7 @@ class SimCore:
         # Description joint order for the plant; the articulation's order is mapped through names.
         self.plant = PlantCore(self.desc, joints, num_envs,
                                PlantCfg(robot=robot, physics_period_ns=self.period_ns, device=device,
+                                        protection=profile_response(self.profile),
                                         **({} if queue_capacity is None else {"queue_capacity": queue_capacity})),
                                solver_joint_names=physical if self.native_state is not None else None)
         props = joint_properties(self.plant, physical)

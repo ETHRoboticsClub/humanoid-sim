@@ -31,6 +31,7 @@ from humanoid_sim.devices.bank import DriveBank, DriveOutput
 from humanoid_sim.devices.demand import LAW_DISABLED, DriveDemand
 from humanoid_sim.devices.envelope import TorqueSpeedEnvelope
 from humanoid_sim.devices.feedback import DriveFeedback
+from humanoid_sim.devices.protection import DriveProtection
 from humanoid_sim.devices.shaping import outside_stable_region, shaped_position_target
 from humanoid_sim.model.description import Description
 from humanoid_sim.timing.clock import NS_PER_MS, check_period
@@ -46,6 +47,7 @@ class PlantCfg:
     robot: str = "ethrc_v1"
     physics_period_ns: int = 4 * NS_PER_MS
     queue_capacity: int = 4
+    protection: str | None = None  # drive protection response, "flag" or "cut" (profile devices.protection.response)
     device: str = "cpu"
     dtype: torch.dtype = torch.float32
 
@@ -64,8 +66,9 @@ class PlantCore:
         drives = [desc.drives[n] for n in self.map.drive_names]
         self.envelope = TorqueSpeedEnvelope([desc.torque_speed(d.family) for d in drives],
                                             braking=[desc.braking_limit(d.name) for d in drives], device=dev, dtype=dt)
+        protection = DriveProtection.for_drives(desc, self.map.drive_names, cfg.protection, device=dev, dtype=dt)
         self.bank = DriveBank(self.envelope, num_envs, self.map.num_drives, queue_capacity=cfg.queue_capacity,
-                              device=dev, dtype=dt)
+                              protection=protection, device=dev, dtype=dt)
         self.drive_stiffness = torch.tensor([d.baseline_stiffness for d in drives], device=dev, dtype=dt)
         self.drive_damping = torch.tensor([d.baseline_damping for d in drives], device=dev, dtype=dt)
         standing = torch.tensor([desc.joints[n].standing_offset_rad if n in desc.joints else 0.0

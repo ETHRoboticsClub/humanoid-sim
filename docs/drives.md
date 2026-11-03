@@ -190,7 +190,7 @@ The bank returns a `DriveOutput`, kept as `PlantCore.last`. Each field is `[E, D
 | HEJ70-48-50 | (0, 50), (10, 45), (15, 30), (20, 10), (22, 0) | 19 Nm |
 | HEJ50-48-30 | (0, 30), (10, 25), (15, 20), (20, 5), (21, 0) | 11 Nm |
 
-The nominal (continuous) torque is `effort_nominal` in actuators.yaml. Nothing clips to it and there is no thermal derating, so a drive can hold its peak indefinitely.
+The nominal (continuous) torque is `effort_nominal` in actuators.yaml. Nothing clips to it and there is no thermal derating, so a drive can hold its peak indefinitely unless [drive protection](#current-limit-and-overload) is on.
 
 A finite `torque_limit_nm` then clips the applied torque to `±torque_limit_nm`. Both the envelope and the limit are multiplied by the drive's `torque_scale`. The demanded torque is never clipped.
 
@@ -204,6 +204,28 @@ env = TorqueSpeedEnvelope([desc.torque_speed("HEJ90-48-140")])
 lower, upper = env.limits(torch.tensor([[-7.0], [0.0], [7.0], [11.0]]))  # rad/s
 # lower: -117.5, -140, -140, -140 Nm; upper: 140, 140, 117.5, 0 Nm
 ```
+
+## Current limit and overload
+
+Off by default. A profile turns it on with `devices.protection.response` (`flag` or `cut`); without it the bank is exactly the one described above, and a description without `backend.overload_dwell_s` refuses the knob. `src/humanoid_sim/devices/protection.py` holds it, and `DriveBank.compute` applies it.
+
+What it follows is Controls' torque guard, not firmware of the drive's own: `TorqueOverload.hpp` (applied on the robot by `JointSafetyMonitor::judgeOverload` to the drive's current demand `0x30D0` converted to torque, and by `ControlCore::torque` in Controls' own simulator to the PD request). The rule, per env and drive:
+
+- The judged torque is the control law's output (`demanded`), capped at the drive's output current limit, which is where a real current demand saturates.
+- A drive is overloaded while that torque's magnitude is above the drive's torque limit, its peak `effort` in actuators.yaml (Controls uses the actuator's `effort_nm`).
+- It trips when it has been overloaded continuously for `backend.overload_dwell_s` (10 ms on the V1, 0.5 s on the G1). A step at or under the limit restarts the count. The count runs on step start times in integer ns, so a trip falls on the first step that starts at least one dwell after the first overloaded step.
+- A drive that is off (the law `DISABLED` in force for the whole step) is not judged; turning a drive off clears its count and its trip, as re-enabling does in Controls.
+
+The current limit is `max_current_a` of the drive's family, as a torque. The description does not hold the drive's gear (`0x3003`), so the output torque per ampere is modeled as the family's `effort_nominal / nominal_current_a` (V1: 3.48, 1.36 and 1.57 Nm/A for HEJ90, HEJ70 and HEJ50, giving 184, 62 and 34 Nm at the current limit, above each peak). The applied torque is clipped to it after the envelope and the cap; a family without those figures has no current limit. On the V1 the envelope is always the tighter clip.
+
+The `response` is what a tripped drive does:
+
+| Response | Tripped drive |
+|---|---|
+| `flag` | Reports the trip and keeps applying its torque, as the robot's drive does until the host reacts |
+| `cut` | Reports the trip and applies no torque until it is turned off |
+
+`DriveBank.overload` holds the state (`tripped` and `over_since_ns`, `[E, D]`, written in place and reset with the env), so a training task can read `plant.core.bank.overload.tripped`. The runtime reports it to Controls in the feedback's per-drive `status` word: bit 0 (`DRIVE_STATUS_OVERLOAD`) is set while the drive is tripped. The sim reports the condition; mapping it to a CiA-402 fault on the fake EPOS4 is Controls' side.
 
 ## Per-drive deviations
 
@@ -317,7 +339,7 @@ The mailbox and its other commands are described in [runtime.md](runtime.md).
 
 The runtime publishes its known gaps in the segment descriptor (`fidelity_gaps` in `src/humanoid_sim/runtime/host.py`):
 
-- There are no drive current, thermal or backlash models. The applied torque is the envelope-clipped control law.
+- There are no drive thermal or backlash models. Unless the profile turns on [drive protection](#current-limit-and-overload), there is no current limit or overload trip either, and the applied torque is the envelope-clipped control law.
 - The passive joint parameters of the upper body (waist, shoulders, elbows) are the description's values and have not been identified from captures.
 - The native USD ankle includes its closed chain. Stop stiffness, joint friction and compliance are modeled rather than verified against hardware traces.
 - IMU errors are the rig's model's: white noise, a turn-on bias and a slow drift (`SET_FIDELITY` ideal turns them off). See [sensors.md](sensors.md#sampling-and-errors).
