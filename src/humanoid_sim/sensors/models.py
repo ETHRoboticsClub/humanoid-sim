@@ -74,14 +74,23 @@ class Imu(Sensor):
     gyro_bias_instability_rad_s: ClassVar[float] = 0.0
     accel_bias_instability_m_s2: ClassVar[float] = 0.0
     bias_correlation_time_ns: ClassVar[int] = 100_000_000_000
+    # Full scale per axis; 0: unbounded. Samples are clipped to it (sensors/imu.py).
+    gyro_range_rad_s: ClassVar[float] = 0.0
+    accel_range_m_s2: ClassVar[float] = 0.0
     noise_basis: ClassVar[str] = "modeled"  # how the figures are known: "modeled" (a guess or an inference) or "measured"
 
     def __init__(self, frame: str, *, sample_period_ns: int, burst_period_ns: tuple[int, int] | None = None,
-                 in_burst_spacing_ns: int = 0, output_lsb: tuple[float, float] | None = None):
+                 in_burst_spacing_ns: int = 0, output_lsb: tuple[float, float] | None = None,
+                 drop_probability: float = 0.0, drop_mode: str = "omit"):
         """``burst_period_ns``: the host receives samples in bursts this far apart (uniform per burst); default:
         every sample as it is taken. ``output_lsb``: the host reads each axis as a signed 16-bit count of this
-        many rad/s (gyro) and m/s² (accelerometer); default: unquantized."""
+        many rad/s (gyro) and m/s² (accelerometer); default: unquantized. ``drop_probability``: each sample is lost with
+        this probability, ``drop_mode`` "omit" (never delivered) or "hold" (repeats the previous output); default: none
+        lost."""
         super().__init__(frame)
+        if not 0.0 <= drop_probability <= 1.0 or drop_mode not in ("omit", "hold"):
+            raise ValueError(f"drop_probability {drop_probability!r} (in [0, 1]) or drop_mode {drop_mode!r} (omit or hold)")
+        self.drop_probability, self.drop_mode = float(drop_probability), drop_mode
         if output_lsb is not None and (len(output_lsb) != 2 or not all(v > 0 for v in output_lsb)):
             raise ValueError(f"output_lsb {output_lsb!r}: expected (gyro rad/s, accel m/s^2) per count, both > 0")
         self.output_lsb = None if output_lsb is None else (float(output_lsb[0]), float(output_lsb[1]))
@@ -102,7 +111,7 @@ class Imu(Sensor):
         if cls.noise_basis not in ("modeled", "measured"):
             raise ValueError(f"{cls.__name__}.noise_basis {cls.noise_basis!r}: modeled or measured")
         _positive_ns(f"{cls.__name__}.bias_correlation_time_ns", cls.bias_correlation_time_ns)
-        for name in ("gyro_noise_density_rad_s_sqrt_hz", "accel_noise_density_m_s2_sqrt_hz", "gyro_turn_on_bias_rad_s",
+        for name in ("gyro_range_rad_s", "accel_range_m_s2", "gyro_noise_density_rad_s_sqrt_hz", "accel_noise_density_m_s2_sqrt_hz", "gyro_turn_on_bias_rad_s",
                      "accel_turn_on_bias_m_s2", "gyro_bias_instability_rad_s", "accel_bias_instability_m_s2"):
             if getattr(cls, name) < 0:
                 raise ValueError(f"{cls.__name__}.{name} < 0")
@@ -119,7 +128,9 @@ class Imu(Sensor):
                               accel_turn_on_bias=self.accel_turn_on_bias_m_s2,
                               gyro_bias_instability=self.gyro_bias_instability_rad_s,
                               accel_bias_instability=self.accel_bias_instability_m_s2,
-                              bias_correlation_time_ns=self.bias_correlation_time_ns, **kw)
+                              bias_correlation_time_ns=self.bias_correlation_time_ns,
+                              gyro_range=self.gyro_range_rad_s, accel_range=self.accel_range_m_s2,
+                              drop_probability=self.drop_probability, drop_mode=self.drop_mode, **kw)
 
 
 class Mti610(Imu):
@@ -135,8 +146,11 @@ class Mti610(Imu):
     gyro_bias_instability_rad_s = 8.0 * DEG / 3600.0
     accel_bias_instability_m_s2 = 15e-6 * G0  # the worse (z) axis
     bias_correlation_time_ns = 100_000_000_000  # modeled: the leaflet gives none
-    # Not modeled yet: ranges ±2000 deg/s and ±10 g, 0.05 deg non-orthogonality, 0.1 %FS non-linearity (MTi 600-series
-    # datasheet MT1603P 2020.B). No source gives a run-to-run bias, a correlation time or an output latency.
+    # Full scale ±2000 deg/s and ±10 g (MTi 600-series datasheet MT1603P 2020.B); samples are clipped to it.
+    gyro_range_rad_s = 2000.0 * DEG
+    accel_range_m_s2 = 10.0 * G0
+    # Not modeled: 0.05 deg non-orthogonality, 0.1 %FS non-linearity (same datasheet). No source gives a run-to-run
+    # bias or a correlation time. The output latency is the profile's devices.imu_path (measured), not the model's.
 
 
 class UnitreeG1Imu(Imu):

@@ -243,6 +243,8 @@ class RobotPlant:
                 raise ValueError("randomizing imu_latency needs the IMU")
             if any(s.param == "imu_latency" and s.op == "scale" for s in specs) and "imu_path" not in self.profile["devices"]:
                 raise ValueError(f"{cfg.robot}: scaling imu_latency needs the profile's devices.imu_path")
+        if "imu_drop_probability" in used and self.imu is None:
+            raise ValueError("randomizing imu_drop_probability needs the IMU")
         if {"friction", "shape_friction"} <= used:
             raise ValueError("choose per-env friction or per-shape friction, not both")
         self.randomizer = Randomizer(specs, {k: v for k, v in nominal.items() if k in used},
@@ -321,7 +323,9 @@ class RobotPlant:
                 "encoder_offset": torch.zeros_like(ones),
                 "joint_friction_ratio": ratio.expand(e, -1).clone(),
                 "imu_gyro_bias": zeros3, "imu_accel_bias": zeros3.clone(), "imu_misalignment": zeros3.clone(),
-                "imu_latency": torch.full((e, 1), self.imu_latency_ns / NS_PER_S, device=self.device)}
+                "imu_latency": torch.full((e, 1), self.imu_latency_ns / NS_PER_S, device=self.device),
+                "imu_drop_probability": torch.full(
+                    (e, 1), self.imu.cfg.drop_probability if self.imu is not None else 0.0, device=self.device)}
 
     def _shape_friction(self) -> torch.Tensor:
         import warp as wp
@@ -420,6 +424,11 @@ class RobotPlant:
                     target[env_ids] = v[name][env_ids].to(target.dtype)
             if "imu_latency" in v:
                 self.imu.latency_ns[env_ids] = (v["imu_latency"][env_ids, 0] * NS_PER_S).round().to(torch.int64)
+            if "imu_drop_probability" in v:
+                p = v["imu_drop_probability"][env_ids, 0]
+                if not bool(((p >= 0) & (p <= 1)).all()):
+                    raise ValueError("imu_drop_probability must be in [0, 1]")
+                self.imu.drop_probability[env_ids] = p.to(self.imu.drop_probability.dtype)
 
     def attach_log(self, log) -> None:
         """Log signals into ``log`` (a :class:`~humanoid_sim.signals.log.SignalLog`) from now on."""
