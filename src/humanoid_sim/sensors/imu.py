@@ -16,8 +16,8 @@ samples, newest first, each with its measurement time and its host-receipt stamp
   training plant; 0 by default) after its measurement, the host's path the burst model leaves out.
 * **Range.** ``gyro_range`` / ``accel_range`` (the part's full scale, per axis; 0 = unbounded, the default): each sample
   is clipped to ± the range after the errors are added, before the output field rounds it.
-* **Dropped samples.** With probability ``drop_probability`` per sample (per env, starting at the cfg's; a cfg of 0
-  draws nothing) a sample is lost. ``drop_mode="omit"``: it never reaches the host, so the consumer sees a gap in
+* **Dropped samples.** With probability ``drop_probability`` per sample (per env, starting at the cfg's, and read every
+  step, so the plant can write a rate to a cfg of 0) a sample is lost. ``drop_mode="omit"``: it never reaches the host, so the consumer sees a gap in
   ``seq`` and ``sample_ns``, as Controls' MTi driver counts a skipped SampleTime as ``missed``. ``"hold"``: a
   sample is delivered but repeats the previous output (a stale read); the first sample after a reset is never held.
   Losses are drawn from their own stream, so the noise is the same with and without them.
@@ -110,8 +110,7 @@ class ImuDelivery:
         self._nominal_sigma = self._sigma.clone()
         inf = math.inf
         self._range = torch.tensor([cfg.gyro_range or inf] * 3 + [cfg.accel_range or inf] * 3, **f)
-        self._drops = cfg.drop_probability > 0  # fixed at construction: a cfg without drops draws nothing
-        self.drop_probability = torch.full((num_envs,), cfg.drop_probability, **f)  # per env, written by the plant
+        self.drop_probability = torch.full((num_envs,), cfg.drop_probability, **f)  # per env, written by the plant (read every step)
         self.drop_generator = torch.Generator(device=self.device).manual_seed(seed + 0x5EED)
         self._last = torch.zeros(num_envs, 6, **f)  # the previous output, for "hold"
         self._last_valid = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
@@ -237,16 +236,15 @@ class ImuDelivery:
         sample = torch.where(self.lsb > 0, counts * self.lsb, sample)
         self.seq.add_(due.long())
         keep = due
-        if self._drops:
-            lost = due & (torch.rand(self.num_envs, generator=self.drop_generator, device=self.device,
-                                     dtype=self.dtype) < self.drop_probability)
-            if self.cfg.drop_mode == "hold":
-                lost = lost & self._last_valid
-                sample = torch.where(lost.unsqueeze(1), self._last, sample)
-            else:
-                keep = due & ~lost
-            self._last.copy_(torch.where(due.unsqueeze(1), sample, self._last))
-            self._last_valid.copy_(self._last_valid | due)
+        lost = due & (torch.rand(self.num_envs, generator=self.drop_generator, device=self.device,
+                                 dtype=self.dtype) < self.drop_probability)  # a rate of 0 never loses
+        if self.cfg.drop_mode == "hold":
+            lost = lost & self._last_valid
+            sample = torch.where(lost.unsqueeze(1), self._last, sample)
+        else:
+            keep = due & ~lost
+        self._last.copy_(torch.where(due.unsqueeze(1), sample, self._last))
+        self._last_valid.copy_(self._last_valid | due)
         full = keep & (self.pending_count >= self.cfg.pending)
         self._drop_oldest_pending(full)
         slot = self.pending_count.clamp(max=self.cfg.pending - 1)

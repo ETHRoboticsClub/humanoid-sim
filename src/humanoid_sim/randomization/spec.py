@@ -68,6 +68,7 @@ PARAMS: dict[str, Param] = {
     "imu_accel_bias": Param("device", "axis", unit="m/s²", doc="accelerometer bias, sensor frame"),
     "imu_misalignment": Param("device", "axis", unit="rad", doc="sensor rotation from its mount, rotation vector"),
     "imu_latency": Param("device", "env", unit="s", doc="IMU sample measured → its earliest delivery to the host. Nominal: the profile's devices.imu_path, else 0"),
+    "imu_drop_probability": Param("device", "env", doc="probability that an IMU sample is lost, in [0, 1]. Nominal: the sensor model's drop_probability (0 on the V1)"),
 }
 
 _SELECTORS = {"body": "bodies", "joint": "joints", "drive": "drives", "shape": "shapes"}
