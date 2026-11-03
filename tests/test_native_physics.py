@@ -69,7 +69,7 @@ def test_native_training_reset_randomization_and_feedback(request, solver):
     sim = SimCore(built_usd("ethrc_v1"), device="cuda:0", num_envs=2,
                   fixed_base=True, solver=solver, cuda_graph=False)
     request.addfinalizer(sim.close)
-    plant = RobotPlant(sim.backend.robot, TrainPlantCfg(reporting=False, randomization=[
+    plant = RobotPlant(sim.backend.robot, TrainPlantCfg(reporting=False, feedback_sampling=False, randomization=[
         ParamSpec("joint_armature", "uniform", (1.2, 1.2), "scale")]))
     positions, _ = plant.joint_state()
     untouched = positions[0].clone()

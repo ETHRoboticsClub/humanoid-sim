@@ -238,6 +238,7 @@ The fidelity gaps the runtime publishes:
 - ankle as pitch and roll hinges driven through the crank transmission (no closed chain)
 - IMU errors from the rig's model: white noise, turn-on bias, Gauss-Markov drift (SET_FIDELITY ideal turns them off); the turn-on bias is redrawn at every IMU reset, not only at power-on
 - drive delay is each family's fixed figure (actuators.yaml drive_delay_s), without per-cycle jitter
+- drive feedback is the plant's state at every bus cycle, exactly: no sample age (the robot's PDO samples come 3.0-7.5 ms apart), torque noise or velocity dither (the training plant has them, devices.feedback_*)
 - for a robot whose description records no delay for some families (the G1's): drive delay unmeasured for those families, whose demands act when the bus delivers them
 
 ### Demands
