@@ -28,6 +28,7 @@ from humanoid_sim.physics.crank_stops import check_crank_stops
 from humanoid_sim.physics.joint_properties import JointProperties
 from humanoid_sim.physics.model_build import model_build
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.objects import WorldObjects
 
 # Base-joint PD. Each joint carries the whole robot (a few kg m² about yaw, ~10 about pitch and roll at the
 # pelvis), so 1e5 Nm/rad holds a 30 Nm waist reaction to 0.3 mrad and stays below the explicit-stiffness
@@ -66,6 +67,7 @@ class IsaacLabCfg:
     # A heightfield terrain in place of the flat ground (an Isaac Lab TerrainImporterCfg, as training's
     # ``heightfield_terrain_cfg`` builds it): each env's robot starts at its tile's origin, ``base_height_m`` above it.
     terrain: object | None = None
+    objects: WorldObjects | None = None  # moving and free bodies (world/objects.py), in every env
     rerun: bool = False
     rerun_rrd: str | None = None
     # More scene entities by name (Isaac Lab entity configs: cameras, assets), added before the scene is built, as
@@ -405,6 +407,9 @@ class IsaacLabRobot:
             from humanoid_sim.world.boxes import static_boxes_cfg
 
             scene_cfg.static_boxes = static_boxes_cfg(cfg.scene.file, cfg.scene.spawn_m, friction=cfg.ground_friction)
+        from humanoid_sim.world.objects import add_objects
+
+        add_objects(scene_cfg, cfg.objects)
         scene_cfg.robot = articulation_cfg(usd_path, props, fixed_base=cfg.fixed_base, base_joints=cfg.base_joints,
                                            self_collision=cfg.self_collision, base_height_m=cfg.base_height_m,
                                            contact_sensors=cfg.contacts)
@@ -462,6 +467,11 @@ class IsaacLabRobot:
             root[:, :3] += self.env_origins
             self.robot.write_root_pose_to_sim_index(root_pose=root)
             self.robot.write_root_velocity_to_sim_index(root_velocity=torch.zeros(cfg.num_envs, 6, device=root.device))
+        self.objects = None
+        if cfg.objects:
+            from humanoid_sim.world.objects import ObjectsDriver
+
+            self.objects = ObjectsDriver(self.scene, cfg.objects)
         # Start every env at the articulation's default (standing) joint state.
         default = self.robot.data.default_joint_pos.torch.clone()
         self.robot.write_joint_position_to_sim_index(position=default)

@@ -24,6 +24,8 @@ The benchmarks need Isaac Lab, so they run in the Docker image or on a GPU node,
 | `--runtime` | off | | Run the runtime workload; it takes precedence over `--train` |
 | `--scene PATH`, `--spawn X Y` | none, `0 0` | all | Stand the robots among the static boxes in `PATH`, every robot at the spawn point (see [world.md](world.md#static-boxes)); the JSON gets a `scene` entry |
 
+| `--objects PATH` | none | all | Add the moving and free objects in `PATH` (JSON, see [world.md](world.md#moving-and-free-objects)), in every env; the JSON gets an `objects` entry |
+
 Options the workload does not use are ignored without a warning. The global options `--robot`, `--assets`, `--usd` and `--solver` go before `bench`, for example `humanoid-sim --usd path/to/robot.usda bench --num-envs 4096`.
 
 ## Output

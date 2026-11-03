@@ -25,11 +25,12 @@ from humanoid_sim.devices.demand import DriveDemand
 from humanoid_sim.sim import SimCore
 from humanoid_sim.timing.clock import NS_PER_MS, NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.objects import WorldObjects
 
 POLICY_PERIOD_NS = 20 * NS_PER_MS
 
 
-def run_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict:
+def run_bench(args, usd: Path, scene: StaticBoxes | None = None, objects: WorldObjects | None = None) -> dict:
     from humanoid_sim.model.poses import STANDING_CLEARANCE_M, initial_pose
 
     device = args.device
@@ -37,7 +38,8 @@ def run_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict:
     sim = SimCore(usd, device=device, robot=args.robot, num_envs=args.num_envs,
                   base_height_m=height + STANDING_CLEARANCE_M, solver=args.solver,
                   integrator=args.integrator,
-                  self_collision=False if getattr(args, "no_self_collision", False) else None, scene=scene)
+                  self_collision=False if getattr(args, "no_self_collision", False) else None, scene=scene,
+                  objects=objects)
     plant = sim.plant
     q0 = pose.to(device=sim.plant.cfg.device, dtype=sim.joint_state()[0].dtype).expand(args.num_envs, -1).clone()
     sim.write_joint_state(q0, torch.zeros_like(q0))
@@ -90,10 +92,12 @@ def run_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict:
         "fraction_envs_near_pose": upright, "fraction_envs_up": up,
         "robot": args.robot, "self_collision": sim.backend.cfg.self_collision, "host_syncs": "none (torch sync debug mode)" if cuda else "n/a",
         "scene": None if scene is None else scene.describe(),
+        "objects": None if not objects else objects.describe(),
     }
 
 
-def run_runtime_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict:
+def run_runtime_bench(args, usd: Path, scene: StaticBoxes | None = None,
+                      objects: WorldObjects | None = None) -> dict:
     import tempfile
 
     import numpy as np
@@ -105,7 +109,7 @@ def run_runtime_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict
     desc = Description.load(args.robot)
     with tempfile.TemporaryDirectory() as tmp:
         host = RuntimeHost(Path(tmp) / "plant", usd, device=args.device, robot=args.robot, solver=args.solver,
-                           support="free", pose="home", scene=scene)
+                           support="free", pose="home", scene=scene, objects=objects)
         client = abi.Segment.open(Path(tmp) / "plant")
         try:
             host._reset({"pose": "home"})

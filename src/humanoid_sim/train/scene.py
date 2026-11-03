@@ -9,6 +9,9 @@
 * ``static_boxes``: with ``scene`` (:class:`~humanoid_sim.world.boxes.StaticBoxes`), a room's walls and furniture
   as static boxes that every env collides with. Every env's robot then starts at the world origin, the scene's
   spawn point (each env is its own solver world, so robots at one spot never touch).
+* ``moving_objects`` and ``free_objects``: with ``objects`` (:class:`~humanoid_sim.world.objects.WorldObjects`), bodies
+  on scripted paths and bodies the robot can push, one set per env, in the env's frame. Drive the moving ones with
+  :class:`~humanoid_sim.world.objects.ObjectsDriver` (``update(plant.t_ns)`` before each physics step).
 
 The robot's default state is upright, its lowest sole corner on the ground
 (:func:`~humanoid_sim.model.kinematics.standing_base_height`), so ``reset_scene_to_default`` puts it on its feet,
@@ -41,6 +44,7 @@ from humanoid_sim.model.poses import POSES, STANDING_CLEARANCE_M, initial_pose
 from humanoid_sim.physics.isaaclab import contact_sensor_cfg, imu_sensor_cfg
 from humanoid_sim.physics.joint_properties import JointProperties
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.objects import WorldObjects
 
 __all__ = ["POSES", "STANDING_CLEARANCE_M", "initial_pose", "plant_joint_properties", "robot_build", "robot_scene_cfg",
            "robot_sim_cfg"]
@@ -78,9 +82,10 @@ def initial_joint_positions(desc, pose: dict[str, float]) -> dict[str, float]:
 def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_spacing: float | None = None,
                     terrain=None, ground_friction: float | None = None, imu: bool = True, contacts: bool = True,
                     self_collision: bool | None = None, pose: str = "home", scene: StaticBoxes | None = None,
-                    physics_overrides: dict | None = None):
+                    objects: WorldObjects | None = None, physics_overrides: dict | None = None):
     """Scene config with the robot, its sensors and the ground (or ``terrain``, an Isaac Lab
-    ``TerrainImporterCfg``), the robot on its feet in ``pose`` (see :data:`POSES`), and ``scene``'s static boxes.
+    ``TerrainImporterCfg``), the robot on its feet in ``pose`` (see :data:`POSES`), ``scene``'s static boxes and
+    ``objects`` (moving and free bodies, none by default).
     With robot friction randomized, pass ``ground_friction=0``: the solver takes the larger friction of the two
     shapes in contact; the boxes take the ground's friction. ``env_spacing`` defaults to 2.5 m, and to 0 with a
     ``scene``, which allows no other and no ``terrain``."""
@@ -120,6 +125,9 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
         from humanoid_sim.world.boxes import static_boxes_cfg
 
         cfg.static_boxes = static_boxes_cfg(scene.file, scene.spawn_m, friction=friction)
+    from humanoid_sim.world.objects import add_objects
+
+    add_objects(cfg, objects)
     if imu:
         cfg.imu = imu_sensor_cfg(robot)
     if contacts:
