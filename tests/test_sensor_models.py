@@ -228,3 +228,14 @@ def test_a_feedback_transfer_parses_into_the_delivered_samples_newest_first():
     out = imu_samples(gyro, accel, ints, h)
     assert list(out["seq"]) == [7, 6, 5] and list(out["sample_ns"]) == [70, 60, 50] and list(out["stamp_ns"]) == [71, 61, 51]
     assert out["gyro_rad_s"][2].tolist() == [6.0, 7.0, 8.0] and out["specific_force_m_s2"][0].tolist() == [100.0, 101.0, 102.0]
+
+
+def test_the_mti_610_clips_at_its_datasheet_full_scale_and_the_unmeasured_imus_do_not():
+    cfg = Mti610("imu_link", sample_period_ns=2_500_000).delivery_cfg()
+    assert cfg.gyro_range == pytest.approx(2000 * math.pi / 180) and cfg.accel_range == pytest.approx(10 * 9.80665)
+    assert cfg.drop_probability == 0.0
+    ideal = UnitreeG1Imu("imu_link", sample_period_ns=2_500_000).delivery_cfg()
+    assert ideal.gyro_range == 0.0 and ideal.accel_range == 0.0 and ideal.drop_probability == 0.0
+    assert Mti610("imu_link", sample_period_ns=2_500_000, drop_probability=0.1).delivery_cfg().drop_probability == 0.1
+    with pytest.raises(ValueError):
+        Mti610("imu_link", sample_period_ns=2_500_000, drop_probability=2.0)

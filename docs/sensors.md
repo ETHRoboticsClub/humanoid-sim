@@ -205,6 +205,14 @@ In training, a sample is also held for the plant's IMU latency (`ImuDelivery.lat
 
 In training, each sample is also written as the host decodes it from the sensor's output fields (`ImuDelivery.lsb`, from the rig instance's `output_lsb`): rounded to whole counts and saturated at a signed 16-bit count. The V1's MTi-610 sends RateOfTurn in counts of 2^-9 rad/s and Acceleration in counts of 2^-8 m/s² over CAN (MT1604P 6.4.2 and 6.4.4, as Controls' `ethrc_mti_can` decodes them), so a policy reads the gyro at rest in steps of 1.95e-3 rad/s, as on the robot. The runtime leaves it at 0: Controls encodes the samples into the MTi's CAN frames itself (`ethrc_fake_ethercat/mti_can.py`), and quantizing in both places would be redundant, as for the drives' reporting.
 
+### Range and lost samples
+
+Each sample is clipped per axis to the model's full scale (`gyro_range_rad_s`, `accel_range_m_s2`; 0 is unbounded, the default) after the errors are added and before the output field rounds it, so a bias or noise can push a reading over the limit as it would on the part. The V1's MTi-610 clips at ±2000 deg/s and ±10 g (MTi 600-series datasheet MT1603P 2020.B). The G1's body IMU and the ZED Mini's are unbounded: Unitree publishes no ranges and the ZED's part is unconfirmed. The runtime clips too, since it runs the same `ImuDelivery`.
+
+An instance can lose samples: `Mti610("imu_link", sample_period_ns=2_500_000, drop_probability=0.01)`. Each sample is lost with that probability (`ImuDelivery.drop_probability`, per env, starts at the instance's; a cfg of 0 draws nothing, so the default output is bit-identical to before). `drop_mode="omit"` (the default) never delivers a lost sample, leaving a gap in `seq` and `sample_ns`: Controls' `ethrc_mti_can` assembler sees the same on the wire as a skipped SampleTime and counts it as `missed`, and publishes nothing for it. `drop_mode="hold"` delivers the sample with the previous output's value, for a stale read; the first sample after a reset is never held. Losses use their own random stream, so the noise draws are the same with and without them. Both rigs default to none lost: the V1 measured none missed in 124 s at 400 Hz (2026-11-02), and the G1's rate of loss is unmeasured.
+
+The output latency has no model knob: it is the profile's `devices.imu_path.sample_to_host_ns` (measured on the V1, 2.1 ms), applied per env in training and overridable by the `imu_latency` randomization parameter (see Delivery above).
+
 ### `ImuSamples`
 
 The last H delivered samples per env, newest first. H is `ImuDeliveryCfg.history`: 16 by default, which is what training keeps, and 32 in the runtime, which builds its `SimCore` with `imu_history=abi.IMU_SAMPLES` so the feedback region's 32 slots can fill. Slots not yet filled have a `sample_ns` and `stamp_ns` of -1.

@@ -14,6 +14,13 @@ samples, newest first, each with its measurement time and its host-receipt stamp
   (uniform per burst), stamped on receipt ``in_burst_spacing_ns`` apart. A consumer that reads "the latest
   sample" sees it up to one burst period late. A sample is held at least ``latency_ns`` (per env, set by the
   training plant; 0 by default) after its measurement, the host's path the burst model leaves out.
+* **Range.** ``gyro_range`` / ``accel_range`` (the part's full scale, per axis; 0 = unbounded, the default): each sample
+  is clipped to ± the range after the errors are added, before the output field rounds it.
+* **Dropped samples.** With probability ``drop_probability`` per sample (per env, starting at the cfg's; a cfg of 0
+  draws nothing) a sample is lost. ``drop_mode="omit"``: it never reaches the host, so the consumer sees a gap in
+  ``seq`` and ``sample_ns``, as Controls' MTi driver counts a skipped SampleTime as ``missed``. ``"hold"``: a
+  sample is delivered but repeats the previous output (a stale read); the first sample after a reset is never held.
+  Losses are drawn from their own stream, so the noise is the same with and without them.
 * **Output field.** ``lsb`` (per axis, set by the training plant; 0, unquantized, by default): each sample is
   rounded to whole counts of it and saturates at a signed 16-bit count, as the host decodes the sensor's output.
   The runtime leaves it at 0: its client encodes the samples into the sensor's frames itself.
@@ -42,6 +49,10 @@ class ImuDeliveryCfg:
     gyro_bias_instability: float = 0.0  # rad/s, stationary sigma of the drift
     accel_bias_instability: float = 0.0  # m/s²
     bias_correlation_time_ns: int = 100_000_000_000
+    gyro_range: float = 0.0  # rad/s, full scale per axis; 0: unbounded
+    accel_range: float = 0.0  # m/s², full scale per axis; 0: unbounded
+    drop_probability: float = 0.0  # per sample; 0: none lost
+    drop_mode: str = "omit"  # "omit" (never delivered, a gap in seq) or "hold" (delivered, repeats the previous output)
     history: int = 16  # delivered samples kept per env
     pending: int = 16  # samples a burst can carry
 
@@ -81,6 +92,12 @@ class ImuDelivery:
     def __init__(self, cfg: ImuDeliveryCfg, num_envs: int, *, device="cpu", dtype=torch.float32, seed: int = 0):
         if cfg.pending * cfg.sample_period_ns < cfg.burst_period_ns[1]:
             raise ValueError("pending buffer shorter than a burst period")
+        if cfg.gyro_range < 0 or cfg.accel_range < 0:
+            raise ValueError(f"ranges ({cfg.gyro_range}, {cfg.accel_range}) must be >= 0 (0: unbounded)")
+        if not 0.0 <= cfg.drop_probability <= 1.0:
+            raise ValueError(f"drop_probability {cfg.drop_probability} outside [0, 1]")
+        if cfg.drop_mode not in ("omit", "hold"):
+            raise ValueError(f"drop_mode {cfg.drop_mode!r}: omit or hold")
         self.cfg, self.num_envs = cfg, num_envs
         self.device, self.dtype = torch.device(device), dtype
         self.generator = torch.Generator(device=self.device).manual_seed(seed)
@@ -91,6 +108,13 @@ class ImuDelivery:
         f = dict(device=self.device, dtype=dtype)
         self._sigma = torch.tensor([self.gyro_sigma] * 3 + [self.accel_sigma] * 3, **f)
         self._nominal_sigma = self._sigma.clone()
+        inf = math.inf
+        self._range = torch.tensor([cfg.gyro_range or inf] * 3 + [cfg.accel_range or inf] * 3, **f)
+        self._drops = cfg.drop_probability > 0  # fixed at construction: a cfg without drops draws nothing
+        self.drop_probability = torch.full((num_envs,), cfg.drop_probability, **f)  # per env, written by the plant
+        self.drop_generator = torch.Generator(device=self.device).manual_seed(seed + 0x5EED)
+        self._last = torch.zeros(num_envs, 6, **f)  # the previous output, for "hold"
+        self._last_valid = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
         i64 = dict(device=self.device, dtype=torch.int64)
         # The model's bias: turn-on (drawn at reset) and in-run drift, gyro then accelerometer axes.
         self._turn_on_sigma = torch.tensor([cfg.gyro_turn_on_bias] * 3 + [cfg.accel_turn_on_bias] * 3, **f)
@@ -149,6 +173,7 @@ class ImuDelivery:
         if not keep_seq:
             self.seq.index_fill_(0, env_ids, 0)
         self.pending_count.index_fill_(0, env_ids, 0)
+        self._last_valid[env_ids] = False
         s = self.samples
         s.stamp_ns.index_fill_(0, env_ids, -1)
         s.sample_ns.index_fill_(0, env_ids, -1)
@@ -207,17 +232,29 @@ class ImuDelivery:
         acc = (r @ ideal[:, 3:].unsqueeze(-1)).squeeze(-1) + self.accel_bias
         model_bias = (self.turn_on + self.drift) * self._model_errors
         sample = torch.cat([gyro, acc], dim=1) + model_bias + self._normal(self.num_envs) * self._sigma
+        sample = torch.maximum(torch.minimum(sample, self._range), -self._range)
         counts = torch.round(sample / self.lsb.clamp(min=torch.finfo(self.dtype).tiny)).clamp(-32768, 32767)
         sample = torch.where(self.lsb > 0, counts * self.lsb, sample)
         self.seq.add_(due.long())
-        full = due & (self.pending_count >= self.cfg.pending)
+        keep = due
+        if self._drops:
+            lost = due & (torch.rand(self.num_envs, generator=self.drop_generator, device=self.device,
+                                     dtype=self.dtype) < self.drop_probability)
+            if self.cfg.drop_mode == "hold":
+                lost = lost & self._last_valid
+                sample = torch.where(lost.unsqueeze(1), self._last, sample)
+            else:
+                keep = due & ~lost
+            self._last.copy_(torch.where(due.unsqueeze(1), sample, self._last))
+            self._last_valid.copy_(self._last_valid | due)
+        full = keep & (self.pending_count >= self.cfg.pending)
         self._drop_oldest_pending(full)
         slot = self.pending_count.clamp(max=self.cfg.pending - 1)
-        write = due.unsqueeze(1) & (self._slots.unsqueeze(0) == slot.unsqueeze(1))
+        write = keep.unsqueeze(1) & (self._slots.unsqueeze(0) == slot.unsqueeze(1))
         self.pending_values.copy_(torch.where(write.unsqueeze(-1), sample.unsqueeze(1), self.pending_values))
         self.pending_ns.copy_(torch.where(write, at_ns.unsqueeze(1), self.pending_ns))
         self.pending_seq.copy_(torch.where(write, self.seq.unsqueeze(1), self.pending_seq))
-        self.pending_count.copy_((self.pending_count + due.long()).clamp(max=self.cfg.pending))
+        self.pending_count.copy_((self.pending_count + keep.long()).clamp(max=self.cfg.pending))
 
     def _drop_oldest_pending(self, mask: torch.Tensor) -> None:
         self._shift_pending(mask.long())
