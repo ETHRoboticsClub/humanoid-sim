@@ -14,7 +14,9 @@ top, without a second terrain code path:
   * ``.json``, the tiles of a training terrain: the arguments of ``heightfield_terrain_cfg`` (``size_m``, ``rows``,
     ``cols``, ``border_m``, ``curriculum``, and optionally ``friction``, ``horizontal_scale_m``,
     ``vertical_scale_m``, ``seed``) and ``tiles``, ``{name: {"type": "HfRandomUniformTerrainCfg", ...fields}}`` of
-    Isaac Lab's heightfield sub-terrain configs. Set a ``seed`` for the same ground every time.
+    Isaac Lab's heightfield sub-terrain configs, or of its triangle-mesh ones (``"type":
+    "MeshPyramidStairsTerrainCfg"``, from ``isaaclab.terrains.trimesh``), which make the terrain a
+    ``mesh_terrain_cfg``. Set a ``seed`` for the same ground every time.
 
   Terrain generators and curricula of a task stay in humanoid-learning: it passes its own config in Python, or
   writes a heights file for the command line.
@@ -60,6 +62,8 @@ class Terrain:
         out = {"source": self.source, "sha256": self.sha256, "type": "heightfield"}
         if gen is None:
             return out
+        if not all(getattr(c, "convert_to_heightfield", True) for c in gen.sub_terrains.values()):
+            out["type"] = "mesh"  # one collision mesh, not a heightfield
         material = getattr(self.cfg, "physics_material", None)
         return out | {
             "size_m": gen.size[0], "rows": gen.num_rows, "cols": gen.num_cols, "border_m": gen.border_width,
@@ -144,8 +148,10 @@ _SPEC_KEYS = {"size_m", "rows", "cols", "border_m", "curriculum", "friction", "h
 
 def _tile_spec_cfg(path: Path, friction: float | None):
     import isaaclab.terrains.height_field as height_field
+    import isaaclab.terrains.trimesh as trimesh
+    from isaaclab.terrains import SubTerrainBaseCfg
 
-    from humanoid_sim.world.terrain import heightfield_terrain_cfg
+    from humanoid_sim.world.terrain import heightfield_terrain_cfg, mesh_terrain_cfg
 
     spec = json.loads(path.read_text())
     unknown = sorted(set(spec) - _SPEC_KEYS)
@@ -157,15 +163,20 @@ def _tile_spec_cfg(path: Path, friction: float | None):
     for name, fields in spec["tiles"].items():
         fields = dict(fields)
         kind = fields.pop("type", None)
-        cls = getattr(height_field, str(kind), None)
-        if not (isinstance(cls, type) and issubclass(cls, height_field.HfTerrainBaseCfg)):
-            raise ValueError(f"{path}: tile {name!r}: type {kind!r} is not a heightfield sub-terrain of "
-                             "isaaclab.terrains.height_field")
+        cls = getattr(height_field, str(kind), None) or getattr(trimesh, str(kind), None)
+        if not (isinstance(cls, type) and issubclass(cls, SubTerrainBaseCfg)):
+            raise ValueError(f"{path}: tile {name!r}: type {kind!r} is not a sub-terrain of "
+                             "isaaclab.terrains.height_field or isaaclab.terrains.trimesh")
         tiles[name] = cls(**{k: tuple(v) if isinstance(v, list) else v for k, v in fields.items()})
     args = {k: v for k, v in spec.items() if k != "tiles"}
     if friction is not None:
         args["friction"] = friction
-    return heightfield_terrain_cfg(tiles, **args)
+    if all(isinstance(c, height_field.HfTerrainBaseCfg) and c.convert_to_heightfield for c in tiles.values()):
+        return heightfield_terrain_cfg(tiles, **args)
+    for key in ("horizontal_scale_m", "vertical_scale_m"):
+        if key in args:
+            raise ValueError(f"{path}: {key} is for heightfield tiles; a spec with mesh tiles has none")
+    return mesh_terrain_cfg(tiles, **args)
 
 
 _FILE_TILE_CLASS = None

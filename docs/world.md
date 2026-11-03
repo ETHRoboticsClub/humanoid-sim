@@ -1,11 +1,12 @@
 # The world around the robot
 
-Around the robot, humanoid-sim has a ground (a flat plane, or a heightfield terrain, a surface given as a grid of heights), optional static boxes standing on it (a room's walls and furniture, such as Controls' hangar), optional moving and free objects (people, a tug, a cart, a crate to push), an optional [support](glossary.md#support) that holds the robot up, and external [disturbances](glossary.md#disturbance). The code is in `src/humanoid_sim/world/` and in the scene builders that use it: `robot_scene_cfg` for training (`src/humanoid_sim/train/scene.py`) and `SimCore` (`src/humanoid_sim/sim.py`) for replays and the real-time runtime.
+Around the robot, humanoid-sim has a ground (a flat plane, a heightfield terrain, a surface given as a grid of heights, or a triangle-mesh terrain such as stairs), optional static boxes standing on it (a room's walls and furniture, such as Controls' hangar), optional moving and free objects (people, a tug, a cart, a crate to push), an optional [support](glossary.md#support) that holds the robot up, and external [disturbances](glossary.md#disturbance). The code is in `src/humanoid_sim/world/` and in the scene builders that use it: `robot_scene_cfg` for training (`src/humanoid_sim/train/scene.py`) and `SimCore` (`src/humanoid_sim/sim.py`) for replays and the real-time runtime.
 
 | Feature | Training | Replay | Runtime (`serve`) |
 |---|---|---|---|
 | Flat ground | default; friction set by `ground_friction` | profile friction | profile friction |
 | Heightfield terrain | `robot_scene_cfg(..., terrain=...)` | `SimCore(..., terrain=...)`, `replay --terrain FILE` | `serve --terrain FILE` |
+| Mesh terrain (stairs, edged ramps; [Kamino](#triangle-mesh-terrain)) | `robot_scene_cfg(..., terrain=mesh_terrain_cfg(...))` | `SimCore(..., terrain=...)`, `replay --terrain FILE` | `serve --terrain FILE` |
 | Static boxes (walls, furniture) | `robot_scene_cfg(..., scene=...)` | none | `--scene` and `--spawn` |
 | Moving and free objects | `robot_scene_cfg(..., objects=...)`, driven by `ObjectsDriver` | `SimCore(..., objects=...)` | `--objects` |
 | Start pose | `robot_scene_cfg(..., pose=...)`: `"home"` (default) or `"standing"` | the capture's first measured drive positions | the profile's `poses.start` (V1 `standing`, G1 `home`) or `--pose`; `RESET` can pick either |
@@ -28,7 +29,7 @@ The robot touches the world through one convex hull per body and a thin box unde
 
 ## Heightfield terrain
 
-The robot's contacts run in MJWarp's own collision pipeline, which collides the robot's hulls and boxes with heightfields but not with triangle-mesh terrain. Isaac Lab's terrain generator builds the whole terrain as one triangle mesh and tags it for conversion to a heightfield only when every sub-terrain sets `convert_to_heightfield`, which the `Hf*` configs do by default; Newton then replaces the mesh by a heightfield at the terrain's horizontal resolution. `heightfield_terrain_cfg` (`src/humanoid_sim/world/terrain.py`) enforces this and raises a `ValueError` for any sub-terrain that is not an `Hf*` config with conversion on. Mesh sub-terrains (Isaac Lab's `Mesh*` configs, such as stairs with vertical risers) are therefore not supported.
+Isaac Lab's terrain generator builds the whole terrain as one triangle mesh and tags it for conversion to a heightfield only when every sub-terrain sets `convert_to_heightfield`, which the `Hf*` configs do by default; Newton then replaces the mesh by a heightfield at the terrain's horizontal resolution. `heightfield_terrain_cfg` (`src/humanoid_sim/world/terrain.py`) enforces this and raises a `ValueError` for any sub-terrain that is not an `Hf*` config with conversion on. Mesh sub-terrains (Isaac Lab's `Mesh*` configs, such as stairs with vertical risers) go through `mesh_terrain_cfg` instead ([Triangle-mesh terrain](#triangle-mesh-terrain)).
 
 This module is the mechanism only. Which tiles a task trains on, how many, how hard, and any curriculum over them are the task's choice and live in humanoid-learning with its terrain generators; humanoid-sim fixes only what the physics can collide with. So `heightfield_terrain_cfg` has no stock tile mix and no default layout: the caller states the grid.
 
@@ -91,7 +92,7 @@ The runtime starts the robot standing, as on flat ground, but on the terrain "st
 
 What the runtime tells its clients. The descriptor's `terrain` is null on flat ground; else the file and its SHA-256, the layout the config states (`size_m`, `rows`, `cols`, `border_m`, `curriculum`, `horizontal_scale_m`, `vertical_scale_m`, `seed`, `tiles`, `friction`), `spawn_m` (x, y, z of the start, in the world frame) and `extent_m` (the mesh's x and y ranges). `serve --trajectory` copies the block into the recording's header, so a recording says which ground it was made on. Rendering sensors from such a recording, or from a live session, is refused: the render scene has the flat ground only.
 
-Refused: a terrain with static boxes (they stand on the flat ground) and, in the runtime, with a gantry crane (placed in the room's frame).
+Refused: a terrain with static boxes (they stand on the flat ground; stairs as boxes are below) and, in the runtime, with a gantry crane (placed in the room's frame).
 
 ### Which pipeline collides the robot
 
@@ -122,9 +123,32 @@ MJWarp tests each robot shape against the heightfield cells under it, collects u
 
 The message is separate from MJWarp's `nconmax` and `njmax` overflow warnings, which mean the contact or constraint buffers of the step ran out (`physics` block of `profiles/ethrc_v1.yaml`).
 
+## Triangle-mesh terrain
+
+`mesh_terrain_cfg(sub_terrains, *, size_m, rows, cols, border_m, curriculum, friction)` (`src/humanoid_sim/world/terrain.py`) is `heightfield_terrain_cfg` for Isaac Lab's mesh sub-terrains (`isaaclab.terrains.trimesh`: `MeshPyramidStairsTerrainCfg`, `MeshInvertedPyramidStairsTerrainCfg`, `MeshBoxTerrainCfg`, `MeshGapTerrainCfg`, `MeshPitTerrainCfg`, `MeshRailsTerrainCfg` and the others). It returns the same `TerrainImporterCfg`, so `robot_scene_cfg`, `SimCore` and the runtime take it unchanged, and `load_terrain` reads mesh tiles from the `.json` tile spec (`{"type": "MeshPyramidStairsTerrainCfg", "step_height_range": [0.15, 0.15], "step_width": 0.4}`). Heightfield tiles may be mixed in; the terrain is then one collision mesh and none of it is converted. A terrain of heightfield tiles only is refused, use `heightfield_terrain_cfg`. The runtime descriptor's terrain `type` is `mesh` for such a terrain, and `Ground` reads the stage's triangles, so the start pose, `rest_base_height` and the origins work as on a heightfield (a pyramid's origin is the top of its platform).
+
+The mesh collides because Newton's collision pipeline tests every robot shape against the triangles under it (`narrow_phase.py`: a triangle midphase, then GJK/MPR between the triangle and the box, sphere or convex hull). It was our own guard that kept meshes out of the training scene; the "meshes do not collide" in earlier versions of this page was about MJWarp's own pipeline (`contacts: mujoco`), which this page's heightfield section already rules out. What the pipeline's contacts do next depends on the solver:
+
+| Ground | Kamino | MJWarp (`contacts: newton`) |
+|---|---|---|
+| Mesh stairs, the V1 | Works. Rests on the platform, on a lower ring and near an edge with its soles at the surface within 1 mm; landing from 0.3 m (2.4 m/s) on stairs does not go through | Falls through: on landing the soft contact lets the 5 mm sole boxes sink past the zero-thickness triangle, the contact normal flips and nothing pushes back (`xfail` in `tests/test_mesh_terrain.py`) |
+| Mesh stairs, the G1 | Works (soles within 1 mm of the surface) | Works as far as tested: soles within 4 mm of the surface on the platform and on a ring |
+| A flat, open mesh (a scan's floor) | Works (V1 rests on it) | MuJoCo refuses to compile it (`mesh volume is too small`) |
+| The same stairs as static boxes on the flat ground | Works | Works (the soles sink up to 2 cm into a box for an instant on a 2.4 m/s landing, then rest on it) |
+
+A triangle has no inside. Kamino's contacts are hard constraints that keep the penetration near zero, so the sole never gets far enough in for the normal to flip. MJWarp's are soft: a robot landing with a thin shape (the V1's sole is 5 mm) goes deeper than the shape's half thickness and is pushed the wrong way. A heightfield does not have this because MJWarp collides it as solid prisms down to its base. Shape margins on the terrain (`newton:contactMargin`, `physxCollision:restOffset`) changed nothing in the V1 case, and neither did `nconmax`, the integrator or the cone. So on MJWarp, build steps from static boxes (below), and use mesh terrain on Kamino.
+
+Stairs as boxes. `StaticBoxes` ([Static boxes](#static-boxes)) collide on both solvers, so nested boxes standing on z = 0, one per step as Isaac Lab's pyramid stairs build them, make stairs on MJWarp too. The costs: every env starts at the world origin on the same stairs (boxes are not per tile), and no terrain curriculum.
+
+Contacts. A robot on a mesh makes more contacts than on a plane (a V1 on stairs makes about 30 per world on the terrain, on top of its self-contacts). Kamino's capacity (`max_contacts_per_world`) is checked by the plant as before and stops rather than drop contacts; raise it if a task with stairs hits it.
+
+Not tried: the hangar scan (832k triangles) as ground, a mesh terrain under thousands of envs on Kamino (speed and memory), Kamino with a terrain of many tiles of different shapes, and `contacts: mujoco`. A scanned room still enters as boxes; its mesh is only drawn.
+
+The checks are in `tests/test_mesh_terrain.py` (construction runs on any machine with Isaac Lab; the physics runs on CUDA): a V1 and a G1 hold the home pose on the stairs on each solver, and a V1 lands on them.
+
 ## Static boxes
 
-A room enters the scene as static boxes fitted to its walls and furniture. They stand on the flat ground, which stays the walking surface. The physics cannot collide the robot with a scan's triangle mesh (see [Heightfield terrain](#heightfield-terrain)), but it collides boxes like any convex shape. The code is in `src/humanoid_sim/world/boxes.py`.
+A room enters the scene as static boxes fitted to its walls and furniture. They stand on the flat ground, which stays the walking surface. A scan's triangle mesh is not collided here (see [Triangle-mesh terrain](#triangle-mesh-terrain) for what mesh collision does and does not do), but boxes collide like any convex shape, on both solvers. The code is in `src/humanoid_sim/world/boxes.py`.
 
 Controls' hangar is such a room. Its MuJoCo simulation stands the robot among 470 boxes fitted to a scan of the ETHRC hangar: 82 wall slabs and one or a few blocks per piece of furniture, all turned by the same 1.75° about the vertical. The boxes are in Controls' `ros2_ws/src/sim/ethrc_sim/environments/hangar/hangar_proxy.npz` (a git-lfs file: run `git lfs pull` in the Controls checkout), and its spawn point, `HANGAR_SPAWN` in `ethrc_sim/environments.py`, is (-4.42, 3.48) m, open floor 1.35 m from the nearest box. humanoid-sim does not copy the file: you pass its path.
 
@@ -474,10 +498,10 @@ A `RESET` command clears all active disturbances. Faults (`INJECT_FAULT`: encode
 
 ## What is not modeled
 
-- A room collides as boxes only. Its scan is drawn as a textured mesh but never collided, the Gaussian splat of the hangar is drawn only by the RTX cameras ([rtx-sensors.md](rtx-sensors.md)), and there are no other static shapes (cylinders, meshes).
+- A room collides as boxes only. Its scan is drawn as a textured mesh but never collided (a mesh collides as terrain on Kamino, but the scan has not been tried), the Gaussian splat of the hangar is drawn only by the RTX cameras ([rtx-sensors.md](rtx-sensors.md)), and there are no other static shapes (cylinders, meshes).
 - Objects are primitive shapes: no meshes, and a moving object's orientation is a yaw. A moving object is kinematic, so it never yields to the robot. Free objects have a constant mass and friction per scene (not per env), and replays of captures have no option for objects (a capture has none).
 - Static boxes stand on the flat ground; they cannot be combined with a heightfield terrain, and every environment of a scene with boxes starts at the spawn point.
-- There is no triangle-mesh terrain (stairs with vertical risers, mesh obstacles), for the collision reason above.
+- Mesh terrain (stairs with vertical risers, edged ramps) collides on Kamino only; on MJWarp the V1 falls through it, so stairs there are static boxes on the flat ground.
 - Replays and the runtime start one robot on the first tile of a terrain; there is no choice of tile, no terrain curriculum, and the sensor render scene (cameras, lidar) and `view-runtime` draw the flat ground only.
 - The training scene has no fixed-base or base-joint option; supports in training are limited to a `Gantry` your task applies.
 - A gantry crane is its rope's top only: the frame, bridge and hook do not collide, the rope has no mass and is drawn as a line, and the crane follows its command whatever the rope pulls.

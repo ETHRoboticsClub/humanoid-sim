@@ -16,6 +16,7 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 | `test_envelope.py` | Torque-speed envelope interpolation in all four quadrants | |
 | `test_exc_reader.py` | The capture reader: sampling helpers, captures that match the description, the bursty base-frame IMU stream | 2 tests `data` |
 | `test_imu_delivery.py` | IMU sampling on the sensor clock, burst delivery, bias, misalignment and noise, per-env reset | |
+| `test_mesh_terrain.py` | Stairs with vertical risers as the ground: `mesh_terrain_cfg` and mesh tiles in a terrain file, and the V1 and G1 standing on the stairs (platform, a ring, near an edge) and the V1 landing on them, as mesh terrain and as static boxes, on each solver; the V1 on MJWarp's mesh is `xfail` | the stairs tests `physics`, on CUDA |
 | `test_mirror.py` | The left/right mirror map against URDF forward kinematics | |
 | `test_model_build.py` | The prepared URDF: inventory, welds, limits, sole boxes, digest, body tree, collision meshes, self-collision sets, base joints | |
 | `test_objects.py` | Moving and free objects: path interpolation (linear and spline, one-shot and looping, batched over envs with per-env clocks, exact in nanoseconds), the specs and their file, the driver's frames, phase and offset; in the solver, on MJWarp and Kamino, a kinematic box that follows its path and shoves a standing V1, a free box that the robot pushes, and on CUDA the driver's update inside a CUDA graph under torch's sync debug mode | 3 tests `physics` |

@@ -1,8 +1,8 @@
 """Static boxes around the robot: a scene's fixed collision geometry (walls, furniture), read from a file.
 
-The physics collides the robot with convex shapes and heightfields, not triangle meshes (MJWarp's collision
-pipeline, see ``world/terrain.py``), so a scanned room enters the scene as boxes fitted to the scan. They stand on
-the scene's own flat ground, which stays the walking surface.
+Boxes collide on both solvers, so a scanned room enters the scene as boxes fitted to the scan (triangle meshes
+collide as terrain on Kamino only, ``world/terrain.py``). They stand on the scene's own flat ground, which stays the
+walking surface.
 
 The file is an ``.npz``, in metres and radians, z up, the floor at z = 0:
 
