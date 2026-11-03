@@ -19,6 +19,7 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from humanoid_sim.model.description import Description
@@ -62,6 +63,9 @@ class IsaacLabCfg:
     extra_imus: dict | None = None  # more IMU sensors, scene name -> the URDF link each sits at
     contacts: bool = False  # a contact sensor on every body
     scene: StaticBoxes | None = None  # static boxes around the robot (every env's robot then starts at the origin)
+    # A heightfield terrain in place of the flat ground (an Isaac Lab TerrainImporterCfg, as training's
+    # ``heightfield_terrain_cfg`` builds it): each env's robot starts at its tile's origin, ``base_height_m`` above it.
+    terrain: object | None = None
     rerun: bool = False
     rerun_rrd: str | None = None
     # More scene entities by name (Isaac Lab entity configs: cameras, assets), added before the scene is built, as
@@ -372,7 +376,7 @@ def simulation_cfg(physics: dict, *, device: str, period_s: float, solver: str |
 
 
 class IsaacLabRobot:
-    """Scene with ground, robot and any static boxes; exposes joint state, target writes and stepping as torch
+    """Scene with ground (or terrain), robot and any static boxes; exposes joint state, target writes and stepping as torch
     tensors."""
 
     def __init__(self, desc: Description, usd_path: Path, cfg: IsaacLabCfg, *, props: JointProperties):
@@ -390,7 +394,12 @@ class IsaacLabRobot:
         # The boxes are one set of shapes every env's world collides with, at the same coordinates.
         spacing = 0.0 if cfg.scene is not None else cfg.env_spacing_m
         scene_cfg = SceneCfg(num_envs=cfg.num_envs, env_spacing=spacing, replicate_physics=True)
-        scene_cfg.ground = ground_cfg(cfg.ground_friction)
+        if cfg.terrain is not None and cfg.scene is not None:
+            raise ValueError("a scene's boxes stand on the flat ground: no terrain with them")
+        if cfg.terrain is not None:
+            scene_cfg.terrain = cfg.terrain
+        else:
+            scene_cfg.ground = ground_cfg(cfg.ground_friction)
         if cfg.scene is not None:
             from humanoid_sim.world.boxes import static_boxes_cfg
 
@@ -416,12 +425,19 @@ class IsaacLabRobot:
         physics = {"solver": cfg.solver, cfg.solver: cfg.settings}
         self.sim = sim_utils.SimulationContext(simulation_cfg(physics, device=cfg.device, period_s=cfg.period_s,
                                                               integrator=cfg.integrator, visualizers=visualizers))
+        generator = getattr(cfg.terrain, "terrain_generator", None)
+        if getattr(generator, "seed", None) is not None:
+            # Isaac Lab's height-field functions draw their heights from NumPy's global state, which the generator's
+            # seed does not set: seeding it makes the same config the same ground every time.
+            np.random.seed(generator.seed)
         with model_build(desc.robot, physics):
             self.scene = instantiate(scene_cfg)
             self.sim.reset()
         check_crank_stops(desc.robot, physics)
         apply_joint_limits(physics)
         apply_loop_closure(physics)
+        if cfg.terrain is not None:
+            apply_heightfield_base(physics)  # as RobotPlant does for a training scene
         from humanoid_sim.physics.contact_capacity import contact_capacity_guard
 
         self._contact_capacity = contact_capacity_guard(physics, cfg.num_envs, cfg.device)
@@ -432,6 +448,19 @@ class IsaacLabRobot:
         self.imu = self.scene["imu"] if cfg.imu else None
         self.extra_imus = {name: self.scene[name] for name in (cfg.extra_imus or {})}
         self.contacts = self.scene["contacts"] if cfg.contacts else None
+        # On a terrain every env's robot starts at its tile's origin (the scene's env origins), as training resets it;
+        # the surface the scene was built with is read back for callers that rest a robot on it.
+        self.ground = None
+        self.env_origins = None
+        if cfg.terrain is not None:
+            from humanoid_sim.world.terrain_io import Ground
+
+            self.ground = Ground.from_stage()
+            self.env_origins = self.scene.env_origins.clone()
+            root = self.robot.data.default_root_pose.torch.clone()
+            root[:, :3] += self.env_origins
+            self.robot.write_root_pose_to_sim_index(root_pose=root)
+            self.robot.write_root_velocity_to_sim_index(root_velocity=torch.zeros(cfg.num_envs, 6, device=root.device))
         # Start every env at the articulation's default (standing) joint state.
         default = self.robot.data.default_joint_pos.torch.clone()
         self.robot.write_joint_position_to_sim_index(position=default)

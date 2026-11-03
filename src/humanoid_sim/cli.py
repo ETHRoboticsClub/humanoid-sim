@@ -3,7 +3,7 @@
     humanoid-sim [--solver mjwarp|kamino] <command>  Newton solver for the commands that step physics
                                                    (default: the profile's)
     humanoid-sim build-asset [--base-joints]       robot USD from the description (Isaac Lab image)
-    humanoid-sim replay <exc-dir> [--period-ms PERIOD] [--base yaw|orientation|fixed]
+    humanoid-sim replay <exc-dir> [--period-ms PERIOD] [--base yaw|orientation|fixed] [--terrain FILE]
                                                    drive-level replay, scored against the capture;
                                                    base following the capture's IMU yaw (default), or fixed
     humanoid-sim view-replay <replay-dir> --save x.rrd   sim and real robot + every drive signal in Rerun
@@ -11,7 +11,7 @@
     humanoid-sim bench --num-envs N [--train]      real-time factor / throughput (Isaac Lab / Newton); --train runs
                                                    the Train-Time API scene (sensors, randomization); --runtime
                                                    the real-time host's step
-    humanoid-sim serve --segment PATH [--support suspended|free]
+    humanoid-sim serve --segment PATH [--support suspended|free] [--terrain FILE]
                                                    one robot in real time behind the runtime segment, for
                                                    Controls' plant host"""
 
@@ -71,10 +71,12 @@ def cmd_replay(args) -> int:
     effort = effort_config(args)
     moving = args.base != "fixed"
     usd = _usd(args, base_joints=moving)
+    terrain = _terrain(args)
     sim = SimCore(usd, device=args.device, robot=args.robot,
                   period_ns=None if args.period_ms is None else int(round(args.period_ms * 1e6)),
                   fixed_base=not moving, base_joints=moving, solver=args.solver, integrator=args.integrator,
-                  self_collision=False if args.no_self_collision else None, contacts=acceleration is not None)
+                  self_collision=False if args.no_self_collision else None, contacts=acceleration is not None,
+                  terrain=terrain)
     period_ns = sim.period_ns
     t = time.time()
     res = replay(cap, sim, duration_s=args.duration, base_motion=args.base if moving else None,
@@ -97,6 +99,7 @@ def cmd_replay(args) -> int:
     summary = {"dataset_id": cap.dataset_id, "name": cap.name, "period_ns": period_ns,
                "physics": f"isaaclab/{sim.solver}", "device": args.device, "integrator": integrator, "base": args.base,
                "self_collision": not args.no_self_collision and bool(sim.profile["physics"]["self_collision"]),
+               "terrain": None if terrain is None else terrain.describe(),
                **plant_identity(sim, usd),
                "wall_s": wall,
                "sim_s": len(res.t_ns) * period_ns / 1e9, "drives": res.drives,
@@ -207,6 +210,20 @@ def _add_scene_args(parser) -> None:
                         help="the scene point (m) the robot starts at, placed at the world origin (default 0 0)")
 
 
+def _terrain(args):
+    """The terrain of ``--terrain`` (a heights ``.npz`` or a tile-spec ``.json``, world/terrain_io.py), or None."""
+    if args.terrain is None:
+        return None
+    from humanoid_sim.world.terrain_io import load_terrain
+
+    return load_terrain(args.terrain)
+
+
+def _add_terrain_arg(parser) -> None:
+    parser.add_argument("--terrain", default=None, help="a heightfield in place of the flat ground, built as training "
+                        "builds its terrain: an .npz of heights or a .json of tiles, as world/terrain_io.py describes")
+
+
 def _gantry(args):
     """The crane of ``--gantry``, placed with ``--spawn`` like the scene, or None."""
     if args.gantry is None:
@@ -223,6 +240,7 @@ def cmd_serve(args) -> int:
         raise SystemExit("--truth-every must be at least 1, and 1 with --trajectory (it records every step)")
     host = RuntimeHost(args.segment, _usd(args), device=args.device, robot=args.robot, solver=args.solver,
                        support=args.support, pose=args.pose, scene=_scene(args), gantry=_gantry(args),
+                       terrain=_terrain(args),
                        bus_period_ns=int(args.bus_period_us * 1000),
                        client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
                        sim_revision=_revision(),
@@ -338,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     add_acceleration_args(r)
     add_effort_args(r)
     r.add_argument("--capture-coordinates")
+    _add_terrain_arg(r)
     r.set_defaults(func=cmd_replay)
 
     v = sub.add_parser("view-replay", help="Rerun recording of a replay: sim and real robot, all drive signals")
@@ -457,6 +476,7 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--scan-texture", default=None, help="the scan's texture (PNG)")
     sv.add_argument("--scan-floor-texture", default=None, help="the scan's floor seen from above (PNG), drawn over "
                     "the scene file's floor_corners")
+    _add_terrain_arg(sv)
     sv.add_argument("--gantry", default=None, help="a gantry crane over the scene (JSON, world/trolley.py's "
                     "GantryRig, in the scene file's frame): MOVE_GANTRY moves it, a hoist rope hangs from it")
     sv.set_defaults(func=cmd_serve)

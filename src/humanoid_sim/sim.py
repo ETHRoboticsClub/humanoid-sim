@@ -10,6 +10,11 @@ orientation as yaw, pitch and roll (``R = Rz Ry Rx``) and their rates, held thro
 ``scene`` (:class:`~humanoid_sim.world.boxes.StaticBoxes`) puts static boxes around the robot, which starts at
 the world origin (the scene's spawn point).
 
+``terrain`` (a :class:`~humanoid_sim.world.terrain_io.Terrain`, or the Isaac Lab ``TerrainImporterCfg`` that
+``heightfield_terrain_cfg`` gives training) puts a heightfield in place of the flat ground, built the way training
+builds it. Each env's robot starts at its tile's origin, ``base_height_m`` above it (:attr:`SimCore.env_origins`);
+:attr:`SimCore.ground` gives the surface height under any (x, y). Not with ``scene``.
+
 ``gantry`` (:class:`~humanoid_sim.world.supports.Gantry`) hangs the robot from a rope from the next step on;
 ``fixed_base`` suspends it (the base welded to the world).
 
@@ -40,6 +45,7 @@ from humanoid_sim.model.urdf import BASE_JOINTS
 from humanoid_sim.physics.joint_properties import joint_properties
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.terrain_io import Terrain, as_terrain
 
 
 class SimCore:
@@ -50,8 +56,9 @@ class SimCore:
                  contacts: bool = False, seed: int = 0, cuda_graph: bool = False, compile: bool = False,
                  imu_history: int | None = None, extra_rig: str | None = None, scene: StaticBoxes | None = None,
                  entities: dict | None = None, render_each_step: bool = True,
-                 queue_capacity: int | None = None):
+                 queue_capacity: int | None = None, terrain: Terrain | object | None = None):
         check_asset_robot(usd_path, robot)
+        self.terrain = as_terrain(terrain)
         self.desc = Description.load(robot)
         # The IMUs of ``extra_rig`` (sensors/rigs.py EXTRAS) besides the plant's own, each simulated where its frame
         # is: ``SimCore.extra_imus[name]``, stepped with the plant's IMU.
@@ -93,9 +100,11 @@ class SimCore:
             base_joints=base_joints, ground_friction=self.profile["model"]["ground_friction"],
             imu=imu, extra_imus={n: s.frame for n, s in extra_imus.items()}, contacts=contacts, rerun=rerun,
             rerun_rrd=rerun_rrd, scene=scene, entities=entities,
-            render_each_step=render_each_step),
+            render_each_step=render_each_step, terrain=None if self.terrain is None else self.terrain.cfg),
             props=props)
         self.scene = scene
+        self.ground = self.backend.ground
+        self.env_origins = self.backend.env_origins
         order = [self.backend.joint_names.index(n) for n in joints]
         self._to_plant = torch.tensor(order, device=self.plant.cfg.device)
         self._to_solver = torch.tensor([self.backend.joint_names.index(n) for n in physical], device=device)
