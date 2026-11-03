@@ -9,6 +9,11 @@ from conftest import PHYSICS_ROBOTS, built_usd
 
 pytestmark = pytest.mark.physics
 
+
+@pytest.fixture(autouse=True)
+def _isaac_lab():
+    pytest.importorskip("isaaclab_newton")
+
 SIZE_M = 4.0
 SCALE_M = 0.1
 SEED = 7
