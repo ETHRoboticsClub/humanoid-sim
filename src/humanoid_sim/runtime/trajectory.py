@@ -35,13 +35,15 @@ def record_dtype(num_joints: int) -> np.dtype:
 
 class TrajectoryWriter:
     def __init__(self, path: str | Path, *, robot: str, description_digest: str, joints: list[str], period_ns: int,
-                 base_frame: str, scene: dict | None = None, gantry: dict | None = None):
+                 base_frame: str, scene: dict | None = None, gantry: dict | None = None,
+                 terrain: dict | None = None):
         self.path = Path(path)
         self.dtype = record_dtype(len(joints))
         header = self.header = {
                   "schema": SCHEMA, "recording_id": uuid.uuid4().hex,
                   "robot": robot, "description_digest": description_digest, "joints": list(joints),
                   "period_ns": int(period_ns), "base_frame": base_frame, "scene": scene, "gantry": gantry,
+                  "terrain": terrain,
                   "frame": "world: the host's scene frame, z up", "quaternion": "x y z w",
                   "units": {"time": "ns, plant time", "position": "m", "velocity": "m/s, rad/s",
                             "joint_pos": "rad, URDF joint coordinates"}}

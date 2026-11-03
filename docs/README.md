@@ -25,7 +25,7 @@ Start with [overview.md](overview.md) for how the parts fit together, then pick 
 | [sensors.md](sensors.md) | Encoders, the IMU and its burst delivery, contacts, what is measured and what is true |
 | [rtx-sensors.md](rtx-sensors.md) | Cameras and lidar rendered by Isaac Sim's RTX, published as Controls reads them, with their checks and cost |
 | [training.md](training.md) | The Train-Time API: the plant in an Isaac Lab task, randomization, observations, logging |
-| [world.md](world.md) | Ground and terrain, pushes and joint disturbances, the gantry |
+| [world.md](world.md) | Ground and terrain, static boxes, moving and free objects, pushes and joint disturbances, the gantry |
 | [runtime.md](runtime.md) | `serve`, the shared-memory segment, sessions, commands, `view-runtime` |
 | [controls-integration.md](controls-integration.md) | How Controls' plant host attaches and what it expects |
 | [replay-and-sysid.md](replay-and-sysid.md) | Replaying captures, scoring, fitting delays and passive joint parameters |

@@ -18,7 +18,9 @@ def heightfield_terrain_cfg(sub_terrains: dict, *, size_m: float, rows: int, col
     """A generated terrain of heightfield sub-terrains (``{name: Hf*Cfg}``, proportions as weights) on a grid of
     ``rows`` by ``cols`` square tiles of ``size_m``. With ``curriculum`` rows are difficulty levels, otherwise each
     tile draws its own. With robot friction randomized pass ``friction=0`` (the solver uses the larger friction of a
-    contact). The grid spacing and height step set the heightfield's resolution in the collision pipeline."""
+    contact). The terrain's restitution is 0, the neutral partner of a randomized robot ``restitution`` (the solver
+    uses the larger of a contact's two). The grid spacing and height step set the heightfield's resolution in the
+    collision pipeline."""
     from isaaclab.sim.spawners.materials import RigidBodyMaterialBaseCfg
     from isaaclab.terrains import TerrainGeneratorCfg, TerrainImporterCfg
     from isaaclab.terrains.height_field import HfTerrainBaseCfg

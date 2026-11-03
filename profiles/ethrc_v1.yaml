@@ -59,6 +59,27 @@ devices:
   # 1.25-5.12 ms p5-p95, Madgwick and the relay 0.6 ms of it). The MTi's own delay before the stamp is unmeasured
   # (the datasheet gives none); the rig's random delivery phase, 0-2.5 ms, stands in for it.
   imu_path: {sample_to_host_ns: 2100000}
+  # How often the master gets a drive's feedback (PDO), as whole bus cycles (backend.control_period_s, 1.5 ms) between
+  # samples. pdo_feedback.csv of the excitation captures exc-53f09771 and exc-5fd2bcca (2026-10-28), t_source_ros_ns
+  # of drive HEJ90L1 (all drives of a frame agree to 17 us): 35,814 spacings, 5.08 ms mean, 3.0-7.5 ms p5-p95, every
+  # one a whole number of cycles to 0.1 ms. The counts are the cycle numbers 1 to 10 (10: ten or more) of the two
+  # captures pooled (the two differ by 0.01 in each probability). Lag-1 autocorrelation -0.40 is not modeled (the
+  # sampler draws independently). The held value is the master's feedback age; the publish delay past a sample,
+  # 2.24 ms median, 1.58-2.94 ms p5-p95 (t_publish - t_source), is not modeled here.
+  feedback_sampling:
+    cycles: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    probability: [804, 4716, 15063, 11853, 2482, 500, 259, 89, 28, 20]  # counts of 35,814, normalized on load
+  # What a drive's feedback carries that the quantization (above) does not: Gaussian velocity dither (sigma in counts
+  # per 400 us controller sample, added before the rounding) and torque noise (Nm, before the rounding to mNm). The
+  # same captures, windows of 100 PDO samples (0.5 s) in which a drive's position stayed within 2 counts: 65 windows
+  # of HEJ90 drives, 16 of HEJ70, 35 of HEJ50. Dither: fraction of nonzero velocity readings 0.334 / 0.314 / 0.318,
+  # sigma = 0.5 / z(1 - p/2); torque: median over windows of the standard deviation of the torque reading (linear
+  # trend removed), 0.463 / 0.107 / 0.052 Nm (white; HEJ90 drives range 0.24-0.65 Nm, waist yaw 1.2). Measured at
+  # rest; in motion the torque reading varies far more (the drive's current, not measurement noise).
+  feedback_noise:
+    HEJ90-48-140: {velocity_dither_counts: 0.52, torque_nm: 0.46}
+    HEJ70-48-50: {velocity_dither_counts: 0.50, torque_nm: 0.11}
+    HEJ50-48-30: {velocity_dither_counts: 0.50, torque_nm: 0.05}
 
 solver_gains: baseline        # constant per-episode PD = humanoid-urdf baseline_position_gains (native ankle shafts use crank gains)
 

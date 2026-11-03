@@ -70,6 +70,13 @@ A real drive does not report its physical state exactly. It reports whole encode
 - Velocity: whole counts per controller sample, `round(velocity · cpr / 2π · T)` with `T = 1 / controller_rate_hz`, converted back to rad/s.
 - Applied torque: rounded to whole mNm. The demanded torque passes through unchanged.
 
+On top of that, `DriveReporting` adds two errors that Controls' fake drive does not have, measured on the robot (the V1 excitation captures exc-53f09771 and exc-5fd2bcca, 2026-10-28, in windows where a drive stayed within 2 counts for 0.5 s). Each is a per-family sigma in the profile's `devices.feedback_noise`, and `for_drives(..., noise=False)` or `TrainPlantCfg.feedback_noise=False` turns both off:
+
+- Velocity dither: a Gaussian of `velocity_dither_counts` (0.5 to 0.52 counts per sample on every family) added to the true counts per sample before the rounding. The real reading is whole counts per sample (to within 0.05 of a count), but a drive at rest reads +-1 count in 31 to 33 % of its samples, symmetrically, and +-2 in under 0.4 %; the model gives 31 to 33 % and 0.3 %. A HEJ90 at rest then reads with an RMS of 2.2 rad/s, a HEJ70 or HEJ50 with 0.55 rad/s. This is the dither of the current 0x606C reading; it does not change what the sim reports otherwise.
+- Torque noise: white Gaussian noise of `torque_nm` (0.46 Nm on the HEJ90, 0.11 on the HEJ70, 0.05 on the HEJ50) on the applied torque before the rounding. It is the standard deviation of the torque reading of a drive at rest. In motion the reading varies much more, which is the drive's current, and is not modeled.
+
+The position jitter stays as it is. At rest the sim's reading differs from the window's median count in 67 % of the samples and the robot's in 25 to 30 %, which is 1 count at most either way.
+
 Rounding is half away from zero, as C's `lround` does. The resulting resolution (controller rate 2500 Hz for every family, so `T` = 400 µs):
 
 | Family | Encoder (counts/rev) | Position step | Velocity step |
@@ -78,7 +85,7 @@ Rounding is half away from zero, as C's `lround` does. The resulting resolution 
 | HEJ70-48-50 | 16384 | 0.383 mrad | 0.959 rad/s |
 | HEJ50-48-30 (arms and ankle cranks) | 16384 | 0.383 mrad | 0.959 rad/s |
 
-The velocity is coarse: a HEJ90 joint moving slower than half a step, 1.92 rad/s, reports 0.
+The velocity is coarse: without the dither, a HEJ90 joint moving slower than half a step, 1.92 rad/s, reports 0 (0.48 rad/s on a HEJ70 or HEJ50).
 
 ```python
 import torch
@@ -103,12 +110,16 @@ out = reporting.report(fb)
 
 | Field | Shape | Meaning |
 |---|---|---|
-| `drive` | `DriveFeedback [E, D]` | Feedback now, as reported: offset included, quantized when `TrainPlantCfg.reporting` is true (the default) |
+| `drive` | `DriveFeedback [E, D]` | Feedback as the master holds it now: offset included, quantized with its noise when `TrainPlantCfg.reporting` is true (the default), and the drive's last sample (below) |
 | `history` | `DriveFeedback [E, H, D]` | One entry per physics step, newest first, reported the same way. H is `TrainPlantCfg.feedback_history` (16) |
 | `history_ns` | `[E, H]` | Plant time of each history entry; -1 for none yet |
 | `imu` | `ImuSamples` or None | The raw IMU samples received so far (below) |
 
-A history entry is taken at the start of each physics step: the state at that time and the torques of the step that just ended. `history[:, 0]` is therefore one physics period older than `drive`. The jitter is drawn on every call, for the history too, so two calls in the same step give different jitter. With `reporting=False` the feedback is unquantized but still includes the encoder offset.
+A history entry is taken at the start of each physics step: the state at that time and the torques of the step that just ended. `history[:, 0]` is therefore one physics period older than `drive`. Each entry is reported once, when it is taken. `drive` is reported on every `measured()` call, so two calls in the same step give different jitter (and noise). With `reporting=False` the feedback is unquantized but still includes the encoder offset.
+
+#### Feedback age
+
+The master does not see the drives' state at every step. The robot's drives deliver their process data (PDO feedback) at whole bus cycles (1.5 ms), but only every 3.4 cycles on average: 35,814 spacings in the same captures have a mean of 5.08 ms and 3.0 to 7.5 ms from p5 to p95, and all 22 drives of a frame arrive together. `FeedbackSampler` (`src/humanoid_sim/devices/sampling.py`) holds the reported feedback between such samples: a sample is taken when its time comes (at the first physics step that starts at or after it), and the next one `k` bus cycles after the nominal time of this one, `k` drawn from the profile's `devices.feedback_sampling` (probabilities of 1 to 10 cycles). One draw per env, shared by its drives. Each held value repeats exactly, noise included, until the next sample. The spacing of the measured samples has a lag-1 autocorrelation of -0.40; the draws are independent. `TrainPlantCfg.feedback_sampling=False` reports the present state at every step. The publish delay past a sample (2.24 ms median) is not modeled. A physics period longer than a bus cycle takes at most one sample per step.
 
 ```python
 plant = env.action_manager.get_term("drives").plant
