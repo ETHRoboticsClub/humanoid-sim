@@ -131,7 +131,7 @@ hsim --help
 The rest of this page uses `hsim`. Three additions are useful:
 
 - To make the captures visible, add `-v "$(dirname "$PWD")/datasets":/workspace/datasets`. The tests then find them at their default location, `/workspace/datasets/humanoid-v1`.
-- To keep Warp's compiled kernels between runs, add `-v hsim-warp-cache:/cache`. The image sets `WARP_CACHE_PATH=/cache/warp`; without the volume every container compiles the kernels again.
+- To keep Warp's compiled kernels between runs, add `-v hsim-warp-cache:/cache`. The image sets `WARP_CACHE_PATH=/cache/warp`; without the volume every container compiles the kernels again. The `humanoid-sim` commands compile them without NVRTC's precompiled headers, whose mapping can fail on a fresh cache and end the command.
 - On a Linux machine with an NVIDIA GPU, add `--gpus all`. This needs the NVIDIA Container Toolkit and a driver recent enough for the image's CUDA 13.0 build of torch (driver 580 or newer).
 
 On Linux, files the container writes under `outputs/` belong to root.
