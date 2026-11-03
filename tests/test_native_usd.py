@@ -245,7 +245,7 @@ def test_native_host_publishes_feedback_before_the_first_step(desc, tmp_path):
     path = build_asset(desc, load_profile(desc.robot), tmp_path / "asset")
     host = RuntimeHost(tmp_path / "plant", path, device="cuda:0", support="free", compile=False)
     try:
-        host.sim.feedback = None
+        host.sim.write_joint_state(*host.sim.joint_state())
         host._publish()
         record = host.seg.regions["feedback"].read()
         assert record is not None

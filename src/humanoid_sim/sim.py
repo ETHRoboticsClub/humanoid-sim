@@ -49,8 +49,8 @@ from humanoid_sim.model.urdf import BASE_JOINTS
 from humanoid_sim.physics.joint_properties import joint_properties
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
-from humanoid_sim.world.terrain_io import Terrain, as_terrain
 from humanoid_sim.world.objects import WorldObjects
+from humanoid_sim.world.terrain_io import Terrain, as_terrain
 
 
 class SimCore:
