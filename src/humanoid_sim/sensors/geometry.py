@@ -218,10 +218,13 @@ class Stream:
 
     def optical_in_device(self) -> np.ndarray:
         """4x4 pose of the optical frame in the device frame."""
-        from scipy.spatial.transform import Rotation
-
+        x, y, z, w = np.asarray(self.rotation_xyzw, dtype=float) / np.linalg.norm(self.rotation_xyzw)
         T = np.eye(4)
-        T[:3, :3] = Rotation.from_quat(self.rotation_xyzw).as_matrix()
+        T[:3, :3] = [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
         T[:3, 3] = self.translation_m
         return T
 
