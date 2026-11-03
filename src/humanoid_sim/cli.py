@@ -290,14 +290,15 @@ def cmd_serve(args) -> int:
 
 def cmd_render_runtime(args) -> int:
     from humanoid_sim.runtime.render import render_runtime
+    from humanoid_sim.runtime.render_workers import render_runtime_workers
     from humanoid_sim.sensors.session import SessionCfg
 
     cfg = SessionCfg(robot=args.robot, sensors=args.sensors, splat=args.splat, splat_intensity=args.splat_intensity,
                      scan_mesh=args.scan_mesh, lights=args.lights, cameras=not args.no_cameras,
                      lidar=not args.no_lidar, feeds=args.feeds, lidar_domain=args.lidar_domain, rrd=args.rrd, images=args.images,
                      depth_noise=args.depth_noise, device=args.device, assets=args.assets)
-    render_runtime(args.segment, cfg, seconds=args.seconds, wait_s=args.wait, summary=args.summary,
-                   window=args.window)
+    render = render_runtime if args.combined else render_runtime_workers
+    render(args.segment, cfg, seconds=args.seconds, wait_s=args.wait, summary=args.summary, window=args.window)
     return 0
 
 
@@ -422,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
                      help="the room's ceiling lights (JSON, in the scan's frame; placed with the host's spawn)")
     rr_.add_argument("--no-cameras", action="store_true")
     rr_.add_argument("--no-lidar", action="store_true")
+    rr_.add_argument("--combined", action="store_true",
+                     help="render cameras and lidar in one Kit process instead of independent workers")
     rr_.add_argument("--depth-noise", action="store_true",
                      help="the stereo cameras' depth errors (noise, occlusion and texture holes); off: exact depth")
     rr_.add_argument("--feeds", default=None, help="camera feed root (ethrc-camera-sim-feed/v1)")
