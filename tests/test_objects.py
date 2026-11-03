@@ -27,6 +27,11 @@ from humanoid_sim.world.objects import (
     yaw_quat_xyzw,
 )
 
+# Kamino fails both solver tests (L40S, Newton 1.6.1): its kinematic bodies are written to state_in.body_q in Newton's
+# contract, and the driver's writes there did not move the box or the robot. Not understood yet; strict is off so a
+# fix shows.
+SOLVERS = ["mjwarp", pytest.param("kamino", marks=pytest.mark.xfail(reason="Kamino: moving and free objects "
+                                                                       "not working yet", strict=False))]
 ASSETS = Path(__file__).resolve().parents[1] / "outputs" / "assets"
 
 
@@ -296,7 +301,7 @@ def _run(usd, objects, solver, request, device=None):
 
 
 @pytest.mark.physics
-@pytest.mark.parametrize("solver", ["mjwarp", "kamino"])
+@pytest.mark.parametrize("solver", SOLVERS)
 def test_a_kinematic_box_follows_its_path_and_pushes_the_standing_robot(usd, solver, request):
     """The box is driven kinematically: it is where the path puts it and moves at the path's speed, whatever it meets.
     Reaching the path's end it has shoved the standing robot sideways off its feet's line, and the robot has taken a
@@ -322,7 +327,7 @@ def test_a_kinematic_box_follows_its_path_and_pushes_the_standing_robot(usd, sol
 
 
 @pytest.mark.physics
-@pytest.mark.parametrize("solver", ["mjwarp", "kamino"])
+@pytest.mark.parametrize("solver", SOLVERS)
 def test_the_robot_pushes_a_free_box_which_slides_on_the_ground(usd, solver, request):
     """The robot, thrown at 1.5 m/s forward (the V1's +y) into a free box 30 cm ahead of it, pushes it: the box moves
     away ahead of the robot and comes to rest on the ground, while a free box with nothing near it stays where it

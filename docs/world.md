@@ -1,12 +1,13 @@
 # The world around the robot
 
-Around the robot, humanoid-sim has a ground (a flat plane, or in training a heightfield terrain, a surface given as a grid of heights), optional static boxes standing on it (a room's walls and furniture, such as Controls' hangar), an optional [support](glossary.md#support) that holds the robot up, and external [disturbances](glossary.md#disturbance). The code is in `src/humanoid_sim/world/` and in the scene builders that use it: `robot_scene_cfg` for training (`src/humanoid_sim/train/scene.py`) and `SimCore` (`src/humanoid_sim/sim.py`) for replays and the real-time runtime.
+Around the robot, humanoid-sim has a ground (a flat plane, or in training a heightfield terrain, a surface given as a grid of heights), optional static boxes standing on it (a room's walls and furniture, such as Controls' hangar), optional moving and free objects (people, a tug, a cart, a crate to push), an optional [support](glossary.md#support) that holds the robot up, and external [disturbances](glossary.md#disturbance). The code is in `src/humanoid_sim/world/` and in the scene builders that use it: `robot_scene_cfg` for training (`src/humanoid_sim/train/scene.py`) and `SimCore` (`src/humanoid_sim/sim.py`) for replays and the real-time runtime.
 
 | Feature | Training | Replay | Runtime (`serve`) |
 |---|---|---|---|
 | Flat ground | default; friction set by `ground_friction` | profile friction | profile friction |
 | Heightfield terrain | `robot_scene_cfg(..., terrain=...)` | none | none |
 | Static boxes (walls, furniture) | `robot_scene_cfg(..., scene=...)` | none | `--scene` and `--spawn` |
+| Moving and free objects | `robot_scene_cfg(..., objects=...)`, driven by `ObjectsDriver` | `SimCore(..., objects=...)` | `--objects` |
 | Start pose | `robot_scene_cfg(..., pose=...)`: `"home"` (default) or `"standing"` | the capture's first measured drive positions | the profile's `poses.start` (V1 `standing`, G1 `home`) or `--pose`; `RESET` can pick either |
 | Free base | always | none | `--support free` |
 | Fixed base | none | `--base fixed` | none |
@@ -217,6 +218,77 @@ Measured on one L40S with the hangar's 470 boxes and every robot at the spawn po
 
 The hangar costs nothing in the runtime, and in training about a quarter more physics time per step for the V1 (two fifths for the G1, which has more shapes). With the plant's work around the physics, the whole step of 16,384 V1s grows from 7.5 to 8.9 ms.
 
+## Moving and free objects
+
+Two kinds of primitive body (box, capsule or cylinder) join the scene besides the static boxes. A moving object is kinematic: it follows a path you give, the solver treats it as immovable, so it pushes the robot and nothing pushes it back. People, a tug and a cart are moving objects. A free object is a dynamic rigid body with a mass and a friction that the robot can push. Both collide with the robot and the ground, and they are USD prims on the stage, so the RTX cameras and lidars see them where the physics has them ([rtx-sensors.md](rtx-sensors.md)). There are none by default. The code is in `src/humanoid_sim/world/objects.py`.
+
+This is the mechanism only. Which objects a task spawns, along which paths, and any sweep over them live in humanoid-learning; the knobs are the per-env `phase_ns` and `offset_m` of the driver.
+
+### The specs
+
+```python
+from humanoid_sim.world.objects import FreeObject, MovingObject, ObjectPath, WorldObjects
+
+person = MovingObject(
+    "person", "capsule", (0.2, 1.3), friction=0.8, rgb=(0.2, 0.4, 0.8),   # (radius, straight height)
+    path=ObjectPath.of([0, 4, 8], [[3, -2, 0.85], [3, 2, 0.85], [3, -2, 0.85]], [1.57, -1.57, 1.57],
+                       interpolation="spline", loop=True))
+crate = FreeObject("crate", "box", (0.4, 0.4, 0.4), mass_kg=6.0, friction=0.6, position_m=(1.2, 0.0, 0.2))
+objects = WorldObjects(moving=(person,), free=(crate,))
+```
+
+| Shape | `size_m` |
+|---|---|
+| `box` | full extents `(x, y, z)` |
+| `capsule` | `(radius, height)` along z, the height being the straight part |
+| `cylinder` | `(radius, height)` along z |
+
+Positions are the body's centre, `yaw` turns it about the vertical, both in the env's frame: the world frame shifted by the env's origin (`scene.env_origins`; the world origin in a scene with static boxes). `friction` is the contact friction, static and dynamic. The solver takes the larger of the two shapes' friction in a contact, so an object with friction 1.0 overrides a robot whose friction is randomized below 1.0; give an object the friction it should have.
+
+`ObjectPath.of(times_s, positions_m, yaw_rad, interpolation=, loop=)` takes waypoint times in seconds (rounded to integer nanoseconds), centre positions `[K, 3]` and yaws `[K]`:
+
+- `interpolation="linear"` moves at constant velocity between waypoints. `"spline"` is a cubic Hermite curve through them with Catmull-Rom tangents, so the velocity is continuous; the end tangents of a one-shot path continue the end segments' slope.
+- A one-shot path holds its first pose before its first waypoint's time and its last pose after its last one. `loop=True` repeats with the path's duration as period; the path must end where it starts (the same position, and the same yaw up to whole turns), which a loop checks at construction.
+- The path's clock is whatever you pass to `ObjectsDriver.update`: the plant's `t_ns`, or a per-env episode clock. The first waypoint's time is the path's start.
+
+`WorldObjects.load(path)` reads the same from JSON, which is what `--objects` takes:
+
+```json
+{"moving": [{"name": "person", "shape": "capsule", "size": [0.2, 1.3], "friction": 0.8, "rgb": [0.2, 0.4, 0.8],
+             "path": {"times_s": [0, 4, 8], "positions_m": [[3, -2, 0.85], [3, 2, 0.85], [3, -2, 0.85]],
+                      "yaw_rad": [1.57, -1.57, 1.57], "interpolation": "spline", "loop": true}}],
+ "free": [{"name": "crate", "shape": "box", "size": [0.4, 0.4, 0.4], "mass_kg": 6.0, "friction": 0.6,
+           "position_m": [1.2, 0, 0.2], "yaw_rad": 0}]}
+```
+
+`rgb` and `yaw_rad` are optional.
+
+### In a scene
+
+| Front end | How |
+|---|---|
+| Training | `robot_scene_cfg(n, usd, objects=objects)`, then `driver = ObjectsDriver(scene, objects)` once the scene is built and `driver.update(plant.t_ns)` before each physics step. Free objects are reset by Isaac Lab's scene reset like any rigid object (`driver.reset(env_ids)` does it by hand). Objects are per env, so they work with `env_spacing`, with a terrain and with static boxes. |
+| `SimCore` (replays, benchmarks, sessions) | `SimCore(usd, ..., objects=objects)`. Each step puts the moving objects where their paths are at the plant time since the last `reset_objects()`. |
+| Runtime | `humanoid-sim serve ... --objects objects.json`. RESET and each new session start the paths again and put the free objects back. The descriptor's `objects` lists them. |
+| Benchmarks | `humanoid-sim bench ... --objects objects.json`, for each workload |
+| RTX sensors | `SessionCfg(objects="objects.json")` |
+
+`ObjectsDriver.update(t_ns)` evaluates every env's every moving object at once (torch over `[envs, objects]`, no Python per env) and writes the poses and velocities into the solver state with no host sync. Pass `t_ns` as an int, or as a device int64 scalar (one clock) or `[envs]` tensor (a clock per env); the update is then safe inside a CUDA graph. `driver.phase_ns` `[envs, moving]` (int64, ns) starts each env's object earlier or later along its path and `driver.offset_m` `[envs, moving, 3]` shifts its positions; both are zero until you write them. `driver.pose(t_ns)` returns the world-frame poses `[envs, moving, 7]` and velocities `[envs, moving, 6]` without writing, and `driver.state()` reads the objects' positions and velocities back from the solver.
+
+The kinematic body moves at its path's velocity through each step (the solver integrates the velocity written with the pose), so a contact sees the body's real speed and the robot is pushed by momentum, not only by the penetration. Isaac Lab's own pose writers would flag the written worlds for a solver reset and a forward-kinematics pass before the next step; with every env written every step that resets the robots' solver warm start, so the driver writes the arrays directly and flags nothing.
+
+### Solver support
+
+Both solvers have kinematic bodies in Newton 1.6.1 (`BodyFlags.KINEMATIC`), but they take their poses differently. MJWarp turns a world-fixed kinematic body into a mocap body, which Newton updates only on a model-change notification (not per step, not graph safe), and a kinematic body with a free joint into a body with a locked armature whose pose and velocity are read from the state every step. The driver uses the second form. Kamino treats a kinematic body as immovable and expects its pose in `state_in.body_q` between steps.
+
+- MJWarp: verified on an L40S (`tests/test_objects.py`): a kinematic box follows its path and moves at the path's velocity, a V1 shoved by it takes a contact force and is pushed off its feet's line, the robot pushes a free box, and the update runs in a CUDA graph under torch's sync debug mode.
+- Kamino: not working yet. On the same L40S the two solver tests fail (the box and the robot did not interact), and they are marked `xfail`. The driver writes `body_q` and `body_qd` as Kamino's contract says; why that is not enough is not known.
+- The RTX camera and lidar check (`tests/test_rtx_objects.py`) was written but has not been run.
+
+### What the objects cost
+
+Not measured yet. `humanoid-sim bench --train --num-envs 4096 --objects PATH` reports the step time with one and eight objects; the update is a few dozen small torch kernels per physics step.
+
 ## Supports
 
 A support holds the robot up while it is tested, the way the real robot hangs in its gantry. Which ones a front end offers is in the table at the top of this page.
@@ -380,6 +452,7 @@ A `RESET` command clears all active disturbances. Faults (`INJECT_FAULT`: encode
 ## What is not modeled
 
 - A room collides as boxes only. Its scan is drawn as a textured mesh but never collided, the Gaussian splat of the hangar is drawn only by the RTX cameras ([rtx-sensors.md](rtx-sensors.md)), and there are no other static shapes (cylinders, meshes).
+- Objects are primitive shapes: no meshes, and a moving object's orientation is a yaw. A moving object is kinematic, so it never yields to the robot. Free objects have a constant mass and friction per scene (not per env), and replays of captures have no option for objects (a capture has none).
 - Static boxes stand on the flat ground; they cannot be combined with a heightfield terrain, and every environment of a scene with boxes starts at the spawn point.
 - There is no triangle-mesh terrain (stairs with vertical risers, mesh obstacles), for the collision reason above.
 - Replays and the runtime have no terrain; they always use the flat ground at the profile's friction.
