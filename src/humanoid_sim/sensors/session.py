@@ -45,6 +45,7 @@ class SessionCfg:
     sensors: str | None = None  # an extra rig (rigs.EXTRAS) whose sensors join the robot's
     scene: str | None = None  # static boxes (.npz)
     spawn_m: tuple[float, float] = (0.0, 0.0)
+    objects: str | None = None  # moving and free bodies (JSON, world/objects.py): drawn by the cameras, seen by the lidar
     splat: str | None = None  # the room's splat as USD
     splat_intensity: float = 1.0  # its emission (rtx.set_splat_intensity)
     scan_mesh: str | None = None  # the room's scan (OBJ), surfaces for the lidar
@@ -77,6 +78,7 @@ class SensorSession:
         from humanoid_sim.sensors.lights import CeilingLights, ceiling_light_prims, dome_nits
         from humanoid_sim.sim import SimCore
         from humanoid_sim.world.boxes import StaticBoxes
+        from humanoid_sim.world.objects import WorldObjects
 
         self.cfg = cfg
         desc = Description.load(cfg.robot)
@@ -105,7 +107,7 @@ class SensorSession:
         pose, height = initial_pose(self.usd, cfg.robot, "home")
         self.sim = SimCore(self.usd, device=cfg.device, robot=cfg.robot, fixed_base=cfg.fixed_base and cfg.physics,
                            base_height_m=height + STANDING_CLEARANCE_M, scene=self.boxes, entities=entities,
-                           render_each_step=False)
+                           objects=WorldObjects.load(cfg.objects) if cfg.objects else None, render_each_step=False)
         self.scan_mesh = cfg.scan_mesh if cfg.scan_mesh and lidars else None  # the lidar's surfaces, when loaded
         # SimCore built the physics model above: what follows changes what rays see, never what collides.
         self.room_rays = self._apply_room_rays(bool(cameras), bool(lidars))

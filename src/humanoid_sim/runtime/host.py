@@ -40,6 +40,10 @@ and furniture, starting at the scene's spawn point (the world origin); the descr
 its digest and the spawn point, so the client can map the truth's world frame to the scene's. A spawn point inside
 a box is refused.
 
+With ``objects`` (:class:`~humanoid_sim.world.objects.WorldObjects`) bodies move along scripted paths and free bodies
+stand to be pushed; RESET starts the paths again and puts the free bodies back. The descriptor's ``objects`` lists
+them.
+
 With ``gantry`` (:class:`~humanoid_sim.world.trolley.GantryRig`, in world coordinates) a crane stands over the
 scene: MOVE_GANTRY commands its bridge, trolley and hoist, a hoist rope (SET_SUPPORT ``hoist``) hangs from its hook,
 and the truth reports where it is. The descriptor's ``gantry`` gives its geometry and limits.
@@ -65,6 +69,7 @@ from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.runtime.trajectory import IMU_RECORD, ImuWriter, TrajectoryWriter
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.objects import WorldObjects
 from humanoid_sim.world.supports import GRAVITY_M_S2, NONE, _quat_rotate, level_under
 from humanoid_sim.world.trolley import GantryRig
 
@@ -234,7 +239,7 @@ class RuntimeHost:
                  client_timeout_ns: int = 500_000_000,
                  seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True,
                  scene: StaticBoxes | None = None, gantry: GantryRig | None = None,
-                 trajectory: str | Path | None = None, extra_rig: str | None = None):
+                 objects: WorldObjects | None = None, trajectory: str | Path | None = None, extra_rig: str | None = None):
         from humanoid_sim.devices.models import drive_models
         from humanoid_sim.model.asset import asset_meta, load_profile
         from humanoid_sim.model.description import Description
@@ -249,6 +254,7 @@ class RuntimeHost:
         if scene is not None and scene.clearance_m() == 0.0:
             raise ValueError(f"spawn point {scene.spawn_m} is inside a box of {scene.file}: the robot starts there")
         self.scene = scene
+        self.objects = objects
         self.support = support
         meta = asset_meta(usd)
         if pose is not None and pose not in POSES:
@@ -262,7 +268,8 @@ class RuntimeHost:
         models = drive_models(Description.load(robot))
         self.sim = SimCore(usd, device=device, robot=robot, solver=solver,
                            base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
-                           compile=compile and cuda, imu_history=abi.IMU_SAMPLES, scene=scene, extra_rig=extra_rig,
+                           compile=compile and cuda, imu_history=abi.IMU_SAMPLES, scene=scene, objects=objects,
+                           extra_rig=extra_rig,
                            queue_capacity=_queue_capacity(max(m.drive_delay_ns for m in models.values()),
                                                           bus_period_ns,
                                                           int(load_profile(robot)["physics"]["period_ns"])))
@@ -355,6 +362,7 @@ class RuntimeHost:
         # Held until the client attaches.
         self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = self._named_pose(self.start_pose)
         self._write_pose(*self._prescribed)
+        self.sim.reset_objects()
         if self.support == "suspended":
             self._hang_harness(level=True)
         self._set_drives_off(np.ones(len(self.drives), dtype=bool))  # no client, no demands
@@ -426,6 +434,7 @@ class RuntimeHost:
             "drive_models": self._drive_model_table(),
             "fidelity_gaps": fidelity_gaps(self.drive_models),
             "scene": None if self.scene is None else self.scene.describe(),
+            "objects": None if not self.objects else self.objects.describe(),
             "gantry": None if self.rig is None else self.rig.describe(),
         }
 
@@ -620,6 +629,7 @@ class RuntimeHost:
         roped = self._rope_due is not None or bool(self.sim.gantry.mode[0] != NONE)
         harness = self._harness_hung or (self.support == "suspended" and (base is not None or not roped))
         self._write_pose(q, base)
+        self.sim.reset_objects()
         env = torch.tensor([0], device=self.device)
         # A rope's anchor stays where it was hung: the harness is rehung where the robot now is (a suspended
         # session's robot goes back on it when the reset moves the base); a client's rope is released when the

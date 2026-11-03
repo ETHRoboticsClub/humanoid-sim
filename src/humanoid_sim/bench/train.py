@@ -22,6 +22,7 @@ from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.timing.clock import NS_PER_MS, NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.objects import ObjectsDriver, WorldObjects
 
 POLICY_PERIOD_NS = 20 * NS_PER_MS
 
@@ -66,7 +67,7 @@ def physics_overrides(args) -> dict:
     return overrides
 
 
-def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict:
+def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None, objects: WorldObjects | None = None) -> dict:
     import isaaclab.sim as sim_utils
     from isaaclab.utils import instantiate
 
@@ -80,9 +81,11 @@ def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict:
     boxes = scene
     with robot_build(args.robot, solver=args.solver, physics_overrides=overrides):
         scene = instantiate(robot_scene_cfg(n, usd, robot=args.robot, ground_friction=0.0, pose="home",
-                                            self_collision=False if args.no_self_collision else None, scene=boxes))
+                                            self_collision=False if args.no_self_collision else None, scene=boxes,
+                                            objects=objects))
         sim.reset()
     robot = scene["robot"]
+    driver = ObjectsDriver(scene, objects) if objects else None
     on_cuda = str(args.device).startswith("cuda")  # the plant as training runs it
     heaviest = robot.body_names[int(robot.data.body_mass.torch[0].argmax())]
     plant = RobotPlant(robot, TrainPlantCfg(robot=args.robot, randomization=randomization(Description.load(args.robot), heaviest),
@@ -117,6 +120,8 @@ def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict:
             if k % every == 0:
                 policy_step(k)
             plant.pre_physics()
+            if driver is not None:
+                driver.update(plant.t_ns)
             scene.write_data_to_sim()
             sim.step()
             scene.update(period_s)
@@ -156,4 +161,5 @@ def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict:
             "self_collision": self_collision, "host_syncs": "none (torch sync debug mode)" if cuda else "n/a",
             "checksum_finite": bool(torch.isfinite(sink).item()), "fraction_envs_up": up,
             "peak_body_ang_vel_rad_s": peak_spin.item(),
-            "scene": None if boxes is None else boxes.describe()}
+            "scene": None if boxes is None else boxes.describe(),
+            "objects": None if not objects else objects.describe()}

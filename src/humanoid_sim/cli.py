@@ -133,16 +133,16 @@ def cmd_bench(args) -> int:
     if args.runtime:
         from humanoid_sim.bench.runner import run_runtime_bench
 
-        print(json.dumps(run_runtime_bench(args, _usd(args), scene=_scene(args)), indent=1))
+        print(json.dumps(run_runtime_bench(args, _usd(args), scene=_scene(args), objects=_objects(args)), indent=1))
         return 0
     if args.train:
         from humanoid_sim.bench.train import run_train_bench
 
-        print(json.dumps(run_train_bench(args, _usd(args), scene=_scene(args)), indent=1))
+        print(json.dumps(run_train_bench(args, _usd(args), scene=_scene(args), objects=_objects(args)), indent=1))
         return 0
     from humanoid_sim.bench.runner import run_bench
 
-    print(json.dumps(run_bench(args, _usd(args), scene=_scene(args)), indent=1))
+    print(json.dumps(run_bench(args, _usd(args), scene=_scene(args), objects=_objects(args)), indent=1))
     return 0
 
 
@@ -207,6 +207,20 @@ def _add_scene_args(parser) -> None:
                         help="the scene point (m) the robot starts at, placed at the world origin (default 0 0)")
 
 
+def _add_objects_arg(parser) -> None:
+    parser.add_argument("--objects", default=None, help="bodies on scripted paths and free bodies to push (JSON, "
+                        "world/objects.py's WorldObjects.load), in the world frame; none by default")
+
+
+def _objects(args):
+    """The objects of ``--objects``, or None."""
+    if args.objects is None:
+        return None
+    from humanoid_sim.world.objects import WorldObjects
+
+    return WorldObjects.load(args.objects)
+
+
 def _gantry(args):
     """The crane of ``--gantry``, placed with ``--spawn`` like the scene, or None."""
     if args.gantry is None:
@@ -223,6 +237,7 @@ def cmd_serve(args) -> int:
         raise SystemExit("--truth-every must be at least 1, and 1 with --trajectory (it records every step)")
     host = RuntimeHost(args.segment, _usd(args), device=args.device, robot=args.robot, solver=args.solver,
                        support=args.support, pose=args.pose, scene=_scene(args), gantry=_gantry(args),
+                       objects=_objects(args),
                        bus_period_ns=int(args.bus_period_us * 1000),
                        client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
                        sim_revision=_revision(),
@@ -427,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
     be.add_argument("--train", action="store_true", help="Train-Time API scene: RobotPlant, IMU, contacts")
     be.add_argument("--runtime", action="store_true", help="the real-time host's whole step, unpaced")
     _add_scene_args(be)
+    _add_objects_arg(be)
     be.set_defaults(func=cmd_bench)
 
     sv = sub.add_parser("serve", help="one robot in real time behind the runtime segment")
@@ -452,6 +468,7 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--max-steps", type=int, default=None, help="periods per session")
     sv.add_argument("--seed", type=int, default=0)
     _add_scene_args(sv)
+    _add_objects_arg(sv)
     sv.add_argument("--scan-mesh", default=None, help="with --scene: the room's textured scan (an OBJ), for viewers "
                     "only; the descriptor names it and its digest")
     sv.add_argument("--scan-texture", default=None, help="the scan's texture (PNG)")

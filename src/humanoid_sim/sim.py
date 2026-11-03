@@ -10,6 +10,10 @@ orientation as yaw, pitch and roll (``R = Rz Ry Rx``) and their rates, held thro
 ``scene`` (:class:`~humanoid_sim.world.boxes.StaticBoxes`) puts static boxes around the robot, which starts at
 the world origin (the scene's spawn point).
 
+``objects`` (:class:`~humanoid_sim.world.objects.WorldObjects`) adds bodies on scripted paths and free bodies the robot
+can push. Each step first puts the moving bodies where their paths are at the plant time since the last
+:meth:`reset_objects` (the start of the session), so a replay and the runtime see the same scene.
+
 ``gantry`` (:class:`~humanoid_sim.world.supports.Gantry`) hangs the robot from a rope from the next step on;
 ``fixed_base`` suspends it (the base welded to the world).
 
@@ -40,6 +44,7 @@ from humanoid_sim.model.urdf import BASE_JOINTS
 from humanoid_sim.physics.joint_properties import joint_properties
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.objects import WorldObjects
 
 
 class SimCore:
@@ -49,7 +54,7 @@ class SimCore:
                  self_collision: bool | None = None, base_joints: bool = False, imu: bool = False,
                  contacts: bool = False, seed: int = 0, cuda_graph: bool = False, compile: bool = False,
                  imu_history: int | None = None, extra_rig: str | None = None, scene: StaticBoxes | None = None,
-                 entities: dict | None = None, render_each_step: bool = True,
+                 objects: WorldObjects | None = None, entities: dict | None = None, render_each_step: bool = True,
                  queue_capacity: int | None = None):
         check_asset_robot(usd_path, robot)
         self.desc = Description.load(robot)
@@ -92,10 +97,12 @@ class SimCore:
             self_collision=phys["self_collision"] if self_collision is None else self_collision,
             base_joints=base_joints, ground_friction=self.profile["model"]["ground_friction"],
             imu=imu, extra_imus={n: s.frame for n, s in extra_imus.items()}, contacts=contacts, rerun=rerun,
-            rerun_rrd=rerun_rrd, scene=scene, entities=entities,
+            rerun_rrd=rerun_rrd, scene=scene, objects=objects, entities=entities,
             render_each_step=render_each_step),
             props=props)
         self.scene = scene
+        self.objects = objects
+        self._objects_epoch_ns = 0
         order = [self.backend.joint_names.index(n) for n in joints]
         self._to_plant = torch.tensor(order, device=self.plant.cfg.device)
         self._to_solver = torch.tensor([self.backend.joint_names.index(n) for n in physical], device=device)
@@ -156,6 +163,13 @@ class SimCore:
                 bq[:, i], bqd[:, i] = values[name].to(bq.dtype), rates[name].to(bqd.dtype)
         self.backend.write_state(bq, bqd)
         self._state_written = True
+
+    def reset_objects(self) -> None:
+        """Start the moving objects' paths again from the current plant time and put the free bodies back at their
+        start poses, at rest."""
+        self._objects_epoch_ns = self.t_ns
+        if self.backend.objects is not None:
+            self.backend.objects.reset()
 
     def close(self) -> None:
         self.backend.close()
@@ -226,6 +240,8 @@ class SimCore:
         self.gantry.apply(self.t_ns)
         if self._base_acceleration is not None:
             self.backend.apply_base_acceleration(self._base_acceleration)
+        if self.backend.objects is not None:
+            self.backend.objects.update(self.t_ns - self._objects_epoch_ns)
         self.backend.step()
         self.t_ns += self.period_ns
         q, qd = self.solver_state()
