@@ -261,6 +261,8 @@ Rotor armature is attached to each native crank shaft. The linkage supplies its 
 
 Each crank's `position_limit` in `actuators.yaml` becomes the corresponding USD revolute joint's physical limits. The semantic hinge bounds remain the axis hull computed by the description's ankle model. Both MJWarp and Kamino receive the explicit crank stops and closed mechanism.
 
+Training can randomize the stops' stiffness and damping per env on MJWarp with the `crank_stop_stiffness` and `crank_stop_damping` parameters ([training.md](training.md#parameters)). The plant writes the stops' MuJoCo `solref` per world: to the crank joints' raw `solreflimit` on the native USD, to the spatial tendons' limit solref on the reduced model. The stops' nominal `solref` is the profile's `ankle_stop_solref`, which is modeled: gantry runs suggest the hardware stops are softer, but their compliance has not been measured, so the sim sets no range. The ranges to draw are a training choice. Kamino's stops are hard constraints and have no stiffness to set.
+
 The delivered-USD path does not add the reduced model's spatial stop tendons. `robot_build` remains the scene-construction entry point, and startup checks that the native crank joints and their limits reached Newton.
 
 ### Validation

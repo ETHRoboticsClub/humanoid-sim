@@ -407,6 +407,9 @@ The full table is `PARAMS` in `src/humanoid_sim/randomization/spec.py`. E is the
 | `joint_damping` | physics | `[E, 22]` | N m s/rad | model values | Passive viscous damping |
 | `joint_friction_ratio` | device | `[E, 22]` | ratio | description's dynamic / static | Dynamic over static Coulomb friction, in [0, 1] ([drives.md](drives.md#dynamic-friction)) |
 | `friction` | physics | `[E, 1]` | coefficient | robot shape friction | Friction coefficient of every robot shape |
+| `restitution` | physics | `[E, 1]` | coefficient | robot shape restitution (0) | Restitution coefficient of every robot shape, in [0, 1]. Kamino only: MuJoCo's contacts have no restitution, so MJWarp raises |
+| `crank_stop_stiffness` | physics | `[E, 1]` | ratio | 1 | Stiffness of the ankle cranks' stops over the profile's `ankle_stop_solref`. MJWarp only ([drives.md](drives.md#the-crank-stops)) |
+| `crank_stop_damping` | physics | `[E, 1]` | ratio | 1 | Damping of the same stops over the profile's. MJWarp only |
 | `drive_stiffness` | device | `[E, 22]` | ratio | 1 | Realized P gain over the demanded one |
 | `drive_damping` | device | `[E, 22]` | ratio | 1 | Realized D gain over the demanded one |
 | `torque_limit` | device | `[E, 22]` | ratio | 1 | Scale on the torque-speed envelope and the torque cap |
@@ -417,7 +420,7 @@ The full table is `PARAMS` in `src/humanoid_sim/randomization/spec.py`. E is the
 | `imu_misalignment` | device | `[E, 3]` | rad | 0 | Rotation of the sensor in its mount, as a rotation vector |
 | `imu_latency` | device | `[E, 1]` | s | the profile's `devices.imu_path` (2.1 ms on the V1), else 0 | From an IMU sample's measurement to its earliest delivery. A scale needs `imu_path`; the draw must be bounded (not `normal`), and the plant sizes the IMU's pending buffer for its largest value |
 
-A drive acts on its own reading, so with an `encoder_offset` it regulates the offset position: the drive output settles `encoder_offset` away from the demanded target, and `measured()` shows the offset reading while `truth()` shows the physical one. Randomizing `friction` needs the physics manager, which `PlantAction` passes in; see the ground-friction pitfall below. The IMU parameters only take effect when the scene has the IMU.
+A drive acts on its own reading, so with an `encoder_offset` it regulates the offset position: the drive output settles `encoder_offset` away from the demanded target, and `measured()` shows the offset reading while `truth()` shows the physical one. Randomizing `friction`, `restitution` or the crank stops needs the physics manager, which `PlantAction` passes in; see the ground-friction pitfall below. The IMU parameters only take effect when the scene has the IMU.
 
 A list like the one the train benchmark uses (`src/humanoid_sim/bench/train.py`), with a few additions:
 
@@ -522,6 +525,8 @@ The plant's steady-state work (`submit`, `pre_physics`, `measured`, `truth`, `re
 ## Pitfalls
 
 - The solver uses the larger friction of the two shapes in contact (MJWarp always, Kamino as the profile configures it). When `friction` is randomized on the robot, give the ground zero friction (`robot_scene_cfg(..., ground_friction=0.0)` or `heightfield_terrain_cfg(..., friction=0.0)`); with the profile's ground friction of 1.0 every robot value below 1 has no effect.
+- Restitution follows the friction rule: Kamino takes the larger restitution of the two shapes in contact (the profile sets this), and the ground's is 0, so a randomized robot `restitution` decides the bounce. It is the robot's value, not an independent ground value per env: the ground is one prim shared by every env. A restitution spec on MJWarp raises instead of doing nothing. The solver also applies the robot's value to its self-contacts.
+- `crank_stop_stiffness` and `crank_stop_damping` scale the stops' MuJoCo constraint (`k` and `b`; the time constant `tau` becomes `tau / damping` and the damping ratio `zeta * damping / sqrt(stiffness)`). MuJoCo raises a time constant below twice the physics step to that, and the profile's `ankle_stop_solref` already sits there, so draw softer stops (a stiffness range at or below 1) unless the profile's time constant is longer. Kamino's stops are hard constraints: the knob raises there.
 - Take targets and action offsets from `data.default_joint_pos`, not from `standing_offset_rad`: the scene spawns in the home pose, and the standing pose is only used when a scene asks for it. See [The initial pose](#the-initial-pose).
 - The encoder jitter, velocity dither and torque noise are drawn on every `measured()` call for `drive`, once per entry for `history`. With `feedback_sampling` the value of a sample the drive has not renewed repeats, noise included. Two observation terms that each call `measured()` can see different noise in the same step when a new sample is due; read it once in one term, as `actor_obs` does.
 - `history[:, 0]` is one physics step older than `drive`. The history and the IMU are sampled at the start of each physics step, so after an env step their newest entries are from `plant.t_ns - plant.period_ns`, while `drive` is the state now. Use `history_ns` for the times.
