@@ -1,0 +1,89 @@
+--- a/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py
+@@ -162,6 +162,7 @@
+             if self.reduced_ordering == "rcm":
+                 self.permutation = wp.array(permutation, dtype=wp.int32)
+                 self.occupied = wp.array(occupied, dtype=wp.int32)
++                self.model_occupied = wp.clone(self.occupied)
+                 self.permuted_free_outputs = {k: z(self.count * self.free) for k in ("x", "y", "y_hat")}
+                 if self.reduced_dynamic_pattern:
+                     self.body_counts = wp.array(body_counts, dtype=wp.int32)
+@@ -197,6 +198,42 @@
+         problem._delassus.compute(reset_to_zero=True)
+         self.owner._run_iterations(problem)
+
++    def _prepare_factor_pattern(self, problem, *, fresh_sparse_build):
++        # A current Jacobian does not certify the support of an arbitrary D.
++        # Public solves, additive builds and detached arrays must factor every
++        # block, including finite off-pattern entries that fallback cannot detect.
++        p = problem._private_data()
++        operator = problem._delassus._operator
++        jacobians = problem.jacobians
++        certified = (
++            fresh_sparse_build
++            and isinstance(jacobians, SparseSystemJacobians)
++            and jacobians._J_cts is not None
++            and p.D is operator.mat
++            and p.dim is operator.info.dim
++            and p.mio is operator.info.mio
++            and p.vio is operator.info.vio
++        )
++        if not certified:
++            self.occupied.fill_(0xffffffff if self.reduced_dynamic_pattern else 1)
++            return
++        if not self.reduced_dynamic_pattern:
++            # A preceding public call may have selected the dense schedule.
++            wp.copy(self.occupied, self.model_occupied)
++            return
++        topology = jacobians._J_cts.bsm
++        self.body_tiles.zero_()
++        self.pattern_invalid.zero_()
++        self.launch(collect_body_tile_bits, (self.count, topology.max_of_num_nzb), [
++            topology.nzb_coords, topology.nzb_start, topology.num_nzb, p.dim,
++            self.body_counts, self.inverse_permutation, 16, self.pattern_tiles,
++            self.body_tiles, self.pattern_invalid,
++        ], 256)
++        self.launch(self.symbolic_fill, self.count, [
++            self.body_tiles, self.body_counts, p.dim, 16,
++            self.pattern_invalid, self.occupied,
++        ], 128)
++
+     def solve(self, problem, *, _fresh_sparse_build=False):
+         if problem.sparse:
+             raise ValueError("bilateral_reduced prototype only supports dense dynamics")
+@@ -206,22 +243,8 @@
+         if matrix_owner is not None and not use_lazy:
+             matrix_owner.materialize_internal()
+         representation = matrix_owner.descriptor() if use_lazy else []
+-        if self.reduced_dynamic_pattern:
+-            jacobians = problem.jacobians
+-            if not isinstance(jacobians, SparseSystemJacobians) or jacobians._J_cts is None:
+-                raise ValueError("reduced_dynamic_pattern requires live SparseSystemJacobians")
+-            topology = jacobians._J_cts.bsm
+-            self.body_tiles.zero_()
+-            self.pattern_invalid.zero_()
+-            self.launch(collect_body_tile_bits, (self.count, topology.max_of_num_nzb), [
+-                topology.nzb_coords, topology.nzb_start, topology.num_nzb, p.dim,
+-                self.body_counts, self.inverse_permutation, 16, self.pattern_tiles,
+-                self.body_tiles, self.pattern_invalid,
+-            ], 256)
+-            self.launch(self.symbolic_fill, self.count, [
+-                self.body_tiles, self.body_counts, p.dim, 16,
+-                self.pattern_invalid, self.occupied,
+-            ], 128)
++        if self.reduced_ordering == "rcm":
++            self._prepare_factor_pattern(problem, fresh_sparse_build=_fresh_sparse_build)
+         s = self.owner.data.state
+         cfg = self.cfg
+         self.bad_count.zero_()
+--- a/_src/solvers/kamino/_src/solver_kamino_impl.py
++++ b/_src/solvers/kamino/_src/solver_kamino_impl.py
+@@ -1059,7 +1059,7 @@
+         # Solve the dual problem to compute the constraint reactions
+         if (
+             _fresh_dynamics and isinstance(self._solver_fd, PADMMSolver)
+-            and self._solver_fd.config[0].reduced_sparse_diagnostics
++            and self._solver_fd.config[0].algorithm == "bilateral_reduced"
+         ):
+             self._solver_fd._solve_from_fresh_build(problem=self._problem_fd)
+         else:

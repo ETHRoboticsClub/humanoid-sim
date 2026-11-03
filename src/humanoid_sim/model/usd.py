@@ -169,9 +169,10 @@ def fixed_body_excludes(edges: list[tuple[str, str]]) -> list[tuple[str, str]]:
 
 
 def asset_key(desc, profile: dict, *, base_joints: bool = False) -> str:
-    record = {"schema": "humanoid-sim-native-usd/v5", "source": desc.usd_model.digest(),
+    record = {"schema": "humanoid-sim-native-usd/v6", "source": desc.usd_model.digest(),
               "description": desc.digest, "base_joints": base_joints,
-              "actuators": hashlib.sha256(desc.actuators_path.read_bytes()).hexdigest(), "model": profile["model"]}
+              "actuators": hashlib.sha256(desc.actuators_path.read_bytes()).hexdigest(), "model": profile["model"],
+              "ankle_stop_solref": profile["physics"]["mjwarp"]["ankle_stop_solref"]}
     return hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -188,6 +189,9 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     from humanoid_sim.model.asset import ASSET_SCHEMA
     if profile["model"].get("collision_hulls") != "per_mesh":
         raise ValueError("native USD collision_hulls must be per_mesh")
+    prune = profile["model"].get("prune_contained_hulls", False)
+    if not isinstance(prune, bool):
+        raise ValueError("prune_contained_hulls must be a boolean")
     key = asset_key(desc, profile, base_joints=base_joints)
     out = Path(out_root) / desc.robot / key
     meta_path = out / "asset.json"
@@ -222,7 +226,7 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     crank_limits = {}
     for spec in desc.ankle_model.payload["sides"].values():
         for role, drive in zip(("upper", "lower"), spec["motor_names"], strict=True):
-            crank_limits[spec["usd_joints"][role]] = desc.drives[drive].position_limit_device
+            crank_limits[spec["usd_joints"][role]] = desc.drives[drive].shaft_limits
     welded = []
     for name, joint in source.joints.items():
         prim = joint.GetPrim()
@@ -242,6 +246,11 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
         revolute = UsdPhysics.RevoluteJoint(stage.GetPrimAtPath(target))
         revolute.CreateLowerLimitAttr(math.degrees(bounds[0]))
         revolute.CreateUpperLimitAttr(math.degrees(bounds[1]))
+        if name in crank_limits:  # the crank stops' constraint, not the joint stops' (Newton passes it to MJWarp raw)
+            revolute.GetPrim().CreateAttribute("mjc:solreflimit", Sdf.ValueTypeNames.Float2).Set(
+                Gf.Vec2f(*profile["physics"]["mjwarp"]["ankle_stop_solref"]))
+
+    universal = _author_universal_rods(desc, profile, source, stage, mapped)
 
     excluded = []
     fixed_pairs = []
@@ -278,6 +287,11 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
         cube.AddScaleOp().Set(Gf.Vec3f(*sole["half_extents"]))
         UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
         cube.CreatePurposeAttr("guide")
+    pruned = []
+    if prune:
+        from humanoid_sim.model.collision_pruning import prune_stage
+
+        pruned = prune_stage(stage)
     if base_joints:
         _add_base_joints(stage)
     from humanoid_sim.model.urdf import BASE_JOINTS
@@ -288,11 +302,81 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     meta = {"schema": ASSET_SCHEMA, "key": key, "usd": path.name, **desc.identity(),
             "source_usd_sha256": source.digest(), "ankle_representation": "native",
             "base_joints": [name for name, _ in BASE_JOINTS] if base_joints else [],
-            "loop_closures": closures, "crank_joints": crank_joints(desc),
+            "loop_closures": closures, "crank_joints": crank_joints(desc), "universal_rod_joints": universal,
             "welded_joints": welded, "sole_boxes": soles, "merged_collision_bodies": [],
+            "pruned_collision_hulls": pruned,
             "contact_excludes": contact_excludes, "self_collision_sets": None, "self_collision_excludes": excluded}
     meta_path.write_text(json.dumps(meta, indent=1))
     return path
+
+
+def _author_universal_rods(desc, profile: dict, source, stage, mapped) -> list[str]:
+    """With ``model.rod_joints: universal``, turn the open (articulated) ball joint of every ankle rod into a
+    universal joint: rotation about the rod's own ball-to-ball axis locked, the two axes across it free. A rod
+    between two balls spins freely about that axis on a tiny inertia; the spin carries no load. The joint frame
+    turns by :func:`~humanoid_sim.model.native_state.universal_rod_frame` on both bodies, so the assembled pose
+    stays the zero pose. Returns the joints changed."""
+    kind = profile["model"].get("rod_joints", "spherical")
+    if kind == "spherical":
+        return []
+    if kind != "universal":
+        raise ValueError(f"rod_joints {kind!r}: spherical or universal")
+    from pxr import Gf, UsdPhysics
+
+    from humanoid_sim.model.native_state import NativeState, universal_rod_frame
+
+    rods = NativeState(desc).rods
+    if len(rods) != 2 * len(desc.linkages):
+        raise ValueError(f"universal rods: found {len(rods)} loop-closing rods, expected two per ankle linkage")
+    _check_universal_margin(desc)
+    out = []
+    for name, *_, rod_vector, _ in rods:
+        joint = source.joints[name]
+        if not joint.GetPrim().IsA(UsdPhysics.SphericalJoint) or joint.GetExcludeFromArticulationAttr().Get():
+            raise ValueError(f"universal rods: {name} is not an articulated ball joint")
+        if joint.GetPrim().GetAttribute("newton:armature").HasAuthoredValue():
+            # Armature on the ball is the other fix for the same spin; keep one.
+            raise ValueError(f"universal rods: {name} carries an authored newton:armature")
+        turn = Gf.Matrix3d(*universal_rod_frame(rod_vector.numpy()).T.flatten()).ExtractRotation().GetQuat()
+        prim = stage.OverridePrim(mapped(joint.GetPrim()))
+        prim.SetTypeName("PhysicsJoint")
+        target = UsdPhysics.Joint(prim)
+        for get, create in ((joint.GetLocalRot0Attr, target.CreateLocalRot0Attr),
+                            (joint.GetLocalRot1Attr, target.CreateLocalRot1Attr)):
+            create(Gf.Quatf((Gf.Quatd(get().Get()) * turn).GetNormalized()))
+        # A D6 joint: locked axes have low > high; free axes need a limit to be imported at all.
+        for axis, (low, high) in {"transX": (1, -1), "transY": (1, -1), "transZ": (1, -1), "rotZ": (1, -1),
+                                  "rotX": (-math.inf, math.inf), "rotY": (-math.inf, math.inf)}.items():
+            limit = UsdPhysics.LimitAPI.Apply(prim, axis)
+            limit.CreateLowAttr(float(low))
+            limit.CreateHighAttr(float(high))
+        out.append(name)
+    return out
+
+
+UNIVERSAL_MARGIN_RAD = math.radians(60.0)  # largest second angle allowed; the universal joint is singular at 90 deg
+
+
+def _check_universal_margin(desc, samples: int = 4096) -> None:
+    """Refuse universal rods whose second angle comes near its singularity anywhere in the ankle travel:
+    candidates far past the travel, projected onto it."""
+    import torch
+
+    from humanoid_sim.model.native_state import NativeState
+
+    state = NativeState(desc, rod_joints="universal")
+    generator = torch.Generator().manual_seed(0)
+    q = torch.zeros(samples, len(desc.joints), dtype=torch.float64)
+    for linkage in desc.linkages:
+        neutral = torch.as_tensor(desc.ankle_model.neutral(linkage.side), dtype=q.dtype)
+        candidates = neutral + (torch.rand(samples, 2, generator=generator, dtype=q.dtype) - 0.5) * 3.0
+        projected = desc.ankle_model.project(candidates.numpy(), linkage.side)
+        q[:, [list(desc.joints).index(n) for n in linkage.joints]] = torch.as_tensor(projected, dtype=q.dtype)
+    _, angles = state.coordinates(q)
+    worst = max(float(a[:, 1].abs().max()) for a in angles.values())
+    if worst > UNIVERSAL_MARGIN_RAD:
+        raise ValueError(f"universal rods reach {math.degrees(worst):.1f} deg of their second axis "
+                         f"(limit {math.degrees(UNIVERSAL_MARGIN_RAD):.0f}, singular at 90)")
 
 
 def crank_joints(desc) -> dict[str, str]:

@@ -15,6 +15,16 @@ def test_family_ratings_are_resolved_for_every_drive():
         assert drive.effort_nominal == ratings["effort_nominal"]
 
 
+@pytest.mark.parametrize("key", ["shaft_sign", "shaft_zero_rad"])
+def test_a_native_crank_without_its_shaft_frame_is_refused(key):
+    desc = Description.load()
+    assert desc.usd_path is not None  # the profile's native USD
+    crank = next(iter(desc.table["drives"]))
+    desc.table["drives"][crank].pop(key)
+    with pytest.raises(ValueError, match=key):
+        desc.drives
+
+
 @pytest.mark.parametrize("side", ["l", "r"])
 def test_transmission_matches_usd_geometry_over_reachable_workspace(side):
     desc = Description.load()
@@ -25,9 +35,11 @@ def test_transmission_matches_usd_geometry_over_reachable_workspace(side):
     poses = torch.cartesian_prod(*axes)
     poses = poses[torch.from_numpy(model.feasible(poses.numpy(), side))]
     assert len(poses) > 0
-    reference, reach = desc.ankle_model_module()._motor_angles_numpy(poses.numpy(), model.geometries[side])
+    reference, reach = model.cranks(poses.numpy(), side)
     assert (reach < 1).all()
     torch.testing.assert_close(transmission.cranks(poses), torch.from_numpy(reference), atol=1e-12, rtol=0)
+    shafts, _ = desc.ankle_model_module()._motor_angles_numpy(poses.numpy(), model.geometries[side])
+    torch.testing.assert_close(transmission.shafts(poses), torch.from_numpy(shafts), atol=1e-12, rtol=0)
     directions = torch.eye(2, dtype=torch.float64)
     derivative = torch.stack([(transmission.cranks(poses + 1e-6 * direction)
                                - transmission.cranks(poses - 1e-6 * direction)) / 2e-6

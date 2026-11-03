@@ -10,6 +10,15 @@ orientation as yaw, pitch and roll (``R = Rz Ry Rx``) and their rates, held thro
 ``scene`` (:class:`~humanoid_sim.world.boxes.StaticBoxes`) puts static boxes around the robot, which starts at
 the world origin (the scene's spawn point).
 
+``terrain`` (a :class:`~humanoid_sim.world.terrain_io.Terrain`, or the Isaac Lab ``TerrainImporterCfg`` that
+``heightfield_terrain_cfg`` gives training) puts a heightfield in place of the flat ground, built the way training
+builds it. Each env's robot starts at its tile's origin, ``base_height_m`` above it (:attr:`SimCore.env_origins`);
+:attr:`SimCore.ground` gives the surface height under any (x, y). Not with ``scene``.
+
+``objects`` (:class:`~humanoid_sim.world.objects.WorldObjects`) adds bodies on scripted paths and free bodies the robot
+can push. Each step first puts the moving bodies where their paths are at the plant time since the last
+:meth:`reset_objects` (the start of the session), so a replay and the runtime see the same scene.
+
 ``gantry`` (:class:`~humanoid_sim.world.supports.Gantry`) hangs the robot from a rope from the next step on;
 ``fixed_base`` suspends it (the base welded to the world).
 
@@ -40,6 +49,8 @@ from humanoid_sim.model.urdf import BASE_JOINTS
 from humanoid_sim.physics.joint_properties import joint_properties
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.terrain_io import Terrain, as_terrain
+from humanoid_sim.world.objects import WorldObjects
 
 
 class SimCore:
@@ -49,9 +60,10 @@ class SimCore:
                  self_collision: bool | None = None, base_joints: bool = False, imu: bool = False,
                  contacts: bool = False, seed: int = 0, cuda_graph: bool = False, compile: bool = False,
                  imu_history: int | None = None, extra_rig: str | None = None, scene: StaticBoxes | None = None,
-                 entities: dict | None = None, render_each_step: bool = True,
-                 queue_capacity: int | None = None):
+                 objects: WorldObjects | None = None, entities: dict | None = None, render_each_step: bool = True,
+                 queue_capacity: int | None = None, terrain: Terrain | object | None = None):
         check_asset_robot(usd_path, robot)
+        self.terrain = as_terrain(terrain)
         self.desc = Description.load(robot)
         # The IMUs of ``extra_rig`` (sensors/rigs.py EXTRAS) besides the plant's own, each simulated where its frame
         # is: ``SimCore.extra_imus[name]``, stepped with the plant's IMU.
@@ -85,6 +97,7 @@ class SimCore:
                                         **({} if queue_capacity is None else {"queue_capacity": queue_capacity})),
                                solver_joint_names=physical if self.native_state is not None else None)
         props = joint_properties(self.plant, physical)
+        self.plant.enabled_friction[:] = torch.tensor(props.friction, dtype=self.plant.cfg.dtype)
         period_s = self.period_ns / NS_PER_S
         self.backend = IsaacLabRobot(self.desc, usd_path, IsaacLabCfg(
             num_envs=num_envs, device=device, period_s=period_s, solver=self.solver, settings=settings,
@@ -92,10 +105,14 @@ class SimCore:
             self_collision=phys["self_collision"] if self_collision is None else self_collision,
             base_joints=base_joints, ground_friction=self.profile["model"]["ground_friction"],
             imu=imu, extra_imus={n: s.frame for n, s in extra_imus.items()}, contacts=contacts, rerun=rerun,
-            rerun_rrd=rerun_rrd, scene=scene, entities=entities,
-            render_each_step=render_each_step),
+            rerun_rrd=rerun_rrd, scene=scene, objects=objects, entities=entities,
+            render_each_step=render_each_step, terrain=None if self.terrain is None else self.terrain.cfg),
             props=props)
         self.scene = scene
+        self.ground = self.backend.ground
+        self.env_origins = self.backend.env_origins
+        self.objects = objects
+        self._objects_epoch_ns = 0
         order = [self.backend.joint_names.index(n) for n in joints]
         self._to_plant = torch.tensor(order, device=self.plant.cfg.device)
         self._to_solver = torch.tensor([self.backend.joint_names.index(n) for n in physical], device=device)
@@ -104,6 +121,7 @@ class SimCore:
         self._base = (torch.tensor([self.backend.joint_names.index(n) for n, _ in BASE_JOINTS],
                                    device=self.plant.cfg.device) if base_joints else None)
         self._base_target: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._base_acceleration: torch.Tensor | None = None
         from humanoid_sim.world.supports import Gantry
 
         harness = self.profile["support"]["harness"]
@@ -134,6 +152,18 @@ class SimCore:
         if cuda_graph and not str(device).startswith("cuda"):
             raise ValueError("cuda_graph needs a CUDA device")
         self._graphs = _StepGraphs(self, compile=compile) if cuda_graph else None
+        self.write_friction()
+
+    def write_friction(self) -> None:
+        """Write the back-drive joints' solver friction (:meth:`PlantCore.joint_friction`) if it changed."""
+        plant = self.plant
+        if not plant.friction_changed:
+            return
+        plant.friction_changed = False
+        j = plant.backdrive_joints
+        if len(j):
+            self.backend.robot.write_joint_friction_coefficient_to_sim_index(
+                joint_friction_coeff=plant.joint_friction()[:, j].float(), joint_ids=self._to_solver[j])
 
     def joint_state(self) -> tuple[torch.Tensor, torch.Tensor]:
         q, qd = self.backend.joint_state()
@@ -156,6 +186,13 @@ class SimCore:
         self.backend.write_state(bq, bqd)
         self._state_written = True
 
+    def reset_objects(self) -> None:
+        """Start the moving objects' paths again from the current plant time and put the free bodies back at their
+        start poses, at rest."""
+        self._objects_epoch_ns = self.t_ns
+        if self.backend.objects is not None:
+            self.backend.objects.reset()
+
     def close(self) -> None:
         self.backend.close()
 
@@ -172,6 +209,30 @@ class SimCore:
             bqd[:, self._base] = rates.to(bqd.dtype)
             self.backend.write_state(bq, bqd)
             self._state_written = True
+
+    def base_state(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Actual base-joint angles/rates, for prescribed-motion diagnostics."""
+        if self._base is None:
+            raise ValueError("base_state requires base-joint asset")
+        q, v = self.backend.joint_state()
+        return q[:, self._base], v[:, self._base]
+
+    def set_base_acceleration(self, acceleration_w: torch.Tensor | None) -> None:
+        """Equivalent translational inertial loading, not root motion.
+
+        Finite input must be validated before stepping, as rotational targets are.
+        This setter checks layout without synchronizing CUDA for every sample.
+        None disables the correction. Values persist until replaced or cleared.
+        """
+        if acceleration_w is not None:
+            if not (self.backend.cfg.fixed_base or self.backend.cfg.base_joints):
+                raise ValueError("equivalent base acceleration requires fixed translation")
+            if (acceleration_w.shape != (self.plant.num_envs, 3)
+                    or acceleration_w.device != torch.device(self.plant.cfg.device)):
+                raise ValueError("base acceleration must be [envs, 3] on the plant device")
+            if self.gantry.active:
+                raise ValueError("base acceleration replay cannot use an active gantry")
+        self._base_acceleration = acceleration_w
 
     def step(self) -> DriveFeedback:
         q, qd = self.solver_state()
@@ -198,7 +259,12 @@ class SimCore:
             self.backend.set_targets(bt, bv, effort=effort)
         else:
             self.backend.set_targets(bt, effort=effort)
+        self.write_friction()
         self.gantry.apply(self.t_ns)
+        if self._base_acceleration is not None:
+            self.backend.apply_base_acceleration(self._base_acceleration)
+        if self.backend.objects is not None:
+            self.backend.objects.update(self.t_ns - self._objects_epoch_ns)
         self.backend.step()
         self.t_ns += self.period_ns
         q, qd = self.solver_state()

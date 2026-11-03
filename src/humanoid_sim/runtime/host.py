@@ -40,6 +40,18 @@ and furniture, starting at the scene's spawn point (the world origin); the descr
 its digest and the spawn point, so the client can map the truth's world frame to the scene's. A spawn point inside
 a box is refused.
 
+With ``terrain`` (a :class:`~humanoid_sim.world.terrain_io.Terrain`, or the Isaac Lab ``TerrainImporterCfg`` that
+training builds with ``heightfield_terrain_cfg``) the ground is that heightfield instead of the flat plane, built the
+way training builds it. The robot starts at the origin of the terrain's first tile (the descriptor's ``terrain``
+gives that point, the world frame of the truth), and every named pose puts it on the ground under its feet: the
+upright base at the height where the soles, and every other collision shape, just clear the surface under them
+(:func:`~humanoid_sim.world.terrain_io.rest_base_height`), a suspended session that far plus its lift. Not with a
+``scene`` (its boxes stand on the flat ground) or a ``gantry`` (the crane is placed in the room's frame).
+
+With ``objects`` (:class:`~humanoid_sim.world.objects.WorldObjects`) bodies move along scripted paths and free bodies
+stand to be pushed; RESET starts the paths again and puts the free bodies back. The descriptor's ``objects`` lists
+them.
+
 With ``gantry`` (:class:`~humanoid_sim.world.trolley.GantryRig`, in world coordinates) a crane stands over the
 scene: MOVE_GANTRY commands its bridge, trolley and hoist, a hoist rope (SET_SUPPORT ``hoist``) hangs from its hook,
 and the truth reports where it is. The descriptor's ``gantry`` gives its geometry and limits.
@@ -65,7 +77,9 @@ from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.runtime.trajectory import IMU_RECORD, ImuWriter, TrajectoryWriter
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.objects import WorldObjects
 from humanoid_sim.world.supports import GRAVITY_M_S2, NONE, _quat_rotate, level_under
+from humanoid_sim.world.terrain_io import Terrain, as_terrain, rest_base_height
 from humanoid_sim.world.trolley import GantryRig
 
 EXIT_DONE = 0  # max steps or a stop request
@@ -85,8 +99,8 @@ FIDELITY_GAPS = [
     "IMU errors from the rig's model: white noise, turn-on bias, Gauss-Markov drift (SET_FIDELITY ideal turns them "
     "off); the turn-on bias is redrawn at every IMU reset, not only at power-on",
     "drive delay is each family's fixed figure (actuators.yaml drive_delay_s), without per-cycle jitter",
-    "angular momentum is not conserved under fast joint motion at the 4 ms MJWarp step: a hung robot whose joints "
-    "move fast picks up a spin about the vertical that the spreader bar's straps then turn back and damp",
+    "drive feedback is the plant's state at every bus cycle, exactly: no sample age (the robot's PDO samples come "
+    "3.0-7.5 ms apart), torque noise or velocity dither (the training plant has them, devices.feedback_*)",
 ]
 
 
@@ -236,7 +250,8 @@ class RuntimeHost:
                  client_timeout_ns: int = 500_000_000,
                  seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True,
                  scene: StaticBoxes | None = None, gantry: GantryRig | None = None,
-                 trajectory: str | Path | None = None, extra_rig: str | None = None):
+                 objects: WorldObjects | None = None, trajectory: str | Path | None = None, extra_rig: str | None = None,
+                 terrain: Terrain | object | None = None):
         from humanoid_sim.devices.models import drive_models
         from humanoid_sim.model.asset import asset_meta, load_profile
         from humanoid_sim.model.description import Description
@@ -250,7 +265,13 @@ class RuntimeHost:
             raise ValueError(f"{robot}: its profile names no support.harness to suspend it by")
         if scene is not None and scene.clearance_m() == 0.0:
             raise ValueError(f"spawn point {scene.spawn_m} is inside a box of {scene.file}: the robot starts there")
+        terrain = as_terrain(terrain)
+        if terrain is not None and (scene is not None or gantry is not None):
+            raise ValueError("a terrain replaces the flat ground that a scene's boxes and a gantry crane stand on: "
+                             "no scene or gantry with it")
         self.scene = scene
+        self.terrain = terrain
+        self.objects = objects
         self.support = support
         meta = asset_meta(usd)
         if pose is not None and pose not in POSES:
@@ -264,11 +285,17 @@ class RuntimeHost:
         models = drive_models(Description.load(robot))
         self.sim = SimCore(usd, device=device, robot=robot, solver=solver,
                            base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
-                           compile=compile and cuda, imu_history=abi.IMU_SAMPLES, scene=scene, extra_rig=extra_rig,
+                           compile=compile and cuda, imu_history=abi.IMU_SAMPLES, scene=scene, objects=objects,
+                           extra_rig=extra_rig, terrain=terrain,
                            queue_capacity=_queue_capacity(max(m.drive_delay_ns for m in models.values()),
                                                           bus_period_ns,
                                                           int(load_profile(robot)["physics"]["period_ns"])))
         self.device = torch.device(device)
+        self.ground = self.sim.ground
+        # Where sessions start: the origin of the terrain's first tile, else the world origin. A named pose is put
+        # down on the ground there; the robot's collision shapes in each pose are kept to find that height anywhere.
+        self._spawn = (0.0, 0.0) if self.ground is None else tuple(float(v) for v in self.sim.env_origins[0, :2])
+        self._pose_shapes = {} if self.ground is None else self._terrain_pose_shapes(usd, robot)
         self.rig = gantry
         self.trolley = None if gantry is None else self.sim.gantry.mount(gantry)
         self._intake = _DemandIntake(self.sim.plant, len(self.sim.plant.map.drive_names), self.device,
@@ -296,17 +323,6 @@ class RuntimeHost:
         self._sole_ids = torch.tensor([s["id"] for s in self._soles], device=self.device)
         self._sole_points = torch.stack([torch.cat([s["corners"], s["face"], s["axes"]]) for s in self._soles])
         self._sole_half = torch.stack([s["half"] for s in self._soles])
-        # Back-drive friction: the 1:1 drives' joints, their friction enabled and disabled.
-        one_to_one = [(k, self.joints.index(d.joints[0])) for k, d in
-                      enumerate(self.desc.drives[n] for n in self.drives) if d.crank is None]
-        self._backdrive_drives = np.array([k for k, _ in one_to_one])
-        self._backdrive_joint_ids = [self.robot.joint_names.index(self.joints[j]) for _, j in one_to_one]
-        self._friction_on = torch.tensor([[self.desc.joints[self.joints[j]].friction for _, j in one_to_one]],
-                                         device=self.device)
-        # A family without a recorded backdrive_torque keeps the enabled friction.
-        self._friction_off = torch.tensor([[float(self.desc.family_value(
-            self.desc.drives[self.drives[k]].family, "backdrive_torque",
-            self.desc.joints[self.joints[j]].friction)) for k, j in one_to_one]], device=self.device)
         self._drive_off: np.ndarray | None = None
         # Device-to-host copies: into pinned buffers, waited for on a blocking event (the host thread sleeps
         # instead of spinning while the GPU finishes: it shares the machine with Controls).
@@ -319,7 +335,8 @@ class RuntimeHost:
         self.trajectory = None if trajectory is None else TrajectoryWriter(
             trajectory, robot=robot, description_digest=self.desc.digest, joints=self.joints,
             period_ns=self.period_ns, base_frame=self.robot.body_names[0],
-            scene=self._segment_args["descriptor"].get("scene"), gantry=self._segment_args["descriptor"].get("gantry"))
+            scene=self._segment_args["descriptor"].get("scene"), gantry=self._segment_args["descriptor"].get("gantry"),
+            terrain=self._segment_args["descriptor"].get("terrain"))
         self.imu_log = None
         self.extra_imu_logs: dict[str, ImuWriter] = {}
         if self.trajectory is not None:
@@ -357,6 +374,7 @@ class RuntimeHost:
         # Held until the client attaches.
         self._prescribed: tuple[torch.Tensor, torch.Tensor | None] | None = self._named_pose(self.start_pose)
         self._write_pose(*self._prescribed)
+        self.sim.reset_objects()
         if self.support == "suspended":
             self._hang_harness(level=True)
         self._set_drives_off(np.ones(len(self.drives), dtype=bool))  # no client, no demands
@@ -404,6 +422,7 @@ class RuntimeHost:
         self.sim.write_joint_state(q, qd)
         env = torch.tensor([0], device=self.device)
         self.sim.plant.reset(env)  # plant time keeps running: the IMU's sample clock depends on it
+        self._drive_off = None  # every drive off until the next demand
         self.sim.feedback = None
         for imu in self._imus():
             imu.reset(env, self.sim.t_ns, keep_seq=True)
@@ -428,8 +447,18 @@ class RuntimeHost:
             "drive_models": self._drive_model_table(),
             "fidelity_gaps": fidelity_gaps(self.drive_models),
             "scene": None if self.scene is None else self.scene.describe(),
+            "terrain": self._terrain_descriptor(),
+            "objects": None if not self.objects else self.objects.describe(),
             "gantry": None if self.rig is None else self.rig.describe(),
         }
+
+    def _terrain_descriptor(self) -> dict | None:
+        """Null on the flat ground; else the terrain (:meth:`Terrain.describe`), where the robot starts (``spawn_m``,
+        x y z of the first tile's origin in the world frame) and the surface's extent (``extent_m``)."""
+        if self.terrain is None:
+            return None
+        return self.terrain.describe() | {"spawn_m": [float(v) for v in self.sim.env_origins[0]],
+                                          "extent_m": self.ground.describe()}
 
     def _drive_model_table(self) -> list[dict]:
         """Each drive model with the drives it is, for the descriptor."""
@@ -510,15 +539,28 @@ class RuntimeHost:
             raise ValueError("base_pose is [x, y, z, qx, qy, qz, qw] with a unit quaternion")
         return p
 
-    def _named_pose(self, name: str, lift_m: float | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """The pose upright at the spawn, its soles ``lift_m`` above the ground (the session's lift by default)."""
+    def _named_pose(self, name: str, lift_m: float | None = None, *, xy: tuple[float, float] | None = None,
+                    yaw: float = 0.0) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """The pose upright at the spawn (or at ``xy`` turned ``yaw``), its soles ``lift_m`` above the ground (the
+        session's lift by default). On a terrain the base is as high as the ground under the robot's shapes asks."""
         from humanoid_sim.model.poses import STANDING_CLEARANCE_M
 
         q_desc, height = self._poses[name]
         names = list(self.desc.joints)
         q = torch.tensor([[float(q_desc[names.index(n)]) for n in self.joints]], device=self.device)
+        x, y = self._spawn if xy is None else xy
+        if self.ground is not None:
+            height = rest_base_height(self.ground, *self._pose_shapes[name], (x, y), yaw)
         z = height + STANDING_CLEARANCE_M + (self._lift_m() if lift_m is None else lift_m)
-        return q, torch.tensor([[0.0, 0.0, z, 0.0, 0.0, 0.0, 1.0]], device=self.device)
+        pose = [x, y, z, 0.0, 0.0, math.sin(yaw / 2), math.cos(yaw / 2)]
+        return q, torch.tensor([pose], device=self.device)
+
+    def _terrain_pose_shapes(self, usd: Path, robot: str) -> dict:
+        """Each named pose's collision shapes in the upright base frame (points and radii), to rest it on the
+        terrain."""
+        from humanoid_sim.model.kinematics import collision_points_in_base
+
+        return {name: collision_points_in_base(usd, self.sim.desc, q) for name, (q, _) in self._poses.items()}
 
     def _lift_m(self) -> float:
         return SUSPENDED_LIFT_M if self.support == "suspended" else 0.0
@@ -622,6 +664,7 @@ class RuntimeHost:
         roped = self._rope_due is not None or bool(self.sim.gantry.mode[0] != NONE)
         harness = self._harness_hung or (self.support == "suspended" and (base is not None or not roped))
         self._write_pose(q, base)
+        self.sim.reset_objects()
         env = torch.tensor([0], device=self.device)
         # A rope's anchor stays where it was hung: the harness is rehung where the robot now is (a suspended
         # session's robot goes back on it when the reset moves the base); a client's rope is released when the
@@ -632,6 +675,7 @@ class RuntimeHost:
         elif roped and base is not None:
             self._release_rope()
         self.sim.plant.reset(env)
+        self._drive_off = None
         for imu in self._imus():
             imu.reset(env, self.sim.t_ns, keep_seq=True)
         self._prescribed = None
@@ -686,11 +730,10 @@ class RuntimeHost:
                 self._release_rope()
                 if in_place:
                     return "free"
-                q, base = self._named_pose(self.start_pose, lift_m=0.0)
                 x, y, z, w = self.robot.data.root_link_pose_w.torch[0, 3:7].tolist()
                 yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-                base[0, :2] = self.robot.data.root_link_pose_w.torch[0, :2]
-                base[0, 5:7] = torch.tensor([math.sin(yaw / 2), math.cos(yaw / 2)], device=self.device)
+                here = self.robot.data.root_link_pose_w.torch[0, :2].tolist()
+                q, base = self._named_pose(self.start_pose, lift_m=0.0, xy=(here[0], here[1]), yaw=yaw)
                 self._place(q, base)
             return "free"
         if kind == "suspended":
@@ -892,15 +935,15 @@ class RuntimeHost:
         self._set_drives_off(~running)
 
     def _set_drives_off(self, off: np.ndarray) -> None:
-        """Back-drive friction on the joints of the 1:1 drives that are off; written only on a change."""
-        off = off[self._backdrive_drives]
+        """Back-drive friction on the joints of the 1:1 drives that are off (:meth:`PlantCore.joint_friction`). The
+        demands reach the plant through a CUDA graph, which cannot flag the change itself: this does, on a change
+        of the on/off pattern."""
         if self._drive_off is not None and np.array_equal(off, self._drive_off):
             return
         self._drive_off = off.copy()
-        mask = torch.from_numpy(off).to(self.device).unsqueeze(0)
-        self.robot.write_joint_friction_coefficient_to_sim_index(
-            joint_friction_coeff=torch.where(mask, self._friction_off, self._friction_on),
-            joint_ids=self._backdrive_joint_ids)
+        plant = self.sim.plant
+        plant.drive_off.copy_(torch.from_numpy(off).to(plant.drive_off.device)[plant.backdrive_drives].unsqueeze(0))
+        plant.friction_changed = True
 
     def _client_lost(self) -> bool:
         return self.attached and abi.mono_ns() - self._client_mono_ns > self.client_timeout_ns

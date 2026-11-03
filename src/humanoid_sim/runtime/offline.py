@@ -54,6 +54,8 @@ def render_trajectory(trajectory: str | Path, cfg, out: str | Path, *, start_s: 
     from humanoid_sim.world.trolley import GantryRig
 
     traj = Trajectory.load(trajectory)
+    if traj.header.get("terrain"):
+        raise ValueError(f"{trajectory} was recorded on a terrain; the sensor render scene has the flat ground only")
     desc = Description.load(cfg.robot)
     order = check_trajectory(traj, desc)
     scene, spawn, scan_mesh = host_scene(traj.header.get("scene"))

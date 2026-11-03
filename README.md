@@ -87,11 +87,6 @@ Physics runs on CUDA; Warp's CPU device runs the same code for tests and small e
 | `humanoid-sim view-runtime PATH [--save x.rrd]` | Watches a running session in Rerun, read-only |
 | `humanoid-sim replay <exc-dir> [--base yaw\|orientation\|fixed]` | Replays a capture drive by drive and scores it |
 | `humanoid-sim view-replay <replay-dir> --save x.rrd` | The replay in Rerun: sim, real robot ghost, every drive signal |
-| `humanoid-sim fit-delay <exc-dir>...` | Finds when recorded demands take effect, by batched replay |
-| `humanoid-sim fit-passive <exc-dir>... --num-envs N` | Fits upper-body passive joint parameters to captures |
-| `humanoid-sim check-bag <capture-or-bag>...` | Checks captures or rosbags against what a PACE fit needs, without physics |
-| `humanoid-sim fit-pace <capture-or-bag>... --holdout ...` | Fits PACE 0.2.0's actuator model to captures or rosbags |
-| `humanoid-sim pace-selftest --num-envs N` | Fits PACE parameters planted in the sim back from a synthetic chirp |
 | `humanoid-sim bench [--train\|--runtime] --num-envs N` | Measures throughput or the runtime's step time |
 
 Two runnable examples sit in `examples/`: `runtime_client.py` (a complete runtime client in NumPy) and `train_scene.py` (a training scene with terrain, randomization, pushes and a Rerun recording).
@@ -156,3 +151,5 @@ The rules the code follows (no ROS, physics only through Isaac Lab on MJWarp, in
 ## License
 
 Apache 2.0, see [LICENSE](LICENSE).
+
+System identification fitting, acceptance and reports are owned by humanoid-learning (`python -m humanoid_learning.sysid --help`). This repository retains physical replay, readers and simulator physics checks.

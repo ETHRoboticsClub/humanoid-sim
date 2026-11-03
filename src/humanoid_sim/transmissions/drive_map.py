@@ -44,6 +44,7 @@ class DriveJointMap:
         self._lin_d = torch.tensor(lin_d, device=device, dtype=torch.long)
         self._lin_j = torch.tensor(lin_j, device=device, dtype=torch.long)
         self._lin_s = torch.tensor(lin_s, device=device, dtype=dtype)
+        self._lin_z = torch.zeros_like(self._lin_s)
         self.ankles = []
         for lk in desc.linkages:
             if lk.upper not in self.drive_names:
@@ -66,7 +67,7 @@ class DriveJointMap:
         e = q.shape[0]
         qdrv = torch.zeros(e, self.num_drives, device=q.device, dtype=q.dtype)
         vdrv = torch.zeros_like(qdrv)
-        qdrv[:, self._lin_d] = q[:, self._lin_j] * self._lin_s
+        qdrv[:, self._lin_d] = (q[:, self._lin_j] - self._lin_z) * self._lin_s
         vdrv[:, self._lin_d] = qd[:, self._lin_j] * self._lin_s
         jacs = []
         for _, d_idx, j_idx, tr in self.ankles:
@@ -111,7 +112,8 @@ class DriveJointMap:
 
 
 class NativeDriveJointMap(DriveJointMap):
-    """Drive torques act on the USD's actual shaft joints; the solver closes the rods.
+    """Drive torques act on the USD's actual shaft joints; the solver closes the rods. A crank's device angle is
+    ``sign * (shaft angle - shaft_zero_rad)``.
 
     The logical DriveJointMap remains available for converting policy hinge targets
     to crank targets. This map is only the physical state/force boundary.
@@ -127,5 +129,6 @@ class NativeDriveJointMap(DriveJointMap):
         self._lin_d = torch.arange(len(names), device=device)
         self._lin_j = torch.tensor([self.joint_names.index(n) for n in names], device=device)
         self._lin_s = torch.tensor([d.sign for d in desc.drives.values()], device=device, dtype=dtype)
+        self._lin_z = torch.tensor([d.shaft_zero_rad for d in desc.drives.values()], device=device, dtype=dtype)
         self.ankles = []
         self.actuated_joints = self._lin_j.sort().values

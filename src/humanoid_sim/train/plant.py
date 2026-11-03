@@ -11,10 +11,11 @@ sits between demands and the solver:
   :attr:`RobotPlant.gantry` (a :class:`~humanoid_sim.world.supports.Gantry`: no rope until a task hangs one, and
   resets keep it);
 * :meth:`RobotPlant.measured` is what the robot's host would read: drive feedback as the drive reports it (its
-  position offset included, in whole encoder counts with ±1 count of jitter, velocity per controller sample;
-  :class:`~humanoid_sim.devices.reporting.DriveReporting`), a short per-step history of it, and the raw IMU
-  samples received so far (sensor frame, receipt stamps). :meth:`RobotPlant.truth` is everything else, for
-  critics and rewards;
+  position offset included, in whole encoder counts with ±1 count of jitter, velocity per controller sample with
+  its dither, torque with its noise; :class:`~humanoid_sim.devices.reporting.DriveReporting`) as the master holds it
+  between the drive's samples (:class:`~humanoid_sim.devices.sampling.FeedbackSampler`), a short per-step history of
+  it, and the raw IMU samples received so far (sensor frame, receipt stamps). :meth:`RobotPlant.truth` is everything
+  else, for critics and rewards;
 * :meth:`RobotPlant.reset` writes the state of the envs being reset and redraws their device parameters;
   :meth:`RobotPlant.set_level` redraws everything at a new randomization level (solver writes: rare);
 * :meth:`RobotPlant.log` writes named signals of a few envs into a Rerun recording at plant time
@@ -27,7 +28,8 @@ description's; drive order is the description's drive order. No host syncs in st
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, replace
 
 import torch
 
@@ -37,9 +39,10 @@ from humanoid_sim.devices.feedback import DriveFeedback
 from humanoid_sim.devices.models import drive_models
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
+from humanoid_sim.physics.crank_stops import scaled_solref
 from humanoid_sim.randomization import PARAMS, ParamSpec, Randomizer, parse_specs
 from humanoid_sim.sensors import rigs
-from humanoid_sim.sensors.imu import ImuDelivery, ImuSamples
+from humanoid_sim.sensors.imu import ImuDelivery, ImuSamples, pending_slots
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.supports import Gantry
 
@@ -52,7 +55,13 @@ class TrainPlantCfg:
     seed: int = 0
     feedback_history: int = 16  # physics steps of drive feedback kept for :meth:`RobotPlant.measured`
     reporting: bool = True  # measured drive feedback quantized as the drive reports it
+    feedback_noise: bool = True  # with reporting: velocity dither and torque noise (profile devices.feedback_noise)
+    feedback_sampling: bool = True  # hold the drive's last sample between samples (profile devices.feedback_sampling)
+    command_jitter_ns: int = 0  # each demand's arrival is moved by a uniform draw in ±this (no measurement: off)
+    cuda_graph: bool = False  # capture drive math and IMU delivery; CUDA only
+    compile: bool = False  # fuse drive and IMU math before capture; requires cuda_graph
     queue_capacity: int = 8  # demands in flight per env: ≥ (max latency + drive delay) / demand period + 1
+    physics_overrides: dict = field(default_factory=dict)  # explicit profile overrides, shared with scene construction
 
 
 @dataclass
@@ -74,27 +83,95 @@ class Truth:
     contact_forces_w: torch.Tensor | None  # [E, B, 3] net force per body
 
 
+def command_latency_ns(profile: dict, drive_delay_ns: torch.Tensor) -> torch.Tensor:
+    """Each drive's nominal latency before it ``[D]`` (int ns): the profile's measured ``devices.command_path``
+    ``frame_to_drive_ns`` less the drive's own delay; zero without one (an ideal controller path)."""
+    path = profile["devices"].get("command_path")
+    if path is None:
+        return torch.zeros_like(drive_delay_ns)
+    total = path["frame_to_drive_ns"]
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise ValueError(f"devices.command_path.frame_to_drive_ns {total!r}: expected a non-negative integer of ns")
+    out = total - drive_delay_ns
+    if (out < 0).any():
+        raise ValueError(f"devices.command_path.frame_to_drive_ns {total} is shorter than a drive's own delay "
+                         f"({int(drive_delay_ns.max())} ns)")
+    return out
+
+
+def command_arrival_ns(sent_ns: torch.Tensor, latency_ns: torch.Tensor, drive_delay_ns: torch.Tensor,
+                       jitter_ns: int = 0, generator: torch.Generator | None = None) -> torch.Tensor:
+    """When a demand sent at ``sent_ns`` ``[E]`` reaches each drive ``[E, D]``: after the latency before the drive and
+    the drive's own delay, moved by a uniform integer draw in ±``jitter_ns`` per demand and drive (never before it was
+    sent). The arrival queue keeps arrivals in order, so a jittered demand never overtakes an earlier one."""
+    arrival = sent_ns.to(torch.int64).unsqueeze(1) + latency_ns + drive_delay_ns
+    if jitter_ns == 0:
+        return arrival
+    if jitter_ns < 0:
+        raise ValueError(f"command jitter {jitter_ns} ns is negative")
+    draw = torch.randint(-jitter_ns, jitter_ns + 1, arrival.shape, generator=generator, device=arrival.device)
+    return torch.maximum(arrival + draw, sent_ns.to(torch.int64).unsqueeze(1))
+
+
+def imu_latency_ns(profile: dict) -> int:
+    """The IMU's nominal latency (int ns): the profile's measured ``devices.imu_path`` ``sample_to_host_ns``; zero
+    without one (samples reach the consumer as delivered)."""
+    path = profile["devices"].get("imu_path")
+    if path is None:
+        return 0
+    total = path["sample_to_host_ns"]
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise ValueError(f"devices.imu_path.sample_to_host_ns {total!r}: expected a non-negative integer of ns")
+    return total
+
+
+def imu_latency_bounds(specs, nominal_ns: int) -> tuple[float, float]:
+    """The least and greatest ``imu_latency`` (ns) the specs can draw around ``nominal_ns``, in their order."""
+    lo = hi = float(nominal_ns)
+    for s in specs:
+        if s.param != "imu_latency":
+            continue
+        if s.dist == "normal":
+            raise ValueError("imu_latency needs a bounded distribution (uniform, log_uniform or discrete_uniform)")
+        a, b = (v * NS_PER_S for v in s.range) if s.op != "scale" else s.range
+        if s.op == "scale":
+            if a < 0:
+                raise ValueError("imu_latency: a scale below 0")
+            lo, hi = lo * a, hi * b
+        elif s.op == "add":
+            lo, hi = lo + a, hi + b
+        else:
+            lo, hi = a, b
+    return lo, hi
+
+
 class RobotPlant:
+    _stops = None  # StopSolref when crank_stop_stiffness or crank_stop_damping is randomized
+
     def __init__(self, robot, cfg: TrainPlantCfg | None = None, *, imu=None, contacts=None, physics_manager=None):
         """``robot``: the scene's articulation; ``imu`` / ``contacts``: its sensors (optional);
         ``physics_manager``: ``env.sim.physics_manager`` (needed to randomize shape friction)."""
         self.cfg = cfg = cfg or TrainPlantCfg()
+        if cfg.compile and not cfg.cuda_graph:
+            raise ValueError("TrainPlantCfg.compile requires cuda_graph")
         self.robot, self.imu_sensor, self.contacts = robot, imu, contacts
         self.desc = Description.load(cfg.robot)
-        self.profile = load_profile(cfg.robot)
+        self.profile = load_profile(cfg.robot, physics_overrides=cfg.physics_overrides)
         self.num_envs = e = robot.num_instances
         self.device = torch.device(robot.device)
         self.period_ns = int(self.profile["physics"]["period_ns"])
         self.joints = list(self.desc.joints)
         self.joint_ids = torch.tensor([robot.joint_names.index(n) for n in self.joints], device=self.device)
         self.native_state = None
+        self._native_ids = None  # solver joint ids of the native DOFs, built on the first write
         physical = None
         if self.profile["model"].get("ankle_representation") == "native":
             from humanoid_sim.model.native_state import NativeState
             from humanoid_sim.transmissions.drive_map import native_joint_names
 
             physical = native_joint_names(self.desc)
-            self.native_state = NativeState(self.desc, device=self.device)
+            self.native_state = NativeState(self.desc, device=self.device,
+                                            compile_batch_size=e if cfg.compile else None)
         self.core = PlantCore(self.desc, self.joints, e, PlantCfg(robot=cfg.robot, physics_period_ns=self.period_ns,
                                                                   queue_capacity=cfg.queue_capacity,
                                                                   device=str(self.device)), solver_joint_names=physical)
@@ -103,11 +180,12 @@ class RobotPlant:
         self.drives = self.core.map.drive_names
         d = len(self.drives)
         self.t_ns = 0
-        self.latency_ns = torch.zeros(e, d, dtype=torch.int64, device=self.device)  # before the drive, randomized
         models = drive_models(self.desc)
         self.drive_models = [models[n] for n in self.drives]
         self.drive_delay_ns = torch.tensor([m.drive_delay_ns for m in self.drive_models], dtype=torch.int64,
                                            device=self.device)
+        self.command_latency_ns = command_latency_ns(self.profile, self.drive_delay_ns)  # [D] nominal
+        self.latency_ns = self.command_latency_ns.expand(e, -1).clone()  # before the drive, randomized
         self._targets = robot.data.default_joint_pos.torch.clone()
         self._physics_manager = physics_manager
         harness = self.profile["support"]["harness"]
@@ -126,18 +204,47 @@ class RobotPlant:
             from humanoid_sim.devices.reporting import DriveReporting
 
             self.reporting = DriveReporting.for_drives(self.desc, self.drives, self.profile, device=self.device,
-                                                       seed=cfg.seed + 2)
+                                                       seed=cfg.seed + 2, noise=cfg.feedback_noise)
+        self.sampler = None
+        if cfg.feedback_sampling:  # None without the profile's devices.feedback_sampling: every step reports
+            from humanoid_sim.devices.sampling import FeedbackSampler
+
+            self.sampler = FeedbackSampler.for_robot(self.desc, self.profile, e, d, device=self.device,
+                                                     seed=cfg.seed + 3)
+        if cfg.command_jitter_ns < 0:
+            raise ValueError(f"command_jitter_ns {cfg.command_jitter_ns} is negative")
+        self._jitter_generator = torch.Generator(device=self.device).manual_seed(cfg.seed + 4)
+        specs = parse_specs(cfg.randomization)
+        self.imu_latency_ns = imu_latency_ns(self.profile)  # nominal
         self.imu = None
         if imu is not None:
-            self.imu = ImuDelivery(rigs.imu(self.desc).delivery_cfg(), e,
-                                   device=self.device, seed=cfg.seed + 1)
+            lo, hi = imu_latency_bounds(specs, self.imu_latency_ns)
+            if lo < 0:
+                raise ValueError(f"imu_latency can draw {lo} ns; a latency is not negative")
+            sensor = rigs.imu(self.desc)
+            delivery = sensor.delivery_cfg()
+            pending = max(delivery.pending, pending_slots(delivery, math.ceil(hi), self.period_ns))
+            self.imu = ImuDelivery(replace(delivery, pending=pending), e, device=self.device, seed=cfg.seed + 1)
             self.imu.reset(torch.arange(e, device=self.device), 0)
+            self.imu.latency_ns.fill_(self.imu_latency_ns)
+            if sensor.output_lsb is not None:  # the host decodes counts; the runtime's client does this itself
+                gyro_lsb, accel_lsb = sensor.output_lsb
+                self.imu.lsb.copy_(torch.tensor([gyro_lsb] * 3 + [accel_lsb] * 3, device=self.device))
 
-        specs = parse_specs(cfg.randomization)
         self._nominal_physics = self._read_physics()
+        self.core.enabled_friction.copy_(self._nominal_physics["joint_friction"])
         nominal = {name: v for name, v in self._nominal_physics.items()} | self._device_nominal()
         self._ratio = nominal["joint_friction_ratio"]
         used = {s.param for s in specs}
+        if any(s.param == "latency" and s.op == "scale" for s in specs) and "command_path" not in self.profile["devices"]:
+            raise ValueError(f"{cfg.robot}: scaling latency needs the profile's devices.command_path")
+        if "imu_latency" in used:
+            if self.imu is None:
+                raise ValueError("randomizing imu_latency needs the IMU")
+            if any(s.param == "imu_latency" and s.op == "scale" for s in specs) and "imu_path" not in self.profile["devices"]:
+                raise ValueError(f"{cfg.robot}: scaling imu_latency needs the profile's devices.imu_path")
+        if "imu_drop_probability" in used and self.imu is None:
+            raise ValueError("randomizing imu_drop_probability needs the IMU")
         if {"friction", "shape_friction"} <= used:
             raise ValueError("choose per-env friction or per-shape friction, not both")
         self.randomizer = Randomizer(specs, {k: v for k, v in nominal.items() if k in used},
@@ -145,7 +252,7 @@ class RobotPlant:
                                       "drive": self.drives,
                                       "shape": [f"shape_{i}" for i in range(nominal.get("shape_friction", torch.empty(e, 0)).shape[1])]},
                                      num_envs=e, device=self.device, seed=cfg.seed, level=cfg.level)
-        from humanoid_sim.physics.crank_stops import check_crank_stops
+        from humanoid_sim.physics.crank_stops import StopSolref, check_crank_stops
         from humanoid_sim.physics.isaaclab import (
             apply_heightfield_base,
             apply_joint_limits,
@@ -156,6 +263,7 @@ class RobotPlant:
         if used & {"friction", "shape_friction"} and physics_manager is None:
             raise ValueError("randomizing friction needs the physics manager (env.sim.physics_manager)")
         self._solver = running_solver()
+        self._contact_knobs(used)
         check_crank_stops(cfg.robot, self.profile["physics"])
         apply_joint_limits(self.profile["physics"])
         apply_loop_closure(self.profile["physics"])
@@ -163,8 +271,21 @@ class RobotPlant:
         from humanoid_sim.physics.contact_capacity import contact_capacity_guard
 
         self._contact_capacity = contact_capacity_guard(self.profile["physics"], e, self.device)
+        if used & {"crank_stop_stiffness", "crank_stop_damping"}:
+            self._stops = StopSolref(robot, physics_manager.get_model(), self.desc, e)
+            self._stops_solref0 = self._stops.read()
         self._write_physics()
         self._write_device(torch.arange(e, device=self.device))
+        self._drive_graph = None
+        self._imu_graph = None
+        if cfg.cuda_graph:
+            from humanoid_sim.train.drive_step import DriveStepGraph
+
+            self._drive_graph = DriveStepGraph(self.core, *self.solver_state(), compile=cfg.compile)
+            if self.imu is not None:
+                from humanoid_sim.train.imu_step import ImuStepGraph
+
+                self._imu_graph = ImuStepGraph(self.imu, self.period_ns, compile=cfg.compile)
 
     # -- randomization ----------------------------------------------------------------------------
 
@@ -184,6 +305,9 @@ class RobotPlant:
             mu = self._shape_friction()
             out["friction"] = mu[:, :1].clone()
             out["shape_friction"] = mu.clone()
+            out["restitution"] = self._shape_restitution()[:, :1].clone()
+        out["crank_stop_stiffness"] = torch.ones(self.num_envs, 1, device=self.device)
+        out["crank_stop_damping"] = torch.ones(self.num_envs, 1, device=self.device)
         return out
 
     def _device_nominal(self) -> dict[str, torch.Tensor]:
@@ -195,15 +319,38 @@ class RobotPlant:
                                 for n in self.core.solver_map.joint_names], device=self.device)
         ratio = torch.where(static > 0, dynamic / static.clamp(min=1e-12), torch.ones_like(static))
         return {"drive_stiffness": ones, "drive_damping": ones.clone(), "torque_limit": ones.clone(),
-                "latency": torch.zeros_like(ones), "encoder_offset": torch.zeros_like(ones),
+                "latency": (self.command_latency_ns / NS_PER_S).to(ones.dtype).expand(e, -1).clone(),
+                "encoder_offset": torch.zeros_like(ones),
                 "joint_friction_ratio": ratio.expand(e, -1).clone(),
-                "imu_gyro_bias": zeros3, "imu_accel_bias": zeros3.clone(), "imu_misalignment": zeros3.clone()}
+                "imu_gyro_bias": zeros3, "imu_accel_bias": zeros3.clone(), "imu_misalignment": zeros3.clone(),
+                "imu_latency": torch.full((e, 1), self.imu_latency_ns / NS_PER_S, device=self.device),
+                "imu_drop_probability": torch.full(
+                    (e, 1), self.imu.cfg.drop_probability if self.imu is not None else 0.0, device=self.device)}
 
     def _shape_friction(self) -> torch.Tensor:
         import warp as wp
 
         model = self._physics_manager.get_model()
         return wp.to_torch(self.robot._root_view.get_attribute("shape_material_mu", model)[:, 0])
+
+    def _shape_restitution(self) -> torch.Tensor:
+        import warp as wp
+
+        model = self._physics_manager.get_model()
+        return wp.to_torch(self.robot._root_view.get_attribute("shape_material_restitution", model)[:, 0])
+
+    def _contact_knobs(self, used: set[str]) -> None:
+        """Raise unless the running solver can randomize the contact and stop parameters the specs use."""
+        knobs = used & {"restitution", "crank_stop_stiffness", "crank_stop_damping"}
+        if knobs and self._physics_manager is None:
+            raise ValueError(f"randomizing {sorted(knobs)} needs the physics manager (env.sim.physics_manager)")
+        if "restitution" in used and self._solver != "kamino":
+            raise ValueError(f"{self._solver} has no contact restitution (MuJoCo's contacts do not bounce); "
+                             "randomizing restitution needs Kamino")
+        if used & {"crank_stop_stiffness", "crank_stop_damping"}:
+            from humanoid_sim.physics.crank_stops import check_stop_solref_support
+
+            check_stop_solref_support(self.cfg.robot, self.profile["physics"], self._solver)
 
     def _write_physics(self) -> None:
         """Write every randomized solver parameter, all envs (startup and level changes only)."""
@@ -231,6 +378,8 @@ class RobotPlant:
         if "joint_friction" in v:
             r.write_joint_friction_coefficient_to_sim_index(joint_friction_coeff=v["joint_friction"],
                                                             joint_ids=self.solver_joint_ids)
+            self.core.enabled_friction.copy_(v["joint_friction"])
+            self.core.friction_changed = True  # the off drives' joints take their back-drive torque again
         if "joint_damping" in v:
             r.write_joint_viscous_friction_coefficient_to_sim_index(joint_viscous_friction_coeff=v["joint_damping"],
                                                                     joint_ids=self.solver_joint_ids)
@@ -240,6 +389,19 @@ class RobotPlant:
             mu = self._shape_friction()
             mu[:] = v["shape_friction" if "shape_friction" in v else "friction"].to(mu.dtype)
             self._physics_manager.add_model_change(ModelFlags.SHAPE_PROPERTIES)
+        if "restitution" in v:
+            from newton import ModelFlags
+
+            if not bool(((v["restitution"] >= 0) & (v["restitution"] <= 1)).all()):
+                raise ValueError("restitution must be in [0, 1]")
+            bounce = self._shape_restitution()
+            bounce[:] = v["restitution"].to(bounce.dtype)
+            self._physics_manager.add_model_change(ModelFlags.SHAPE_PROPERTIES)
+        if self._stops is not None:
+            ones = torch.ones_like(self._nominal_physics["crank_stop_stiffness"])
+            self._stops.write(scaled_solref(self._stops_solref0, v.get("crank_stop_stiffness", ones),
+                                            v.get("crank_stop_damping", ones)))
+            self._physics_manager.add_model_change(self._stops.flag)
 
     def _write_device(self, env_ids: torch.Tensor) -> None:
         v, bank = self.randomizer.values, self.core.bank
@@ -260,6 +422,13 @@ class RobotPlant:
                                  ("imu_misalignment", self.imu.misalignment)):
                 if name in v:
                     target[env_ids] = v[name][env_ids].to(target.dtype)
+            if "imu_latency" in v:
+                self.imu.latency_ns[env_ids] = (v["imu_latency"][env_ids, 0] * NS_PER_S).round().to(torch.int64)
+            if "imu_drop_probability" in v:
+                p = v["imu_drop_probability"][env_ids, 0]
+                if not bool(((p >= 0) & (p <= 1)).all()):
+                    raise ValueError("imu_drop_probability must be in [0, 1]")
+                self.imu.drop_probability[env_ids] = p.to(self.imu.drop_probability.dtype)
 
     def attach_log(self, log) -> None:
         """Log signals into ``log`` (a :class:`~humanoid_sim.signals.log.SignalLog`) from now on."""
@@ -287,7 +456,8 @@ class RobotPlant:
     def submit(self, demand: DriveDemand, sent_ns: torch.Tensor, env_mask: torch.Tensor | None = None) -> None:
         """Demands ``[E, D]`` sent at ``sent_ns`` ``[E]``; each drive applies them after the latency before it and its
         own delay."""
-        arrival = sent_ns.to(torch.int64).unsqueeze(1) + self.latency_ns + self.drive_delay_ns
+        arrival = command_arrival_ns(sent_ns, self.latency_ns, self.drive_delay_ns, self.cfg.command_jitter_ns,
+                                     self._jitter_generator)
         self.core.submit(demand, arrival, env_mask)
 
     def joint_state(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -306,10 +476,24 @@ class RobotPlant:
             return
         values, rates = self.native_state.dofs(q, qd)
         names = list(values)
-        ids = torch.tensor([self.robot.joint_names.index(n) for n in names], device=self.device)
+        if self._native_ids is None:  # a host-to-device copy, kept out of the steady-state reset
+            self._native_ids = torch.tensor([self.robot.joint_names.index(n) for n in names], device=self.device)
+        ids = self._native_ids
         self.robot.write_joint_state_to_sim_index(
             position=torch.stack([values[n] for n in names], -1).to(q.dtype),
             velocity=torch.stack([rates[n] for n in names], -1).to(qd.dtype), joint_ids=ids, env_ids=env_ids)
+
+    def _write_friction(self) -> None:
+        """Write the back-drive joints' solver friction (:meth:`PlantCore.joint_friction`) if a reset or a demand
+        changed it: once per submit, outside the drive graph."""
+        core = self.core
+        if not core.friction_changed:
+            return
+        core.friction_changed = False
+        j = core.backdrive_joints
+        if len(j):
+            self.robot.write_joint_friction_coefficient_to_sim_index(
+                joint_friction_coeff=core.joint_friction()[:, j].float(), joint_ids=self.solver_joint_ids[j])
 
     def pre_physics(self) -> None:
         """Before each physics step: sample sensors at the step start, run the drives, write the targets, apply
@@ -317,12 +501,19 @@ class RobotPlant:
         if self._contact_capacity is not None:
             self._contact_capacity.check()
         q, qd = self.solver_state()
-        fb = self.core.feedback(q, qd)
-        self._push_history(fb)
+        if self._drive_graph is None:
+            fb = self.core.feedback(q, qd)
+        else:
+            # The graph snapshots the preceding drive output before advancing the bank.
+            # Sensor delivery uses a separate graph with its own registered RNG.
+            target, fb = self._drive_graph.step(self.t_ns, q, qd)
+        self._push_history(self._sample(fb))
         if self.imu is not None:
             data = self.imu_sensor.data
-            self.imu.step(self.t_ns, data.ang_vel_b.torch, data.lin_acc_b.torch)
-        target = self.core.pre_physics(self.t_ns, q, qd, self.core.post_state)  # feedback converted q above
+            delivery = self.imu if self._imu_graph is None else self._imu_graph
+            delivery.step(self.t_ns, data.ang_vel_b.torch, data.lin_acc_b.torch)
+        if self._drive_graph is None:
+            target = self.core.pre_physics(self.t_ns, q, qd, self.core.post_state)  # feedback converted q above
         self._targets[:, self.solver_joint_ids] = target.to(self._targets.dtype)
         tc = self.robot.actuators.target_command
         tc.set_position_index(value=self._targets)
@@ -330,6 +521,7 @@ class RobotPlant:
         effort = torch.zeros_like(self._targets)
         effort[:, self.solver_joint_ids] = self.core.passive_effort.to(effort.dtype)
         tc.set_effort_index(value=effort)
+        self._write_friction()
         self.gantry.apply(self.t_ns)
         self.t_ns += self.period_ns
 
@@ -345,14 +537,22 @@ class RobotPlant:
     def _with_offset(self, fb: DriveFeedback, offset: torch.Tensor) -> DriveFeedback:
         return DriveFeedback(fb.position_rad + offset, fb.velocity_rad_s, fb.applied_torque_nm, fb.demanded_torque_nm)
 
+    def _sample(self, fb: DriveFeedback) -> DriveFeedback:
+        """The physical feedback ``fb`` at the plant time as the host reads it: the drive's offset included, reported
+        (quantized, with its noise) and then held between the drive's samples. The sample is taken by the first call
+        at a plant time that finds one due (the end of one step is the start of the next, so :meth:`measured` and
+        the next :meth:`pre_physics` meet at the same time); a later call at that time returns it."""
+        fb = self._with_offset(fb, self.core.bank.position_offset)
+        if self.reporting is not None:
+            fb = self.reporting.report(fb)
+        if self.sampler is not None:
+            fb = self.sampler.step(self.t_ns, fb)
+        return fb
+
     def measured(self) -> Measured:
         q, qd = self.solver_state()
-        offset = self.core.bank.position_offset
-        drive = self._with_offset(self.core.feedback(q, qd), offset)
-        history = self._with_offset(self._hist, offset.unsqueeze(1))
-        if self.reporting is not None:
-            drive, history = self.reporting.report(drive), self.reporting.report(history)
-        return Measured(drive, history, self._hist_ns, self.imu.samples if self.imu is not None else None)
+        drive = self._sample(self.core.feedback(q, qd))
+        return Measured(drive, replace(self._hist), self._hist_ns, self.imu.samples if self.imu is not None else None)
 
     def truth(self) -> Truth:
         q, qd = self.joint_state()
@@ -382,6 +582,8 @@ class RobotPlant:
         self.core.reset(env_ids, demand)
         self.randomizer.draw_reset(env_ids)
         self._write_device(env_ids)
+        if self.sampler is not None:
+            self.sampler.reset(env_ids)
         self._hist_ns.index_fill_(0, env_ids, -1)
         if self.imu is not None:
             self.imu.reset(env_ids, self.t_ns)

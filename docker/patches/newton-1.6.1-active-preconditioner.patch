@@ -1,0 +1,80 @@
+--- a/_src/solvers/kamino/config.py
++++ b/_src/solvers/kamino/config.py
+@@ -383,6 +383,13 @@
+     """
+     Additional keyword arguments to pass to the linear solver.\n
+     Defaults to an empty dictionary.
++    """
++
++    matrix_preconditioner_stride: int = 0
++    """Explicit dense matrix preconditioner launch width per world.
++
++    Zero retains the reference launch. Positive values use a strided active-entry
++    kernel. All worlds in a batch must select the same execution setting.
+     """
+ 
+     cull_speculative_contacts: bool = True
+@@ -450,6 +457,9 @@
+         """
+         # Import here to avoid module-level imports and circular dependencies
+         from ._src.linalg import LinearSolverNameToType  # noqa: PLC0415
++
++        if type(self.matrix_preconditioner_stride) is not int or self.matrix_preconditioner_stride < 0:
++            raise ValueError("matrix_preconditioner_stride must be a non-negative integer")
+ 
+         # Ensure that the linear solver type is a valid option
+         supported_linear_solver_types = LinearSolverNameToType.keys()
+--- a/_src/solvers/kamino/_src/dynamics/dual.py
++++ b/_src/solvers/kamino/_src/dynamics/dual.py
+@@ -1045,6 +1045,26 @@
+         vio,
+         problem_P,
+     )
++
++
++@wp.kernel
++def _apply_dual_preconditioner_to_active_matrix(
++    problem_dim: wp.array[wp.int32],
++    problem_mio: wp.array[wp.int32],
++    problem_vio: wp.array[wp.int32],
++    problem_P: wp.array[wp.float32],
++    X: wp.array[wp.float32],
++    stride: int,
++):
++    """Visit only active entries while preserving the reference multiply order."""
++    wid, lane = wp.tid()
++    ncts = problem_dim[wid]
++    mio = problem_mio[wid]
++    vio = problem_vio[wid]
++    for entry in range(lane, ncts * ncts, stride):
++        i = entry // ncts
++        j = entry % ncts
++        X[mio + entry] = problem_P[vio + i] * (problem_P[vio + j] * X[mio + entry])
+ 
+ 
+ @wp.kernel
+@@ -1655,6 +1675,8 @@
+             for c in config:
+                 if not isinstance(c, DualProblem.Config):
+                     raise TypeError(f"Expected DualProblem.Config, got {type(c)}")
++            if len({c.dynamics.matrix_preconditioner_stride for c in config}) > 1:
++                raise ValueError("matrix_preconditioner_stride must be uniform across worlds")
+             return config
+         else:
+             raise TypeError(f"Expected List[DualProblem.Config] or DualProblem.Config, got {type(config)}")
+@@ -1932,6 +1954,15 @@
+         if self._sparse:
+             # Preconditioner has already been connected to appropriate array
+             pass
++        elif self._config[0].dynamics.matrix_preconditioner_stride:
++            stride = min(self._config[0].dynamics.matrix_preconditioner_stride,
++                         max(1, self.delassus._max_of_max_total_D_size))
++            wp.launch(
++                _apply_dual_preconditioner_to_active_matrix,
++                dim=(self._size.num_worlds, stride),
++                inputs=[self._data.dim, self._data.mio, self._data.vio, self._data.P, self._data.D, stride],
++                device=self.device,
++            )
+         else:
+             wp.launch(
+                 _apply_dual_preconditioner_to_matrix,

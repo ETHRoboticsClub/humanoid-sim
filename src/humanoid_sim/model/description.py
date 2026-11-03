@@ -53,7 +53,7 @@ class Drive:
     name: str  # EtherCAT device name, or the joint name for a robot whose motors have no device names
     family: str
     joints: tuple[str, ...]
-    sign: int  # device = sign * URDF joint (1:1 drives); +1 for cranks (crank frame is the device frame)
+    sign: int  # device = sign * URDF joint (1:1 drives); cranks: device = sign * (shaft angle - shaft_zero_rad)
     crank: str | None  # "upper" | "lower" for linkage cranks
     effort_peak: float  # Nm at the drive output
     effort_nominal: float | None
@@ -62,6 +62,16 @@ class Drive:
     baseline_stiffness: float  # Nm/rad at the drive output
     baseline_damping: float
     motor_index: int | None = None  # slot in the backend's motor array (Unitree LowCmd), when it has one
+    shaft_zero_rad: float = 0.0  # cranks: the shaft (USD joint) angle where the device reads zero
+
+    def shaft_angle(self, device):
+        """A crank's shaft (USD joint) angle at a device angle."""
+        return self.sign * device + self.shaft_zero_rad
+
+    @property
+    def shaft_limits(self) -> tuple[float, float]:
+        """A crank's stop interval as shaft (USD joint) angles."""
+        return tuple(sorted(self.shaft_angle(float(limit)) for limit in self.position_limit_device))
 
 
 @dataclass(frozen=True)
@@ -238,8 +248,13 @@ class Description:
         for device, d in self.table.get("drives", {}).items():
             d = self.actuator_values(d)
             k, dmp = gain(device, d)
+            # Native USD cranks are USD shaft joints, read through the device frame; elsewhere the frames coincide.
+            missing = [key for key in ("shaft_sign", "shaft_zero_rad") if key not in d]
+            if self.usd_path is not None and missing:
+                raise ValueError(f"native crank {device} lacks {', '.join(missing)} in actuators.yaml")
             out[device] = Drive(
-                name=device, family=d["family"], joints=tuple(d["joints"]), sign=1, crank=d["crank"],
+                name=device, family=d["family"], joints=tuple(d["joints"]), sign=int(d.get("shaft_sign", 1)),
+                crank=d["crank"], shaft_zero_rad=float(d.get("shaft_zero_rad", 0.0)),
                 effort_peak=float(d["effort"]),
                 effort_nominal=float(d["effort_nominal"]) if "effort_nominal" in d else None,
                 velocity=float(d["velocity"]), position_limit_device=tuple(d["position_limit"]),
@@ -284,6 +299,17 @@ class Description:
         value = float(value)
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"{self.robot}: {family} drive_delay_s {value!r} must be finite and non-negative")
+        return round(value * 1e9)
+
+    def control_period_ns(self) -> int | None:
+        """The robot's bus cycle (``backend.control_period_s``) in integer ns: one exchange of its controller with
+        its drives. None when the description records none."""
+        value = self.table.get("backend", {}).get("control_period_s")
+        if value is None:
+            return None
+        value = float(value)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{self.robot}: backend control_period_s {value!r} must be finite and positive")
         return round(value * 1e9)
 
     def family_value(self, family: str, key: str, default=None):
@@ -380,9 +406,12 @@ class Description:
         import torch
 
         native = self.usd_path is not None
+        cranks = [self.drives[name] for name in self.ankle_cranks(side)] if native else []
         return AnkleTransmission(self.ankle_geometry(side), self.ankle_kinematic_sign(side),
                                  (0.0, 0.0) if native else self.ankle_neutral(side),
-                                 native_angles=native, device=device, dtype=dtype or torch.float32)
+                                 native_angles=native, device=device, dtype=dtype or torch.float32,
+                                 crank_sign=[d.sign for d in cranks] if native else (1, 1),
+                                 crank_zero=[d.shaft_zero_rad for d in cranks] if native else (0.0, 0.0))
 
     def ankle_cranks(self, side: str) -> tuple[str, str]:
         """(upper, lower) crank drive names of one side."""

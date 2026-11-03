@@ -140,7 +140,7 @@ A demand leaves the master at `sent_ns` and takes effect at the drive at `arriva
 
 Where the arrival time comes from depends on the front end:
 
-- Training: `RobotPlant.submit(demand, sent_ns)` (`src/humanoid_sim/train/plant.py`) sets `arrival_ns[e, d] = sent_ns[e] + latency_ns[e, d] + drive_delay_ns[d]`. `latency_ns` is the latency before the drive (the controller's path), from the `latency` randomization parameter (seconds, per env and drive, redrawn for envs being reset), 0 when it is not randomized; `drive_delay_ns` is the drive's own delay from its [model](#drive-models), always applied.
+- Training: `RobotPlant.submit(demand, sent_ns)` (`src/humanoid_sim/train/plant.py`) sets `arrival_ns[e, d] = sent_ns[e] + latency_ns[e, d] + drive_delay_ns[d]`. `latency_ns` is the latency before the drive (the controller's path), the profile's measured `devices.command_path.frame_to_drive_ns` less the drive's own delay (0 without one), which the `latency` randomization parameter (seconds, per env and drive, redrawn for envs being reset) scales, offsets or replaces; `drive_delay_ns` is the drive's own delay from its [model](#drive-models), always applied.
 - Runtime: the host takes every record the client appended to the demand ring since the last physics step, oldest first, and queues each to arrive at drive `d` at its send time (`sent_mono_ns` mapped to plant time) plus that drive's `drive_delay_ns` ([Drive models](#drive-models); `RuntimeHost._take_demands` in `src/humanoid_sim/runtime/host.py`). Controls' fake bank sends each record when its bus delivers that cycle's outputs, so the lane's timing is the real master's up to the bus, then the drive's delay here.
 - Replay: recorded demands with an optional fixed delay; see [replay-and-sysid.md](replay-and-sysid.md).
 
@@ -221,7 +221,7 @@ In the runtime these stay at identity, except `torque_scale`, which the `power_s
 
 ## Target shaping with constant solver gains
 
-Isaac Lab's articulation has a joint PD inside the solver. MJWarp's `implicitfast` integrator treats its damping implicitly. Changing solver gains requires a model update, so they are fixed when the plant is built. The gains `k0`, `d0` on one-to-one joints and native crank shafts are the drive's baseline gains from `actuators.yaml`; passive ankle hinges have zero drive gains. They are written at spawn (`src/humanoid_sim/physics/joint_properties.py`). The analytical semantic-only map retains standing-pose reflected gains for calculations without native shafts, not for the delivered USD physics.
+Isaac Lab's articulation has a joint PD inside the solver. MJWarp's `rk4`, the profiles' integrator, integrates it explicitly, damping included; `implicitfast` would treat the damping implicitly but does not conserve angular momentum at 4 ms. Changing solver gains requires a model update, so they are fixed when the plant is built. The gains `k0`, `d0` on one-to-one joints and native crank shafts are the drive's baseline gains from `actuators.yaml`; passive ankle hinges have zero drive gains. They are written at spawn (`src/humanoid_sim/physics/joint_properties.py`). The analytical semantic-only map retains standing-pose reflected gains for calculations without native shafts, not for the delivered USD physics.
 
 | Joints | `k0` (Nm/rad) | `d0` (Nm·s/rad) |
 |---|---|---|
@@ -261,6 +261,8 @@ Rotor armature is attached to each native crank shaft. The linkage supplies its 
 
 Each crank's `position_limit` in `actuators.yaml` becomes the corresponding USD revolute joint's physical limits. The semantic hinge bounds remain the axis hull computed by the description's ankle model. Both MJWarp and Kamino receive the explicit crank stops and closed mechanism.
 
+Training can randomize the stops' stiffness and damping per env on MJWarp with the `crank_stop_stiffness` and `crank_stop_damping` parameters ([training.md](training.md#parameters)). The plant writes the stops' MuJoCo `solref` per world: to the crank joints' raw `solreflimit` on the native USD, to the spatial tendons' limit solref on the reduced model. The stops' nominal `solref` is the profile's `ankle_stop_solref`, which is modeled: gantry runs suggest the hardware stops are softer, but their compliance has not been measured, so the sim sets no range. The ranges to draw are a training choice. Kamino's stops are hard constraints and have no stiffness to set.
+
 The delivered-USD path does not add the reduced model's spatial stop tendons. `robot_build` remains the scene-construction entry point, and startup checks that the native crank joints and their limits reached Newton.
 
 ### Validation
@@ -278,7 +280,7 @@ The description states no dynamic friction yet, so the relief is zero by default
 
 ## Disabled drives: back-drive friction
 
-A disabled drive is back-driven through its gearbox. Only the runtime host models this (`RuntimeHost._set_drives_off` in `src/humanoid_sim/runtime/host.py`). When a 1:1 drive's law is disabled in the latest demand record, the host sets its joint's Coulomb friction to the family's `backdrive_torque` in place of the enabled-drive friction from actuators.yaml (a family without one keeps the joint's friction). It writes the friction only when the on/off pattern changes. Before a client attaches every drive is disabled.
+A disabled drive is back-driven through its gearbox, the same way in training, replay and the runtime. `PlantCore` (`src/humanoid_sim/core.py`) keeps which 1:1 drives are off from the latest demand submitted or reset (a reset without a demand, like the bank's, turns every drive off), and `PlantCore.joint_friction` gives their joints the family's `backdrive_torque` as Coulomb friction in place of the enabled-drive friction (a family without one keeps the joint's friction). The switch happens when the demand is submitted, not when it arrives. `SimCore` (replays, sysid, the runtime) and `RobotPlant` (training) write that friction to the solver before a step that follows a submit or a reset; the runtime host, whose demands reach the plant through a CUDA graph, flags it when the on/off pattern of the latest demand record changes. Before a client attaches every drive is disabled.
 
 | Family | `backdrive_torque` | Datasheet figure |
 |---|---|---|
@@ -286,7 +288,7 @@ A disabled drive is back-driven through its gearbox. Only the runtime host model
 | HEJ70-48-50 | 0.5 Nm | approximate |
 | HEJ50-48-30 | 0.8 Nm | upper bound |
 
-The ankle hinges keep their friction, since a crank's figure has no joint-space equivalent. `RobotPlant` (training) and `SimCore` (replays, benchmarks) do not switch friction: an off drive there keeps the enabled-drive friction, or the randomized `joint_friction`.
+The ankle hinges keep their friction, since a crank's figure has no joint-space equivalent. A randomized `joint_friction` or a fitted friction (`fit-pace`, `fit-passive`) is the enabled-drive friction; the back-drive torque itself is not randomized.
 
 ## Physical faults
 
@@ -319,7 +321,9 @@ The runtime publishes its known gaps in the segment descriptor (`fidelity_gaps` 
 - The passive joint parameters of the upper body (waist, shoulders, elbows) are the description's values and have not been identified from captures.
 - The native USD ankle includes its closed chain. Stop stiffness, joint friction and compliance are modeled rather than verified against hardware traces.
 - IMU errors are the rig's model's: white noise, a turn-on bias and a slow drift (`SET_FIDELITY` ideal turns them off). See [sensors.md](sensors.md#sampling-and-errors).
-- Each drive's delay is its family's fixed figure, with no per-cycle jitter. A family whose description records no delay (the G1's) has none, and the gap names it.
+- Each drive's delay is its family's fixed figure, with no per-cycle jitter in the runtime. The training plant has an off-by-default knob for it (`TrainPlantCfg.command_jitter_ns`), but nothing measures the jitter yet. A family whose description records no delay (the G1's) has none, and the gap names it.
+- The runtime's drive feedback is the plant's state at every bus cycle, exactly. The robot's samples come 3.0 to 7.5 ms apart, with torque noise (0.05 to 0.46 Nm) and a dithering velocity reading; the training plant models these ([Reporting in training](sensors.md#reporting-in-training)), the runtime leaves them to Controls' fake bank.
+- The backend's `mode_ramp_s` (the ramp when a drive's mode is enabled or disabled) and its control period's jitter are not modeled: the ramp is the controller's behavior and neither has been measured.
 - Angular momentum is not conserved under fast joint motion at the 4 ms MJWarp step. A hung robot whose waist and hips move fast picks up a spin about the vertical; the gantry's spreader bar turns it back and damps it ([world.md](world.md#suspended-the-lab-gantry)).
 
-For the drive model this means the applied torque follows the law within the step, with no current-loop dynamics, and a drive can hold its peak torque indefinitely. Gearbox losses are only the joints' Coulomb friction and viscous damping from actuators.yaml, plus the back-drive friction of an off drive in the runtime. There is no integral term. The cranks' stops are enforced by the solver on MJWarp (see [The crank stops](#the-crank-stops)); the drive model itself does not clamp a crank's target to them.
+For the drive model this means the applied torque follows the law within the step, with no current-loop dynamics, and a drive can hold its peak torque indefinitely. Gearbox losses are only the joints' Coulomb friction and viscous damping from actuators.yaml, plus the back-drive friction of an off drive. There is no integral term. The cranks' stops are enforced by the solver on MJWarp (see [The crank stops](#the-crank-stops)); the drive model itself does not clamp a crank's target to them.

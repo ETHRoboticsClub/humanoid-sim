@@ -16,6 +16,7 @@ from humanoid_sim.physics.crank_stops import (
     crank_stops,
     tendon_length_m,
 )
+from humanoid_sim.timing import NS_PER_S
 
 ROBOT = "ethrc_v1"
 # Hinge angles probed: the hinges' travel widened by this much on every side, far past where any crank reaches.
@@ -190,7 +191,7 @@ def test_cranks_driven_past_their_stops_stop_at_them(request):
              torch.zeros(n, dtype=torch.long))
     worst = torch.full((n,), -torch.inf, dtype=torch.float64)
     fastest = torch.zeros(n, dtype=torch.float64)
-    for _ in range(250):  # 1 s
+    for _ in range(NS_PER_S // sim.period_ns):  # 1 s
         sim.step()
         past, speed = _overrun(desc, joints, *sim.joint_state())
         worst, fastest = torch.maximum(worst, past), torch.maximum(fastest, speed)

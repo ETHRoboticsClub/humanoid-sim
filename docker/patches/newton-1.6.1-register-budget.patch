@@ -1,0 +1,62 @@
+--- a/_src/solvers/kamino/_src/linalg/factorize/llt_blocked.py
++++ b/_src/solvers/kamino/_src/linalg/factorize/llt_blocked.py
+@@ -216,8 +216,8 @@
+ 
+ 
+ @cache
+-def make_llt_blocked_solve_kernel(block_size: int):
+-    @wp.kernel
++def make_llt_blocked_solve_kernel(block_size: int, cuda_max_registers: int | None = None):
++    @wp.kernel(cuda_max_registers=cuda_max_registers)
+     def llt_blocked_solve_kernel(
+         # Inputs:
+         dim: wp.array[wp.int32],
+@@ -316,8 +316,8 @@
+ 
+ 
+ @cache
+-def make_llt_blocked_solve_inplace_kernel(block_size: int):
+-    @wp.kernel
++def make_llt_blocked_solve_inplace_kernel(block_size: int, cuda_max_registers: int | None = None):
++    @wp.kernel(cuda_max_registers=cuda_max_registers)
+     def llt_blocked_solve_inplace_kernel(
+         # Inputs:
+         dim: wp.array[wp.int32],
+--- a/_src/solvers/kamino/_src/linalg/linear.py
++++ b/_src/solvers/kamino/_src/linalg/linear.py
+@@ -595,6 +595,8 @@
+         ftol: float | None = None,
+         dtype: type[ScalarType] = wp.float32,  # type: ignore[assignment]
+         device: wp.DeviceLike | None = None,
++        *,
++        solve_max_registers: int | None = None,
+         **kwargs: dict[str, Any],
+     ):
+         """Initialize a blocked Cholesky solver.
+@@ -616,6 +618,7 @@
+                 the triangular-solve kernels.
+             factorize_block_dim: Number of threads per CUDA block used to
+                 launch the factorization kernel.
++            solve_max_registers: Optional CUDA register budget for the triangular-solve kernels.
+             atol: Absolute solve tolerance.
+             rtol: Relative solve tolerance.
+             ftol: Factorization tolerance.
+@@ -633,11 +636,16 @@
+         self._solve_block_size: int = solve_block_size
+         self._solve_block_dim: int = solve_block_dim
+         self._factorize_block_dim: int = factorize_block_dim
++        self._solve_max_registers: int | None = solve_max_registers
+ 
+         # Create the factorization and solve kernels
+         self._factorize_kernel = factorize.make_llt_blocked_factorize_kernel(self._factorize_block_size)
+-        self._solve_kernel = factorize.make_llt_blocked_solve_kernel(self._solve_block_size)
+-        self._solve_inplace_kernel = factorize.make_llt_blocked_solve_inplace_kernel(self._solve_block_size)
++        self._solve_kernel = factorize.make_llt_blocked_solve_kernel(
++            self._solve_block_size, cuda_max_registers=self._solve_max_registers
++        )
++        self._solve_inplace_kernel = factorize.make_llt_blocked_solve_inplace_kernel(
++            self._solve_block_size, cuda_max_registers=self._solve_max_registers
++        )
+ 
+         # Initialize base class members
+         super().__init__(

@@ -1,0 +1,45 @@
+# Angular momentum drift and step time per robot, solver and integrator at a 4 ms step, on one GPU.
+#   sky launch -y -c hsim-integrators -i 10 sky/integrators.sky.yaml   (autostop: stop, not down)
+#   sky exec hsim-integrators sky/integrators.sky.yaml                  (re-run; setup is skipped)
+#   rsync -avz hsim-integrators:sky_workdir/outputs/integrators/ outputs/integrators-gpu/
+# Environment: Isaac Lab release/3.0.0 at the pinned commit, resolved from its own uv.lock on the VM.
+name: humanoid-sim-integrators
+workdir: .
+
+resources:
+  cloud: aws
+  accelerators: L40S:1
+  cpus: 8+
+  memory: 32+
+  disk_size: 200
+
+envs:
+  ISAACLAB_COMMIT: 32712682b69edd488eea26689da6905c48d31037
+  UV_VERSION: 0.13.1
+  ROBOTS: "ethrc_v1 g1_29dof_rev_1_0 g1_29dof_with_hand_rev_1_0"
+  PERIOD_MS: "4"
+  MJWARP_INTEGRATORS: "euler implicitfast implicit rk4"
+  ENV_COUNTS: "1"   # one robot: step latency. 4096 V1s ran the 62 GB node out of host memory.
+
+setup: bash sky/setup.sh
+run: |
+  set -euo pipefail
+  export PATH="$HOME/.local/bin:$HOME/il-venv/bin:$PATH"
+  cd "$HOME/sky_workdir"
+  mkdir -p outputs/integrators
+  uv pip install -q --python "$HOME/il-venv/bin/python" pytest  # the spike reuses the test's helpers
+  run() {  # name, args...
+    local name=$1; shift
+    python spikes/integrator_drift/drift_latency.py --device cuda:0 --period-ms "$PERIOD_MS" "$@" \
+      > "outputs/integrators/$name.log" 2>&1 || true
+    grep '^{' "outputs/integrators/$name.log" | tee "outputs/integrators/$name.json" || echo "== $name: no result"
+  }
+  for robot in ${ROBOTS}; do
+    humanoid-sim --robot "$robot" build-asset | tail -1
+    for n in ${ENV_COUNTS}; do
+      for i in ${MJWARP_INTEGRATORS}; do
+        run "${robot}_mjwarp_${i}_${n}" --robot "$robot" --solver mjwarp --integrator "$i" --num-envs "$n"
+      done
+      run "${robot}_kamino_euler_${n}" --robot "$robot" --solver kamino --num-envs "$n"
+    done
+  done

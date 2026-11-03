@@ -114,7 +114,12 @@ class BagCapture:
         rows: dict[str, list[tuple]] = {}
         for m in self._messages[FEEDBACK_TOPIC]:
             n = len(m.device)
-            cols = [np.asarray(getattr(m, f), dtype=np.float64) for f in FEEDBACK_FIELDS.values()]
+            cols = []
+            for field in FEEDBACK_FIELDS.values():
+                values = getattr(m, field, None)
+                if field in ("current_a", "current_demand_a") and (values is None or len(values) == 0):
+                    values = np.full(n, np.nan)
+                cols.append(np.asarray(values, dtype=np.float64))
             if any(len(c) != n for c in cols) or len(m.source_stamp_ns) != n:
                 raise ValueError(f"{self.root}: a DriveFeedback message with sequences of different lengths")
             for i, dev in enumerate(m.device):
@@ -146,15 +151,19 @@ class BagCapture:
         states = before[-1:] + during
         if not states:
             raise ValueError(f"{self.root}: no {GAINS_TOPIC} message at or after the feedback starts")
+        # Judged on the streaming drives only: `applied` and `failed` cover every listed drive, unpowered hands too.
+        streaming = {d for d, tr in self.pdo().items() if np.isfinite(tr["native_position_rad"]).any()}
         ref = None
         for m in states:
-            if m.failed or m.failed_motors or not m.applied or not all(m.motor_applied) or m.ramp_remaining_s > 0:
+            applied = dict(zip(m.motors, m.motor_applied, strict=True))
+            if (streaming & set(m.failed_motors) or not all(applied.get(d, False) for d in streaming)
+                    or m.ramp_remaining_s > 0):
                 raise ValueError(f"{self.root}: gains not applied, ramping or failed during the recording")
             pairs = {d: (float(kp), float(kd)) for d, kp, kd in
                      zip(m.motors, m.kp_nm_per_rad, m.kd_nm_s_per_rad, strict=True)}
             if ref is None:
                 ref = pairs
-            elif pairs != ref:
+            elif any(pairs.get(d) != ref.get(d) for d in streaming):
                 raise ValueError(f"{self.root}: gains changed during the recording")
         missing = sorted(set(self.pdo()) - set(ref))
         if missing:

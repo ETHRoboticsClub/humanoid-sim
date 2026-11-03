@@ -3,7 +3,7 @@ import torch
 
 from humanoid_sim.core import PlantCfg, PlantCore
 from humanoid_sim.devices.bank import DriveBank
-from humanoid_sim.devices.demand import LAW_FREEZE, DriveDemand
+from humanoid_sim.devices.demand import LAW_DISABLED, LAW_FREEZE, DriveDemand
 from humanoid_sim.devices.envelope import TorqueSpeedEnvelope
 from humanoid_sim.devices.shaping import shaped_position_target, solver_force
 from humanoid_sim.model.description import Description
@@ -170,6 +170,48 @@ def test_sliding_friction_relief(desc):
     assert shift.tolist() == pytest.approx([0.3 * torch.tanh(torch.tensor(10.0)).item(), -0.3 * torch.tanh(
         torch.tensor(10.0)).item()])
     assert torch.allclose(target(0.3, enabled=False), target(0.0, enabled=False))
+
+
+def test_an_off_drive_takes_its_back_drive_friction(desc):
+    """The joint of a 1:1 drive that is off (after a reset, or by its demand) takes the family's backdrive torque as
+    friction, per env; one that is on, its enabled friction; a crank-driven joint always keeps its own."""
+    joints = list(desc.joints)
+    plant = PlantCore(desc, joints, 2, PlantCfg(dtype=D64))
+    enabled = torch.tensor([desc.joints[n].friction for n in joints], dtype=D64)
+    backdrive = enabled.clone()
+    for d in desc.drives.values():
+        value = desc.family_value(d.family, "backdrive_torque")
+        if d.crank is None and value is not None:
+            backdrive[joints.index(d.joints[0])] = float(value)
+    if torch.equal(backdrive, enabled):
+        pytest.skip("the description records no backdrive torque")
+    for lk in desc.linkages:
+        for name in lk.joints:
+            assert backdrive[joints.index(name)] == enabled[joints.index(name)]
+
+    assert plant.friction_changed  # every drive starts off
+    torch.testing.assert_close(plant.joint_friction(), backdrive.expand(2, -1))
+    plant.friction_changed = False
+
+    n = plant.map.num_drives
+    demand = DriveDemand.pd(torch.zeros(2, n, dtype=D64), plant.drive_stiffness.expand(2, -1),
+                            plant.drive_damping.expand(2, -1))
+    demand.law[1] = LAW_DISABLED  # env 1: every drive disabled
+    plant.submit(demand, torch.zeros(2, n, dtype=torch.long))
+    assert plant.friction_changed
+    torch.testing.assert_close(plant.joint_friction(), torch.stack([enabled, backdrive]))
+
+    plant.enabled_friction[:] = 2 * enabled  # a randomized or fitted friction is the enabled one
+    switched = torch.zeros(len(joints), dtype=torch.bool)
+    switched[plant.backdrive_joints] = True
+    torch.testing.assert_close(plant.joint_friction(),
+                               torch.stack([2 * enabled, torch.where(switched, backdrive, 2 * enabled)]))
+
+    plant.submit(demand, torch.zeros(2, n, dtype=torch.long), env_mask=torch.tensor([True, False]))
+    plant.friction_changed = False
+    plant.reset(torch.tensor([0]))  # a reset without a demand turns env 0's drives off
+    assert plant.friction_changed
+    torch.testing.assert_close(plant.joint_friction(), torch.where(switched, backdrive, 2 * enabled).expand(2, -1))
 
 
 def test_dynamic_friction_from_the_description(tmp_path):

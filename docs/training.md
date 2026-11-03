@@ -47,10 +47,23 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `robot` | `"ethrc_v1"` | Profile (`profiles/ethrc_v1.yaml`) and description to load |
 | `randomization` | `[]` | Randomization specs, as dicts or `ParamSpec`; see [Randomization](#randomization) |
 | `level` | `1.0` | Initial randomization level |
-| `seed` | `0` | Seed of the randomizer; the IMU model uses `seed + 1` and the encoder jitter `seed + 2` |
+| `seed` | `0` | Seed of the randomizer; the IMU model uses `seed + 1`, the encoder jitter and feedback noise `seed + 2`, the feedback sampler `seed + 3` |
 | `feedback_history` | `16` | Physics steps of drive feedback kept in `Measured.history` |
 | `reporting` | `True` | Quantize the measured drive feedback the way the drives report it |
+| `feedback_noise` | `True` | With `reporting`: add the drives' measured velocity dither and torque noise ([Reporting in training](sensors.md#reporting-in-training)) |
+| `feedback_sampling` | `True` | Hold the measured drive feedback between the drive's samples, 3.0 to 7.5 ms apart ([Feedback age](sensors.md#feedback-age)); needs the profile's `devices.feedback_sampling` |
+| `command_jitter_ns` | `0` | Move each demand's arrival at each drive by a uniform integer draw in +-this many ns (generator seeded `seed + 4`). Off: no measurement of the per-cycle jitter yet. Arrivals stay in order |
+| `cuda_graph` | `False` | Capture drive feedback, target shaping and IMU delivery on CUDA |
+| `compile` | `False` | Fuse the captured drive and IMU math with `torch.compile`; requires `cuda_graph` |
 | `queue_capacity` | `8` | Demands in flight per env; needs at least (max latency + drive delay) / demand period + 1 |
+| `physics_overrides` | `{}` | Explicit nested overrides of the profile's physics settings |
+
+Pass the same `physics_overrides` to `robot_scene_cfg`, `robot_sim_cfg`, `robot_build` and `TrainPlantCfg`.
+They merge into the profile without editing its files, so simulation timing, model transformations,
+contact-capacity checks and the plant use the same configuration. Use
+`load_profile(robot, physics_overrides=overrides)` to record the resolved settings in experiment metadata.
+
+For GPU training, `TrainPlantCfg(cuda_graph=True, compile=True)` compiles and captures the drive and IMU calculations during construction. The graph reads a device nanosecond clock and persistent parameter and queue buffers, so demands, partial resets and randomization continue to take effect. The drive graph snapshots the preceding step's torques for feedback history before advancing the bank. A separate IMU graph registers the sensor's random generator and preserves its sampling and burst-delivery schedule. Capture warmup restores sensor buffers and RNG state. The first boundary and irregular intervals use the ordinary sensor path. Physics stepping and task rewards retain their own update schedules. Compilation adds startup work; measure throughput after warmup. Leave both options false for eager execution, or enable only `cuda_graph` to capture without compiler fusion.
 
 `PlantActionCfg` extends Isaac Lab's `ActionTermCfg`:
 
@@ -159,7 +172,7 @@ def plant(env):
 
 
 def actor_obs(env):
-    m = plant(env).measured()  # one call: the encoder jitter is drawn per call
+    m = plant(env).measured()  # one call: the reporting noise is drawn per call
     return torch.cat([m.drive.position_rad, m.drive.velocity_rad_s, m.imu.gyro[:, 0], m.imu.specific_force[:, 0]],
                      dim=1)
 
@@ -282,7 +295,7 @@ The [baseline gains](glossary.md#baseline-gains) (`plant.core.drive_stiffness`, 
 | `history_ns` | `[E, H]` int64 | Plant time of each history entry; -1 where nothing was recorded since the last reset |
 | `imu` | `ImuSamples` or `None` | Raw IMU samples received so far, newest first |
 
-With `reporting=True` the drive values are quantized the way Controls' fake EtherCAT drive (`Epos4Slave.cpp`) reports them, in `src/humanoid_sim/devices/reporting.py`. The position is the drive's own reading in whole encoder counts, so it includes the drive's `encoder_offset`, plus a random -1, 0 or +1 count on every read. The velocity is whole counts per controller sample at 2.5 kHz, converted back to rad/s. The applied torque is in whole mNm; the demanded torque passes through. Values stay in rad, rad/s and Nm. With `reporting=False` only the offset is added.
+With `reporting=True` the drive values are quantized the way Controls' fake EtherCAT drive (`Epos4Slave.cpp`) reports them, in `src/humanoid_sim/devices/reporting.py`. The position is the drive's own reading in whole encoder counts, so it includes the drive's `encoder_offset`, plus a random -1, 0 or +1 count on every read. The velocity is whole counts per controller sample at 2.5 kHz, converted back to rad/s, with the measured dither. The applied torque is in whole mNm, with the measured noise; the demanded torque passes through. The values are held between the drive's samples (`feedback_sampling`). Values stay in rad, rad/s and Nm. With `reporting=False` only the offset is added.
 
 | Drive family | Drives | Counts per rev | Position step | Velocity step |
 |---|---|---|---|---|
@@ -322,7 +335,7 @@ The contact sensor covers every body and also tracks force history (3 steps) and
 
 ### `params()`
 
-`params()` returns the realized randomized parameters per env as a dict keyed by parameter name. Only the parameters in the spec list appear. Units are those of the [parameter table](#parameters); shapes are `[E, N]` over the parameter's targets, `[E, 23, 3]` for `body_com`, `[E, 1]` for `friction` and `[E, 3]` for the IMU parameters. They suit privileged critic inputs (latency, payload, friction). The tensors are the randomizer's own; clone what you keep.
+`params()` returns the realized randomized parameters per env as a dict keyed by parameter name. Only the parameters in the spec list appear. Units are those of the [parameter table](#parameters); shapes are `[E, N]` over the parameter's targets, `[E, 23, 3]` for `body_com`, `[E, 1]` for `friction`, `imu_latency` and `imu_drop_probability`, `[E, 3]` for the IMU axis parameters. They suit privileged critic inputs (latency, payload, friction). The tensors are the randomizer's own; clone what you keep.
 
 ## Time
 
@@ -394,6 +407,9 @@ The full table is `PARAMS` in `src/humanoid_sim/randomization/spec.py`. E is the
 | `joint_damping` | physics | `[E, 22]` | N m s/rad | model values | Passive viscous damping |
 | `joint_friction_ratio` | device | `[E, 22]` | ratio | description's dynamic / static | Dynamic over static Coulomb friction, in [0, 1] ([drives.md](drives.md#dynamic-friction)) |
 | `friction` | physics | `[E, 1]` | coefficient | robot shape friction | Friction coefficient of every robot shape |
+| `restitution` | physics | `[E, 1]` | coefficient | robot shape restitution (0) | Restitution coefficient of every robot shape, in [0, 1]. Kamino only: MuJoCo's contacts have no restitution, so MJWarp raises |
+| `crank_stop_stiffness` | physics | `[E, 1]` | ratio | 1 | Stiffness of the ankle cranks' stops over the profile's `ankle_stop_solref`. MJWarp only ([drives.md](drives.md#the-crank-stops)) |
+| `crank_stop_damping` | physics | `[E, 1]` | ratio | 1 | Damping of the same stops over the profile's. MJWarp only |
 | `drive_stiffness` | device | `[E, 22]` | ratio | 1 | Realized P gain over the demanded one |
 | `drive_damping` | device | `[E, 22]` | ratio | 1 | Realized D gain over the demanded one |
 | `torque_limit` | device | `[E, 22]` | ratio | 1 | Scale on the torque-speed envelope and the torque cap |
@@ -402,8 +418,10 @@ The full table is `PARAMS` in `src/humanoid_sim/randomization/spec.py`. E is the
 | `imu_gyro_bias` | device | `[E, 3]` | rad/s | 0 | Gyro bias, sensor frame |
 | `imu_accel_bias` | device | `[E, 3]` | m/s² | 0 | Accelerometer bias, sensor frame |
 | `imu_misalignment` | device | `[E, 3]` | rad | 0 | Rotation of the sensor in its mount, as a rotation vector |
+| `imu_latency` | device | `[E, 1]` | s | the profile's `devices.imu_path` (2.1 ms on the V1), else 0 | From an IMU sample's measurement to its earliest delivery. A scale needs `imu_path`; the draw must be bounded (not `normal`), and the plant sizes the IMU's pending buffer for its largest value |
+| `imu_drop_probability` | device | `[E, 1]` | probability | the sensor model's `drop_probability` (0 on the V1) | The chance that each IMU sample is lost, read every step. A draw outside [0, 1] raises when it is written, so use a bounded distribution or `set`; `drop_mode` stays the model's. Needs the IMU |
 
-A drive acts on its own reading, so with an `encoder_offset` it regulates the offset position: the drive output settles `encoder_offset` away from the demanded target, and `measured()` shows the offset reading while `truth()` shows the physical one. Randomizing `friction` needs the physics manager, which `PlantAction` passes in; see the ground-friction pitfall below. The IMU parameters only take effect when the scene has the IMU.
+A drive acts on its own reading, so with an `encoder_offset` it regulates the offset position: the drive output settles `encoder_offset` away from the demanded target, and `measured()` shows the offset reading while `truth()` shows the physical one. Randomizing `friction`, `restitution` or the crank stops needs the physics manager, which `PlantAction` passes in; see the ground-friction pitfall below. The IMU parameters only take effect when the scene has the IMU.
 
 A list like the one the train benchmark uses (`src/humanoid_sim/bench/train.py`), with a few additions:
 
@@ -508,8 +526,10 @@ The plant's steady-state work (`submit`, `pre_physics`, `measured`, `truth`, `re
 ## Pitfalls
 
 - The solver uses the larger friction of the two shapes in contact (MJWarp always, Kamino as the profile configures it). When `friction` is randomized on the robot, give the ground zero friction (`robot_scene_cfg(..., ground_friction=0.0)` or `heightfield_terrain_cfg(..., friction=0.0)`); with the profile's ground friction of 1.0 every robot value below 1 has no effect.
+- Restitution follows the friction rule: Kamino takes the larger restitution of the two shapes in contact (the profile sets this), and the ground's is 0, so a randomized robot `restitution` decides the bounce. It is the robot's value, not an independent ground value per env: the ground is one prim shared by every env. A restitution spec on MJWarp raises instead of doing nothing. The solver also applies the robot's value to its self-contacts.
+- `crank_stop_stiffness` and `crank_stop_damping` scale the stops' MuJoCo constraint (`k` and `b`; the time constant `tau` becomes `tau / damping` and the damping ratio `zeta * damping / sqrt(stiffness)`). MuJoCo raises a time constant below twice the physics step to that, and the profile's `ankle_stop_solref` already sits there, so draw softer stops (a stiffness range at or below 1) unless the profile's time constant is longer. Kamino's stops are hard constraints: the knob raises there.
 - Take targets and action offsets from `data.default_joint_pos`, not from `standing_offset_rad`: the scene spawns in the home pose, and the standing pose is only used when a scene asks for it. See [The initial pose](#the-initial-pose).
-- The encoder jitter is drawn on every `measured()` call, for `drive` and for `history`. Two observation terms that each call `measured()` see different jitter in the same step; read it once in one term, as `actor_obs` does.
+- The encoder jitter, velocity dither and torque noise are drawn on every `measured()` call for `drive`, once per entry for `history`. With `feedback_sampling` the value of a sample the drive has not renewed repeats, noise included. Two observation terms that each call `measured()` can see different noise in the same step when a new sample is due; read it once in one term, as `actor_obs` does.
 - `history[:, 0]` is one physics step older than `drive`. The history and the IMU are sampled at the start of each physics step, so after an env step their newest entries are from `plant.t_ns - plant.period_ns`, while `drive` is the state now. Use `history_ns` for the times.
 - After a reset, the history and IMU buffers keep the previous episode's values until they are overwritten; only `history_ns`, `sample_ns`, `stamp_ns`, `seq` and `count` mark them empty. The observation computed right after a reset, in the same env step, always has `count == 0`, and the first burst can take more than one policy period to arrive. Mask on `history_ns >= 0` and `stamp_ns >= 0` where it matters.
 - `measured().imu` is the delivery model's buffer, updated in place every physics step. Clone it to keep it.
@@ -518,7 +538,6 @@ The plant's steady-state work (`submit`, `pre_physics`, `measured`, `truth`, `re
 - Use one `PlantAction` per robot and no other action term that writes the robot's joint targets; the plant overwrites them before every physics step.
 - Keep the articulation's actuators implicit, as `robot_scene_cfg` builds them. If explicit actuator configs are added, Isaac Lab's Newton backend can run the whole decimation loop in one physics call, and `apply_actions` (the plant) would run once per policy step instead of once per physics step.
 - Drives are off after a reset until a demand arrives; see [Resets](#resets).
-- Training keeps each joint's Coulomb friction at its enabled-drive value from the description while a drive is off. The runtime host switches the joints of disabled 1:1 drives to the family's [back-drive](glossary.md#back-drive) torque (`src/humanoid_sim/runtime/host.py`), which is larger: 1.5 Nm on an HEJ 90 joint where the knee's enabled friction is 0.31 Nm. An unpowered robot in training therefore folds more easily than the same robot in the runtime. The ankle joints keep their friction in both.
 
 For a discrete delay distribution, use `dist: discrete_uniform`, an inclusive
 `range` in seconds, and a positive `quantum` in seconds; the range width must be

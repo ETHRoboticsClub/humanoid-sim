@@ -31,6 +31,7 @@ def test_build_preserves_closed_chain_and_inertias(native):
     source = Usd.Stage.Open(str(desc.usd_path))
     built = Usd.Stage.Open(str(path))
     closures = []
+    universal = set(asset_meta(path)["universal_rod_joints"])
     for prim in source.Traverse():
         other = built.GetPrimAtPath(prim.GetPath().ReplacePrefix(
             source.GetDefaultPrim().GetPath(), Sdf.Path("/Robot/Geometry")))
@@ -38,8 +39,12 @@ def test_build_preserves_closed_chain_and_inertias(native):
             for name in ("mass", "centerOfMass", "diagonalInertia", "principalAxes"):
                 assert other.GetAttribute(f"physics:{name}").Get() == prim.GetAttribute(f"physics:{name}").Get()
         if prim.IsA(UsdPhysics.SphericalJoint):
-            assert other.IsA(UsdPhysics.SphericalJoint)
-            for name in ("localPos0", "localPos1", "localRot0", "localRot1", "excludeFromArticulation"):
+            # A universal rod joint keeps the ball's centre; its frame turns (test_native_usd).
+            kept = ("localPos0", "localPos1", "excludeFromArticulation")
+            if prim.GetName() not in universal:
+                assert other.IsA(UsdPhysics.SphericalJoint)
+                kept += ("localRot0", "localRot1")
+            for name in kept:
                 assert other.GetAttribute(f"physics:{name}").Get() == prim.GetAttribute(f"physics:{name}").Get()
             if UsdPhysics.Joint(prim).GetExcludeFromArticulationAttr().Get():
                 closures.append(str(other.GetPath()))
@@ -56,7 +61,7 @@ def test_native_cranks_have_drive_stops_and_no_authored_controller(native):
     for drive, name in cranks.items():
         joint = UsdPhysics.RevoluteJoint(joints[name])
         actual = (joint.GetLowerLimitAttr().Get(), joint.GetUpperLimitAttr().Get())
-        assert actual == pytest.approx([math.degrees(value) for value in desc.drives[drive].position_limit_device])
+        assert actual == pytest.approx([math.degrees(value) for value in desc.drives[drive].shaft_limits])
         assert not joints[name].HasAPI(UsdPhysics.DriveAPI, "angular")
 
 
@@ -119,8 +124,9 @@ def test_native_drive_torque_and_feedback_use_the_crank_shafts(native):
     feedback = plant.feedback(positions, velocities)
     for drive in cranks:
         index = plant.map.drive_names.index(drive)
-        assert feedback.position_rad[0, index] == pytest.approx(0.12)
-        assert feedback.velocity_rad_s[0, index] == pytest.approx(0.23)
+        d = desc.drives[drive]
+        assert feedback.position_rad[0, index] == pytest.approx(d.sign * (0.12 - d.shaft_zero_rad))
+        assert feedback.velocity_rad_s[0, index] == pytest.approx(d.sign * 0.23)
     demand = DriveDemand.pd(torch.zeros_like(feedback.position_rad), plant.drive_stiffness,
                            plant.drive_damping)
     plant.submit(demand, torch.tensor([0]))
@@ -135,7 +141,7 @@ def test_native_drive_torque_and_feedback_use_the_crank_shafts(native):
             assert props.armature[index] == 0
         for drive in (linkage.upper, linkage.lower):
             index = names.index(cranks[drive])
-            assert torque[0, index] == plant.last.applied[0, plant.map.drive_names.index(drive)]
+            assert torque[0, index] == desc.drives[drive].sign * plant.last.applied[0, plant.map.drive_names.index(drive)]
             assert props.armature[index] > 0
             assert props.effort_limit[index] == desc.drives[drive].effort_peak
 
@@ -182,6 +188,11 @@ def test_native_reset_velocities_follow_pose_derivatives(native):
         for name in crank_names:
             torch.testing.assert_close(rates[name], (after[name] - before[name]) / 2e-6, atol=1e-8, rtol=0)
     for name, *_ in state.rods:
+        if name in state.universal:  # two angles, rates their derivatives
+            reported = torch.stack([rates[f"{name}:{axis}"] for axis in range(2)], dim=-1)
+            torch.testing.assert_close(reported, (following_balls[name] - previous_balls[name]) / 2e-6,
+                                       atol=1e-8, rtol=0)
+            continue
         previous, following = previous_balls[name].numpy(), following_balls[name].numpy()
         relative_vector = (previous[:, 3:] * following[:, :3] - following[:, 3:] * previous[:, :3]
                            + np.cross(previous[:, :3], following[:, :3]))

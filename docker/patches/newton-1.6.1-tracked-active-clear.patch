@@ -1,0 +1,207 @@
+--- a/_src/solvers/kamino/config.py
++++ b/_src/solvers/kamino/config.py
+@@ -384,6 +384,9 @@
+     Additional keyword arguments to pass to the linear solver.\n
+     Defaults to an empty dictionary.
+     """
++
++    tracked_active_clear: bool = False
++    """Clear only tracked active dense Delassus prefixes; default keeps full clearing."""
+ 
+     matrix_preconditioner_stride: int = 0
+     """Explicit dense matrix preconditioner launch width per world.
+@@ -457,6 +460,9 @@
+         """
+         # Import here to avoid module-level imports and circular dependencies
+         from ._src.linalg import LinearSolverNameToType  # noqa: PLC0415
++
++        if type(self.tracked_active_clear) is not bool:
++            raise ValueError("tracked_active_clear must be bool")
+ 
+         if type(self.matrix_preconditioner_stride) is not int or self.matrix_preconditioner_stride < 0:
+             raise ValueError("matrix_preconditioner_stride must be a non-negative integer")
+--- a/_src/solvers/kamino/_src/dynamics/dual.py
++++ b/_src/solvers/kamino/_src/dynamics/dual.py
+@@ -1419,6 +1419,13 @@
+         # in order to allocate corresponding per-friction-cone parameters
+         model_max_contacts_host = contacts.model_max_contacts_host if contacts is not None else 0
+ 
++        clear_modes = {c.dynamics.tracked_active_clear for c in self._config}
++        if len(clear_modes) != 1:
++            raise ValueError("tracked_active_clear must be common to every world")
++        tracked_active_clear = clear_modes.pop()
++        if self._sparse and tracked_active_clear:
++            raise ValueError("tracked_active_clear requires dense dynamics")
++
+         # Construct the Delassus operator first since it will already process the necessary
+         # model and contacts allocation sizes and will create some of the necessary arrays
+         if self._sparse:
+@@ -1441,6 +1448,7 @@
+             )
+         else:
+             self._delassus = DelassusOperator(
++                tracked_active_clear=tracked_active_clear,
+                 model=model,
+                 data=data,
+                 limits=limits,
+--- a/_src/solvers/kamino/_src/dynamics/delassus.py
++++ b/_src/solvers/kamino/_src/dynamics/delassus.py
+@@ -949,6 +949,25 @@
+         )
+ 
+ 
++@wp.kernel
++def _clear_tracked_delassus_prefix(
++    dim: wp.array[wp.int32],
++    highwater: wp.array[wp.int32],
++    mio: wp.array[wp.int32],
++    values: wp.array[wp.float32],
++):
++    world, lane = wp.tid()
++    count = wp.max(dim[world], highwater[world])
++    for index in range(lane, count * count, 1024):
++        values[mio[world] + index] = wp.float32(0.0)
++
++
++@wp.kernel
++def _mark_delassus_active_write(dim: wp.array[wp.int32], highwater: wp.array[wp.int32]):
++    world = wp.tid()
++    highwater[world] = wp.max(highwater[world], dim[world])
++
++
+ class DelassusOperator:
+     """
+     A container to represent the Delassus matrix operator.
+@@ -962,6 +981,7 @@
+         contacts: ContactsKamino | None = None,
+         solver: LinearSolverType = None,
+         solver_kwargs: dict[str, Any] | None = None,
++        tracked_active_clear: bool = False,
+     ):
+         """
+         Creates a Delassus operator for the given model, limits and contacts containers.
+@@ -982,6 +1002,7 @@
+             contacts: The container holding the allocated contacts data.
+             solver: The solver type to use for linear systems defined by the Delassus operator.
+             solver_kwargs: Additional keyword arguments to pass to the solver constructor.
++            tracked_active_clear: Opt into tracked active-prefix clearing; default preserves full clearing.
+         """
+         # Declare and initialize the host-side cache of the necessary memory allocations
+         self._num_worlds: int = 0
+@@ -1002,6 +1023,9 @@
+ 
+         # Declare the optional Cholesky factorization
+         self._solver: LinearSolverType | None = None
++        self._tracked_active_clear = bool(tracked_active_clear)
++        self._tracked_clear_highwater: wp.array[wp.int32] | None = None
++        self._tracked_clear_capacity: wp.array[wp.int32] | None = None
+         self._body_grouped: _BodyGroupedDelassus | None = None
+ 
+         # Allocate the Delassus operator data if at least the model is provided
+@@ -1151,6 +1175,12 @@
+         else:
+             self._operator.info.finalize(dimensions=maxdims, dtype=wp.float32, itype=wp.int32, device=self._device)
+ 
++        # Finalize allocated fresh zero storage: no previous writes survive.
++        self._tracked_clear_highwater = None
++        self._tracked_clear_capacity = None
++        if self._tracked_active_clear:
++            self._allocate_tracked_clear()
++
+         # Optionally initialize the linear system solver if one is specified
+         if solver is not None:
+             if not issubclass(solver, LinearSolverType):
+@@ -1158,12 +1188,74 @@
+             solver_kwargs = solver_kwargs or {}
+             self._solver = solver(operator=self._operator, device=self._device, **solver_kwargs)
+ 
++    @property
++    def tracked_active_clear(self) -> bool:
++        """Whether build uses tracked active-prefix clearing (default False)."""
++        return self._tracked_active_clear
++
++    def _allocate_tracked_clear(self):
++        self._tracked_clear_capacity = to_warp_int32_array(self._world_maxdims, device=self._device)
++        self._tracked_clear_highwater = wp.zeros(self._num_worlds, dtype=wp.int32, device=self._device)
++
++    def set_tracked_active_clear(self, enabled: bool):
++        """Opt into tracked writes without changing current matrix contents.
++
++        Configure outside CUDA capture and before capturing builds. All writes
++        must stay inside the current active matrix prefix, or the caller must
++        invoke invalidate_tracked_clear() after writing arbitrary storage.
++        build() and regularize() track their own writes, including reset=False.
++        zero() always clears the entire allocation, regardless of this mode.
++        Enabling after prior use conservatively marks the full allocation dirty.
++        """
++        if not isinstance(enabled, bool):
++            raise TypeError("enabled must be bool")
++        if enabled == self._tracked_active_clear:
++            return
++        self._tracked_active_clear = enabled
++        if enabled and self._operator is not None:
++            if self._tracked_clear_highwater is None:
++                self._allocate_tracked_clear()
++            self.invalidate_tracked_clear()
++
++    def invalidate_tracked_clear(self):
++        """Mark arbitrary external matrix writes; device-only and graph safe."""
++        if self._tracked_clear_highwater is not None:
++            wp.copy(self._tracked_clear_highwater, self._tracked_clear_capacity)
++
++    def _track_active_write(self):
++        if self._tracked_active_clear and self._num_worlds:
++            wp.launch(
++                kernel=_mark_delassus_active_write,
++                dim=self._num_worlds,
++                inputs=[self._operator.info.dim, self._tracked_clear_highwater],
++                device=self._device,
++            )
++
++    def _clear_for_build(self):
++        if not self._tracked_active_clear:
++            self.zero()
++            return
++        if self._num_worlds:
++            # Read immutable history in every clearing CTA. Update it only in a
++            # later ordered operation; there are four 256-thread CTAs per world.
++            wp.launch(
++                kernel=_clear_tracked_delassus_prefix,
++                dim=(self._num_worlds, 1024),
++                inputs=[self._operator.info.dim, self._tracked_clear_highwater,
++                        self._operator.info.mio, self._operator.mat],
++                block_dim=256,
++                device=self._device,
++            )
++            wp.copy(self._tracked_clear_highwater, self._operator.info.dim)
++
+     def zero(self):
+         """
+         Sets all values of the Delassus matrix to zero.
+         This is useful for resetting the operator before recomputing it.
+         """
+         self._operator.mat.zero_()
++        if self._tracked_clear_highwater is not None:
++            self._tracked_clear_highwater.zero_()
+ 
+     def build(
+         self,
+@@ -1208,7 +1300,9 @@
+ 
+         # Initialize the Delassus matrix to zero
+         if reset_to_zero:
+-            self.zero()
++            self._clear_for_build()
++        else:
++            self._track_active_write()
+ 
+         # Build the Delassus matrix parallelized over the upper triangle. Warp's
+         # CUDA kernels use 32-thread warps, so pad the work count to keep the
+@@ -1294,6 +1388,7 @@
+             Each value in `eta` corresponds to the regularization along each constraint.
+             Shape of ``(sum_of_max_total_cts,)``.
+         """
++        self._track_active_write()
+         wp.launch(
+             kernel=_regularize_delassus_diagonal_dense,
+             dim=(self._size.num_worlds, self._size.max_of_max_total_cts),

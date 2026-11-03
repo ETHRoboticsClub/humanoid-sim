@@ -4,6 +4,7 @@ import pytest
 import torch
 from conftest import GRAVITY, PARTS, PHYSICS_ROBOTS, built_usd
 
+from humanoid_sim.timing import NS_PER_MS
 from humanoid_sim.train.plant import TrainPlantCfg
 
 pytestmark = [pytest.mark.physics, pytest.mark.parametrize("robot", PHYSICS_ROBOTS)]
@@ -63,13 +64,14 @@ def test_heightfield_terrain_carries_the_feet(robot):
         soles = [art.body_names.index(b["body"]) for b in boxes]
         settled = []
         forces = torch.zeros(2, len(art.body_names))
-        for k in range(85):  # drives off: it drops 5 cm onto the terrain and folds up
+        steps, last = 340 * NS_PER_MS // plant.period_ns, 100 * NS_PER_MS // plant.period_ns
+        for k in range(steps):  # drives off: it drops 5 cm onto the terrain and folds up
             _step(sim, scene, plant, 1)
-            if k >= 60:  # over the last 0.1 s: the feet bounce on the bumps, so average
+            if k >= steps - last:  # over the last 0.1 s: the feet bounce on the bumps, so average
                 poses = art.data.body_link_pose_w.torch.numpy()
                 settled.append(min(float(_sole_corners(poses[e, b], box)[:, 2].min())
                                    for e in range(2) for b, box in zip(soles, boxes, strict=True)))
-                forces += plant.truth().contact_forces_w[..., 2] / 25
+                forces += plant.truth().contact_forces_w[..., 2] / last
         # Landed, the soles rest on the terrain, at most a few millimetres (soft contact) below its lowest point (0);
         # through the 0.1 mm base the V1's sank about 3 cm and the G1's about 1.5 cm.
         assert sum(settled) / len(settled) > -0.005
@@ -170,16 +172,20 @@ def test_force_push_accelerates_the_robot_horizontally(robot):
         push.level = torch.tensor([0.0, 1.0])  # env 0 unpushed
         push.reset(torch.arange(2), plant.t_ns)
         _step(sim, scene, plant, 1)
-        com0 = art.data.root_com_pos_w.torch[:, :2].clone()
-        for _ in range(25):  # 0.1 s
+        mass = art.data.body_mass.torch
+
+        def com():  # the whole robot's: the base alone, pushed and light, runs ahead of it
+            return (mass.unsqueeze(-1) * art.data.body_com_pos_w.torch[..., :2]).sum(1) / mass.sum(1, keepdim=True)
+
+        com0 = com()
+        for _ in range(100 * NS_PER_MS // plant.period_ns):  # 0.1 s
             push.step(plant.t_ns)
             _step(sim, scene, plant, 1)
-        dx = art.data.root_com_pos_w.torch[:, :2] - com0
-        mass = art.data.body_mass.torch.sum(1)
-        expect = 0.5 * 500.0 / mass[1] * 0.1 ** 2
+        dx = com() - com0
+        expect = 0.5 * 500.0 / mass[1].sum() * 0.1 ** 2
         heading = push.force[1, :2] / push.force[1, :2].norm()
         assert push.force[0].norm() == 0 and dx[0].norm() < 1e-3
-        assert (dx[1] @ heading).item() == pytest.approx(expect.item(), rel=0.15)  # off-COM push: some turns
+        assert (dx[1] @ heading).item() == pytest.approx(expect.item(), rel=0.15)
     finally:
         sim_utils.SimulationContext.clear_instance()
 

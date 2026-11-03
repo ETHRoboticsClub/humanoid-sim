@@ -1,16 +1,8 @@
 # Replay and system identification
 
-humanoid-sim can replay an excitation capture recorded on the robot at the drive level and fit model parameters to it. During a replay each of the 22 simulated drives receives the position demand the real drive acted on, and the simulated drive feedback is compared with what the real drive measured. These commands are built on this:
+humanoid-sim owns physical replay and capture readers. Fitting, acceptance, conversion commands, reports and fitting SkyPilot tasks live in humanoid-learning (`python -m humanoid_learning.sysid --help`). Its fitter supplies resolved drive targets through `DriveCommands`; replay does not choose a controller command clock.
 
-| Command | What it does | Code |
-|---|---|---|
-| `humanoid-sim replay` | Replays one capture and scores the sim against it | `src/humanoid_sim/replay/replay.py` |
-| `humanoid-sim fit-delay` | Finds the timing offset between the recorded demands and the drives' response | `src/humanoid_sim/sysid/delay.py` |
-| `humanoid-sim fit-passive` | Fits upper-body joint damping, friction and armature | `src/humanoid_sim/sysid/passive.py` |
-| `humanoid-sim fit-pace` | Fits PACE 0.2.0's actuator model to captures or rosbags, from their command frames | `src/humanoid_sim/sysid/pace.py` |
-| `humanoid-sim pace-selftest` | Plants PACE parameters in the sim and fits them back from a synthetic chirp | `src/humanoid_sim/sysid/pace.py` |
-
-All of them step physics on Isaac Lab / MJWarp, so they run in the Isaac Lab image or on a GPU node (see [getting-started.md](getting-started.md) and [testing-and-gpu.md](testing-and-gpu.md)). The capture reader, `src/humanoid_sim/replay/exc.py`, needs only NumPy and can be used anywhere.
+`humanoid-sim replay` steps the plant in the Isaac Lab image on CUDA and compares recorded and simulated drive feedback. The capture reader and coordinate/conversion helpers are usable without physics. See [getting-started.md](getting-started.md) and [testing-and-gpu.md](testing-and-gpu.md).
 
 ## Excitation captures
 
@@ -29,13 +21,13 @@ The SkyPilot tasks and the examples below use these three captures:
 | File | Contents | Used by humanoid-sim |
 |---|---|---|
 | `manifest.json` | Format, `dataset_id`, `display_name`, the `complete` flag, the robot's identity and calibration revisions, the resolved excitation (profile, sweep, per-joint amplitude and center), per-joint signal limits, stream schemas with units, row counts, file digests and a tracking-error summary | `format`, `complete`, `dataset_id`, `display_name` |
-| `commands.csv` | The joint-space targets the robot API published, one frame every 20 ms (`q_nominal_rad` and `q_mirror_rad` per joint) | No |
+| `commands.csv` | The joint-space targets the robot API published, one frame every 20 ms (`q_nominal_rad` and `q_mirror_rad` per joint) | Read by the client to supply resolved drive targets |
 | `acks.csv` | The receivers' acknowledgements of each command frame | No |
 | `pdo_feedback.csv` | Per drive at about 200 Hz: measured position `native_position_rad`, `velocity_rad_s`, `torque_nm`, `current_a`, `motor_position_rad`, `status_word`, the drive's position demand `position_demand_rad` and its current demand `current_demand_a` | Position demand as the input; measured position, velocity and torque for scoring |
 | `joints.csv` | Joint-space positions and velocities from Controls' `/rt/joint_states` | No |
-| `imu.csv` | Controls' `/rt/imu`: orientation from the Madgwick filter, angular velocity and specific force, already rotated into the `base_link` frame, and the relay's sample counter `source_seq` | Orientation, angular velocity and `source_seq`, for the moving-base modes |
+| `imu.csv` | Controls' `/rt/imu`: orientation from the Madgwick filter, angular velocity and specific force, already rotated into the `base_link` frame, and the relay's sample counter `source_seq` | Orientation, angular velocity and `source_seq`, for moving-base modes; specific force only for opt-in acceleration loading |
 | `drives.csv` | Controls' drive status diagnostic aggregate, including winding temperature | No |
-| `gains.json` | The gains in force on each drive at the start and at the end of the capture, as SI values and as raw drive counts | Raw P and D gains |
+| `gains.json` | The gains in force on each drive at the start and at the end of the capture, as SI values and as raw drive counts | Raw P and D gains; actuators listed without SI gains (the hands) are left out |
 
 Every time humanoid-sim reads comes from a `t_source_ros_ns` column: integer nanoseconds on the robot's ROS clock. For the IMU that stamp is the time the host received the sample (see the base modes below). The `t_recv_runtime_ns` columns are on the host's monotonic clock and are never mixed in.
 
@@ -49,9 +41,15 @@ Each drive is fed its own position demand, object 0x6062 of the drive's CiA 402 
 
 `imu.csv` provides the base motion for the `yaw` and `orientation` base modes.
 
-### What the replay ignores
+### Optional inputs and diagnostics
 
-`commands.csv`, `acks.csv`, `joints.csv` and `drives.csv` are never read. From `pdo_feedback.csv`, `current_a`, `current_demand_a` and `motor_position_rad` are loaded but not used, and `status_word` and the publish and receipt stamps are not read. The IMU's specific force is not used, so the base's linear motion is not replayed. The reader does not verify the manifest's digests, and nothing compares the capture's identity and calibration revisions with the robot description in `third_party/humanoid-urdf`.
+Ordinary replay uses recorded PDO demands. A fitting client can instead supply a resolved `DriveCommands` stream with an explicit frame/APPLIED clock and latency. ACK absence does not prove a command was discarded. Choosing clocks and converting semantic controller targets belong to the client.
+
+Actual and requested currents remain separate raw telemetry. `--effort-mode raw` records coverage; calibrated comparison requires an explicit sourced current-to-torque artifact and never invents conversion constants. Reported torque is not independent current calibration.
+
+`--base-acceleration imu` optionally applies the equivalent translational inertial load to each body's centre of mass, while the base position remains fixed. It requires full orientation mode, inactive simulated gantry and contact monitoring. It is off by default; this mechanism does not validate measured IMU frames, timing, bias or attitude reconstruction.
+
+Identified incompatible captures require an explicit digest-bound coordinate artifact, or a hash-bound legacy-to-native conversion. These alternatives cannot both be applied. Original capture files stay unchanged. Windowed conversions retain parent provenance and hash their own transformed commands; copied source manifest digests describe the source, not the derived CSVs.
 
 ## Recording a capture for the sim
 
@@ -60,8 +58,8 @@ Captures come from the robot API's actuator identification: the `RUN_EXCITATION`
 This is what the code here needs from a capture:
 
 - The robot hangs on the gantry with its feet unloaded. The identification profiles require gantry support. The replay keeps the base's position fixed and at most turns it as the IMU recorded, so it assumes that nothing but the gantry holds the robot.
-- The gains stay the same for the whole capture. `ExcitationCapture.gains()` refuses a capture whose raw gains at the end differ from those at the start. The excitation never changes gains itself; set non-baseline gains with `SET_ACTUATOR_GAINS` before the run. The sim's target shaping is only guaranteed stable up to twice the description's baseline gains (`outside_stable_region` in `src/humanoid_sim/devices/shaping.py`), and the replay does not report a capture that goes beyond that. The present captures run the baseline gains, which `tests/test_exc_reader.py` checks.
-- The capture is complete. A run the robot API ramped down early is stored with `complete: false`, and `ExcitationCapture` refuses it.
+- The gains stay the same for the whole capture. `ExcitationCapture.gains()` refuses a capture whose raw gains at the end differ from those at the start. The excitation never changes gains itself; set non-baseline gains with `SET_ACTUATOR_GAINS` before the run. Every replay runs the solver PD at the capture's own gains (`solver_gains_of` in `src/humanoid_sim/replay/replay.py`), so the target shaping, which is only guaranteed stable up to twice the solver gains (`outside_stable_region` in `src/humanoid_sim/devices/shaping.py`), is not stretched by a capture that runs the drives above their baseline.
+- The capture is complete. A run the robot API ramped down early is stored with `complete: false`, and `ExcitationCapture` refuses it; explicit `--partial` fits completed sweeps only.
 - The IMU stream has no gaps in `source_seq`. The moving-base modes rebuild the IMU sample times from the sequence and raise on a gap. A fixed-base replay does not read the IMU.
 - Every drive in the description has rows in `pdo_feedback.csv` with `position_demand_rad` filled in.
 - The drives move. Every score here is a position error, so a drive whose demand hardly changes contributes little but noise. On the present captures two ankle cranks, `maxonHEJ50L_ANK1` and `maxonHEJ50R_ANK2`, move by only 1 to 4 mrad peak to peak, so their numbers say little. Each body region has a low-band profile (`<region>`, 0.2 to 3 Hz over 30 s) and a high-band one (`<region>-high`, 3 to 10 Hz over 45 s); record both. The large excursions at low frequency expose friction, and the high band is where inertia (armature) dominates. `fit-passive` uses a capture from one band to check a fit made on the other.
@@ -79,7 +77,7 @@ humanoid-sim replay ../datasets/humanoid-v1/exc-503fc128aaf14405a0c2418d63ff9a60
 humanoid-sim replay <exc-dir> --base fixed --period-ms 1 --duration 10
 ```
 
-In the Isaac Lab image, run these through `hsim` with the datasets mounted ([getting-started.md](getting-started.md#run-commands-in-the-image)), so that `../datasets/humanoid-v1` resolves inside the container. On a machine without CUDA add `--device cpu`.
+In the Isaac Lab image, run these through `hsim` with the datasets mounted ([getting-started.md](getting-started.md#run-commands-in-the-image)), so that `../datasets/humanoid-v1` resolves inside the container. Physics requires CUDA; CPU use is limited to readers and offline analysis.
 
 The top-level options `--robot` (default `ethrc_v1`), `--assets` (default `outputs/assets`), `--usd` (an explicit robot USD) and `--solver` (`mjwarp` or `kamino`, default the profile's) go before the subcommand. [robot-model.md](robot-model.md) describes the assets.
 
@@ -94,11 +92,11 @@ A replay (`replay()`, `_prepare()` and `_run()` in `src/humanoid_sim/replay/repl
 |---|---|---|
 | `<exc-dir>` | required | The capture directory |
 | `--period-ms` | 4 | Physics period and replay step, in ms. The profile's `physics.period_ns` is 4 ms. |
-| `--integrator` | the profile's, `implicitfast` | MJWarp integrator, for example `euler` |
+| `--integrator` | the profile's, `rk4` | MJWarp integrator, for example `implicitfast` |
 | `--device` | `cuda:0` | `cuda:N`, or `cpu` for Warp's CPU device, which is slow |
 | `--duration` | the whole capture | Replay only the first this many seconds |
 | `--base` | `yaw` | `yaw`, `orientation` or `fixed`; see below |
-| `--demand-delay-ms` | 0 | Apply each recorded demand this many ms after its stamp; a negative value applies it before. Take it from `fit-delay`. |
+| `--demand-delay-ms` | 0 | Apply each recorded demand this many ms after its stamp; a negative value applies it before. A delay estimate can be obtained through humanoid-learning. |
 | `--out` | `outputs/replay` | Parent directory of the result |
 
 ### Base modes
@@ -123,7 +121,7 @@ The base-joints asset hangs the robot from a world-fixed root through three revo
 
 ### Output
 
-The result directory is `<out>/<dataset_id>_mjwarp_<integrator>_<period in us>us_base-<base>`, with `_demand<delay>ms` appended when a delay is set (for example `exc-503fc128aaf14405a0c2418d63ff9a60_mjwarp_implicitfast_4000us_base-yaw_demand+2ms`). It holds `summary.json` and `trace.npz`. All values are SI.
+The result directory is `<out>/<dataset_id>_mjwarp_<integrator>_<period in us>us_base-<base>`, with `_demand<delay>ms` appended when a delay is set (for example `exc-503fc128aaf14405a0c2418d63ff9a60_mjwarp_rk4_4000us_base-yaw_demand+2ms`). It holds `summary.json` and `trace.npz`. All values are SI.
 
 `summary.json`:
 
@@ -374,7 +372,7 @@ Judge a fit as for `fit-passive`: `holdout.objective_fit` clearly below `holdout
 
 `sky/replay.sky.yaml` and `sky/sysid.sky.yaml` run the replays and the passive fit on one L40S on AWS (8 or more CPUs, 32 GB or more of memory, 200 GB of disk). `sky/setup.sh` installs Isaac Lab release 3.0.0 at `ISAACLAB_COMMIT` and humanoid-sim in editable mode. The repository is synced to `~/sky_workdir` on the node, and the three captures are mounted from `../datasets/humanoid-v1/` (beside the repository) at `/data/exc-<id>`. To use another capture, add it to `file_mounts`.
 
-`replay.sky.yaml` builds both assets and replays every mounted capture once for each `period_ms:integrator` pair in `RUNS` (`4:implicitfast 4:euler 1:implicitfast`), with the default `yaw` base and no demand delay, one process per capture in parallel. Results go to `outputs/replay-mjwarp/`, with a log per capture and run; the task ends by printing each run's JSON summary line.
+`replay.sky.yaml` builds both assets and replays every mounted capture once for each `period_ms:integrator` pair in `RUNS` (`4:rk4 4:implicitfast 1:rk4`), with the default `yaw` base and no demand delay, one process per capture in parallel. Results go to `outputs/replay-mjwarp/`, with a log per capture and run; the task ends by printing each run's JSON summary line.
 
 ```bash
 sky launch -y -c hsim-bench -i 10 sky/replay.sky.yaml

@@ -8,7 +8,7 @@ The same plant code serves three uses:
 |---|---|---|---|
 | Training | humanoid-learning, any Isaac Lab task | Thousands in parallel on one GPU | `humanoid_sim.train` (the Train-Time API) |
 | Real-time runtime | Controls' plant host, tests, demos | One, in real time | `humanoid-sim serve` |
-| Replay and system identification | Anyone checking the sim against the real robot | One per capture, or many for fits | `humanoid-sim replay`, `fit-delay`, `fit-passive` |
+| Replay and system identification | Anyone checking the sim against the real robot | One per capture, or many for fits | `humanoid-sim replay`; fitting in humanoid-learning |
 
 ![Six robots in the training scene](images/scene-hero.png)
 
@@ -42,7 +42,7 @@ Between humanoid-sim and humanoid-learning the line is mechanism against choice:
 
 | Concern | humanoid-sim: the mechanism | humanoid-learning: the choice |
 |---|---|---|
-| Terrain | `heightfield_terrain_cfg`: a terrain the physics can collide with, from the tiles and grid the caller gives | Terrain generators: tile mixes, sizes and difficulty, and the curriculum that moves envs between rows |
+| Terrain | `heightfield_terrain_cfg`: a terrain the physics can collide with, from the tiles and grid the caller gives; the same terrain in replays and the runtime (`terrain=`, `--terrain FILE`) | Terrain generators: tile mixes, sizes and difficulty, and the curriculum that moves envs between rows |
 | Disturbances | `ForcePush`, a push process with the caller's ranges; joint torques; the runtime's `APPLY_DISTURBANCE` | Which pushes a task trains and is tested against, and their schedule |
 | Randomization | Models of the randomized parameters, their distributions as specs, a level knob | Which parameters, their ranges, and when the level moves |
 | Sensors | Sensor models and their knobs (the IMU's noise and delivery timing; cameras, lighting and LIDAR are not modeled yet, and come as knobs here when they are: a light's intensity, a sensor switched off) | Which sensors a policy reads, and ablations over them |
@@ -88,7 +88,7 @@ A manager-based Isaac Lab environment adds the plant as its action term (`PlantA
 
 ### Replay
 
-Excitation captures recorded on the real robot (`datasets/humanoid-v1/exc-*`) are replayed drive by drive: each simulated drive gets the demand the real drive got, and the sim's positions, velocities and torques are scored against what the real drives measured. `fit-delay` and `fit-passive` use batched replays to fit the command delay and passive joint parameters. See [replay-and-sysid.md](replay-and-sysid.md).
+Excitation captures recorded on the real robot (`datasets/humanoid-v1/exc-*`) are replayed drive by drive: each simulated drive gets the demand the real drive got, and the sim's positions, velocities and torques are scored against what the real drives measured. humanoid-learning uses batched replay to fit timing and mechanical parameters. See [replay-and-sysid.md](replay-and-sysid.md).
 
 ## What is measured, what is true
 

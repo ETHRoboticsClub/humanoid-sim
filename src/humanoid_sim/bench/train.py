@@ -22,6 +22,7 @@ from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.timing.clock import NS_PER_MS, NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.objects import ObjectsDriver, WorldObjects
 
 POLICY_PERIOD_NS = 20 * NS_PER_MS
 
@@ -52,7 +53,21 @@ def randomization(desc, payload_body: str) -> list[dict]:
     return terms
 
 
-def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict:
+def physics_overrides(args) -> dict:
+    """The profile overrides of ``--period-ms`` and ``--integrator``, for comparing physics settings."""
+    overrides = {}
+    if getattr(args, "period_ms", None) is not None:
+        period_ns = round(args.period_ms * NS_PER_MS)
+        if period_ns <= 0 or POLICY_PERIOD_NS % period_ns:
+            raise ValueError(f"--period-ms {args.period_ms}: must divide the {POLICY_PERIOD_NS // NS_PER_MS} ms policy period")
+        overrides["period_ns"] = period_ns
+    if args.integrator is not None:
+        solver = args.solver or load_profile(args.robot)["physics"]["solver"]
+        overrides[solver] = {"integrator": args.integrator}
+    return overrides
+
+
+def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None, objects: WorldObjects | None = None) -> dict:
     import isaaclab.sim as sim_utils
     from isaaclab.utils import instantiate
 
@@ -60,15 +75,21 @@ def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict:
     from humanoid_sim.train.scene import robot_build, robot_scene_cfg, robot_sim_cfg
 
     n = args.num_envs
-    sim = sim_utils.SimulationContext(robot_sim_cfg(args.robot, device=args.device, solver=args.solver))
+    overrides = physics_overrides(args)
+    sim = sim_utils.SimulationContext(robot_sim_cfg(args.robot, device=args.device, solver=args.solver,
+                                                    physics_overrides=overrides))
     boxes = scene
-    with robot_build(args.robot, solver=args.solver):
+    with robot_build(args.robot, solver=args.solver, physics_overrides=overrides):
         scene = instantiate(robot_scene_cfg(n, usd, robot=args.robot, ground_friction=0.0, pose="home",
-                                            self_collision=False if args.no_self_collision else None, scene=boxes))
+                                            self_collision=False if args.no_self_collision else None, scene=boxes,
+                                            objects=objects))
         sim.reset()
     robot = scene["robot"]
+    driver = ObjectsDriver(scene, objects) if objects else None
+    on_cuda = str(args.device).startswith("cuda")  # the plant as training runs it
     heaviest = robot.body_names[int(robot.data.body_mass.torch[0].argmax())]
-    plant = RobotPlant(robot, TrainPlantCfg(robot=args.robot, randomization=randomization(Description.load(args.robot), heaviest)),
+    plant = RobotPlant(robot, TrainPlantCfg(robot=args.robot, randomization=randomization(Description.load(args.robot), heaviest),
+                                            physics_overrides=overrides, cuda_graph=on_cuda, compile=on_cuda),
                        imu=scene["imu"], contacts=scene["contacts"], physics_manager=sim.physics_manager)
     q, qd = plant.joint_state()  # the scene's default pose: home
     q = q.clone()
@@ -79,6 +100,7 @@ def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict:
     gen = torch.Generator(device=q.device).manual_seed(0)
     resets = max(1, n // 50)
     sink = torch.zeros((), device=q.device)
+    peak_spin = torch.zeros((), device=q.device)
 
     def policy_step(k):
         nonlocal sink
@@ -93,13 +115,17 @@ def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict:
         plant.submit(DriveDemand.pd(stand, stiff, damp), sent)
 
     def run(steps):
+        nonlocal peak_spin
         for k in range(steps):
             if k % every == 0:
                 policy_step(k)
             plant.pre_physics()
+            if driver is not None:
+                driver.update(plant.t_ns)
             scene.write_data_to_sim()
             sim.step()
             scene.update(period_s)
+            peak_spin = torch.maximum(peak_spin, robot.data.body_link_vel_w.torch[..., 3:].norm(dim=-1).max())
 
     run(50)
     cuda = str(q.device).startswith("cuda")
@@ -126,9 +152,14 @@ def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None) -> dict:
     if error:
         return {"error": "host sync in steady state", "detail": error}
     sim_s = args.steps * period_s
-    self_collision = False if args.no_self_collision else bool(load_profile(args.robot)["physics"]["self_collision"])
+    physics = load_profile(args.robot, physics_overrides=overrides)["physics"]
+    solver = args.solver or physics["solver"]
+    self_collision = False if args.no_self_collision else bool(physics["self_collision"])
     return {"workload": "train", "robot": args.robot, "device": args.device, "num_envs": n, "steps": args.steps,
+            "solver": solver, "period_ns": plant.period_ns, "integrator": physics[solver].get("integrator"),
             "wall_s": wall, "env_steps_per_s": n * args.steps / wall, "sim_seconds_per_wall_second": n * sim_s / wall,
             "self_collision": self_collision, "host_syncs": "none (torch sync debug mode)" if cuda else "n/a",
             "checksum_finite": bool(torch.isfinite(sink).item()), "fraction_envs_up": up,
-            "scene": None if boxes is None else boxes.describe()}
+            "peak_body_ang_vel_rad_s": peak_spin.item(),
+            "scene": None if boxes is None else boxes.describe(),
+            "objects": None if not objects else objects.describe()}

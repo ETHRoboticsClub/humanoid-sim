@@ -35,7 +35,10 @@ def collapse_fixed_joints(builder):
     mass = np.asarray(builder.body_mass, dtype=np.float64).copy()
     com = np.asarray(builder.body_com, dtype=np.float64).reshape(-1, 3).copy()
     inertia = np.asarray(builder.body_inertia, dtype=np.float64).reshape(-1, 3, 3).copy()
-    mapping = builder.collapse_fixed_joints()
+    # A world-fixed articulation root remains a named body for sensors and supports.
+    # Merge its rigid children, but do not absorb the root into the static world.
+    anchors = [i for i, parent in enumerate(builder.joint_parent) if parent < 0]
+    mapping = builder.collapse_fixed_joints(joints_to_keep=anchors)
     groups = {}
     for child, parent in mapping["body_merged_parent"].items():
         if parent >= 0:

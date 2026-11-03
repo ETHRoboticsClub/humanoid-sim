@@ -1,0 +1,10 @@
+{
+  "_src/solvers/kamino/config.py": {
+    "before": "5fa04b5c885ab721633692f4c40fb75cc7c589ce5e62caa5690db9a3960efb18",
+    "after": "c5cfe76c1f60671bee0366ec6bdb56e881c698d4f9d054062f65706fea2f75e5"
+  },
+  "_src/solvers/kamino/_src/dynamics/dual.py": {
+    "before": "a15058250968fa0f325c7e570ddaa1f513772005fa60462b9de0bff059b937d0",
+    "after": "8b5be3832e6f35a754cf2a6d09ecfdbbcc193e4158421f3a139620ae00e7b3e1"
+  }
+}

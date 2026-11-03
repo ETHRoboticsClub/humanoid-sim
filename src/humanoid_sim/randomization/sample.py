@@ -12,9 +12,7 @@ import re
 
 import torch
 
-from humanoid_sim.randomization.spec import PARAMS, ParamSpec
-
-AXES = ("x", "y", "z")
+from humanoid_sim.randomization.spec import AXES, PARAMS, ParamSpec
 
 
 class Randomizer:
@@ -77,11 +75,14 @@ class Randomizer:
         width = value.shape[2:] if value.dim() == 3 else ()
         shape = (len(env_ids), len(cols) if spec.per_target else 1) + tuple(width)
         if spec.buckets is None:
-            x = self._sample(spec, shape)
+            x = self._sample(spec, shape, cols)
         else:
-            table = self._sample(spec, (spec.buckets,))
             indices = torch.randint(spec.buckets, shape, generator=self.generator, device=self.device)
-            x = table[indices]
+            if spec.axis_ranges is None:
+                x = self._sample(spec, (spec.buckets,), cols)[indices]
+            else:
+                table = self._sample(spec, (spec.buckets, shape[-1]), cols)
+                x = table[indices, torch.arange(shape[-1], device=self.device)]
         x = x.expand(len(env_ids), len(cols), *width)
         current = value[env_ids][:, cols]
         if spec.op == "scale":
@@ -93,19 +94,29 @@ class Randomizer:
         rows = env_ids.unsqueeze(1)
         value[rows, cols.unsqueeze(0)] = new.to(value.dtype)
 
-    def _sample(self, spec: ParamSpec, shape: tuple[int, ...]) -> torch.Tensor:
-        lo, hi = spec.range
+    def _sample(self, spec: ParamSpec, shape: tuple[int, ...], cols: torch.Tensor) -> torch.Tensor:
+        axes = spec.axis_ranges
+        if axes is None:
+            lo, hi = spec.range
+        else:  # [W] bounds broadcast over the trailing dimension, the selected axes for the IMU's
+            lo, hi = (torch.tensor(b, dtype=torch.float64, device=self.device) for b in zip(*axes, strict=True))
+            if PARAMS[spec.param].target == "axis":
+                lo, hi = lo[cols], hi[cols]
         u = torch.rand(shape, generator=self.generator, device=self.device, dtype=torch.float64)
         if spec.dist == "discrete_uniform":
-            count = round((hi - lo) / spec.quantum) + 1
+            count = round((hi - lo) / spec.quantum) + 1 if axes is None else torch.round((hi - lo) / spec.quantum) + 1
             x = lo + torch.floor(u * count) * spec.quantum
             centre = 0.5 * (lo + hi)
         elif spec.dist == "uniform":
             x = lo + (hi - lo) * u
             centre = 0.5 * (lo + hi)
         elif spec.dist == "log_uniform":
-            x = torch.exp(math.log(lo) + (math.log(hi) - math.log(lo)) * u)
-            centre = math.sqrt(lo * hi)
+            if axes is None:
+                x = torch.exp(math.log(lo) + (math.log(hi) - math.log(lo)) * u)
+                centre = math.sqrt(lo * hi)
+            else:
+                x = torch.exp(torch.log(lo) + (torch.log(hi) - torch.log(lo)) * u)
+                centre = torch.sqrt(lo * hi)
         else:
             x = lo + hi * torch.randn(shape, generator=self.generator, device=self.device, dtype=torch.float64)
             centre = lo

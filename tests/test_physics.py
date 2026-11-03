@@ -16,6 +16,7 @@ from conftest import (
 
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
+from humanoid_sim.timing import NS_PER_MS
 
 
 @pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
@@ -160,7 +161,7 @@ def test_holds_its_pose_on_a_fixed_base_against_gravity(request, robot, solver):
     qdrv, _, _ = p.map.drive_state(q, qd)
     p.submit(DriveDemand.pd(qdrv, p.drive_stiffness.expand(1, -1), p.drive_damping.expand(1, -1)),
              torch.zeros(1, dtype=torch.long))
-    for _ in range(100):  # 0.4 s: settled at the baseline damping
+    for _ in range(400 * NS_PER_MS // sim.period_ns):  # 0.4 s: settled at the baseline damping
         fb = sim.step()
     q1, _ = sim.joint_state()
     assert torch.isfinite(fb.applied_torque_nm).all()
@@ -219,7 +220,7 @@ def test_imu_delivers_raw_samples_on_a_fixed_base(request, robot):
 
     sim = SimCore(built_usd(robot), device="cpu", robot=robot, fixed_base=True, imu=True, contacts=True)
     request.addfinalizer(sim.close)
-    for _ in range(50):  # 0.2 s
+    for _ in range(200 * NS_PER_MS // sim.period_ns):  # 0.2 s
         sim.step()
     s = sim.imu.samples
     n = int(s.count[0])
@@ -370,24 +371,27 @@ def test_a_joint_pushed_into_its_stop_stays_at_it(robot, solver):
         sim.close()
 
 
+
+
 @pytest.mark.physics
-def test_pace_objective_is_zero_at_planted_parameters(request):
-    """A chirp recorded with planted PACE parameters replays exactly at them, and measurably worse at the start
-    values: the fit's plumbing (bias, delay, friction relief, solver writes) round-trips."""
+def test_a_replay_runs_the_solver_pd_at_the_captures_gains(request, device):
+    """Gains above twice the baseline would leave target shaping's stable region: the replay puts the solver PD at
+    the capture's gains instead, in the plant and in the articulation."""
     pytest.importorskip("isaaclab_newton")
-    import numpy as np
+    import torch
 
+    from humanoid_sim.replay.replay import solver_gains_of
     from humanoid_sim.sim import SimCore
-    from humanoid_sim.sysid.pace import PaceSpace, chirp_commands, evaluate, start_values, synthetic_capture
 
-    sim = SimCore(built_usd("ethrc_v1"), device="cpu", robot="ethrc_v1", num_envs=2, fixed_base=True)
+    if not device.startswith("cuda"):
+        pytest.skip("robot physics requires --device cuda:0 in the Isaac Lab image")
+    sim = SimCore(built_usd("ethrc_v1"), device=device, robot="ethrc_v1", num_envs=4, fixed_base=True)
     request.addfinalizer(sim.close)
-    joints, drives = list(sim.plant.map.joint_names), list(sim.plant.map.drive_names)
-    space = PaceSpace(joints, drives, start_values(sim.desc, joints))
-    x_true = np.random.default_rng(0).uniform(-0.5, 0.5, space.dim)
-    amp = {j: 0.05 for j in joints}
-    commands = chirp_commands(joints, duration_s=3.0, f0_hz=0.5, f1_hz=3.0, amplitude_rad=amp)
-    capture = synthetic_capture(sim, space, space.decode(np.tile(x_true, (2, 1))), commands)
-    f, _ = evaluate(sim, [capture], space, np.stack([x_true, space.x0()]), list(range(len(drives))),
-                    base_motion=None, duration_s=None)
-    assert f[0] < 1e-4 and f[1] > 10 * f[0]
+    plant = sim.plant
+    kp, kd = 4.5 * plant.drive_stiffness.clone(), 2.5 * plant.drive_damping.clone()
+    solver_gains_of(sim, kp, kd)
+    lin_j, lin_d = plant.solver_map._lin_j, plant.solver_map._lin_d
+    ids = [sim.backend.robot.joint_names.index(plant.solver_map.joint_names[i]) for i in lin_j.tolist()]
+    stiffness = sim.backend.robot.data.joint_stiffness.torch[:, ids].to(plant.k0.dtype)
+    assert torch.allclose(plant.k0[:, lin_j], kp[lin_d].expand(4, -1))
+    assert torch.allclose(stiffness, kp[lin_d].expand(4, -1), rtol=1e-5)

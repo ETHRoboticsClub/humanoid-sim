@@ -113,7 +113,9 @@ def test_physical_crank_feedback_does_not_reconstruct_from_hinges(desc):
         for role, drive in zip(("upper", "lower"), spec["motor_names"], strict=True):
             q[:, names.index(spec["usd_joints"][role])] = .123
             i = core.map.drive_names.index(drive)
-            assert torch.all(core.feedback(q, q * 0).position_rad[:, i] == .123)
+            d = desc.drives[drive]
+            expected = torch.tensor(d.sign * (.123 - d.shaft_zero_rad), dtype=q.dtype)
+            torch.testing.assert_close(core.feedback(q, q * 0).position_rad[:, i], expected.expand(2))
     props = joint_properties(core, names)
     for lk in desc.linkages:
         assert all(props.stiffness[names.index(n)] == props.armature[names.index(n)] == 0 for n in lk.joints)
@@ -147,8 +149,60 @@ def test_native_asset_preserves_closures_and_authors_shaft_limits(desc, tmp_path
             p = next(p for p in stage.Traverse() if p.GetName() == name)
             joint = UsdPhysics.RevoluteJoint(p)
             assert np.radians([joint.GetLowerLimitAttr().Get(), joint.GetUpperLimitAttr().Get()]) == pytest.approx(
-                desc.drives[drive].position_limit_device)
+                desc.drives[drive].shaft_limits, abs=1e-6)
+            assert list(p.GetAttribute("mjc:solreflimit").Get()) == pytest.approx(
+                profile["physics"]["mjwarp"]["ankle_stop_solref"])
     assert source.digest() == source_hash
+
+
+
+def test_universal_rods_lock_only_the_spin_about_their_own_axis(desc, tmp_path):
+    from pxr import Gf, Usd, UsdPhysics
+
+    profile = load_profile(desc.robot)
+    profile["model"]["rod_joints"] = "universal"
+    stage = Usd.Stage.Open(str(build_asset(desc, profile, tmp_path)))
+    rods = NativeState(desc).rods
+    for name, *_, rod_vector, _ in rods:
+        prim = next(p for p in stage.Traverse() if p.GetName() == name)
+        joint = UsdPhysics.Joint(prim)
+        assert prim.GetTypeName() == "PhysicsJoint" and not joint.GetExcludeFromArticulationAttr().Get()
+        limits = {axis: (UsdPhysics.LimitAPI(prim, axis).GetLowAttr().Get(),
+                         UsdPhysics.LimitAPI(prim, axis).GetHighAttr().Get()) for axis in
+                  ("transX", "transY", "transZ", "rotX", "rotY", "rotZ")}
+        assert all(low > high for axis, (low, high) in limits.items() if axis not in ("rotX", "rotY"))
+        assert all(low < high for axis, (low, high) in limits.items() if axis in ("rotX", "rotY"))
+        # The locked Z of the new frame lies along the rod, in the frame the source joint used on the rod.
+        source = desc.usd_model.joints[name]
+        old, new = (np.asarray(Gf.Matrix3d(Gf.Rotation(Gf.Quatd(a.Get()))).GetTranspose())
+                    for a in (source.GetLocalRot1Attr(), joint.GetLocalRot1Attr()))
+        rod = old @ (rod_vector.numpy() / np.linalg.norm(rod_vector.numpy()))
+        assert new[:, 2] == pytest.approx(rod, abs=1e-6)
+    assert len(rods) == len(desc.linkages) * 2
+
+
+def test_universal_rods_refuse_a_ball_that_already_carries_armature(tmp_path):
+    from pxr import Sdf, Usd
+
+    desc = Description.load()  # its own stage: the edit stays in this description's session layer
+    profile = load_profile(desc.robot)
+    profile["model"]["rod_joints"] = "universal"
+    name = NativeState(desc).rods[0][0]
+    stage = desc.usd_model.stage
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        desc.usd_model.joints[name].GetPrim().CreateAttribute("newton:armature", Sdf.ValueTypeNames.Float).Set(1e-4)
+    with pytest.raises(ValueError, match="armature"):
+        build_asset(desc, profile, tmp_path)
+
+
+def test_universal_rods_near_their_singularity_are_refused(desc, tmp_path, monkeypatch):
+    from humanoid_sim.model import usd
+
+    profile = load_profile(desc.robot)
+    profile["model"]["rod_joints"] = "universal"
+    monkeypatch.setattr(usd, "UNIVERSAL_MARGIN_RAD", 1e-3)
+    with pytest.raises(ValueError, match="second axis"):
+        build_asset(desc, profile, tmp_path)
 
 
 @pytest.mark.physics
@@ -201,3 +255,22 @@ def test_native_host_publishes_feedback_before_the_first_step(desc, tmp_path):
             record[1]["drive"]["position_rad"][:len(host.drives)], expected[0].cpu().numpy())
     finally:
         host.close()
+
+
+def test_fixed_joint_collapse_keeps_the_world_anchor_body():
+    newton = pytest.importorskip("newton")
+    import warp as wp
+
+    from humanoid_sim.physics.model_build import collapse_fixed_joints
+
+    builder = newton.ModelBuilder()
+    root = builder.add_link(mass=2.0, inertia=wp.mat33(1.0), label="anchored_root")
+    child = builder.add_link(mass=1.0, inertia=wp.mat33(0.5), label="rigid_child")
+    anchor = builder.add_joint_fixed(-1, root, label="world_anchor")
+    rigid = builder.add_joint_fixed(root, child, label="rigid_assembly")
+    builder.add_articulation([anchor, rigid])
+    collapse_fixed_joints(builder)
+    assert builder.body_label == ["anchored_root"]
+    assert builder.joint_label == ["world_anchor"]
+    assert builder.joint_parent == [-1]
+    assert builder.body_mass == [3.0]

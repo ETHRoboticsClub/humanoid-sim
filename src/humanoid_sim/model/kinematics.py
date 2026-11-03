@@ -50,10 +50,10 @@ class RobotKinematics:
             from humanoid_sim.model.native_state import NativeState
 
             self._native = NativeState(Description.load(meta["robot"]))
+            ends = [*qstart[1:], per_q]
             for i, name in enumerate(labels):
-                width = 4 if robot.joint_type[i] == newton.JointType.BALL else 1
                 self._native_columns[name] = torch.as_tensor(
-                    np.arange(num_envs)[:, None] * per_q + qstart[i] + np.arange(width)[None])
+                    np.arange(num_envs)[:, None] * per_q + np.arange(qstart[i], ends[i])[None])
 
     def body_poses(self, q: torch.Tensor) -> np.ndarray:
         """World poses ``[E * B, 7]`` (position, quaternion xyzw) for joint positions ``q`` ``[E, J]``."""
@@ -90,6 +90,18 @@ def standing_base_height(usd_path: Path, desc, q: torch.Tensor | None = None) ->
     return -lowest_collision_z(kin, kin.body_poses(q.reshape(1, -1)))
 
 
+def collision_points_in_base(usd_path: Path, desc, q: torch.Tensor, *, face_m: float = 0.01):
+    """The robot's collision shapes bounded from below, for resting it on uneven ground: points ``[N, 3]`` and the
+    radius around each ``[N]`` (spheres and capsules), in the frame of an upright base at the origin, with the joints
+    at ``q`` ``[J]``. A box (a sole plate) contributes its corners and a grid on its faces ``face_m`` apart, so a
+    bump under the middle of a sole counts; a hull its vertices."""
+    kin = RobotKinematics(usd_path, list(desc.joints), base_height_m=0.0)
+    poses = kin.body_poses(q.reshape(1, -1))
+    body, local, radius = _collision_points(kin, face_m=face_m)
+    world = np.stack([_rotate(poses[b, 3:], p) for b, p in zip(body, local, strict=True)]) + poses[body, :3]
+    return world, radius
+
+
 def lowest_collision_z(kin: RobotKinematics, poses: np.ndarray) -> float:
     """World height of the lowest point of env 0's collision shapes, with its bodies at ``poses`` (``body_poses``)."""
     body, local, radius = _collision_points(kin)
@@ -97,11 +109,13 @@ def lowest_collision_z(kin: RobotKinematics, poses: np.ndarray) -> float:
     return float((world[:, 2] - radius).min())
 
 
-def _collision_points(kin: RobotKinematics):
+def _collision_points(kin: RobotKinematics, face_m: float | None = None):
     """Points bounding env 0's collision shapes from below: body index ``[N]``, the point in the body frame
-    ``[N, 3]``, and the radius around it ``[N]`` (spheres and capsules). Cached on ``kin``."""
-    if getattr(kin, "_points", None) is not None:
-        return kin._points
+    ``[N, 3]``, and the radius around it ``[N]`` (spheres and capsules). With ``face_m`` a box also gets a grid of
+    points on its faces about that far apart. Cached on ``kin``."""
+    cache = getattr(kin, "_points", None)
+    if cache is not None and cache[0] == face_m:
+        return cache[1]
     import newton
 
     m = kin.model
@@ -118,6 +132,8 @@ def _collision_points(kin: RobotKinematics):
             pts, r = np.zeros((1, 3)), sx
         elif kind[i] == newton.GeoType.BOX:
             pts, r = SOLE_CORNERS * np.array([sx, sy, sz]), 0.0
+            if face_m is not None:
+                pts = np.concatenate([pts, _box_face_grid(np.array([sx, sy, sz]), face_m)])
         elif kind[i] in (newton.GeoType.CAPSULE, newton.GeoType.CYLINDER):
             pts, r = np.array([[0.0, 0.0, -sy], [0.0, 0.0, sy]]), sx  # radius, half height along local z
         elif kind[i] in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH):
@@ -129,8 +145,23 @@ def _collision_points(kin: RobotKinematics):
         body_ids += [b] * len(local)
         points.append(local)
         radii += [r] * len(local)
-    kin._points = (np.asarray(body_ids), np.concatenate(points), np.asarray(radii))
-    return kin._points
+    kin._points = (face_m, (np.asarray(body_ids), np.concatenate(points), np.asarray(radii)))
+    return kin._points[1]
+
+
+def _box_face_grid(half: np.ndarray, spacing: float) -> np.ndarray:
+    """Points on the six faces of a box with half extents ``half``, about ``spacing`` apart."""
+    out = []
+    for axis in range(3):
+        u, v = [a for a in range(3) if a != axis]
+        gu = np.linspace(-half[u], half[u], max(int(np.ceil(2 * half[u] / spacing)) + 1, 2))
+        gv = np.linspace(-half[v], half[v], max(int(np.ceil(2 * half[v] / spacing)) + 1, 2))
+        uu, vv = np.meshgrid(gu, gv, indexing="ij")
+        for sign in (-1.0, 1.0):
+            face = np.zeros((uu.size, 3))
+            face[:, axis], face[:, u], face[:, v] = sign * half[axis], uu.ravel(), vv.ravel()
+            out.append(face)
+    return np.concatenate(out)
 
 
 def _rotate(q_xyzw: np.ndarray, v: np.ndarray) -> np.ndarray:

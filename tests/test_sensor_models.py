@@ -55,6 +55,13 @@ def test_the_v1_carries_the_mti_610_on_can_and_an_oak_d_w():
     cfg = rig.imu.delivery_cfg()
     assert cfg.gyro_turn_on_bias == Mti610.gyro_turn_on_bias_rad_s
     assert (cfg.sample_period_ns, cfg.burst_period_ns) == (2_500_000, (2_500_000, 2_500_000))  # 400 Hz, no bursts
+    assert rig.imu.output_lsb == (2.0**-9, 2.0**-8)  # the MTi's CAN RateOfTurn and Acceleration fields
+
+
+@pytest.mark.parametrize("lsb", [(0.0, 1.0), (1.0,), (1.0, -1.0)])
+def test_an_output_field_needs_two_positive_resolutions(lsb):
+    with pytest.raises(ValueError, match="output_lsb"):
+        Mti610("imu_link", sample_period_ns=2_500_000, output_lsb=lsb)
 
 
 @pytest.mark.parametrize("robot", ["g1_29dof_rev_1_0", "g1_29dof_with_hand_rev_1_0"])
@@ -125,9 +132,17 @@ def test_values_are_checked():
     with pytest.raises(ValueError, match="coefficients"):
         _d435(distortion={"rgb": ("plumb_bob", (0.1, 0.0))})
     with pytest.raises(ValueError, match="coefficients"):
-        _d435(distortion={"rgb": ("rational_polynomial", (0.0,) * 8)})
+        _d435(distortion={"rgb": ("rational_polynomial", (0.0,) * 5)})
     with pytest.raises(ValueError, match="does not have"):
         _d435(stream_offsets_m={"thermal": (0.0, 0.0, 0.0)})
+    with pytest.raises(ValueError, match="depth_focal_px"):
+        _d435(depth_focal_px=0.0)
+    with pytest.raises(ValueError, match="unit quaternion"):
+        _d435(stream_rotations_xyzw={"depth": (0.0, 0.0, 1.0)})
+    with pytest.raises(ValueError, match="unit quaternion"):
+        _d435(stream_rotations_xyzw={"depth": (0.5, 0.5, 0.5, 0.6)})
+    with pytest.raises(ValueError, match="does not have"):
+        _d435(stream_rotations_xyzw={"thermal": (0.0, 0.0, 0.0, 1.0)})
     with pytest.raises(ValueError, match="bias_correlation_time_ns"):
         type("Bad", (Imu,), {"bias_correlation_time_ns": 0})
     with pytest.raises(ValueError, match="gyro_noise_density"):
@@ -213,3 +228,14 @@ def test_a_feedback_transfer_parses_into_the_delivered_samples_newest_first():
     out = imu_samples(gyro, accel, ints, h)
     assert list(out["seq"]) == [7, 6, 5] and list(out["sample_ns"]) == [70, 60, 50] and list(out["stamp_ns"]) == [71, 61, 51]
     assert out["gyro_rad_s"][2].tolist() == [6.0, 7.0, 8.0] and out["specific_force_m_s2"][0].tolist() == [100.0, 101.0, 102.0]
+
+
+def test_the_mti_610_clips_at_its_datasheet_full_scale_and_the_unmeasured_imus_do_not():
+    cfg = Mti610("imu_link", sample_period_ns=2_500_000).delivery_cfg()
+    assert cfg.gyro_range == pytest.approx(2000 * math.pi / 180) and cfg.accel_range == pytest.approx(10 * 9.80665)
+    assert cfg.drop_probability == 0.0
+    ideal = UnitreeG1Imu("imu_link", sample_period_ns=2_500_000).delivery_cfg()
+    assert ideal.gyro_range == 0.0 and ideal.accel_range == 0.0 and ideal.drop_probability == 0.0
+    assert Mti610("imu_link", sample_period_ns=2_500_000, drop_probability=0.1).delivery_cfg().drop_probability == 0.1
+    with pytest.raises(ValueError):
+        Mti610("imu_link", sample_period_ns=2_500_000, drop_probability=2.0)

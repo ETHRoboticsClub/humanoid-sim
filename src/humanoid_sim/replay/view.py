@@ -25,7 +25,7 @@ REAL_COLOR = (255, 140, 0, 90)
 SERIES = {"sim": ("sim", (90, 110, 160)), "real": ("real", (255, 140, 0)), "demand": ("demand", (60, 170, 90))}
 
 
-def blueprint(drives: list[str], joint_of: dict[str, str]):
+def blueprint(drives: list[str], joint_of: dict[str, str], *, effort=False):
     """Overlay view, sim-only and real-only views, one plot tab per drive, all residuals, timeline open."""
     import rerun.blueprint as rrb
 
@@ -33,6 +33,10 @@ def blueprint(drives: list[str], joint_of: dict[str, str]):
                                 contents=[f"/sim/0/drives/{d}/position", f"/real/drives/{d}/position",
                                           f"/demand/drives/{d}/position"]) for d in drives]
     plots.append(rrb.TimeSeriesView(name="All residuals (sim - real)", origin="/residual"))
+    if effort:
+        plots.extend([rrb.TimeSeriesView(name="Recorded current (A); model equivalent", origin="/effort/current_a"),
+                      rrb.TimeSeriesView(name="Applied vs current-derived torque (N m, modeled)", origin="/effort/torque_nm"),
+                      rrb.TimeSeriesView(name="Effort residual (N m, modeled)", origin="/effort/residual_nm")])
     return rrb.Blueprint(
         rrb.Horizontal(
             rrb.Vertical(
@@ -100,7 +104,7 @@ def view_replay(trace_dir: Path, usd: Path, rrd: str | None, *, fps: float = 50.
 
     joint_of = {d.name: (d.joints[0] if d.crank is None else f"{d.joints[0]}/{d.crank} crank")
                 for d in desc.drives.values()}
-    bp = blueprint(drives, joint_of)
+    bp = blueprint(drives, joint_of, effort="effort_recorded_current_a" in tr)
     log = SignalLog("humanoid-sim replay", rrd=None, init=True)  # one app, so a saved layout applies to every replay
     log.rr.send_recording_name(f"{summary['name']} ({summary['dataset_id']})")
     if rrd:
@@ -128,3 +132,14 @@ def view_replay(trace_dir: Path, usd: Path, rrd: str | None, *, fps: float = 50.
             log.series(f"/real/drives/{d}/{key}", rel, tr[f"real_{key}"][:, i])
         log.series(f"/demand/drives/{d}/position", rel, tr["demand"][:, i])
         log.series(f"/residual/0/drives/{d}/position", rel, tr["sim_position"][:, i] - tr["real_position"][:, i])
+    if "effort_comparison" in summary:
+        for i, d in enumerate(summary["effort_comparison"]["metadata"]["drives"]):
+            channels = {"recorded_current_a": ("current_a", "actual"),
+                        "recorded_current_demand_a": ("current_a", "requested"),
+                        "model_equivalent_current_a": ("current_a", "model_equivalent"),
+                        "sim_applied_torque_nm": ("torque_nm", "sim_applied"),
+                        "current_derived_torque_nm": ("torque_nm", "current_derived_modeled"),
+                        "applied_torque_residual_nm": ("residual_nm", "sim_minus_reference")}
+            for key, (unit, name) in channels.items():
+                if f"effort_{key}" in tr:
+                    log.series(f"/effort/{unit}/{d}/{name}", rel, tr[f"effort_{key}"][:, i])

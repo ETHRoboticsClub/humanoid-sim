@@ -4,8 +4,7 @@ Each drive is fed, at the recorded gains, PD law, no feed-forward or target velo
 
 * ``source="drive"``: its recorded position demand (0x6062, linearly interpolated from the ~200 Hz PDO samples,
   arriving without added latency: it is already what the drive used);
-* ``source="command"``: the targets the EtherCAT master sent it, rebuilt from the joint-space command frames
-  (:func:`drive_targets`), each frame submitted at its stamp and taking effect one latency later, as the plant
+* ``source="command"``: the targets resolved by the caller from its recorded controller commands, each frame submitted at its stamp and taking effect one latency later, as the plant
   applies demands in training (``latency_ns``, per env).
 
 The sim's drive-frame position, velocity and applied torque are scored against the drive's own measurements at
@@ -18,7 +17,7 @@ joints) the base follows the capture's IMU (:class:`~humanoid_sim.replay.base.Ba
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import torch
@@ -26,9 +25,37 @@ import torch
 from humanoid_sim.core import PlantCore
 from humanoid_sim.devices.demand import DriveDemand
 from humanoid_sim.replay.base import BaseMotion
-from humanoid_sim.replay.exc import CommandTrace, ExcitationCapture, sample_hold, sample_linear
+from humanoid_sim.replay.coordinates import validate_capture_coordinates
+from humanoid_sim.replay.exc import ExcitationCapture, sample_linear
+from humanoid_sim.replay.inertial import AccelerationCfg, AccelerationSignal, prepare_capture_acceleration
 from humanoid_sim.sim import SimCore
 from humanoid_sim.timing.clock import NS_PER_S
+
+
+@dataclass(frozen=True)
+class DriveCommands:
+    """Resolved current-description drive-frame targets [frames, drives], at int64 source-clock ns.
+
+    Controller conversion and choosing APPLIED versus frame stamps belong to the
+    caller. Replay only schedules the supplied stream with the supplied latency.
+    """
+
+    drives: tuple[str, ...]
+    t_ns: np.ndarray
+    position_rad: np.ndarray
+    reference: str
+
+    def __post_init__(self):
+        if self.reference not in ("frame", "applied"):
+            raise ValueError("command reference must be frame or applied")
+        if len(set(self.drives)) != len(self.drives):
+            raise ValueError("command drives must be unique")
+        if self.t_ns.dtype != np.int64 or self.t_ns.ndim != 1 or not len(self.t_ns):
+            raise ValueError("command stamps must be a nonempty int64 ns vector")
+        if (np.diff(self.t_ns) <= 0).any():
+            raise ValueError("command stamps must strictly increase")
+        if self.position_rad.shape != (len(self.t_ns),len(self.drives)) or not np.isfinite(self.position_rad).all():
+            raise ValueError("command positions must be finite [frames, drives]")
 
 
 @dataclass
@@ -41,6 +68,8 @@ class ReplayResult:
     real: dict[str, np.ndarray]  # position, velocity, torque: [T, D]
     demand: np.ndarray  # [T, D]
     meta: dict = field(default_factory=dict)
+    motion: dict[str, np.ndarray] = field(default_factory=dict)
+    effort: dict[str, np.ndarray] = field(default_factory=dict)
 
     def real_joint_q(self, plant: PlantCore) -> np.ndarray:
         """URDF joint positions of the real robot at each sample (1:1 signs; ankle FK from the cranks)."""
@@ -72,76 +101,13 @@ def initial_joint_state(plant: PlantCore, native: np.ndarray | torch.Tensor) -> 
     nat = nat.unsqueeze(0) if nat.dim() == 1 else nat
     q = torch.tensor([[desc.joints[n].standing_offset_rad for n in plant.map.joint_names]],
                      dtype=torch.float64, device=dev).expand(nat.shape[0], -1).clone()
-    q[:, exact._lin_j] = nat[:, exact._lin_d] * exact._lin_s
+    q[:, exact._lin_j] = nat[:, exact._lin_d] * exact._lin_s + exact._lin_z
     for _, d_idx, j_idx, tr in exact.ankles:  # solved in float64, whatever the plant's dtype
         q[:, j_idx] = tr.joints_from_cranks(nat[:, d_idx], q[:, j_idx])
         resid = (tr.cranks(q[:, j_idx]) - nat[:, d_idx]).abs().max().item()
         if resid > 1e-6:
             raise RuntimeError(f"ankle start pose did not converge (residual {resid:.2e} rad)")
     return q.to(plant.cfg.dtype)
-
-
-def drive_targets(plant: PlantCore, commands: CommandTrace) -> tuple[np.ndarray, np.ndarray]:
-    """The drive-frame targets ``[F, D]`` the master sends for each command frame from the first that names every
-    joint, and their stamps ``[F]``. As Controls' master (``standalone.cpp`` ``bodyDriveTargets``): a 1:1 drive gets
-    ``sign · (q + standing_offset)``, an ankle's cranks the inverse kinematics of its hinges. The master's velocity
-    slew is not modeled: it stages a target unchanged when one step reaches it (check with
-    :func:`command_demand_rms`)."""
-    joints = plant.map.joint_names
-    missing = sorted(set(joints) - set(commands.joints))
-    if missing:
-        raise ValueError(f"the command frames never name joints {missing}")
-    cols = [commands.joints.index(j) for j in joints]
-    q = commands.positions_rad[:, cols]
-    full = np.isfinite(q).all(axis=1)
-    if not full.any():
-        raise ValueError("no command frame names every joint")
-    first = int(np.argmax(full))
-    offsets = np.array([plant.desc.joints[j].standing_offset_rad for j in joints])
-    from humanoid_sim.transmissions.drive_map import DriveJointMap
-
-    exact = DriveJointMap(plant.desc, joints, plant.map.drive_names, dtype=torch.float64)
-    qt = torch.as_tensor(q[first:] + offsets, dtype=torch.float64)
-    qdrv, _, _ = exact.drive_state(qt, torch.zeros_like(qt))
-    return qdrv.numpy(), commands.t_ns[first:]
-
-
-def fit_commands(capture):
-    """The command frames a command replay applies and what their stamps are: ``(frames, "applied")``, stamped when
-    the controller applied each, when the capture has those acknowledgements, so a delay after them is the drives'
-    own (``drive_delay_s``); else ``(frames, "frame")``, stamped when they left the loop host, so the delay also
-    holds the software path."""
-    applied = capture.applied_commands()
-    return (applied, "applied") if applied is not None else (capture.commands(), "frame")
-
-
-def command_demand_rms(capture, plant: PlantCore, shifts_ns: np.ndarray) -> dict:
-    """How well the rebuilt targets explain the drives' own demands: per shift ``s`` and drive, the RMS of 0x6062
-    minus the target sent ``s`` earlier (zero-order hold), and the mean at the best shift. Near zero at some shift
-    when the rebuild matches the master, up to the drive's interpolation and any slew. A drive without 0x6062 is
-    compared with its measured position instead, which adds its tracking error (``against``); a large mean there
-    still shows a zero or sign that differs from the description's."""
-    targets, t_cmd = drive_targets(plant, fit_commands(capture)[0])
-    pdo = capture.pdo()
-    drives = plant.map.drive_names
-    rms = np.full((len(shifts_ns), len(drives)), np.nan)
-    mean = np.full_like(rms, np.nan)
-    against = {}
-    for i, d in enumerate(drives):
-        field = "position_demand_rad" if np.isfinite(pdo[d]["position_demand_rad"]).any() else "native_position_rad"
-        against[d] = field
-        t, ref = pdo[d].t_ns, pdo[d][field]
-        keep = (t >= t_cmd[0] + int(max(shifts_ns))) & np.isfinite(ref)
-        for k, s in enumerate(shifts_ns):
-            err = ref[keep] - sample_hold(t_cmd, targets[:, i], t[keep] - int(s))
-            if err.size:
-                rms[k, i], mean[k, i] = float(np.sqrt(np.mean(err ** 2))), float(np.mean(err))
-    if np.isnan(rms).all():
-        raise ValueError("no feedback after the first command frame to check the rebuilt targets against")
-    best = int(np.nanargmin(np.nanmean(rms, axis=1)))
-    return {"shifts_ns": [int(s) for s in shifts_ns], "drives": drives, "against": against, "rms_rad": rms.tolist(),
-            "best_shift_ns": int(shifts_ns[best]), "rms_at_best_rad": dict(zip(drives, rms[best].tolist(), strict=True)),
-            "mean_at_best_rad": dict(zip(drives, mean[best].tolist(), strict=True))}
 
 
 @dataclass
@@ -153,35 +119,72 @@ class _Run:
     base: BaseMotion | None
     command_t: np.ndarray | None = None  # [F] stamps of the targets, relative to t_grid[0]
     latency_ns: torch.Tensor | None = None  # [E]
+    acceleration: AccelerationSignal | None = None
+    acceleration_w: np.ndarray | None = None
+    gain_support: dict | None = None
 
 
 def _prepare(capture: ExcitationCapture, sim: SimCore, duration_s: float | None, base_motion: str | None,
-             delays_ns: np.ndarray | None = None, source: str = "drive", latency_ns=None) -> _Run:
+             delays_ns: np.ndarray | None = None, source: str = "drive", latency_ns=None,
+             commands: DriveCommands | None = None,
+             base_acceleration: AccelerationCfg | AccelerationSignal | None = None) -> _Run:
     """``delays_ns`` ``[E]``: env ``e`` applies the demand recorded at ``t`` at ``t + delay`` (negative: earlier).
-    ``source="command"``: the targets the master sent (:func:`fit_commands`), taking effect ``latency_ns`` ``[E]`` or
+    ``source="command"``: the caller-resolved drive targets, taking effect ``latency_ns`` ``[E]`` or
     ``[E, D]`` (per drive) after their stamp."""
     if source not in ("drive", "command"):
         raise ValueError(f"replay source {source!r}: drive or command")
     plant = sim.plant
+    validate_capture_coordinates(capture, plant.desc)
     drives = plant.map.drive_names
     pdo = capture.pdo()
     t_start, t_end = capture.time_span_ns()
     if source == "command":
-        targets, t_cmd = drive_targets(plant, fit_commands(capture)[0])
+        if commands is None or tuple(drives) != commands.drives:
+            raise ValueError("command replay needs a resolved DriveCommands stream in plant drive order")
+        targets, t_cmd = commands.position_rad, commands.t_ns
         t_start = max(t_start, int(t_cmd[0]))  # from the first frame naming every joint
     if duration_s is not None:
         t_end = min(t_end, t_start + int(duration_s * NS_PER_S))
+    acceleration = None
+    if base_acceleration is not None:
+        if base_motion != "orientation":
+            raise ValueError("IMU acceleration requires full orientation replay")
+        if sim.gantry.active:
+            raise ValueError("acceleration replay requires inactive gantry")
+        if sim.backend.contacts is None:
+            raise ValueError("acceleration replay requires contact monitoring (SimCore contacts=True)")
+        gravity = sim.backend.gravity_w
+        acceleration = (prepare_capture_acceleration(capture, sim.desc, gravity, base_acceleration)
+                        if isinstance(base_acceleration, AccelerationCfg) else base_acceleration)
+        if (acceleration.metadata["description_digest"] != sim.desc.digest
+                or not np.allclose(acceleration.metadata["gravity_w_m_s2"], gravity, atol=0, rtol=0)):
+            raise ValueError("prepared acceleration description/gravity does not match simulation")
+        t_start = max(t_start, int(acceleration.t_ns[0]))
+        t_end = min(t_end, int(acceleration.t_ns[-1]))
     period = sim.period_ns
     t_grid = np.arange(t_start, t_end - period, period, dtype=np.int64)
     t_meas = t_grid + period
+    if acceleration is not None and not len(t_grid):
+        raise ValueError("no common valid replay/IMU interval")
+    acceleration_w = acceleration.intervals(t_grid, t_meas) if acceleration is not None else None
 
     def series(name, t):
         return np.stack([sample_linear(pdo[d].t_ns, pdo[d][name], t) for d in drives], axis=1)
 
     real = {"position": series("native_position_rad", t_meas), "velocity": series("velocity_rad_s", t_meas),
             "torque": series("torque_nm", t_meas)}
+    if getattr(capture, "coordinates", None) is not None:
+        raw = capture.capture_pdo()
+        real["capture_position"] = np.stack([
+            sample_linear(raw[d].t_ns, raw[d]["native_position_rad"], t_meas) for d in drives], axis=1)
     # Base targets at the step start: with the velocity target the base PD lands on the step-end orientation.
-    base = BaseMotion.from_imu(capture.imu(), t_grid, base_motion) if base_motion else None
+    trace = capture.imu() if base_motion else None
+    if acceleration is not None:
+        # The inertial conversion normalizes validated near-unit quaternions;
+        # rotational targets must use that same rotation. Legacy path is untouched.
+        q = trace.orientation_xyzw
+        trace = replace(trace, orientation_xyzw=q / np.linalg.norm(q, axis=1, keepdims=True))
+    base = BaseMotion.from_imu(trace, t_grid, base_motion) if base_motion else None
     if source == "command":
         if delays_ns is not None:
             raise ValueError("source='command' takes latency_ns, not delays_ns")
@@ -189,21 +192,57 @@ def _prepare(capture: ExcitationCapture, sim: SimCore, duration_s: float | None,
             torch.as_tensor(np.asarray(latency_ns), dtype=torch.int64, device=plant.cfg.device)
         if lat.shape not in ((plant.num_envs,), (plant.num_envs, len(drives))) or bool((lat < 0).any()):
             raise ValueError(f"latency_ns: [{plant.num_envs}] or [{plant.num_envs}, {len(drives)}] delays >= 0 expected")
-        return _Run(t_grid, t_meas, targets, real, base, t_cmd - t_grid[0], lat)
+        return _Run(t_grid, t_meas, targets, real, base, t_cmd - t_grid[0], lat, acceleration, acceleration_w)
     if delays_ns is None:
         demand = series("position_demand_rad", t_grid)
     else:
         demand = np.stack([series("position_demand_rad", t_grid - int(d)) for d in delays_ns], axis=1)
-    return _Run(t_grid, t_meas, demand, real, base)
+    return _Run(t_grid, t_meas, demand, real, base, acceleration=acceleration, acceleration_w=acceleration_w)
+
+
+def solver_gains_of(sim: SimCore, stiffness: torch.Tensor, damping: torch.Tensor) -> None:
+    """Run the solver PD at drive gains ``stiffness``, ``damping`` ``[D]`` instead of the description's baseline:
+    the plant's ``k0``, ``d0`` and the articulation's joint stiffness and damping. Target shaping is only
+    guaranteed stable up to twice the solver gains, and a capture may run the drives well above their baseline; at
+    the capture's own gains the shaping leaves the drive's PD to the solver (1:1 drives and native crank shafts
+    exactly; the hinge ankles at their standing Jacobian)."""
+    plant = sim.plant
+    dev, dt = plant.cfg.device, plant.cfg.dtype
+    names = plant.solver_map.joint_names
+    standing = torch.tensor([plant.desc.joints[n].standing_offset_rad if n in plant.desc.joints else 0.0
+                             for n in names], device=dev, dtype=dt)
+    kp, kd = stiffness.to(device=dev, dtype=dt), damping.to(device=dev, dtype=dt)
+    k0, d0 = plant.solver_map.joint_space_gains(kp, kd, standing)
+    plant.drive_stiffness.copy_(kp)
+    plant.drive_damping.copy_(kd)
+    plant.k0.copy_(k0.expand_as(plant.k0))
+    plant.d0.copy_(d0.expand_as(plant.d0))
+    robot = sim.backend.robot
+    a = plant.actuated
+    ids = torch.tensor([robot.joint_names.index(names[i]) for i in a.tolist()], device=robot.device)
+    robot.write_joint_stiffness_to_sim_index(stiffness=plant.k0[:, a].float().to(robot.device), joint_ids=ids)
+    robot.write_joint_damping_to_sim_index(damping=plant.d0[:, a].float().to(robot.device), joint_ids=ids)
 
 
 def _run(capture: ExcitationCapture, sim: SimCore, run: _Run, on_step) -> None:
+    sim.set_base_acceleration(None)
+    try:
+        _run_steps(capture, sim, run, on_step)
+    finally:
+        sim.set_base_acceleration(None)
+
+
+def _run_steps(capture: ExcitationCapture, sim: SimCore, run: _Run, on_step) -> None:
     """Every env replays the capture from its first sample; ``on_step(k, feedback)`` after each step."""
     plant = sim.plant
     drives, e, dev, dt = plant.map.drive_names, plant.num_envs, plant.cfg.device, plant.cfg.dtype
     gains = capture.gains()
+    from humanoid_sim.replay.gains import gain_support
+
+    run.gain_support = gain_support(capture, plant, gains=gains)
     kp = torch.tensor([[gains[d].stiffness for d in drives]], dtype=dt, device=dev).expand(e, -1)
     kd = torch.tensor([[gains[d].damping for d in drives]], dtype=dt, device=dev).expand(e, -1)
+    solver_gains_of(sim, kp[0], kd[0])
     pdo = capture.pdo()
     read0 = np.array([sample_linear(pdo[d].t_ns, pdo[d]["native_position_rad"], run.t_grid[:1])[0] for d in drives])
     # Each env starts where its drives read the capture's first sample: truth = reading - the drive's offset.
@@ -214,6 +253,8 @@ def _run(capture: ExcitationCapture, sim: SimCore, run: _Run, on_step) -> None:
         q0 = initial_joint_state(plant, read0).expand(e, -1)
     sim.write_joint_state(q0, torch.zeros_like(q0))
     demand = torch.as_tensor(run.demand, dtype=dt, device=dev)
+    acceleration = (torch.as_tensor(run.acceleration_w, dtype=dt, device=dev)
+                    if run.acceleration_w is not None else None)
     angles = rates = None
     if run.base is not None:
         angles = torch.as_tensor(run.base.angles, dtype=torch.float32, device=dev)
@@ -227,6 +268,7 @@ def _run(capture: ExcitationCapture, sim: SimCore, run: _Run, on_step) -> None:
         nxt = int(np.searchsorted(run.command_t, 0, side="right"))
         plant.reset(torch.arange(e, device=dev), DriveDemand.pd(demand[max(nxt - 1, 0)].expand(e, -1), kp, kd))
     period = sim.period_ns
+    contact_peak = torch.zeros((), device=dev) if acceleration is not None else None
     for k in range(len(run.t_grid)):
         if run.command_t is None:
             target = demand[k] if demand.dim() == 3 else demand[k].expand(e, -1)
@@ -238,32 +280,65 @@ def _run(capture: ExcitationCapture, sim: SimCore, run: _Run, on_step) -> None:
                 nxt += 1
         if angles is not None:
             sim.set_base(angles[k].expand(e, -1), rates[k].expand(e, -1))
-        on_step(k, sim.step())
+        if acceleration is not None:
+            sim.set_base_acceleration(acceleration[k].expand(e, -1))
+        feedback = sim.step()
+        if contact_peak is not None:
+            force = sim.backend.contacts.data.net_forces_w.torch
+            contact_peak = torch.maximum(contact_peak, torch.linalg.vector_norm(force, dim=-1).amax())
+        on_step(k, feedback)
+    if contact_peak is not None and float(contact_peak) > 1e-3:
+        raise RuntimeError("contact during acceleration replay: fixed-world contact is unsupported")
     if bool((plant.bank.queue.overflows > 0).any()):
         raise RuntimeError("demands in flight overflowed the drive queue: latency too long for its capacity")
+    from humanoid_sim.replay.gains import check_run_gain_support
+
+    run.gain_support.update(check_run_gain_support(plant))
 
 
 def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None = None,
            base_motion: str | None = None, demand_delay_ns: int = 0, source: str = "drive",
-           latency_ns: int = 0) -> ReplayResult:
+           latency_ns: int = 0, commands: DriveCommands | None = None,
+           base_acceleration: AccelerationCfg | AccelerationSignal | None = None,
+           effort=None) -> ReplayResult:
     """Replay on env 0. ``base_motion``: None (fixed base) or a :data:`~humanoid_sim.replay.base.BASE_MODES`
     mode. ``demand_delay_ns`` (``source="drive"``): apply the demand recorded at ``t`` at ``t + delay``;
     ``latency_ns`` (``source="command"``): from a frame's stamp to its targets taking effect."""
+    sim.set_base_acceleration(None)  # preparation failures must not retain an earlier setting
     plant = sim.plant
+    if effort is not None:
+        from humanoid_sim.replay.effort import EffortCfg, prepare_effort
+
+        if isinstance(effort, EffortCfg):
+            effort = prepare_effort(capture, sim.desc, plant.map.drive_names, effort)
+        if (effort.capture_id != capture.dataset_id or effort.metadata["description_digest"] != sim.desc.digest
+                or set(effort.drives) - set(plant.map.drive_names)):
+            raise ValueError("prepared effort capture/description/drives do not match replay")
     delays = np.full(plant.num_envs, demand_delay_ns) if demand_delay_ns else None
-    lat = np.full(plant.num_envs, latency_ns) if source == "command" else None
-    run = _prepare(capture, sim, duration_s, base_motion, delays, source, lat)
+    lat = (np.full(plant.num_envs, latency_ns) if np.ndim(latency_ns) == 0 else np.asarray(latency_ns)) if source == "command" else None
+    run = _prepare(capture, sim, duration_s, base_motion, delays, source, lat, commands, base_acceleration)
     keys = ("position_rad", "velocity_rad_s", "applied_torque_nm", "demanded_torque_nm")
     acc = {k: torch.zeros(len(run.t_grid), plant.map.num_drives, device=plant.cfg.device) for k in keys}
     acc_q = torch.zeros(len(run.t_grid), len(plant.map.joint_names), device=plant.cfg.device)
 
+    actual_base = (torch.zeros((len(run.t_grid), 6), device=plant.cfg.device)
+                   if run.acceleration is not None else None)
+    contact_peak = (torch.zeros((), device=plant.cfg.device)
+                    if sim.backend.contacts is not None and run.acceleration is None else None)
     offset0 = plant.bank.position_offset[0]
 
     def record(k, fb):
+        nonlocal contact_peak
         for key in keys:
             acc[key][k] = getattr(fb, key)[0]
         acc["position_rad"][k] += offset0  # what the drive reads, as the capture recorded
         acc_q[k] = sim.joint_state()[0][0]
+        if actual_base is not None:
+            aq, av = sim.base_state()
+            actual_base[k] = torch.cat([aq[0], av[0]])
+        if contact_peak is not None:
+            force = sim.backend.contacts.data.net_forces_w.torch
+            contact_peak = torch.maximum(contact_peak, torch.linalg.vector_norm(force, dim=-1).amax())
 
     _run(capture, sim, run, record)
     out = {name: acc[key].cpu().double().numpy() for name, key in
@@ -275,23 +350,50 @@ def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None
     else:  # the target sent last at or before each step's start
         idx = np.clip(np.searchsorted(run.command_t, run.t_grid - run.t_grid[0], side="right") - 1, 0, None)
         demand = run.demand[idx]
+    motion, extra = {}, {}
+    if contact_peak is not None:
+        extra["contact_peak_n"] = float(contact_peak)
+    if run.acceleration is not None:
+        sig = run.acceleration
+        motion = {"source_t_ns": sig.t_ns, "specific_force_b": sig.specific_force_b,
+                  "raw_acceleration_w": sig.raw_acceleration_w,
+                  "rotational_acceleration_b": sig.rotational_acceleration_b,
+                  "processed_acceleration_w": sig.acceleration_w,
+                  "interval_start_ns": run.t_grid, "interval_end_ns": run.t_meas,
+                  "interval_acceleration_w": run.acceleration_w,
+                  "actual_base_angles_rates": actual_base.double().cpu().numpy(),
+                  "target_angles": run.base.angles, "target_rates": run.base.rates}
+        mass = sim.backend.robot.data.body_mass.torch[0, sim.backend._inertial_bodies].sum().item()
+        motion["extra_force_sum_w"] = -mass * run.acceleration_w
+        extra["base_acceleration"] = sig.metadata | {"replay_span_ns": [int(run.t_grid[0]), int(run.t_meas[-1])]}
+    effort_arrays = {}
+    if effort is not None:
+        ids = [plant.map.drive_names.index(d) for d in effort.drives]
+        effort_arrays, extra["effort_comparison"] = effort.compare(run.t_meas, out["applied"][:, ids])
     return ReplayResult(capture.dataset_id, sim.period_ns, plant.map.drive_names, run.t_meas, out, run.real, demand,
                         meta={"name": capture.name, "base": base_motion or "fixed", "source": source,
-                              "demand_delay_ns": demand_delay_ns, "latency_ns": latency_ns,
-                              **plant.desc.identity()})
+                              "demand_delay_ns": demand_delay_ns, "latency_ns": np.asarray(latency_ns).tolist(),
+                              **plant.desc.identity(), "solver_gain_support": run.gain_support,
+                              "capture_coordinates": validate_capture_coordinates(capture, plant.desc), **extra},
+                        motion=motion, effort=effort_arrays)
 
 
 def replay_position_rms(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None = None,
                         base_motion: str | None = None, skip_s: float = 1.0,
                         delays_ns: np.ndarray | None = None, source: str = "drive",
-                        latency_ns: np.ndarray | None = None) -> torch.Tensor:
+                        latency_ns: np.ndarray | None = None,
+                        commands: DriveCommands | None = None,
+                        base_acceleration: AccelerationCfg | AccelerationSignal | None = None) -> torch.Tensor:
     """Every env replays the capture (with its own demand delay if ``delays_ns`` ``[E]`` is given, or, from the
     commands, its own ``latency_ns`` ``[E]``); position RMS (sim − measured) per env and drive ``[E, D]``, after
     ``skip_s``. Accumulated on the device: nothing leaves it until the end."""
+    sim.set_base_acceleration(None)  # preparation failures must not retain an earlier setting
     plant = sim.plant
-    run = _prepare(capture, sim, duration_s, base_motion, delays_ns, source, latency_ns)
+    run = _prepare(capture, sim, duration_s, base_motion, delays_ns, source, latency_ns, commands, base_acceleration)
     real = torch.as_tensor(run.real["position"], dtype=torch.float32, device=plant.cfg.device)
     first = int(np.searchsorted(run.t_meas, run.t_meas[0] + int(skip_s * NS_PER_S)))
+    if run.acceleration is not None and first >= len(run.t_grid):
+        raise ValueError("no acceleration-valid samples after score warmup")
     sq = torch.zeros(plant.num_envs, plant.map.num_drives, device=plant.cfg.device)
     valid = torch.isfinite(real)
     real = torch.nan_to_num(real)

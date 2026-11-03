@@ -19,6 +19,7 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from humanoid_sim.model.description import Description
@@ -27,10 +28,12 @@ from humanoid_sim.physics.crank_stops import check_crank_stops
 from humanoid_sim.physics.joint_properties import JointProperties
 from humanoid_sim.physics.model_build import model_build
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.objects import WorldObjects
 
 # Base-joint PD. Each joint carries the whole robot (a few kg m² about yaw, ~10 about pitch and roll at the
 # pelvis), so 1e5 Nm/rad holds a 30 Nm waist reaction to 0.3 mrad and stays below the explicit-stiffness
-# limit 4 I / dt² at 4 ms; the damping is implicit (MJWarp implicitfast, Kamino's implicit PD) and near critical.
+# limit 4 I / dt² at 4 ms; the damping is near critical. MJWarp's rk4 integrates it explicitly, stable while
+# d dt / I stays under about 2.8 (Kamino's PD and MJWarp's implicitfast treat it implicitly).
 BASE_JOINT_STIFFNESS = 1e5
 BASE_JOINT_DAMPING = 2e3
 
@@ -61,6 +64,10 @@ class IsaacLabCfg:
     extra_imus: dict | None = None  # more IMU sensors, scene name -> the URDF link each sits at
     contacts: bool = False  # a contact sensor on every body
     scene: StaticBoxes | None = None  # static boxes around the robot (every env's robot then starts at the origin)
+    # A heightfield terrain in place of the flat ground (an Isaac Lab TerrainImporterCfg, as training's
+    # ``heightfield_terrain_cfg`` builds it): each env's robot starts at its tile's origin, ``base_height_m`` above it.
+    terrain: object | None = None
+    objects: WorldObjects | None = None  # moving and free bodies (world/objects.py), in every env
     rerun: bool = False
     rerun_rrd: str | None = None
     # More scene entities by name (Isaac Lab entity configs: cameras, assets), added before the scene is built, as
@@ -270,7 +277,8 @@ def contact_sensor_cfg(history: int = 3, air_time: bool = True):
 
 
 def ground_cfg(friction: float):
-    """Flat ground at z = 0. Both solvers take the larger friction of a contact's two shapes."""
+    """Flat ground at z = 0. Both solvers take the larger friction of a contact's two shapes, and Kamino the larger
+    restitution (MJWarp has none): the ground's 0 leaves a randomized robot ``restitution`` in charge."""
     import isaaclab.sim as sim_utils
     from isaaclab.assets import AssetBaseCfg
     from isaaclab.sim.spawners.materials import RigidBodyMaterialBaseCfg
@@ -279,8 +287,8 @@ def ground_cfg(friction: float):
     return AssetBaseCfg(prim_path="/World/Ground", spawn=sim_utils.GroundPlaneCfg(physics_material=material))
 
 
-def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None):
-    """Isaac Lab's config for ``solver`` from its block of the profile's ``physics``."""
+def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None, device: str = "cuda"):
+    """Isaac Lab's config for ``solver`` from its block of the profile's ``physics``, for ``device``."""
     integrator = integrator or settings["integrator"]
     if solver == "mjwarp":
         from isaaclab_newton.physics import MJWarpSolverCfg
@@ -310,18 +318,49 @@ def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None):
                       sparse_jacobian=settings.get("sparse_jacobian"),
                       sparse_dynamics=settings.get("sparse_dynamics", False),
                       max_contacts_per_world=settings["max_contacts_per_world"],
-                      materials=KaminoMaterialsCfg(friction_mix_mode="max"))
+                      materials=KaminoMaterialsCfg(friction_mix_mode="max", restitution_mix_mode="max"))
         method = settings.get("dynamics_solver", "padmm")
         if method == "dvi":
             return KaminoDVISolverCfg(**common, dynamics_solver_cfg=KaminoDVICfg(
                 max_alternating_iterations=settings["iterations"], **settings.get("dvi", {})))
         if method != "padmm":
             raise ValueError(f"Kamino dynamics solver {method!r}: padmm or dvi")
-        return KaminoPADMMSolverCfg(**common, dynamics_solver_cfg=KaminoPADMMCfg(
+        dynamics_type = KaminoDynamicsCfg
+        execution = {name: settings[name] for name in ("matrix_preconditioner_stride", "tracked_active_clear")
+                     if name in settings}
+        if execution:
+            from isaaclab.utils import configclass
+
+            @configclass
+            class KaminoExecutionDynamicsCfg(KaminoDynamicsCfg):
+                matrix_preconditioner_stride: int = 0
+                tracked_active_clear: bool = False
+
+            dynamics_type = KaminoExecutionDynamicsCfg
+        padmm = dict(settings.get("padmm", {}))
+        if padmm.get("algorithm") == "bilateral_reduced" and not device.startswith("cuda"):
+            # The reduced elimination is GPU execution tuning of the same constraint problem: CPU runs the full PADMM.
+            padmm = {name: value for name, value in padmm.items()
+                     if name != "algorithm" and not name.startswith("reduced_")}
+        padmm_type = KaminoPADMMCfg
+        if {"algorithm", "reduced_capacity", "reduced_ordering", "reduced_dynamic_pattern", "reduced_sparse_diagnostics", "reduced_lazy_preconditioning"}.intersection(padmm):
+            from isaaclab.utils import configclass
+
+            @configclass
+            class KaminoAlgorithmPADMMCfg(KaminoPADMMCfg):
+                algorithm: str = "full"
+                reduced_capacity: int = 96
+                reduced_ordering: str = "natural"
+                reduced_dynamic_pattern: bool = False
+                reduced_sparse_diagnostics: bool = False
+                reduced_lazy_preconditioning: bool = False
+
+            padmm_type = KaminoAlgorithmPADMMCfg
+        return KaminoPADMMSolverCfg(**common, dynamics_solver_cfg=padmm_type(
             max_iterations=settings["iterations"],
-            use_graph_conditionals=settings.get("use_graph_conditionals", False), **settings.get("padmm", {})),
-            dynamics=KaminoDynamicsCfg(linear_solver_type=settings.get("linear_solver", "LLTB"),
-                                      linear_solver_kwargs=dict(settings.get("linear_solver_kwargs", {}))))
+            use_graph_conditionals=settings.get("use_graph_conditionals", False), **padmm),
+            dynamics=dynamics_type(linear_solver_type=settings.get("linear_solver", "LLTB"),
+                                   linear_solver_kwargs=dict(settings.get("linear_solver_kwargs", {})), **execution))
     raise ValueError(f"physics solver {solver!r}: one of {', '.join(SOLVERS)}")
 
 
@@ -334,12 +373,13 @@ def simulation_cfg(physics: dict, *, device: str, period_s: float, solver: str |
 
     name, settings = solver_settings(physics, solver)
     return sim_utils.SimulationCfg(
-        dt=period_s, device=device, physics=NewtonCfg(solver_cfg=solver_cfg(name, settings, integrator=integrator)),
+        dt=period_s, device=device,
+        physics=NewtonCfg(solver_cfg=solver_cfg(name, settings, integrator=integrator, device=device)),
         visualizer_cfgs=visualizers or None)
 
 
 class IsaacLabRobot:
-    """Scene with ground, robot and any static boxes; exposes joint state, target writes and stepping as torch
+    """Scene with ground (or terrain), robot and any static boxes; exposes joint state, target writes and stepping as torch
     tensors."""
 
     def __init__(self, desc: Description, usd_path: Path, cfg: IsaacLabCfg, *, props: JointProperties):
@@ -357,11 +397,19 @@ class IsaacLabRobot:
         # The boxes are one set of shapes every env's world collides with, at the same coordinates.
         spacing = 0.0 if cfg.scene is not None else cfg.env_spacing_m
         scene_cfg = SceneCfg(num_envs=cfg.num_envs, env_spacing=spacing, replicate_physics=True)
-        scene_cfg.ground = ground_cfg(cfg.ground_friction)
+        if cfg.terrain is not None and cfg.scene is not None:
+            raise ValueError("a scene's boxes stand on the flat ground: no terrain with them")
+        if cfg.terrain is not None:
+            scene_cfg.terrain = cfg.terrain
+        else:
+            scene_cfg.ground = ground_cfg(cfg.ground_friction)
         if cfg.scene is not None:
             from humanoid_sim.world.boxes import static_boxes_cfg
 
             scene_cfg.static_boxes = static_boxes_cfg(cfg.scene.file, cfg.scene.spawn_m, friction=cfg.ground_friction)
+        from humanoid_sim.world.objects import add_objects
+
+        add_objects(scene_cfg, cfg.objects)
         scene_cfg.robot = articulation_cfg(usd_path, props, fixed_base=cfg.fixed_base, base_joints=cfg.base_joints,
                                            self_collision=cfg.self_collision, base_height_m=cfg.base_height_m,
                                            contact_sensors=cfg.contacts)
@@ -383,19 +431,47 @@ class IsaacLabRobot:
         physics = {"solver": cfg.solver, cfg.solver: cfg.settings}
         self.sim = sim_utils.SimulationContext(simulation_cfg(physics, device=cfg.device, period_s=cfg.period_s,
                                                               integrator=cfg.integrator, visualizers=visualizers))
+        generator = getattr(cfg.terrain, "terrain_generator", None)
+        if getattr(generator, "seed", None) is not None:
+            # Isaac Lab's height-field functions draw their heights from NumPy's global state, which the generator's
+            # seed does not set: seeding it makes the same config the same ground every time.
+            np.random.seed(generator.seed)
         with model_build(desc.robot, physics):
             self.scene = instantiate(scene_cfg)
             self.sim.reset()
         check_crank_stops(desc.robot, physics)
         apply_joint_limits(physics)
         apply_loop_closure(physics)
+        if cfg.terrain is not None:
+            apply_heightfield_base(physics)  # as RobotPlant does for a training scene
         from humanoid_sim.physics.contact_capacity import contact_capacity_guard
 
         self._contact_capacity = contact_capacity_guard(physics, cfg.num_envs, cfg.device)
         self.robot = self.scene["robot"]
+        physical = desc.link_names()
+        self._inertial_bodies = [i for i, n in enumerate(self.robot.body_names) if n in physical]
+        self.gravity_w = tuple(self.sim.cfg.gravity)
         self.imu = self.scene["imu"] if cfg.imu else None
         self.extra_imus = {name: self.scene[name] for name in (cfg.extra_imus or {})}
         self.contacts = self.scene["contacts"] if cfg.contacts else None
+        # On a terrain every env's robot starts at its tile's origin (the scene's env origins), as training resets it;
+        # the surface the scene was built with is read back for callers that rest a robot on it.
+        self.ground = None
+        self.env_origins = None
+        if cfg.terrain is not None:
+            from humanoid_sim.world.terrain_io import Ground
+
+            self.ground = Ground.from_stage()
+            self.env_origins = self.scene.env_origins.clone()
+            root = self.robot.data.default_root_pose.torch.clone()
+            root[:, :3] += self.env_origins
+            self.robot.write_root_pose_to_sim_index(root_pose=root)
+            self.robot.write_root_velocity_to_sim_index(root_velocity=torch.zeros(cfg.num_envs, 6, device=root.device))
+        self.objects = None
+        if cfg.objects:
+            from humanoid_sim.world.objects import ObjectsDriver
+
+            self.objects = ObjectsDriver(self.scene, cfg.objects)
         # Start every env at the articulation's default (standing) joint state.
         default = self.robot.data.default_joint_pos.torch.clone()
         self.robot.write_joint_position_to_sim_index(position=default)
@@ -421,6 +497,19 @@ class IsaacLabRobot:
         tc.set_position_index(value=target)
         tc.set_velocity_index(value=torch.zeros_like(target) if velocity is None else velocity)
         tc.set_effort_index(value=torch.zeros_like(target) if effort is None else effort)
+
+    def apply_base_acceleration(self, acceleration_w: torch.Tensor) -> None:
+        """Add -m*a at physical bodies' CoMs. Input is prevalidated [envs, 3].
+
+        WrenchComposer positions=None means the centre of mass, including for
+        is_global=True (pinned Isaac Lab wrench_composer.py). Auxiliary base
+        support links are excluded. Does not change gravity or actual root motion.
+        """
+        ids = self._inertial_bodies
+        mass = self.robot.data.body_mass.torch[:, ids]
+        force = -mass[..., None] * acceleration_w[:, None]
+        self.robot.instantaneous_wrench_composer.add_forces_and_torques_index(
+            forces=force, torques=torch.zeros_like(force), body_ids=ids, is_global=True)
 
     def step(self) -> None:
         self.scene.write_data_to_sim()
