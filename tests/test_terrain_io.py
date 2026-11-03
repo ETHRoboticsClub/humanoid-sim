@@ -105,6 +105,17 @@ def test_terrain_describes_the_layout_its_config_states():
         "tiles": ["bumps", "waves"], "friction": 0.7}
 
 
+def test_terrain_with_mesh_tiles_describes_itself_as_a_mesh():
+    gen = SimpleNamespace(size=(4.0, 4.0), num_rows=1, num_cols=1, border_width=2.0, curriculum=False,
+                          horizontal_scale=0.1, vertical_scale=0.005, seed=None,
+                          sub_terrains={"stairs": SimpleNamespace(convert_to_heightfield=False),
+                                        "bumps": SimpleNamespace(convert_to_heightfield=True)})
+    cfg = SimpleNamespace(terrain_generator=gen, physics_material=SimpleNamespace(static_friction=1.0))
+    assert Terrain(cfg).describe()["type"] == "mesh"
+    gen.sub_terrains["stairs"].convert_to_heightfield = True
+    assert Terrain(cfg).describe()["type"] == "heightfield"
+
+
 @pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
 def test_resting_on_flat_ground_is_the_standing_height(robot):
     """The collision shapes the host rests on a terrain give the standing height on a plane, and the extra points on
