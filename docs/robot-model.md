@@ -114,7 +114,7 @@ The description has 22 joints and 22 EtherCAT drives. 18 joints have a one-to-on
 | `HEJ70-48-50` | 4 | shoulder flexion and shoulder abduction |
 | `HEJ50-48-30` | 8 | shoulder rotation, elbow flexion, and the four ankle cranks |
 
-From `families:` humanoid-sim reads `torque_speed` (the torque-speed envelope, `src/humanoid_sim/devices/envelope.py`), `controller_rate_hz` (velocity quantization of the training plant's drive feedback, `src/humanoid_sim/devices/reporting.py`) and `backdrive_torque` (the friction of a disabled drive in the runtime host). The family `mass` is a reference humanoid-urdf uses for checking CAD inertials; humanoid-sim does not read it.
+From `families:` humanoid-sim reads `torque_speed` (the torque-speed envelope, `src/humanoid_sim/devices/envelope.py`), `controller_rate_hz` (velocity quantization of the training plant's drive feedback, `src/humanoid_sim/devices/reporting.py`) and `backdrive_torque` (the friction of a disabled drive's joint). The family `mass` is a reference humanoid-urdf uses for checking CAD inertials; humanoid-sim does not read it.
 
 To print the inventory and simulated travel from a checkout (core dependencies only):
 
@@ -268,7 +268,7 @@ The USD carries geometry, inertia and joint ranges. The remaining per-joint valu
 | initial position | The home pose, or the standing pose when a scene asks for it (`robot_scene_cfg(..., pose="standing")`). A bare `articulation_cfg` without `joint_pos` spawns in the standing pose. | `tools/urdf6_zero_rebase.json`, `standing_offset_rad` |
 | range | Calibration travel, built into the USD. | `position_limit`, `mechanical_stop_calibration_rad` |
 
-The solver gains are written at reset only; during a step the plant shapes the position target so that the solver applies the drive model's torque ([drives.md](drives.md)). How stiff the joint stops are is set by the profile's `physics.mjwarp.joint_limits` on MJWarp; on Kamino they are hard constraints. The runtime host changes one value while running: when a one-to-one drive is disabled, its joint's Coulomb friction becomes the family's `backdrive_torque` until the drive is enabled again (`RuntimeHost._set_drives_off`, `src/humanoid_sim/runtime/host.py`); the ankle hinges keep theirs. Training can randomize several of these values per environment, see [training.md](training.md).
+The solver gains are written at reset only; during a step the plant shapes the position target so that the solver applies the drive model's torque ([drives.md](drives.md)). How stiff the joint stops are is set by the profile's `physics.mjwarp.joint_limits` on MJWarp; on Kamino they are hard constraints. One value changes while running, in training, replay and the runtime: when a one-to-one drive is disabled, its joint's Coulomb friction becomes the family's `backdrive_torque` until the drive is enabled again (`PlantCore.joint_friction`, `src/humanoid_sim/core.py`); the ankle hinges keep theirs. Training can randomize several of these values per environment, see [training.md](training.md).
 
 To print the values as the solver receives them (core dependencies only):
 
@@ -442,7 +442,7 @@ A measured value reaches the simulation through humanoid-urdf. Find where the fa
 | You measured | Where it lives | What it changes in humanoid-sim |
 |---|---|---|
 | Joint Coulomb friction or viscous damping | `actuators.yaml` `joints.<joint>.friction` / `damping`, with `damping_friction_source` | Solver friction and passive damping at spawn |
-| Back-driving torque of a disabled drive | `actuators.yaml` `families.<family>.backdrive_torque` | Friction of a disabled drive's joint in the runtime host |
+| Back-driving torque of a disabled drive | `actuators.yaml` `families.<family>.backdrive_torque` | Friction of a disabled drive's joint |
 | Rotor inertia | `joints.<joint>.armature` (ankles: `armature_joint`) | Solver armature |
 | A joint's zero or the standing pose | `joints.<joint>.standing_offset_rad` and `standing_reference`; edited by hand in `actuators.yaml` with its source (never move URDF joint origins for this) | Standing pose, simulated travel, ankle gains and effort limits, mirror center |
 | The CAD (a new export) | Hardware delivers it to humanoid-urdf as `URDF := f(CAD)`, already at the calibration pose (see humanoid-urdf's `README.md`) | Geometry, masses, the home pose and its spawn height |

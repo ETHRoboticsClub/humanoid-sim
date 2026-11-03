@@ -85,6 +85,7 @@ class SimCore:
                                         **({} if queue_capacity is None else {"queue_capacity": queue_capacity})),
                                solver_joint_names=physical if self.native_state is not None else None)
         props = joint_properties(self.plant, physical)
+        self.plant.enabled_friction[:] = torch.tensor(props.friction, dtype=self.plant.cfg.dtype)
         period_s = self.period_ns / NS_PER_S
         self.backend = IsaacLabRobot(self.desc, usd_path, IsaacLabCfg(
             num_envs=num_envs, device=device, period_s=period_s, solver=self.solver, settings=settings,
@@ -135,6 +136,18 @@ class SimCore:
         if cuda_graph and not str(device).startswith("cuda"):
             raise ValueError("cuda_graph needs a CUDA device")
         self._graphs = _StepGraphs(self, compile=compile) if cuda_graph else None
+        self.write_friction()
+
+    def write_friction(self) -> None:
+        """Write the back-drive joints' solver friction (:meth:`PlantCore.joint_friction`) if it changed."""
+        plant = self.plant
+        if not plant.friction_changed:
+            return
+        plant.friction_changed = False
+        j = plant.backdrive_joints
+        if len(j):
+            self.backend.robot.write_joint_friction_coefficient_to_sim_index(
+                joint_friction_coeff=plant.joint_friction()[:, j].float(), joint_ids=self._to_solver[j])
 
     def joint_state(self) -> tuple[torch.Tensor, torch.Tensor]:
         q, qd = self.backend.joint_state()
@@ -223,6 +236,7 @@ class SimCore:
             self.backend.set_targets(bt, bv, effort=effort)
         else:
             self.backend.set_targets(bt, effort=effort)
+        self.write_friction()
         self.gantry.apply(self.t_ns)
         if self._base_acceleration is not None:
             self.backend.apply_base_acceleration(self._base_acceleration)

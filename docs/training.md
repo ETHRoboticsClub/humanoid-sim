@@ -529,7 +529,6 @@ The plant's steady-state work (`submit`, `pre_physics`, `measured`, `truth`, `re
 - Use one `PlantAction` per robot and no other action term that writes the robot's joint targets; the plant overwrites them before every physics step.
 - Keep the articulation's actuators implicit, as `robot_scene_cfg` builds them. If explicit actuator configs are added, Isaac Lab's Newton backend can run the whole decimation loop in one physics call, and `apply_actions` (the plant) would run once per policy step instead of once per physics step.
 - Drives are off after a reset until a demand arrives; see [Resets](#resets).
-- Training keeps each joint's Coulomb friction at its enabled-drive value from the description while a drive is off. The runtime host switches the joints of disabled 1:1 drives to the family's [back-drive](glossary.md#back-drive) torque (`src/humanoid_sim/runtime/host.py`), which is larger: 1.5 Nm on an HEJ 90 joint where the knee's enabled friction is 0.31 Nm. An unpowered robot in training therefore folds more easily than the same robot in the runtime. The ankle joints keep their friction in both.
 
 For a discrete delay distribution, use `dist: discrete_uniform`, an inclusive
 `range` in seconds, and a positive `quantum` in seconds; the range width must be

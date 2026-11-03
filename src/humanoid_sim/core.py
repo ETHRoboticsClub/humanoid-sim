@@ -18,7 +18,7 @@ Dynamic friction: the solver's Coulomb friction is the static one (it holds a jo
 joint whose dynamic friction is lower gets the difference back while it slides, ``relief · tanh(q̇ / v_s)``, so
 the net friction while moving is the dynamic one. :attr:`friction_relief` is ``static − dynamic`` per env and
 joint (the description's by default). A joint whose 1:1 drive is off gets none: its friction is the back-drive
-torque the runtime host writes.
+torque (:meth:`PlantCore.joint_friction`), which every front end writes to the solver.
 """
 
 from __future__ import annotations
@@ -87,6 +87,24 @@ class PlantCore:
         relief = [desc.joints[n].friction - desc.joints[n].dynamic_friction if n in desc.joints else 0.0
                   for n in physical_joints]
         self.friction_relief = torch.tensor(relief, device=dev, dtype=dt).expand(num_envs, -1).clone()
+        # Back-drive friction: the joints of the 1:1 drives whose family records a backdrive_torque.
+        backdrive = [(k, physical_joints.index(d.joints[0]), float(desc.family_value(d.family, "backdrive_torque")))
+                     for k, d in enumerate(drives)
+                     if d.crank is None and desc.family_value(d.family, "backdrive_torque") is not None]
+        self.backdrive_drives = torch.tensor([k for k, _, _ in backdrive], device=dev, dtype=torch.long)
+        self.backdrive_joints = torch.tensor([j for _, j, _ in backdrive], device=dev, dtype=torch.long)
+        self.backdrive_friction = torch.tensor([f for _, _, f in backdrive], device=dev, dtype=dt)
+        # Coulomb friction of each joint while its drive is on [E, J] (Nm): the description's, or what a
+        # randomization or fit wrote to the solver. Written in place, followed by ``friction_changed = True``.
+        self.enabled_friction = torch.tensor([desc.joints[n].friction if n in desc.joints else 0.0
+                                              for n in physical_joints], device=dev, dtype=dt).expand(
+            num_envs, -1).clone()
+        # Whether each back-drive joint's drive is off [E, len(backdrive_drives)], from the latest demand submitted
+        # or reset; every drive starts off, as the bank does.
+        self.drive_off = torch.ones(num_envs, len(backdrive), device=dev, dtype=torch.bool)
+        # Host-side flag for the front end: the solver friction (:meth:`joint_friction`) is due to be written.
+        # Set by reset and submit (not by a submit replayed from a CUDA graph: its caller sets it).
+        self.friction_changed = True
 
     # -- demands ----------------------------------------------------------------------------------
 
@@ -95,6 +113,18 @@ class PlantCore:
         self.gain_warnings.index_fill_(0, env_ids, False)
         self.external_torque.index_fill_(0, env_ids, 0.0)
         self.passive_effort.index_fill_(0, env_ids, 0.0)
+        off = (True if demand is None else
+               (demand.law[:, self.backdrive_drives] == LAW_DISABLED).expand(len(env_ids), -1))
+        self.drive_off[env_ids] = off
+        self.friction_changed = True
+
+    def joint_friction(self) -> torch.Tensor:
+        """Solver Coulomb friction ``[E, J]``: the enabled friction, the back-drive torque on the joints of the 1:1
+        drives that are off. The front end writes it when :attr:`friction_changed` (and clears that)."""
+        f = self.enabled_friction.clone()
+        j = self.backdrive_joints
+        f[:, j] = torch.where(self.drive_off, self.backdrive_friction.to(f.dtype), f[:, j])
+        return f
 
     def submit(self, demand: DriveDemand, arrival_ns: torch.Tensor, env_mask: torch.Tensor | None = None):
         # The solver gains are the baseline drive gains, so shaping is stable up to twice those. The check uses
@@ -107,6 +137,12 @@ class PlantCore:
             flagged &= env_mask.unsqueeze(1)
         self.gain_warnings |= flagged
         self.bank.submit(demand, arrival_ns, env_mask)
+        # The friction follows the demand when it is submitted, not when it arrives.
+        off = (demand.law[:, self.backdrive_drives] == LAW_DISABLED).expand_as(self.drive_off)
+        if env_mask is not None:
+            off = torch.where(env_mask.unsqueeze(1), off, self.drive_off)
+        self.drive_off.copy_(off)
+        self.friction_changed = True
 
     # -- stepping ---------------------------------------------------------------------------------
 

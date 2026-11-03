@@ -202,6 +202,7 @@ class RobotPlant:
                 self.imu.lsb.copy_(torch.tensor([gyro_lsb] * 3 + [accel_lsb] * 3, device=self.device))
 
         self._nominal_physics = self._read_physics()
+        self.core.enabled_friction.copy_(self._nominal_physics["joint_friction"])
         nominal = {name: v for name, v in self._nominal_physics.items()} | self._device_nominal()
         self._ratio = nominal["joint_friction_ratio"]
         used = {s.param for s in specs}
@@ -317,6 +318,8 @@ class RobotPlant:
         if "joint_friction" in v:
             r.write_joint_friction_coefficient_to_sim_index(joint_friction_coeff=v["joint_friction"],
                                                             joint_ids=self.solver_joint_ids)
+            self.core.enabled_friction.copy_(v["joint_friction"])
+            self.core.friction_changed = True  # the off drives' joints take their back-drive torque again
         if "joint_damping" in v:
             r.write_joint_viscous_friction_coefficient_to_sim_index(joint_viscous_friction_coeff=v["joint_damping"],
                                                                     joint_ids=self.solver_joint_ids)
@@ -401,6 +404,18 @@ class RobotPlant:
             position=torch.stack([values[n] for n in names], -1).to(q.dtype),
             velocity=torch.stack([rates[n] for n in names], -1).to(qd.dtype), joint_ids=ids, env_ids=env_ids)
 
+    def _write_friction(self) -> None:
+        """Write the back-drive joints' solver friction (:meth:`PlantCore.joint_friction`) if a reset or a demand
+        changed it: once per submit, outside the drive graph."""
+        core = self.core
+        if not core.friction_changed:
+            return
+        core.friction_changed = False
+        j = core.backdrive_joints
+        if len(j):
+            self.robot.write_joint_friction_coefficient_to_sim_index(
+                joint_friction_coeff=core.joint_friction()[:, j].float(), joint_ids=self.solver_joint_ids[j])
+
     def pre_physics(self) -> None:
         """Before each physics step: sample sensors at the step start, run the drives, write the targets, apply
         the gantry rope."""
@@ -427,6 +442,7 @@ class RobotPlant:
         effort = torch.zeros_like(self._targets)
         effort[:, self.solver_joint_ids] = self.core.passive_effort.to(effort.dtype)
         tc.set_effort_index(value=effort)
+        self._write_friction()
         self.gantry.apply(self.t_ns)
         self.t_ns += self.period_ns
 
