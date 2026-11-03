@@ -122,6 +122,8 @@ def test_softer_crank_stops_give_way_further_on_mjwarp(request):
     _redraw(plant, crank_stop_stiffness=[1.0, 0.25, 0.05], crank_stop_damping=[1.0, 1.0, 1.0])
     written = plant._stops.read()
     torch.testing.assert_close(written[0], nominal[0])
-    assert (written[2, :, 0] > written[1, :, 0]).all() and (written[1, :, 0] > written[0, :, 0]).all()
+    # Softer at a fixed damping is a larger damping ratio, the time constant staying put.
+    torch.testing.assert_close(written[..., 0], nominal[..., 0])
+    assert (written[2, :, 1] > written[1, :, 1]).all() and (written[1, :, 1] > written[0, :, 1]).all()
     over = _crank_overshoot_rad(sim, plant)
     assert (over[1] > over[0]).any() and (over[2] > over[1]).any()
