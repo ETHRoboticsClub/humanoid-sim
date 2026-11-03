@@ -134,7 +134,8 @@ def _tendon_model(num_envs, solref):
 
 
 def test_tendon_stops_are_read_and_written_per_env_and_nothing_else_moves():
-    from newton import ModelFlags
+    pytest.importorskip("warp", reason="needs the newton extra")
+    ModelFlags = pytest.importorskip("newton").ModelFlags
 
     desc = types.SimpleNamespace(usd_path=None)
     model = _tendon_model(3, [(0.008, 1.0), (0.008, 1.0)])
@@ -155,7 +156,7 @@ def test_tendon_stops_are_read_and_written_per_env_and_nothing_else_moves():
 
 
 def test_tendon_stops_missing_or_out_of_world_order_raise():
-    import warp as wp
+    wp = pytest.importorskip("warp", reason="needs the newton extra")
 
     desc = types.SimpleNamespace(usd_path=None)
     with pytest.raises(RuntimeError, match="crank_stop_hook"):
