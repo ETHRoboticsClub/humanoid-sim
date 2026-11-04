@@ -75,10 +75,11 @@ physics:
   # Ankle linkage compliance, for an asset built with `build-asset --ankle-compliance`: a torsional spring and damper
   # between each crank drive's output and its crank arm (transmissions/compliance.py). Per crank, at the crank shaft;
   # a number for every crank or a mapping by crank drive name. The values are the caller's (humanoid-learning fits
-  # them); an asset with the springs refuses to spawn without them. The rigid asset ignores this block. On MJWarp
-  # (rk4, explicit) a spring is stable while its local mode, the crank arm and rod (about 1e-3 kg m² about the shaft
-  # on the V1) against the spring, stays under rk4's limit: about 5000 N m/rad and 1.4 N m s/rad per crank at 1 ms.
-  # Kamino treats the spring's PD implicitly.
+  # them); an asset with the springs refuses to spawn without them. The rigid asset ignores this block. Kamino treats
+  # the spring's PD implicitly: stable at any gains. MJWarp (rk4, explicit) on the V1 at 1 ms, hung, gravity, an 8 Hz
+  # 10 N m shaking hinge load: stable at 300 to 4000 N m/rad with damping up to 0.3 N m s/rad per crank; 1.0 N m s/rad
+  # diverged with springs of 1000 N m/rad or softer once the hinges' friction was removed (it held with the described
+  # friction). The damping acts on the light crank arm next to the spring, which rk4's step bounds.
   ankle_compliance:
     stiffness_nm_per_rad: null
     damping_nm_s_per_rad: null
