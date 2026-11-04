@@ -122,10 +122,10 @@ class SimCore:
                                    device=self.plant.cfg.device) if base_joints else None)
         self._base_target: tuple[torch.Tensor, torch.Tensor] | None = None
         self._base_acceleration: torch.Tensor | None = None
+        from humanoid_sim.world.harness import resolve_harness
         from humanoid_sim.world.supports import Gantry
 
-        harness = self.profile["support"]["harness"]
-        self.gantry = Gantry(self.backend.robot, harness=None if harness is None else harness["body"])
+        self.gantry = Gantry(self.backend.robot, harness=resolve_harness(self.desc, self.profile["support"]["harness"]))
         self.gantry.cuda_graph = cuda_graph
         self.t_ns = 0
         self.feedback: DriveFeedback | None = None
