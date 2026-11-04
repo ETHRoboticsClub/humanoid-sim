@@ -549,10 +549,16 @@ class RobotPlant:
             fb = self.sampler.step(self.t_ns, fb)
         return fb
 
+    def feedback_history(self) -> tuple[DriveFeedback, torch.Tensor]:
+        """The drive feedback history ``[E, H, D]`` (newest first, one per physics step) and its times ``[E, H]`` (ns,
+        -1: none yet), as :meth:`measured` exposes them; takes no new sample."""
+        return replace(self._hist), self._hist_ns
+
     def measured(self) -> Measured:
         q, qd = self.solver_state()
         drive = self._sample(self.core.feedback(q, qd))
-        return Measured(drive, replace(self._hist), self._hist_ns, self.imu.samples if self.imu is not None else None)
+        history, history_ns = self.feedback_history()
+        return Measured(drive, history, history_ns, self.imu.samples if self.imu is not None else None)
 
     def truth(self) -> Truth:
         q, qd = self.joint_state()
