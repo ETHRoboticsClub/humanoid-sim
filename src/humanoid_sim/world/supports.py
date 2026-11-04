@@ -21,6 +21,10 @@ A rope pulls on the body that carries it. Points given in the base frame hang on
 ``attachment_bodies`` (the shoulders) hang on the profile's harness body at those bodies' positions, as the lab's
 straps hold the torso: on a G1 the base is the pelvis, and a rope there lets the torso fold over the waist.
 
+Where the ropes attach comes from :func:`~humanoid_sim.world.harness.resolve_harness`: the robot description's
+``gantry_attachment_link`` frames when it has them (one rope each, at the link, on the body that carries it), else
+the profile's shoulders. The load splits equally either way.
+
 Programs start when they are hung (times relative to then). Each env has its own rope or none, all on one body.
 Forces go through the articulation's instantaneous wrench composer, which Isaac Lab clears after every physics
 step, so call :meth:`Gantry.apply` before every physics step; it adds to the other forces on that body. No host
@@ -39,6 +43,7 @@ from collections.abc import Sequence
 import torch
 
 from humanoid_sim.timing.clock import NS_PER_S
+from humanoid_sim.world.harness import Harness
 
 NONE, TENSION, CABLE, HOIST = 0, 1, 2, 3
 GRAVITY_M_S2 = 9.81  # Isaac Lab's SimulationCfg default; humanoid-sim never sets another
@@ -87,12 +92,23 @@ def level_under(hook: torch.Tensor, com: torch.Tensor, root: torch.Tensor) -> to
 
 
 class Gantry:
-    """Per-env gantry rope on the robot's base, or on ``harness`` (default the base) for named attachment bodies."""
+    """Per-env gantry rope on the robot's base, or on ``harness`` (default the base) for named attachment bodies.
 
-    def __init__(self, robot, *, harness: str | None = None, max_points: int = 2, max_breakpoints: int = 8):
+    ``harness`` is a body name, or the :class:`~humanoid_sim.world.harness.Harness` that
+    :func:`~humanoid_sim.world.harness.resolve_harness` makes of the description and profile: its body carries the
+    ropes and its points (:attr:`harness`, ``harness.attachment()``) are where they attach. A rope takes as many
+    points as the harness has, at least ``max_points`` (default 2)."""
+
+    def __init__(self, robot, *, harness: str | Harness | None = None, max_points: int = 2, max_breakpoints: int = 8):
         self.robot = robot
         e, dev = robot.num_instances, torch.device(robot.device)
         self.num_envs, self.device = e, dev
+        self.harness = harness if isinstance(harness, Harness) else None
+        if self.harness is not None:
+            if self.harness.body not in robot.body_names:
+                raise ValueError(f"harness body {self.harness.body!r} is not a body of the robot")
+            max_points = max(max_points, self.harness.num_points)
+            harness = self.harness.body
         self.harness_id = 0 if harness is None else robot.body_names.index(harness)
         self.body_id = 0  # the body the ropes pull on
         self._body = torch.tensor([self.body_id], device=dev)
@@ -161,10 +177,19 @@ class Gantry:
         return (t_ns + torch.tensor(times, dtype=torch.int64, device=self.device),
                 torch.tensor(values, device=self.device))
 
-    def _target(self, attachment_b, attachment_bodies: Sequence[str] | None) -> tuple[int, list[int] | torch.Tensor]:
+    def _target(self, attachment_b, attachment_bodies: Sequence[str] | None,
+                attachment_h=None) -> tuple[int, list[int] | torch.Tensor]:
         """The rope body and what goes on it: the ids of ``attachment_bodies`` (on the harness body), else the
+        points ``attachment_h`` in the harness body's frame (the description's attachment links), else the
         base-frame points ``attachment_b`` (on the base)."""
-        if attachment_bodies is not None:
+        if attachment_bodies is not None and attachment_h is not None:
+            raise ValueError("a rope's attachment is attachment_bodies or attachment_h, not both")
+        if attachment_h is not None:
+            spec = torch.as_tensor(attachment_h, dtype=torch.float32, device=self.device).reshape(-1, 3)
+            if not bool(torch.isfinite(spec).all()):
+                raise ValueError("attachment points must be finite")
+            body_id = self.harness_id
+        elif attachment_bodies is not None:
             unknown = [b for b in attachment_bodies if b not in self.robot.body_names]
             if unknown:
                 raise ValueError(f"unknown attachment bodies {unknown}")
@@ -247,13 +272,15 @@ class Gantry:
         return pts.expand(len(env_ids), -1, -1)
 
     def hang_tension(self, env_ids: torch.Tensor, t_ns: int, breakpoints_s_n: Sequence[tuple[float, float]], *,
-                     attachment_b=None, attachment_bodies: Sequence[str] | None = None, dry_run: bool = False) -> None:
+                     attachment_b=None, attachment_bodies: Sequence[str] | None = None, attachment_h=None,
+                     dry_run: bool = False) -> None:
         """Vertical tension over time (s, N) from ``t_ns``, split over base-frame ``attachment_b`` points or over
-        the current positions of ``attachment_bodies`` (e.g. both shoulders) on the harness body."""
+        the current positions of ``attachment_bodies`` (e.g. both shoulders) on the harness body, or over ``attachment_h``
+        (points in the harness body's frame, the description's attachment links)."""
         if any(float(n) < 0 for _, n in breakpoints_s_n):
             raise ValueError("tension must be non-negative")
         program = self._program(t_ns, breakpoints_s_n)
-        body_id, spec = self._target(attachment_b, attachment_bodies)
+        body_id, spec = self._target(attachment_b, attachment_bodies, attachment_h)
         self._check_body(env_ids, body_id)
         if dry_run:
             return
@@ -268,7 +295,7 @@ class Gantry:
     def hang_cable(self, env_ids: torch.Tensor, t_ns: int, *, overhead_m: float,
                    length_breakpoints_s_m: Sequence[tuple[float, float]], stiffness_n_m: float,
                    damping_n_s_m: float, attachment_b=None, attachment_bodies: Sequence[str] | None = None,
-                   swing_damping_n_s_m: float = 0.0, spreader_width_m: float | None = None,
+                   attachment_h=None, swing_damping_n_s_m: float = 0.0, spreader_width_m: float | None = None,
                    dry_run: bool = False) -> None:
         """One cable from the harness (base-frame ``attachment_b``, or ``attachment_bodies`` on the harness body,
         such as both shoulders) to an anchor ``overhead_m`` above the points' midpoint now, one strap per point
@@ -279,7 +306,7 @@ class Gantry:
         if any(float(length) <= 0 for _, length in length_breakpoints_s_m):
             raise ValueError("cable lengths must be positive")
         program = self._program(t_ns, length_breakpoints_s_m)
-        body_id, spec = self._target(attachment_b, attachment_bodies)
+        body_id, spec = self._target(attachment_b, attachment_bodies, attachment_h)
         self._check_spreader(spreader_width_m, len(spec))
         self._check_body(env_ids, body_id)
         if dry_run:
@@ -315,8 +342,8 @@ class Gantry:
                         swing_damping_n_s_m)
 
     def hang_hoist(self, env_ids: torch.Tensor, *, stiffness_n_m, damping_n_s_m, swing_damping_n_s_m=0.0,
-                   attachment_b=None, attachment_bodies: Sequence[str] | None = None, point_b=None,
-                   harness: bool = False, spreader_width_m: float | None = None,
+                   attachment_b=None, attachment_bodies: Sequence[str] | None = None, attachment_h=None,
+                   point_b=None, harness: bool = False, spreader_width_m: float | None = None,
                    top_offset_w: torch.Tensor | None = None, dry_run: bool = False) -> None:
         """One cable from the harness to the mounted crane's hook: its top at the trolley, its unstretched
         length the hoist's. The points and the spreader bar are as for :meth:`hang_cable` (base-frame
@@ -330,7 +357,7 @@ class Gantry:
                 math.isfinite(sum(gains)) and stiffness_n_m > 0 and damping_n_s_m >= 0 and swing_damping_n_s_m >= 0):
             raise ValueError("hoist stiffness must be positive, dampings non-negative, all finite")
         if point_b is None:
-            body_id, spec = self._target(attachment_b, attachment_bodies)
+            body_id, spec = self._target(attachment_b, attachment_bodies, attachment_h)
             self._check_spreader(spreader_width_m, len(spec))
         else:
             body_id, pts = self.harness_id if harness else 0, self._rope_points(env_ids, point_b)
@@ -344,6 +371,18 @@ class Gantry:
         self._commit(env_ids, body_id, program)
         self._set_cable(env_ids, HOIST, pts, top_offset_w, self.trolley.anchor_w[env_ids], stiffness_n_m,
                         damping_n_s_m, swing_damping_n_s_m)
+
+    def harness_hook_w(self, env: int = 0) -> torch.Tensor:
+        """The harness hook ``[3]`` now: the mean of the harness's rope points in the world (the attachment links', or
+        the shoulders' bodies')."""
+        if self.harness is None:
+            raise ValueError("the gantry has no harness: build it from a Harness")
+        pose = self.robot.data.body_link_pose_w.torch[env]
+        if self.harness.links:
+            body = pose[self.harness_id]
+            points = torch.as_tensor(self.harness.points_b, dtype=body.dtype, device=body.device)
+            return (body[:3] + _quat_rotate(body[3:].expand(len(points), -1), points)).mean(0)
+        return pose[[self.robot.body_names.index(b) for b in self.harness.shoulders], :3].mean(0)
 
     def rest_length_m(self, t_ns: int) -> torch.Tensor:
         """The cables' unstretched length at ``t_ns`` ``[E]`` (the hoist's for a hoist rope); NaN without a cable.

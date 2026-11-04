@@ -44,6 +44,7 @@ from humanoid_sim.randomization import PARAMS, ParamSpec, Randomizer, parse_spec
 from humanoid_sim.sensors import rigs
 from humanoid_sim.sensors.imu import ImuDelivery, ImuSamples, pending_slots
 from humanoid_sim.timing.clock import NS_PER_S
+from humanoid_sim.world.harness import resolve_harness
 from humanoid_sim.world.supports import Gantry
 
 
@@ -188,8 +189,8 @@ class RobotPlant:
         self.latency_ns = self.command_latency_ns.expand(e, -1).clone()  # before the drive, randomized
         self._targets = robot.data.default_joint_pos.torch.clone()
         self._physics_manager = physics_manager
-        harness = self.profile["support"]["harness"]
-        self.gantry = Gantry(robot, harness=None if harness is None else harness["body"])  # no rope until hung
+        # No rope until hung; its attachment points are the description's gantry attachment links, else the profile's.
+        self.gantry = Gantry(robot, harness=resolve_harness(self.desc, self.profile["support"]["harness"]))
         # Every env starts at the articulation's default joint state, the pose the scene chose (standing or flat
         # feet). (At spawn the joints sit at the URDF zero, the calibration pose.)
         robot.write_joint_state_to_sim_index(position=self._targets.clone(), velocity=torch.zeros_like(self._targets))
