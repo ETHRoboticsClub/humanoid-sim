@@ -37,7 +37,7 @@ AXES = ("x", "y", "z")
 @dataclass(frozen=True)
 class Param:
     kind: str  # "physics" | "device"
-    target: str  # "body" | "joint" | "drive" | "env" | "axis" (the IMU's three axes)
+    target: str  # "body" | "joint" | "drive" | "crank" (ankle crank drives) | "env" | "axis" (the IMU's three axes)
     width: int = 1  # values per target (3 for a CoM offset)
     unit: str = ""
     doc: str = ""
@@ -59,6 +59,13 @@ PARAMS: dict[str, Param] = {
                                                         "ankle_stop_solref; MJWarp only (Kamino's stops are hard)"),
     "crank_stop_damping": Param("physics", "env", doc="damping of the ankle cranks' stops over the profile's "
                                                       "ankle_stop_solref; MJWarp only (Kamino's stops are hard)"),
+    "ankle_spring_stiffness": Param("physics", "crank", unit="N m/rad",
+                                    doc="ankle linkage compliance: stiffness of the spring between a crank drive's "
+                                        "output and its crank arm, per crank (an asset built with ankle compliance); "
+                                        "positive. Nominal: the profile's physics.ankle_compliance"),
+    "ankle_spring_damping": Param("physics", "crank", unit="N m s/rad",
+                                  doc="ankle linkage compliance: damping of that spring, per crank; positive. Nominal: "
+                                      "the profile's physics.ankle_compliance"),
     "drive_stiffness": Param("device", "drive", doc="drive's realized P gain over the demanded one"),
     "drive_damping": Param("device", "drive", doc="drive's realized D gain over the demanded one"),
     "torque_limit": Param("device", "drive", doc="scale of the torque-speed envelope and torque cap"),
@@ -71,7 +78,7 @@ PARAMS: dict[str, Param] = {
     "imu_drop_probability": Param("device", "env", doc="probability that an IMU sample is lost, in [0, 1]. Nominal: the sensor model's drop_probability (0 on the V1)"),
 }
 
-_SELECTORS = {"body": "bodies", "joint": "joints", "drive": "drives", "shape": "shapes"}
+_SELECTORS = {"body": "bodies", "joint": "joints", "drive": "drives", "crank": "cranks", "shape": "shapes"}
 
 
 @dataclass(frozen=True)

@@ -72,6 +72,16 @@ physics:
     # solver pushes that contact out in one step: the robot spins at up to 54 rad/s. It also keeps at most 50 prisms
     # per shape pair. Newton's pipeline gave no such contact or spin in the same rollouts (docs/world.md).
     contacts: newton
+  # Ankle linkage compliance, for an asset built with `build-asset --ankle-compliance`: a torsional spring and damper
+  # between each crank drive's output and its crank arm (transmissions/compliance.py). Per crank, at the crank shaft;
+  # a number for every crank or a mapping by crank drive name. The values are the caller's (humanoid-learning fits
+  # them); an asset with the springs refuses to spawn without them. The rigid asset ignores this block. On MJWarp
+  # (rk4, explicit) a spring is stable while its local mode, the crank arm and rod (about 1e-3 kg m² about the shaft
+  # on the V1) against the spring, stays under rk4's limit: about 5000 N m/rad and 1.4 N m s/rad per crank at 1 ms.
+  # Kamino treats the spring's PD implicitly.
+  ankle_compliance:
+    stiffness_nm_per_rad: null
+    damping_nm_s_per_rad: null
   # Kamino (beta in Newton 1.6): maximal coordinates, hard joint-limit and contact constraints, P-ADMM forward
   # dynamics, contacts from Newton's collision pipeline. Contact friction mixes by the larger coefficient, as
   # MJWarp does. Not yet checked against MJWarp or the captures (modeled).

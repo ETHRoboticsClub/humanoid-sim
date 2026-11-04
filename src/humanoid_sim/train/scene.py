@@ -92,7 +92,7 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
     from isaaclab.scene import InteractiveSceneCfg
     from isaaclab.utils import configclass
 
-    from humanoid_sim.physics.isaaclab import articulation_cfg, ground_cfg
+    from humanoid_sim.physics.isaaclab import articulation_cfg, ground_cfg, spring_gains
 
     check_asset_robot(usd, robot)
     if scene is not None and terrain is not None:
@@ -110,12 +110,13 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
     class RobotSceneCfg(InteractiveSceneCfg):
         pass
 
+    springs = spring_gains(usd, profile["physics"])  # crank springs of an asset built with ankle compliance
     cfg = RobotSceneCfg(num_envs=num_envs, env_spacing=env_spacing, replicate_physics=True)
     cfg.robot = articulation_cfg(
         usd, props, base_height_m=height + STANDING_CLEARANCE_M, contact_sensors=contacts,
         self_collision=profile["physics"]["self_collision"] if self_collision is None else self_collision,
-        joint_pos=[initial[n] for n in props.names])
-    cfg.robot.init_state.joint_pos = {f"^{name}$": value for name, value in initial.items()}
+        joint_pos=[initial[n] for n in props.names], springs=springs or None)
+    cfg.robot.init_state.joint_pos = {f"^{name}$": value for name, value in {**initial, **dict.fromkeys(springs, 0.0)}.items()}
     friction = profile["model"]["ground_friction"] if ground_friction is None else ground_friction
     if terrain is not None:
         cfg.terrain = terrain

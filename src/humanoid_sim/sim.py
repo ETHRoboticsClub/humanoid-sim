@@ -61,7 +61,8 @@ class SimCore:
                  contacts: bool = False, seed: int = 0, cuda_graph: bool = False, compile: bool = False,
                  imu_history: int | None = None, extra_rig: str | None = None, scene: StaticBoxes | None = None,
                  objects: WorldObjects | None = None, entities: dict | None = None, render_each_step: bool = True,
-                 queue_capacity: int | None = None, terrain: Terrain | object | None = None):
+                 queue_capacity: int | None = None, terrain: Terrain | object | None = None,
+                 physics_overrides: dict | None = None, gravity_m_s2: tuple[float, float, float] | None = None):
         check_asset_robot(usd_path, robot)
         self.terrain = as_terrain(terrain)
         self.desc = Description.load(robot)
@@ -75,10 +76,10 @@ class SimCore:
 
             extra_imus = {n: s for n, s in rigs.load(robot, self.desc, extra_rig).sensors.items()
                           if s.kind == "imu" and n != "imu"}
-        self.profile = load_profile(robot)
+        self.profile = load_profile(robot, physics_overrides=physics_overrides)
         phys = self.profile["physics"]
         self.period_ns = int(period_ns or phys["period_ns"])
-        from humanoid_sim.physics.isaaclab import IsaacLabCfg, IsaacLabRobot, solver_settings
+        from humanoid_sim.physics.isaaclab import IsaacLabCfg, IsaacLabRobot, solver_settings, spring_gains
 
         self.solver, settings = solver_settings(phys, solver)
         self.integrator = integrator or settings["integrator"]
@@ -106,7 +107,8 @@ class SimCore:
             base_joints=base_joints, ground_friction=self.profile["model"]["ground_friction"],
             imu=imu, extra_imus={n: s.frame for n, s in extra_imus.items()}, contacts=contacts, rerun=rerun,
             rerun_rrd=rerun_rrd, scene=scene, objects=objects, entities=entities,
-            render_each_step=render_each_step, terrain=None if self.terrain is None else self.terrain.cfg),
+            render_each_step=render_each_step, terrain=None if self.terrain is None else self.terrain.cfg,
+            springs=spring_gains(usd_path, phys) or None, gravity_m_s2=gravity_m_s2),
             props=props)
         self.scene = scene
         self.ground = self.backend.ground
@@ -116,6 +118,13 @@ class SimCore:
         order = [self.backend.joint_names.index(n) for n in joints]
         self._to_plant = torch.tensor(order, device=self.plant.cfg.device)
         self._to_solver = torch.tensor([self.backend.joint_names.index(n) for n in physical], device=device)
+        # Crank springs (an asset built with ankle compliance), in the description's crank drive order: held at a
+        # zero target, written at zero with every state write.
+        from humanoid_sim.model.asset import compliance_springs
+
+        self.springs = compliance_springs(usd_path)
+        self._springs = torch.tensor([self.backend.joint_names.index(n) for n in self.springs.values()],
+                                     device=device, dtype=torch.long)
         if self.native_state is not None:
             self.write_joint_state(*self.joint_state())
         self._base = (torch.tensor([self.backend.joint_names.index(n) for n, _ in BASE_JOINTS],
@@ -183,6 +192,8 @@ class SimCore:
             for name in values:
                 i = self.backend.joint_names.index(name)
                 bq[:, i], bqd[:, i] = values[name].to(bq.dtype), rates[name].to(bqd.dtype)
+        bq[:, self._springs] = 0.0
+        bqd[:, self._springs] = 0.0
         self.backend.write_state(bq, bqd)
         self._state_written = True
 
@@ -250,6 +261,7 @@ class SimCore:
         bt, _ = self.backend.joint_state()
         bt = bt.clone()
         bt[:, self._to_solver] = target.to(bt.dtype)
+        bt[:, self._springs] = 0.0
         effort = torch.zeros_like(bt)
         effort[:, self._to_solver] = self.plant.passive_effort.to(effort.dtype)
         if self._base_target is not None:
