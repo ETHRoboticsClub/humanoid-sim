@@ -101,15 +101,15 @@ uv run ruff check src tests spikes examples docs
 
 ## CI
 
-`.github/workflows/ci.yaml` runs three jobs on every push and pull request.
+Two workflows run on the self-hosted Spark runner, as described in [ci.md](ci.md). `.github/workflows/ci.yaml` runs two jobs on every pull request and push to master, except changes to Markdown only. `.github/workflows/physics.yaml` runs the physics tests.
 
-| Job | Runner | Steps |
+| Job | Trigger | Steps |
 |---|---|---|
-| `cpu-contracts` | `ubuntu-24.04` (x86) and `ubuntu-24.04-arm`, each its own job | Check out with submodules, install uv 0.13.1, `uv sync --python 3.12 --extra dev --extra newton`, `uv run ruff check src tests spikes examples docs`, `uv run pytest -m "not physics and not data"` |
-| `isaaclab-image` | `ubuntu-24.04` (x86) | Check out with submodules, `docker build -f docker/Dockerfile -t humanoid-sim:ci .` (amd64), build the V1's two assets and both G1s', run `pytest -m physics` in the image on Warp's CPU device |
-| `controls-pins` | `ubuntu-24.04` | Compare the humanoid-urdf commit with the one Controls pins |
+| `cpu-contracts` | pull request, push to master | Check out, update the submodules over the deploy key aliases, `uv sync --python 3.12 --extra dev --extra newton --extra kinematics-check --extra viz --extra bag`, `uv run ruff check src tests spikes examples docs`, `uv run --extra dev pytest -m "not physics and not data"` |
+| `controls-pins` | pull request, push to master | Compare the humanoid-urdf commit with the one Controls pins |
+| `physics` | the `physics` label, manual dispatch, nightly | `docker build -f docker/Dockerfile -t humanoid-sim:ci .`, build the V1's two assets and both G1s', run `pytest -m "physics and not rtx"` in the image on the GPU, one process per test file |
 
-No CI runner has a GPU or the captures. The `data` tests run wherever the captures are (natively, in the image or in the `e2e` task), and the CUDA tests only on a GPU node, through the `e2e` task.
+The runner has no captures, so the `data` tests run wherever the captures are (natively, in the image or in the `e2e` task). The Spark's GPU runs the CUDA tests in the `physics` job; the `e2e` task still covers the benchmarks, replays and examples.
 
 ### Controls pins
 
@@ -121,7 +121,7 @@ humanoid-urdf must be at the same commit as in Controls. The `controls-pins` job
 
 Two repository settings control the job:
 
-- `SUBMODULES_TOKEN` is a repository secret: a GitHub token that can read Controls' repository and the submodule repositories. The job uses it to read Controls' pins through the GitHub API. Without it, the job prints a warning and passes without checking anything. The checkout steps of `cpu-contracts` and `isaaclab-image` also use it to fetch the submodules, falling back to the workflow's own token when it is unset.
+- `SUBMODULES_TOKEN` is a repository secret: a GitHub token that can read Controls' repository and the submodule repositories. The job uses it to read Controls' pins through the GitHub API. Without it, the job prints a warning and passes without checking anything. The submodules are fetched with the runner's deploy keys, not this token.
 - `CONTROLS_REF` is a repository variable: the Controls branch, tag or commit whose pins are compared. It defaults to `master`.
 
 Set them with the GitHub CLI (`gh`), or under Settings, Secrets and variables, Actions:

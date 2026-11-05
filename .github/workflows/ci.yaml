@@ -1,48 +1,75 @@
+# CI on the self-hosted Spark runner (labels: self-hosted, linux, arm64, spark). Setup: docs/ci.md.
+#
+# The runner user holds read-only deploy keys, not GitHub secrets. ~/.ssh/config on the Spark:
+#   Host github-humanoid-urdf
+#     HostName github.com
+#     User git
+#     IdentityFile ~/.ssh/deploy_humanoid_urdf
+#     IdentitiesOnly yes
+#   Host github-humanoid-sim
+#     HostName github.com
+#     User git
+#     IdentityFile ~/.ssh/deploy_humanoid_sim
+#     IdentitiesOnly yes
+# and github.com in ~/.ssh/known_hosts. Only the humanoid-urdf alias is used in this repository.
 name: CI
-on: [push, pull_request]
+
+on:
+  pull_request:
+    paths-ignore: ["**/*.md", "docs/images/**"]
+  push:
+    branches: [master]
+    paths-ignore: ["**/*.md", "docs/images/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Job-scoped git config (not global): the submodule URLs go through the deploy key alias.
+  GIT_CONFIG_COUNT: "2"
+  GIT_CONFIG_KEY_0: url.github-humanoid-urdf:ETHRoboticsClub/humanoid-urdf.git.insteadOf
+  GIT_CONFIG_VALUE_0: git@github.com:ETHRoboticsClub/humanoid-urdf.git
+  GIT_CONFIG_KEY_1: url.github-humanoid-urdf:ETHRoboticsClub/humanoid-urdf.git.insteadOf
+  GIT_CONFIG_VALUE_1: https://github.com/ETHRoboticsClub/humanoid-urdf.git
+
 jobs:
   cpu-contracts:
     # Device layer, transmissions, model build, readers and host kinematics (Newton): no Isaac Lab.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.os }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, arm64, spark]
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
           lfs: false
-          token: ${{ secrets.SUBMODULES_TOKEN || github.token }}
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: "0.13.1"
+          persist-credentials: false
+      - name: Submodules
+        run: git submodule update --init --recursive
+      - run: uv --version
       - run: uv sync --python 3.12 --extra dev --extra newton --extra kinematics-check --extra viz --extra bag
       - run: uv run ruff check src tests spikes examples docs
-      - run: uv run pytest -m "not physics and not data"
-  isaaclab-image:
-    # Builds the Isaac Lab image, the V1's assets and both G1s', and runs the physics tests on the CPU.
-    runs-on: ubuntu-24.04
+      - run: uv run --extra dev pytest -m "not physics and not data"
+      - name: Clean the workspace
+        if: always()
+        run: git clean -ffdx || true
+
+  controls-pins:
+    # humanoid-urdf must be at the commit Controls pins on CONTROLS_REF (a repository
+    # variable; default master). Reads Controls through the API with SUBMODULES_TOKEN;
+    # without it the check warns and passes.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, arm64, spark]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
-          token: ${{ secrets.SUBMODULES_TOKEN || github.token }}
-      - run: docker build -f docker/Dockerfile -t humanoid-sim:ci .
-      - run: |
-          docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci build-asset
-          docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci build-asset --base-joints
-          for r in g1_29dof_rev_1_0 g1_29dof_with_hand_rev_1_0; do
-            docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci --robot "$r" build-asset
-          done
-          docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci \
-            pytest -m physics
-  controls-pins:
-    # humanoid-urdf must be at the commit Controls pins on CONTROLS_REF (a repository
-    # variable; default master).
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
+          submodules: false
+          persist-credentials: false
       - env:
           GH_TOKEN: ${{ secrets.SUBMODULES_TOKEN }}
           CONTROLS_REF: ${{ vars.CONTROLS_REF || 'master' }}
@@ -61,3 +88,6 @@ jobs:
           }
           check third_party/humanoid-urdf ros2_ws/src/description/humanoid-urdf
           exit $fail
+      - name: Clean the workspace
+        if: always()
+        run: git clean -ffdx || true
