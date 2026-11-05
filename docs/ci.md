@@ -70,4 +70,33 @@ run --robot g1_29dof_with_hand_rev_1_0 build-asset
 run pytest -m "physics and not rtx" tests/test_physics.py
 ```
 
+### humanoid-learning
+
+Same runner, same labels, same `physics` label and dispatch. Its `Physics` workflow runs at 03:00 UTC. From a clone with submodules:
+
+```
+uv sync --python 3.12 --extra dev
+uv run ruff check src tests
+uv run pytest -m "not physics"
+```
+
+Physics lane:
+
+```
+docker build -f third_party/humanoid-sim/docker/Dockerfile -t humanoid-sim:ci third_party/humanoid-sim
+docker build -f docker/Dockerfile --build-arg HUMANOID_SIM_IMAGE=humanoid-sim:ci -t humanoid-learning:ci .
+run() { docker run --rm --gpus all -v "$PWD":/workspace/humanoid-learning -w /workspace/humanoid-learning humanoid-learning:ci "$@"; }
+run humanoid-sim build-asset
+run pytest -m physics --device cuda:0 tests/test_walk_task_physics.py
+```
+
+### humanoid-urdf
+
+It has one workflow, with no submodules and no physics lane. From a clone:
+
+```
+uv run --no-project --python 3.12 --with pytest --with numpy --with pyyaml --with usd-core \
+  env PYTHONPATH=ethrc_v1/v1_description pytest ethrc_v1/v1_description/test
+```
+
 See [testing-and-gpu.md](testing-and-gpu.md) for the test tiers and the GPU tasks.
