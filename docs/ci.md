@@ -4,18 +4,18 @@ CI runs on a self-hosted runner, not on GitHub-hosted runners. GitHub-hosted run
 
 ## Runner
 
-The runner is the SkyPilot cluster `ci-runner`, a long-lived Kubernetes pod on the `ssh/spark` pool (a DGX Spark: aarch64, Ubuntu 22.04, one GB10 GPU). It runs as the unprivileged user `sky`, never as root. There is no Docker in the pod. It runs three GitHub Actions runners, one each for humanoid-sim, humanoid-learning and humanoid-urdf, and has Isaac Lab in `~/il-venv` for the physics lane. The deploy keys, `~/.ssh`, the runner registrations and the work directories live on the SkyPilot volume `ci-runner-state`, mounted at `/ci`, so a pod restart keeps them.
+The runner is the SkyPilot cluster `ci-runner`, a long-lived Kubernetes pod on the `ssh/spark` pool (a DGX Spark: aarch64, Ubuntu 22.04, one GB10 GPU). It runs as the unprivileged user `sky`, never as root. There is no Docker in the pod. It runs three GitHub Actions runners, one each for humanoid-sim, humanoid-learning and humanoid-urdf, and has Isaac Lab in `~/il-venv` for the physics lane. There is no volume: the deploy keys, `~/.ssh` (a link to `~/ci/ssh`), the runner registrations and the work directories live in `~/ci` in the pod.
 
-The launch task is `~/ETHRC/tools/ci-runner/ci-runner.sky.yaml` on the maintainer's machine; it is not in a repository. Its header has the commands. To restart the runners (after a pod restart, or if they show offline under Settings, Actions, Runners), run `sky exec -d ci-runner --secret GH_TOKEN="$(gh auth token)" ~/ETHRC/tools/ci-runner/ci-runner.sky.yaml`: the registrations are on the volume, so nothing is registered again. A supervisor loop restarts a runner whose process dies. The cluster has no autostop.
+The launch task is `~/ETHRC/tools/ci-runner/ci-runner.sky.yaml` on the maintainer's machine; it is not in a repository. Its header has the commands. To restart the runners while the pod is up (they show offline under Settings, Actions, Runners), run `sky exec -d ci-runner --secret GH_TOKEN="$(gh auth token)" ~/ETHRC/tools/ci-runner/ci-runner.sky.yaml`: the keys and registrations in `~/ci` are kept. If the pod itself was restarted, `~/ci` is gone: relaunch with `sky launch` as in the task header. That reruns setup, generates new deploy keys and registers the runners again with `--replace`; delete the stale deploy keys titled "ci-runner spark (read-only)" in the three repositories afterwards. A supervisor loop restarts a runner whose process dies. The cluster has no autostop.
 
 Labels: `self-hosted`, `linux`, `arm64`, `spark`. Every job uses `runs-on: [self-hosted, linux, arm64, spark]`.
 
 The runner user needs:
 
-- `git` and `uv` 0.13.1 on its `PATH` (`/home/sky/.local/bin/uv`), with the cache on the volume. `uv sync --python 3.12` fetches Python itself.
-- Read-only deploy keys for humanoid-urdf, humanoid-sim and ETHRC-Humanoid-Controls, generated on the cluster, kept on the volume and never in GitHub secrets, with `github.com` in `~/.ssh/known_hosts`.
+- `git` and `uv` 0.13.1 on its `PATH` (`/home/sky/.local/bin/uv`), with its cache in `~/.cache/uv`. `uv sync --python 3.12` fetches Python itself.
+- Read-only deploy keys for humanoid-urdf, humanoid-sim and ETHRC-Humanoid-Controls, generated on the cluster, kept in `~/ci/ssh` and never in GitHub secrets, with `github.com` in `~/.ssh/known_hosts`.
 
-Expected `~/.ssh/config`, one alias per deploy key (the key files sit on the volume, and the launch task writes this file):
+Expected `~/.ssh/config`, one alias per deploy key (the key files sit in `~/ci/ssh`, and the launch task writes this file):
 
 ```
 Host github-humanoid-urdf
