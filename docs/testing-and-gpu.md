@@ -101,15 +101,15 @@ uv run ruff check src tests spikes examples docs
 
 ## CI
 
-Two workflows run on the self-hosted Spark runner, as described in [ci.md](ci.md). `.github/workflows/ci.yaml` runs two jobs on every pull request and push to master, except changes to Markdown only. `.github/workflows/physics.yaml` runs the physics tests.
+Two workflows run on the self-hosted Spark runner, as described in [ci.md](ci.md). `.github/workflows/ci.yaml` runs on every pull request and push to master; the test jobs are skipped for changes to Markdown only, and `ci-ok` reports either way. `.github/workflows/physics.yaml` runs the physics tests.
 
 | Job | Trigger | Steps |
 |---|---|---|
 | `cpu-contracts` | pull request, push to master | Check out, update the submodules over the deploy key aliases, `uv sync --python 3.12 --extra dev --extra newton --extra kinematics-check --extra viz --extra bag`, `uv run ruff check src tests spikes examples docs`, `uv run --extra dev pytest -m "not physics and not data"` |
 | `controls-pins` | pull request, push to master | Compare the humanoid-urdf commit with the one Controls pins |
-| `physics` | the `physics` label, manual dispatch | A placeholder: prints how to run physics on SkyPilot and exits 0 (the runner has no Docker or spare GPU) |
+| `physics` | the `physics` label, manual dispatch, nightly | `pytest -m "physics and not rtx and not data"` in `~/il-venv` on the Spark runner's GPU, one process per test file, after building the V1 and G1 assets. Not a required check |
 
-The runner has no captures, so the `data` tests run wherever the captures are (natively, in the image or in the `e2e` task). Physics, the CUDA tests, the benchmarks, the replays and the examples run through the `e2e` task.
+The runner has no captures, so the `data` tests run wherever the captures are (natively, in the image or in the `e2e` task). The benchmarks, the replays and the examples run through the `e2e` task.
 
 ### Controls pins
 

@@ -11,15 +11,18 @@
 #     User git
 #     IdentityFile ~/.ssh/deploy_humanoid_sim
 #     IdentitiesOnly yes
-# and github.com in ~/.ssh/known_hosts. Only the humanoid-urdf alias is used in this repository.
+#   Host github-controls
+#     HostName github.com
+#     User git
+#     IdentityFile ~/.ssh/deploy_controls
+#     IdentitiesOnly yes
+# and github.com in ~/.ssh/known_hosts. The humanoid-urdf and github-controls aliases are used in this repository.
 name: CI
 
 on:
   pull_request:
-    paths-ignore: ["**/*.md", "docs/images/**"]
   push:
     branches: [master]
-    paths-ignore: ["**/*.md", "docs/images/**"]
 
 permissions:
   contents: read
@@ -37,9 +40,38 @@ env:
   GIT_CONFIG_VALUE_1: https://github.com/ETHRoboticsClub/humanoid-urdf.git
 
 jobs:
+  changes:
+    # Path filter as a job, so the workflow always reports and ci-ok can be a required check. Docs-only changes
+    # (Markdown, docs/images) leave code=false and skip the test jobs.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, arm64, spark]
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          persist-credentials: false
+      - id: filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -z "$BASE_SHA" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          git fetch --quiet --depth=1 origin "$BASE_SHA"
+          if git diff --name-only "$BASE_SHA" HEAD | grep -qvE '\.md$|^docs/images/'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Clean the workspace
+        if: always()
+        run: git clean -ffdx || true
+
   cpu-contracts:
     # Device layer, transmissions, model build, readers and host kinematics (Newton): no Isaac Lab.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: [self-hosted, linux, arm64, spark]
     timeout-minutes: 20
     steps:
@@ -59,10 +91,11 @@ jobs:
         run: git clean -ffdx || true
 
   controls-pins:
-    # humanoid-urdf must be at the commit Controls pins on CONTROLS_REF (a repository
-    # variable; default master). Reads Controls through the API with SUBMODULES_TOKEN;
-    # without it the check warns and passes.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # humanoid-urdf must be at the commit Controls pins on CONTROLS_REF (a repository variable; default master).
+    # Controls is read with its own read-only deploy key (alias github-controls): a shallow fetch of the ref and
+    # git ls-tree. Controls' submodules are not initialised.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: [self-hosted, linux, arm64, spark]
     timeout-minutes: 10
     steps:
@@ -71,15 +104,17 @@ jobs:
           submodules: false
           persist-credentials: false
       - env:
-          GH_TOKEN: ${{ secrets.SUBMODULES_TOKEN }}
           CONTROLS_REF: ${{ vars.CONTROLS_REF || 'master' }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then echo "::warning::no SUBMODULES_TOKEN: Controls' pins not checked"; exit 0; fi
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          git -C "$tmp" init -q
+          git -C "$tmp" fetch -q --depth 1 github-controls:ETHRoboticsClub/ETHRC-Humanoid-Controls.git "$CONTROLS_REF"
           fail=0
           check() {  # our submodule, Controls' path to the same repository
             ours=$(git ls-tree HEAD "$1" | awk '{print $3}')
-            theirs=$(gh api "repos/ETHRoboticsClub/ETHRC-Humanoid-Controls/contents/$2?ref=$CONTROLS_REF" --jq .sha)
-            if [ "$ours" = "$theirs" ]; then
+            theirs=$(git -C "$tmp" ls-tree FETCH_HEAD "$2" | awk '{print $3}')
+            if [ -n "$ours" ] && [ "$ours" = "$theirs" ]; then
               echo "$1 = $ours"
             else
               echo "::error::$1 is at $ours; Controls ($CONTROLS_REF) pins $theirs"
@@ -91,3 +126,18 @@ jobs:
       - name: Clean the workspace
         if: always()
         run: git clean -ffdx || true
+
+  ci-ok:
+    # The one check to require: passes when the test jobs pass or were skipped by the path filter.
+    needs: [changes, cpu-contracts, controls-pins]
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, linux, arm64, spark]
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ needs.changes.result }} ${{ needs.cpu-contracts.result }} ${{ needs.controls-pins.result }}
+        run: |
+          echo "changes, cpu-contracts, controls-pins: $RESULTS"
+          case " $RESULTS " in *failure*|*cancelled*) exit 1;; esac
+          set -- $RESULTS
+          test "$1" = success

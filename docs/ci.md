@@ -4,17 +4,18 @@ CI runs on a self-hosted runner, not on GitHub-hosted runners. GitHub-hosted run
 
 ## Runner
 
-The runner is a long-lived SkyPilot cluster on the `ssh/spark` pool, which is a Kubernetes pod on a DGX Spark (aarch64, Ubuntu 22.04). It runs as the unprivileged user `sky`. There is no Docker in the pod. The runner's state and the deploy keys live on a SkyPilot volume mounted in the pod, so they survive a restart of the pod.
+The runner is the SkyPilot cluster `ci-runner`, a long-lived Kubernetes pod on the `ssh/spark` pool (a DGX Spark: aarch64, Ubuntu 22.04, one GB10 GPU). It runs as the unprivileged user `sky`, never as root. There is no Docker in the pod. It runs three GitHub Actions runners, one each for humanoid-sim, humanoid-learning and humanoid-urdf, and has Isaac Lab in `~/il-venv` for the physics lane. The deploy keys, `~/.ssh`, the runner registrations and the work directories live on the SkyPilot volume `ci-runner-state`, mounted at `/ci`, so a pod restart keeps them.
+
+The launch task is `~/ETHRC/tools/ci-runner/ci-runner.sky.yaml` on the maintainer's machine; it is not in a repository. Its header has the commands. To restart the runners (after a pod restart, or if they show offline under Settings, Actions, Runners), run `sky exec -d ci-runner --secret GH_TOKEN="$(gh auth token)" ~/ETHRC/tools/ci-runner/ci-runner.sky.yaml`: the registrations are on the volume, so nothing is registered again. A supervisor loop restarts a runner whose process dies. The cluster has no autostop.
 
 Labels: `self-hosted`, `linux`, `arm64`, `spark`. Every job uses `runs-on: [self-hosted, linux, arm64, spark]`.
 
 The runner user needs:
 
 - `git` and `uv` 0.13.1 on its `PATH` (`/home/sky/.local/bin/uv`), with the cache on the volume. `uv sync --python 3.12` fetches Python itself.
-- Read-only deploy keys for humanoid-urdf and humanoid-sim on the volume, never in GitHub secrets, with `github.com` in `~/.ssh/known_hosts`.
-- `gh`, only for the `controls-pins` job.
+- Read-only deploy keys for humanoid-urdf, humanoid-sim and ETHRC-Humanoid-Controls, generated on the cluster, kept on the volume and never in GitHub secrets, with `github.com` in `~/.ssh/known_hosts`.
 
-Expected `~/.ssh/config`, one alias per deploy key (the key files sit on the volume):
+Expected `~/.ssh/config`, one alias per deploy key (the key files sit on the volume, and the launch task writes this file):
 
 ```
 Host github-humanoid-urdf
@@ -28,6 +29,12 @@ Host github-humanoid-sim
   User git
   IdentityFile ~/.ssh/deploy_humanoid_sim
   IdentitiesOnly yes
+
+Host github-controls
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/deploy_controls
+  IdentitiesOnly yes
 ```
 
 Each workflow checks out with `submodules: false`, then runs `git submodule update --init --recursive`. The job's environment sets `GIT_CONFIG_*` variables that rewrite the submodule URLs (`git@github.com:ETHRoboticsClub/<repo>.git`) to `<alias>:ETHRoboticsClub/<repo>.git`. The rewrite applies to that job only, including nested submodules, and nothing is written to a global git config.
@@ -36,21 +43,25 @@ Each workflow checks out with `submodules: false`, then runs `git submodule upda
 
 | Workflow | Triggers | What runs | Timeout |
 |---|---|---|---|
-| `CI` (`ci.yaml`) | pull request, push to master; skipped for changes to Markdown and `docs/images` only | `cpu-contracts`: ruff and `pytest -m "not physics and not data"`. `controls-pins`: humanoid-urdf against Controls' pin | 20 min |
-| `Physics` (`physics.yaml`) | the `physics` label on a pull request, manual dispatch | A placeholder: prints how to run physics on SkyPilot and exits 0 | 5 min |
+| `CI` (`ci.yaml`) | pull request, push to master | `changes` decides whether anything besides Markdown and `docs/images` changed. If so: `cpu-contracts` (ruff, `pytest -m "not physics and not data"`) and `controls-pins` (humanoid-urdf against Controls' pin, read over the Controls deploy key). `ci-ok` always runs and passes when those passed or were skipped | 20 min |
+| `Physics` (`physics.yaml`) | the `physics` label on a pull request, manual dispatch, nightly at 02:00 UTC | The `physics` tests (not `rtx`, not `data`) in `~/il-venv` on the GPU, one pytest process per test file, a per-file table in the job summary | 6 h |
+
+`ci-ok` is the check to require on master. It is not affected by the path filter, which is why the filter is a job and not a workflow `paths` setting. The `Physics` job has `continue-on-error` and is not a dependency of `ci-ok`: Isaac Lab on the Spark is slow, so physics is informational and never a required check. A pull request from a fork gets no `ci-ok`, so it cannot merge on a green check.
 
 Pull requests from forks never run on the runner: every job skips unless the head repository is this repository. A newer push to the same ref cancels the run in progress. The workflows have `contents: read` and none uses `pull_request_target`.
 
-## Physics on SkyPilot
+## Physics
 
-Physics needs Docker or a full Isaac Lab environment and a datacenter GPU. The Sparks are only the CPU runner: Isaac Lab on their GB10 is far too slow to be usable, so physics never runs there. Run it by hand on a cloud GPU node (L40S first, then A10G or L4), with the cluster stopped afterwards (`-i 10` stops it after 10 idle minutes):
+The `Physics` workflow runs on the runner's GPU in `~/il-venv`, the environment that `sky/setup.sh` builds. Start it by adding the `physics` label to a pull request, from Actions, Physics, Run workflow, or with `gh workflow run physics.yaml --ref <branch>`. It also runs nightly. It can take hours; the job summary lists each test file with its result and time.
+
+The same tests can run on a separate SkyPilot GPU node, with the cluster stopped afterwards (`-i 10`):
 
 ```
 sky launch -y -d -c hsim-e2e -i 10 sky/e2e.sky.yaml
 sky logs hsim-e2e
 ```
 
-The `e2e` task builds the V1 and G1 assets, runs the whole test suite (physics and CUDA tests included), the benchmarks, the replays and the examples. See [testing-and-gpu.md](testing-and-gpu.md) for the other tasks and for the test tiers. The `physics` label and the manual dispatch of the `Physics` workflow only print this reminder.
+The `e2e` task also runs the benchmarks, the replays and the examples. See [testing-and-gpu.md](testing-and-gpu.md) for the tiers.
 
 ## Run the CI commands locally
 
@@ -70,7 +81,7 @@ uv run ruff check src tests
 uv run pytest -m "not physics"
 ```
 
-Its physics tests run on SkyPilot with `sky launch -y -d -c hl-smoke -i 10 sky/smoke.sky.yaml`.
+Its `Physics` workflow runs `pytest -m "physics and not data" --device cuda:0` per file in `~/il-venv`. On a separate node: `sky launch -y -d -c hl-smoke -i 10 sky/smoke.sky.yaml`.
 
 ### humanoid-urdf
 
