@@ -4,7 +4,7 @@ CI runs on a self-hosted runner, not on GitHub-hosted runners. GitHub-hosted run
 
 ## Runner
 
-The runner is the SkyPilot cluster `ci-runner`, a long-lived Kubernetes pod on the `ssh/spark` pool (a DGX Spark: aarch64, Ubuntu 22.04, one GB10 GPU). It runs as the unprivileged user `sky`, never as root. There is no Docker in the pod. It runs five GitHub Actions runners: one each for humanoid-sim, humanoid-learning and humanoid-urdf, and a second for humanoid-sim and for humanoid-learning so that a long physics run does not block their CI, and has Isaac Lab in `~/il-venv` for the physics lane. There is no volume: the deploy keys, `~/.ssh` (a link to `~/ci/ssh`), the runner registrations and the work directories live in `~/ci` in the pod.
+The runner is the SkyPilot cluster `ci-runner`, a long-lived Kubernetes pod on the `ssh/spark` pool (a DGX Spark: aarch64, Ubuntu 22.04, one GB10 GPU). It runs as the unprivileged user `sky`, never as root. There is no Docker in the pod. It runs three GitHub Actions runners, one each for humanoid-sim, humanoid-learning and humanoid-urdf, sharing the pod's one GPU (the pool cannot hand out a fraction of a GPU, so a physics run blocks that repository's CI until it ends), and has Isaac Lab in `~/il-venv` for the physics lane. There is no volume: the deploy keys, `~/.ssh` (a link to `~/ci/ssh`), the runner registrations and the work directories live in `~/ci` in the pod.
 
 The launch task is `~/ETHRC/tools/ci-runner/ci-runner.sky.yaml` on the maintainer's machine; it is not in a repository. Its header has the commands. To restart the runners while the pod is up (they show offline under Settings, Actions, Runners), run `sky exec -d ci-runner --secret GH_TOKEN="$(gh auth token)" ~/ETHRC/tools/ci-runner/ci-runner.sky.yaml`: the keys and registrations in `~/ci` are kept. If the pod itself was restarted, `~/ci` is gone: relaunch with `sky launch` as in the task header. That reruns setup, generates new deploy keys and registers the runners again with `--replace`; delete the stale deploy keys titled "ci-runner spark (read-only)" in the three repositories afterwards. A supervisor loop restarts a runner whose process dies. The cluster has no autostop.
 
@@ -38,6 +38,15 @@ Host github-controls
 ```
 
 Each workflow checks out with `submodules: false`, then runs `git submodule update --init --recursive`. The job's environment sets `GIT_CONFIG_*` variables that rewrite the submodule URLs (`git@github.com:ETHRoboticsClub/<repo>.git`) to `<alias>:ETHRoboticsClub/<repo>.git`. The rewrite applies to that job only, including nested submodules, and nothing is written to a global git config.
+
+## Security
+
+A self-hosted runner executes whatever a workflow tells it to, so a pull request that reaches it has code execution on the pod. The rules:
+
+- Only code from this organisation's own branches runs on the runner. Every job skips when the head repository is not this repository, so pull requests from forks never reach it. Keep that guard on every job, including new workflows.
+- Never use `pull_request_target`, and never check out a pull request's head in a workflow triggered by anything other than `pull_request`.
+- The pod holds nothing worth stealing beyond read access: read-only deploy keys for humanoid-urdf, humanoid-sim and ETHRC-Humanoid-Controls, no GitHub token, no cloud credentials, no repository secrets. The token used to register the runners is dropped before any runner starts.
+- Before a repository goes public, its pull request lanes move to GitHub-hosted runners (free for public repositories), and the Spark runner only serves pushes to master, the nightly physics run and `workflow_dispatch` by maintainers. Also set the organisation's Actions setting to require approval for workflows from outside contributors.
 
 ## Workflows
 
