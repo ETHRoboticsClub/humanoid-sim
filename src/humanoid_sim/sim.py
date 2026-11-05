@@ -276,8 +276,8 @@ class SimCore:
 class _StepGraphs:
     """The plant's per-step work as two CUDA graphs over static buffers: ``pre`` (IMU sampling at the step start,
     drive bank, target shaping) and ``post`` (drive feedback and the drive-frame state ``pre`` reuses). State lives
-    in the plant's tensors, updated in place; the step time is a device scalar; the IMU's generator is registered
-    with the graph so each replay draws new noise and burst times."""
+    in the plant's tensors, updated in place; the step time is a device scalar; the IMUs' generators (noise and
+    sample dropout) are registered with the graph so each replay draws new noise, burst times and drops."""
 
     def __init__(self, sim: SimCore, warmup: int = 3, compile: bool = False):
         self.sim = sim
@@ -301,7 +301,7 @@ class _StepGraphs:
                 self._post()
                 self._pre()
         torch.cuda.current_stream().wait_stream(side)
-        generators = ([sim.imu.generator] if sim.imu is not None else []) + [d.generator for d in sim.extra_imus.values()]
+        generators = [g for imu in (sim.imu, *sim.extra_imus.values()) if imu is not None for g in imu.generators()]
         self.g_post, self.g_pre = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
         for g in (self.g_post, self.g_pre):
             for gen in generators:
