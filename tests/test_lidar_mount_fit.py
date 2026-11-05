@@ -7,13 +7,13 @@ import pytest
 from humanoid_sim.sensors.geometry import Mount, rpy_matrix
 from humanoid_sim.sensors.session import mount_on
 
-IN_HEAD = ([-0.003680, 0.00003, 0.457434], [np.pi, 0.0511, 0.0])
+IN_HEAD = ([-0.003680, 0.00003, 0.4525687], [np.pi, 0.0511, 0.0])
 HEAD = Mount("head_link", "torso_link", (0.0039635, 0.0, -0.044), tuple(map(tuple, np.eye(3))))
 
 
-def test_with_the_head_untilted_the_fit_is_the_factory_mount_15_mm_lower():
+def test_with_the_head_untilted_the_fit_is_the_factory_mount_19_87_mm_lower():
     m = mount_on(HEAD, *IN_HEAD)
-    np.testing.assert_allclose(m.translation_m, [0.0002835, 0.00003, 0.428434 - 0.015], atol=1e-9)
+    np.testing.assert_allclose(m.translation_m, [0.0002835, 0.00003, 0.4085687], atol=1e-9)
     np.testing.assert_allclose(m.R, rpy_matrix(np.pi, 0.0511, 0), atol=1e-12)
     assert m.link == "torso_link"
 
