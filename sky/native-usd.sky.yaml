@@ -21,4 +21,14 @@ run: |
   python -c 'import torch; assert torch.cuda.is_available(), "CUDA is required for native physics checks"'
   humanoid-sim build-asset
   humanoid-sim build-asset --base-joints
-  pytest -v -s tests/test_native_usd.py tests/test_native_integration.py tests/test_description_delivery.py tests/test_native_parameters.py tests/test_native_physics.py
+  humanoid-sim build-asset --ankle-compliance
+  mkdir -p outputs/native-usd
+  # One pytest process per file: Isaac Lab keeps one simulation per process, and a test that fails while building one
+  # would leave it to every later test of the same process.
+  failed=0
+  for f in test_native_usd test_native_integration test_description_delivery test_native_parameters test_native_physics \
+      test_ankle_compliance test_ankle_compliance_physics; do
+    pytest -v -s --junitxml="outputs/native-usd/$f.xml" "tests/$f.py" > "outputs/native-usd/$f.log" 2>&1 || failed=1
+    echo "$f: $(tail -1 "outputs/native-usd/$f.log")"
+  done
+  exit $failed

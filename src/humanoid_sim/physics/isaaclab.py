@@ -54,6 +54,8 @@ class IsaacLabCfg:
     solver: str = "mjwarp"
     settings: dict | None = None  # the solver's block of the profile's physics
     integrator: str | None = None  # overrides the solver block's
+    springs: dict | None = None  # crank spring joint -> (stiffness, damping), :func:`spring_gains`
+    gravity_m_s2: tuple[float, float, float] | None = None  # None: Isaac Lab's default, Earth's
     fixed_base: bool = False
     base_height_m: float = 1.0
     env_spacing_m: float = 3.0
@@ -200,12 +202,40 @@ def _per_joint(names, values):
     return {f"^{n}$": float(v) for n, v in zip(names, values, strict=True)}
 
 
+# The crank springs' solver effort limit: none in effect (a crank drive peaks at tens of N m).
+SPRING_EFFORT_LIMIT_NM = 1e4
+
+
+def spring_gains(usd_path: Path, physics: dict) -> dict[str, tuple[float, float]]:
+    """``{spring joint: (stiffness N m/rad, damping N m s/rad)}`` of the asset's crank springs, from the profile's
+    ``physics.ankle_compliance`` (a number for every crank or a mapping by crank drive); empty for a rigid asset.
+    Raises when the asset has springs and the block gives no positive values for them."""
+    from humanoid_sim.model.asset import compliance_springs
+
+    springs = compliance_springs(usd_path)
+    if not springs:
+        return {}
+    knobs = physics.get("ankle_compliance") or {}
+
+    def value(key, drive):
+        v = knobs.get(key)
+        v = v.get(drive) if isinstance(v, dict) else v
+        if v is None or not math.isfinite(float(v)) or float(v) <= 0:
+            raise ValueError(f"{usd_path} has ankle crank springs: physics.ankle_compliance.{key} needs a positive "
+                             f"value for {drive}, not {v!r}")
+        return float(v)
+
+    return {joint: (value("stiffness_nm_per_rad", drive), value("damping_nm_s_per_rad", drive))
+            for drive, joint in springs.items()}
+
+
 def articulation_cfg(usd_path: Path, props: JointProperties, *, fixed_base: bool = False, base_joints: bool = False,
                      self_collision: bool = True, base_height_m: float = 1.0, contact_sensors: bool = False,
-                     joint_pos: list[float] | None = None):
+                     joint_pos: list[float] | None = None, springs: dict[str, tuple[float, float]] | None = None):
     """The robot as an Isaac Lab articulation: constant solver PD ``k0, d0`` and the description's passive
     properties per joint, initially at ``joint_pos`` (``props.names`` order; default: the standing pose); base
-    joints (if the asset has them) on a stiff PD."""
+    joints (if the asset has them) on a stiff PD; crank springs (``springs``, :func:`spring_gains`) as a PD to zero
+    with their own gains, at zero."""
     import isaaclab.sim as sim_utils
     from isaaclab.actuators import ImplicitActuatorCfg
     from isaaclab.assets import ArticulationCfg
@@ -225,6 +255,14 @@ def articulation_cfg(usd_path: Path, props: JointProperties, *, fixed_base: bool
         actuators["base"] = ImplicitActuatorCfg(
             joint_names_expr=[f"^{n}$" for n in names], stiffness=BASE_JOINT_STIFFNESS,
             damping=BASE_JOINT_DAMPING, armature=0.0, friction=0.0)
+        joint_pos |= {f"^{n}$": 0.0 for n in names}
+    if springs:
+        names = list(springs)
+        actuators["ankle_compliance"] = ImplicitActuatorCfg(
+            joint_names_expr=[f"^{n}$" for n in names],
+            stiffness=_per_joint(names, [springs[n][0] for n in names]),
+            damping=_per_joint(names, [springs[n][1] for n in names]),
+            armature=0.0, friction=0.0, viscous_friction=0.0, joint_effort_limit=SPRING_EFFORT_LIMIT_NM)
         joint_pos |= {f"^{n}$": 0.0 for n in names}
     return ArticulationCfg(
         prim_path=ROBOT_PRIM,
@@ -365,17 +403,18 @@ def solver_cfg(solver: str, settings: dict, *, integrator: str | None = None, de
 
 
 def simulation_cfg(physics: dict, *, device: str, period_s: float, solver: str | None = None,
-                   integrator: str | None = None, visualizers=None):
+                   integrator: str | None = None, visualizers=None, gravity_m_s2=None):
     """Isaac Lab on Newton with the selected solver (``solver``, else the profile's), configured from the profile's
-    ``physics`` block."""
+    ``physics`` block. ``gravity_m_s2``: None for Isaac Lab's default."""
     import isaaclab.sim as sim_utils
     from isaaclab_newton.physics import NewtonCfg
 
     name, settings = solver_settings(physics, solver)
+    extra = {} if gravity_m_s2 is None else {"gravity": tuple(float(g) for g in gravity_m_s2)}
     return sim_utils.SimulationCfg(
         dt=period_s, device=device,
         physics=NewtonCfg(solver_cfg=solver_cfg(name, settings, integrator=integrator, device=device)),
-        visualizer_cfgs=visualizers or None)
+        visualizer_cfgs=visualizers or None, **extra)
 
 
 class IsaacLabRobot:
@@ -412,7 +451,7 @@ class IsaacLabRobot:
         add_objects(scene_cfg, cfg.objects)
         scene_cfg.robot = articulation_cfg(usd_path, props, fixed_base=cfg.fixed_base, base_joints=cfg.base_joints,
                                            self_collision=cfg.self_collision, base_height_m=cfg.base_height_m,
-                                           contact_sensors=cfg.contacts)
+                                           contact_sensors=cfg.contacts, springs=cfg.springs)
         if cfg.imu:
             scene_cfg.imu = imu_sensor_cfg(desc.robot)
         for name, frame in (cfg.extra_imus or {}).items():
@@ -430,7 +469,8 @@ class IsaacLabRobot:
             raise ValueError("IsaacLabCfg.settings: the solver's block of the profile's physics")
         physics = {"solver": cfg.solver, cfg.solver: cfg.settings}
         self.sim = sim_utils.SimulationContext(simulation_cfg(physics, device=cfg.device, period_s=cfg.period_s,
-                                                              integrator=cfg.integrator, visualizers=visualizers))
+                                                              integrator=cfg.integrator, visualizers=visualizers,
+                                                              gravity_m_s2=cfg.gravity_m_s2))
         generator = getattr(cfg.terrain, "terrain_generator", None)
         if getattr(generator, "seed", None) is not None:
             # Isaac Lab's height-field functions draw their heights from NumPy's global state, which the generator's

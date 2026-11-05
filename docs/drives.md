@@ -257,6 +257,19 @@ The description's `ankle_model` extracts geometry and joint names from USD. `Ank
 
 Rotor armature is attached to each native crank shaft. The linkage supplies its configuration-dependent reflection and coupling through the solver; the constant semantic `armature_joint` approximation is not added to the hinges. Rod and crank body inertias remain those delivered in USD. Friction, drive delay, compliance and stop stiffness remain modeled until robot traces establish them.
 
+### Linkage compliance
+
+The real linkage gives under load: the foot moves away from the pose its crank readings imply, and the crank encoders do not see it. The asset variant built with `humanoid-sim build-asset --ankle-compliance` models that as a torsional spring and damper at each crank shaft. The crank's USD joint keeps its name, frames, axis and stops and is still the drive's joint, but it now turns a light output body (`<crank joint>_output`, 10 g on the shaft axis). A coaxial revolute joint, `<crank joint>_spring`, joins that output to the crank arm. The spring is a joint PD to a zero target, so both solvers carry it the way they carry any joint gain. Kamino treats it implicitly at any stiffness. MJWarp's `rk4` integrates it explicitly. On the V1 at 1 ms it held from 300 to 4000 N m/rad per crank with damping up to 0.3 N m s/rad; 1.0 N m s/rad diverged with springs of 1000 N m/rad or softer once the hinges' friction was removed. The damping acts on the light crank arm next to the spring, which bounds `rk4`'s step.
+
+The drive's encoder reads the output, so the drive feedback, and with it `RobotPlant.measured()`, is the crank reading a rigid linkage would give. The hinges, which `truth()` reports, are the deflected foot, and `Truth.ankle_spring_rad` is each crank arm's angle past its drive's reading. A rigid asset is unchanged: it keeps its key and bytes, and the defaults leave the knobs empty.
+
+| Knob | Where | Unit |
+|---|---|---|
+| `physics.ankle_compliance.stiffness_nm_per_rad`, `damping_nm_s_per_rad` | profile or `physics_overrides`; a number for every crank or a mapping by crank drive name; required by an asset with springs | N m/rad, N m s/rad per crank |
+| `ankle_spring_stiffness`, `ankle_spring_damping` | randomization specs, per env and crank (selector `cranks`), positive | the same |
+
+Statics (`src/humanoid_sim/transmissions/compliance.py`): with `J = dθ/dq` and `K = diag(k)`, a static hinge torque `τ` moves the foot by `J⁻¹ K⁻¹ J⁻ᵀ τ` from the pose its crank readings imply, and the drives' own torques give the same deflection, `-J⁻¹ K⁻¹ τ_d`. On the V1's symmetric ankle the foot's pitch and roll stiffness both follow the sum of the two cranks' stiffness, in a ratio the geometry fixes; their difference sets the pitch-roll coupling. A spring along each rod instead would give the same statics with `k = k_rod r²`, `r` the crank's moment arm, and differs only in how `r` changes with the crank angle, which a static sweep cannot resolve. The physics tests (`tests/test_ankle_compliance_physics.py`) check on both solvers that a static load deflects the foot by these statics, that no load gives no deflection, that stiff springs reproduce the rigid linkage, and that the springs stay stable at the ends of a fitted range under a shaking load. The fitted values come from humanoid-learning.
+
 ### The crank stops
 
 Each crank's `position_limit` in `actuators.yaml` becomes the corresponding USD revolute joint's physical limits. The semantic hinge bounds remain the axis hull computed by the description's ankle model. Both MJWarp and Kamino receive the explicit crank stops and closed mechanism.
