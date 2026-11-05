@@ -1,6 +1,6 @@
 # Testing and GPU runs
 
-The test suite has three tiers. Contract tests run natively on any machine. Physics tests step Isaac Lab and a Newton solver (MJWarp, and Kamino for two of them), and run in the Docker image on Warp's CPU device. A few tests need CUDA and run only on a GPU, which in this repository means a SkyPilot node. This page describes the suite, the CI jobs, and how to run work on a GPU. [getting-started.md](getting-started.md) covers installing uv, building the image and the robot asset.
+The test suite has three tiers. Contract tests run natively on any machine. Physics tests step Isaac Lab and a Newton solver (MJWarp, and Kamino for two of them), and run in the Docker image on Warp's CPU device. A few tests need CUDA and run only on a GPU, which in this repository means a SkyPilot node or the Spark runner. This page describes the suite, the CI jobs, and how to run work on a GPU. [getting-started.md](getting-started.md) covers installing uv, building the image and the robot asset.
 
 ## Test layout
 
@@ -44,7 +44,7 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 
 A test skips when something it needs is missing: Isaac Lab (`isaaclab_newton`), Newton, the Rerun SDK, scipy, the built robot asset, the captures, CUDA or a C compiler. The skip reason names it, and pytest prints every reason at the end of the run (`-ra` is set in `pyproject.toml`). A physics run without the built assets therefore passes with most tests skipped; read the skip summary after a physics run.
 
-Five tests need the built plain assets but carry no marker, because they use host kinematics (Newton, with the `newton` extra) and step no physics: `test_kinematic_model_mass_and_bodies`, `test_home_pose_levels_both_soles_at_one_height`, `test_home_and_start_poses_have_no_self_contact` and `test_the_v1_standing_pose_pitches_its_soles` in `test_physics.py`, and `test_view_runtime_records_frames_from_a_segment` in `test_runtime_view.py`, which also needs the Rerun SDK (the `viz` extra). They run natively once the asset exists in `outputs/assets/`, and skip without it. None of them runs in CI: the `cpu-contracts` job has no asset, and the `isaaclab-image` job selects `-m physics`. All of them run under a plain `pytest` in the image and in the `e2e` task.
+Five tests need the built plain assets but carry no marker, because they use host kinematics (Newton, with the `newton` extra) and step no physics: `test_kinematic_model_mass_and_bodies`, `test_home_pose_levels_both_soles_at_one_height`, `test_home_and_start_poses_have_no_self_contact` and `test_the_v1_standing_pose_pitches_its_soles` in `test_physics.py`, and `test_view_runtime_records_frames_from_a_segment` in `test_runtime_view.py`, which also needs the Rerun SDK (the `viz` extra). They run natively once the asset exists in `outputs/assets/`, and skip without it. None of them runs in CI: the `cpu-contracts` job has no asset, and the `physics` job selects `-m "physics and not rtx"`. All of them run under a plain `pytest` in the image and in the `e2e` task.
 
 ## Markers
 
@@ -70,7 +70,7 @@ The `data` tests look for captures in the directory named by `HUMANOID_SIM_DATAS
 
 Natively you need the `dev`, `newton`, `kinematics-check` and `viz` extras (`uv sync --extra dev --extra newton --extra kinematics-check --extra viz`), as CI installs them; without `newton`, the tests that need scipy or Newton skip, without `kinematics-check` (MuJoCo, for kinematics only) the static-box and scan placement tests skip, and without `viz` (Rerun, and Pillow for images) the scan tests skip. On an Apple silicon Mac with those extras and both robots' plain assets built, the native command reports 146 passed and 62 deselected (the `physics` and `data` tests) in about 20 s.
 
-The image includes pytest (`docker/Dockerfile` installs `pytest>=9,<10`). Build the V1's two assets and both G1s' first, or most physics tests skip. This is the `isaaclab-image` CI job's sequence:
+The image includes pytest (`docker/Dockerfile` installs `pytest>=9,<10`). Build the V1's two assets and both G1s' first, or most physics tests skip. This is the `physics` CI job's sequence:
 
 ```bash
 docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:dev build-asset
