@@ -224,6 +224,11 @@ class ImuDelivery:
             self._prev_host = t1
             self._prev_ns.fill_(t1)
 
+    def generators(self) -> tuple[torch.Generator, ...]:
+        """Every random stream the model draws from in :meth:`step`: a CUDA graph capturing the step must register
+        all of them."""
+        return (self.generator, self.drop_generator)
+
     def _measure(self, due: torch.Tensor, at_ns: torch.Tensor, ideal: torch.Tensor, r: torch.Tensor) -> None:
         drifted = self._drift_decay * self.drift + self._normal(self.num_envs) * self._drift_kick
         self.drift.copy_(torch.where(due.unsqueeze(1), drifted, self.drift))

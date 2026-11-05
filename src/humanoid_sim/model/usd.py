@@ -168,19 +168,24 @@ def fixed_body_excludes(edges: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return sorted(pair for names in groups.values() for pair in combinations(names, 2))
 
 
-def asset_key(desc, profile: dict, *, base_joints: bool = False) -> str:
+def asset_key(desc, profile: dict, *, base_joints: bool = False, ankle_compliance: bool = False) -> str:
     record = {"schema": "humanoid-sim-native-usd/v6", "source": desc.usd_model.digest(),
               "description": desc.digest, "base_joints": base_joints,
               "actuators": hashlib.sha256(desc.actuators_path.read_bytes()).hexdigest(), "model": profile["model"],
               "ankle_stop_solref": profile["physics"]["mjwarp"]["ankle_stop_solref"]}
+    if ankle_compliance:  # only then: the rigid asset keeps its key
+        record["ankle_compliance"] = COMPLIANCE_SCHEMA
     return hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints=False) -> Path:
+def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints=False,
+                ankle_compliance=False) -> Path:
     """Compose the delivered articulation and author simulator choices in a separate layer.
 
     Retain native crank bodies and all loop-closing joints. Weld only uncommanded
     revolute joints outside the ankle mechanisms; never edit the source delivery.
+    With ``ankle_compliance``, the variant whose crank shafts each carry a spring between the drive's output and
+    the crank arm (:func:`_author_crank_springs`); without it nothing of that is authored.
     """
     import shutil
 
@@ -192,7 +197,7 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     prune = profile["model"].get("prune_contained_hulls", False)
     if not isinstance(prune, bool):
         raise ValueError("prune_contained_hulls must be a boolean")
-    key = asset_key(desc, profile, base_joints=base_joints)
+    key = asset_key(desc, profile, base_joints=base_joints, ankle_compliance=ankle_compliance)
     out = Path(out_root) / desc.robot / key
     meta_path = out / "asset.json"
     path = out / "robot.usda"
@@ -251,6 +256,7 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
                 Gf.Vec2f(*profile["physics"]["mjwarp"]["ankle_stop_solref"]))
 
     universal = _author_universal_rods(desc, profile, source, stage, mapped)
+    springs = _author_crank_springs(desc, source, stage, mapped) if ankle_compliance else None
 
     excluded = []
     fixed_pairs = []
@@ -306,6 +312,8 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
             "welded_joints": welded, "sole_boxes": soles, "merged_collision_bodies": [],
             "pruned_collision_hulls": pruned,
             "contact_excludes": contact_excludes, "self_collision_sets": None, "self_collision_excludes": excluded}
+    if springs is not None:
+        meta["ankle_compliance"] = springs
     meta_path.write_text(json.dumps(meta, indent=1))
     return path
 
@@ -351,6 +359,59 @@ def _author_universal_rods(desc, profile: dict, source, stage, mapped) -> list[s
             limit.CreateLowAttr(float(low))
             limit.CreateHighAttr(float(high))
         out.append(name)
+    return out
+
+
+COMPLIANCE_SCHEMA = "crank-spring/v1"
+# The drive output body behind each crank spring: the output flange, on the shaft axis. Its own inertia barely
+# matters (the drive's rotor armature sits on the same joint); a few grams keep the solvers' body inertias sane.
+OUTPUT_MASS_KG = 0.01
+OUTPUT_INERTIA_KG_M2 = 2e-6
+
+
+def _author_crank_springs(desc, source, stage, mapped) -> dict:
+    """Split every ankle crank shaft into the drive's joint and a spring. The drive's joint keeps its name, limits and
+    frames but turns a new output body (``<crank joint>_output``, a sibling of the crank arm at the crank arm's pose,
+    mass on the shaft axis); a revolute joint ``<crank joint>_spring`` on the same axis joins the output to the crank
+    arm. At zero spring angle the assembly is the rigid one. The spring's gains are joint gains set at spawn and by
+    randomization (:mod:`humanoid_sim.transmissions.compliance`). Returns the asset metadata."""
+    from pxr import Gf, UsdGeom, UsdPhysics
+
+    from humanoid_sim.transmissions.compliance import output_body, spring_joints
+
+    springs = spring_joints(desc)
+    cranks = crank_joints(desc)
+    out = {"schema": COMPLIANCE_SCHEMA, "springs": {}, "outputs": {}}
+    for drive, spring in springs.items():
+        name = cranks[drive]
+        joint = source.joints[name]
+        if not joint.GetPrim().IsA(UsdPhysics.RevoluteJoint):
+            raise ValueError(f"ankle compliance: crank {name} is not a revolute joint")
+        _, arm = source.joint_bodies(name)
+        arm_prim = source.bodies[arm]
+        target = mapped(arm_prim).GetParentPath().AppendChild(output_body(name))
+        if stage.GetPrimAtPath(target):
+            raise ValueError(f"ankle compliance: {target} already exists")
+        body = UsdGeom.Xform.Define(stage, target)
+        body.AddTransformOp().Set(UsdGeom.Xformable(arm_prim).GetLocalTransformation())
+        UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
+        mass = UsdPhysics.MassAPI.Apply(body.GetPrim())
+        mass.CreateMassAttr(OUTPUT_MASS_KG)
+        mass.CreateDiagonalInertiaAttr(Gf.Vec3f(OUTPUT_INERTIA_KG_M2))
+        mass.CreateCenterOfMassAttr(Gf.Vec3f(*joint.GetLocalPos1Attr().Get()))
+        mass.CreatePrincipalAxesAttr(Gf.Quatf(1))
+        crank = UsdPhysics.RevoluteJoint(stage.GetPrimAtPath(mapped(joint.GetPrim())))
+        crank.GetBody1Rel().SetTargets([target])
+        hinge = UsdPhysics.RevoluteJoint.Define(stage, mapped(joint.GetPrim()).GetParentPath().AppendChild(spring))
+        hinge.CreateBody0Rel().SetTargets([target])
+        hinge.CreateBody1Rel().SetTargets([mapped(arm_prim)])
+        hinge.CreateAxisAttr(UsdPhysics.RevoluteJoint(joint.GetPrim()).GetAxisAttr().Get())
+        for create in (hinge.CreateLocalPos0Attr, hinge.CreateLocalPos1Attr):
+            create(joint.GetLocalPos1Attr().Get())
+        for create in (hinge.CreateLocalRot0Attr, hinge.CreateLocalRot1Attr):
+            create(joint.GetLocalRot1Attr().Get())
+        out["springs"][drive] = spring
+        out["outputs"][drive] = output_body(name)
     return out
 
 

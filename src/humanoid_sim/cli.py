@@ -2,7 +2,7 @@
 
     humanoid-sim [--solver mjwarp|kamino] <command>  Newton solver for the commands that step physics
                                                    (default: the profile's)
-    humanoid-sim build-asset [--base-joints]       robot USD from the description (Isaac Lab image)
+    humanoid-sim build-asset [--base-joints] [--ankle-compliance]  robot USD from the description (Isaac Lab image)
     humanoid-sim replay <exc-dir> [--period-ms PERIOD] [--base yaw|orientation|fixed] [--terrain FILE]
                                                    drive-level replay, scored against the capture;
                                                    base following the capture's IMU yaw (default), or fixed
@@ -60,7 +60,7 @@ def cmd_build_asset(args) -> int:
     from humanoid_sim.model.description import Description
 
     usd = build_asset(Description.load(args.robot), load_profile(args.robot), Path(args.assets), force=args.force,
-                      base_joints=args.base_joints)
+                      base_joints=args.base_joints, ankle_compliance=args.ankle_compliance)
     print(usd)
     return 0
 
@@ -362,6 +362,9 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--force", action="store_true")
     b.add_argument("--base-joints", action="store_true",
                    help="the variant with yaw/pitch/roll joints above the base, for replays with a moving base")
+    b.add_argument("--ankle-compliance", action="store_true",
+                   help="the variant with a spring between each ankle crank drive and its crank arm (physics."
+                        "ankle_compliance gives its stiffness and damping)")
     b.set_defaults(func=cmd_build_asset)
 
     r = sub.add_parser("replay")
