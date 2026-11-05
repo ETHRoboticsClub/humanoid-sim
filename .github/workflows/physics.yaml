@@ -1,27 +1,13 @@
-# Physics tests on the self-hosted Spark runner (labels: self-hosted, linux, arm64, spark), in the Isaac Lab image
-# (docker/Dockerfile, built natively for arm64) on the Spark's GPU. Triggers: the `physics` label on a pull request,
-# workflow_dispatch, and nightly at 02:00 UTC. Setup: docs/ci.md.
-#
-# The runner user holds read-only deploy keys, not GitHub secrets. ~/.ssh/config on the Spark:
-#   Host github-humanoid-urdf
-#     HostName github.com
-#     User git
-#     IdentityFile ~/.ssh/deploy_humanoid_urdf
-#     IdentitiesOnly yes
-#   Host github-humanoid-sim
-#     HostName github.com
-#     User git
-#     IdentityFile ~/.ssh/deploy_humanoid_sim
-#     IdentitiesOnly yes
-# and github.com in ~/.ssh/known_hosts. The runner user must be in the docker group, with the NVIDIA container toolkit.
+# Physics lane, a placeholder for now. The Spark runner is a Kubernetes pod without Docker and the GB10 GPUs are
+# scarce, so CI does not run physics. Triggers: the `physics` label on a pull request and workflow_dispatch (no
+# nightly). The job prints how to run the physics tests on SkyPilot and exits 0. Running them from CI is a follow-up.
+# Setup: see https://github.com/ETHRoboticsClub/humanoid-sim/blob/master/docs/ci.md
 name: Physics
 
 on:
   pull_request:
-    types: [labeled, synchronize, reopened]
+    types: [labeled]
   workflow_dispatch:
-  schedule:
-    - cron: "0 2 * * *"
 
 permissions:
   contents: read
@@ -30,57 +16,15 @@ concurrency:
   group: physics-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  IMAGE: humanoid-sim:ci
-  GIT_CONFIG_COUNT: "2"
-  GIT_CONFIG_KEY_0: url.github-humanoid-urdf:ETHRoboticsClub/humanoid-urdf.git.insteadOf
-  GIT_CONFIG_VALUE_0: git@github.com:ETHRoboticsClub/humanoid-urdf.git
-  GIT_CONFIG_KEY_1: url.github-humanoid-urdf:ETHRoboticsClub/humanoid-urdf.git.insteadOf
-  GIT_CONFIG_VALUE_1: https://github.com/ETHRoboticsClub/humanoid-urdf.git
-
 jobs:
   physics:
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
-       contains(github.event.pull_request.labels.*.name, 'physics') &&
-       (github.event.action != 'labeled' || github.event.label.name == 'physics'))
+       github.event.label.name == 'physics')
     runs-on: [self-hosted, linux, arm64, spark]
-    timeout-minutes: 90
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: false
-          lfs: false
-          persist-credentials: false
-      - name: Submodules
-        run: git submodule update --init --recursive
-      - name: Build the image
-        run: docker build -f docker/Dockerfile -t "$IMAGE" .
-      - name: Build the robot assets
-        run: |
-          run() { docker run --rm --gpus all -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim "$IMAGE" "$@"; }
-          run build-asset
-          run build-asset --base-joints
-          for r in g1_29dof_rev_1_0 g1_29dof_with_hand_rev_1_0; do run --robot "$r" build-asset; done
-      - name: Physics tests, one pytest process per file
-        run: |
-          # The rtx tests need the Kit image (docker/Dockerfile.kit) and an RTX GPU, so they are not run here.
-          sel='physics and not rtx'
-          run() { docker run --rm --gpus all -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim "$IMAGE" "$@"; }
-          files=$(run pytest -m "$sel" --collect-only -q | grep '::' | cut -d: -f1 | sort -u)
-          test -n "$files" || { echo "::error::no physics tests collected"; exit 1; }
-          failed=""
-          for f in $files; do
-            echo "::group::$f"
-            run pytest -m "$sel" "$f" || failed="$failed $f"
-            echo "::endgroup::"
-          done
-          if [ -n "$failed" ]; then echo "::error::failed files:$failed"; exit 1; fi
-      - name: Clean the workspace
-        if: always()
-        run: |
-          # The container wrote as root: hand the files back before cleaning.
-          docker run --rm --entrypoint chown -v "$PWD":/w "$IMAGE" -R "$(id -u):$(id -g)" /w || true
-          git clean -ffdx || true
-          docker image rm "$IMAGE" || true
+      - run: |
+          echo "::notice::Physics tests do not run in CI yet. Run them on a SkyPilot GPU node: sky launch -y -d -c hsim-e2e -i 10 sky/e2e.sky.yaml"
+          echo "See docs/ci.md in humanoid-sim, section 'Physics on SkyPilot'."
