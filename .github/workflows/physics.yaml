@@ -1,21 +1,7 @@
-# Physics tests for humanoid-sim on the self-hosted Spark runner (labels: self-hosted, linux, arm64, spark), in the Isaac Lab
-# environment at ~/il-venv that the runner's setup installed (sky/setup.sh), on the Spark's GB10 GPU. Triggers: the
-# `physics` label on a pull request, workflow_dispatch, and nightly at 02:00 UTC. Isaac Lab is slow on the Spark, so
-# this lane is never a required check: the job has continue-on-error and ci-ok does not depend on it.
-# Setup: docs/ci.md in humanoid-sim.
-#
-# The runner user holds read-only deploy keys, not GitHub secrets. ~/.ssh/config on the Spark:
-#   Host github-humanoid-urdf
-#     HostName github.com
-#     User git
-#     IdentityFile ~/.ssh/deploy_humanoid_urdf
-#     IdentitiesOnly yes
-#   Host github-humanoid-sim
-#     HostName github.com
-#     User git
-#     IdentityFile ~/.ssh/deploy_humanoid_sim
-#     IdentitiesOnly yes
-# and github.com in ~/.ssh/known_hosts.
+# Physics tests for humanoid-sim on a GitHub-hosted runner, on the CPU: builds the Isaac Lab image (docker/Dockerfile), builds
+# the V1's assets and both G1s', and runs `pytest -m physics` in the image. Triggers: the `physics` label on a same-repository
+# pull request (it needs the submodule token), workflow_dispatch, and nightly at 02:00 UTC. GPU physics runs in
+# humanoid-learning's Physics workflow (job sim-physics). Setup: docs/ci.md.
 name: Physics
 
 on:
@@ -25,67 +11,44 @@ on:
   schedule:
     - cron: "0 2 * * *"
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: physics-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  GIT_CONFIG_COUNT: "2"
-  GIT_CONFIG_KEY_0: url.github-humanoid-urdf:ETHRoboticsClub/humanoid-urdf.git.insteadOf
-  GIT_CONFIG_VALUE_0: git@github.com:ETHRoboticsClub/humanoid-urdf.git
-  GIT_CONFIG_KEY_1: url.github-humanoid-urdf:ETHRoboticsClub/humanoid-urdf.git.insteadOf
-  GIT_CONFIG_VALUE_1: https://github.com/ETHRoboticsClub/humanoid-urdf.git
-
 jobs:
-  physics:
+  isaaclab-image:
     if: >-
       github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.label.name == 'physics')
-    runs-on: [self-hosted, linux, arm64, spark]
-    continue-on-error: true
-    timeout-minutes: 360
+      (github.event.label.name == 'physics' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.user.login != 'dependabot[bot]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
-          submodules: false
+          app-id: ${{ vars.CI_READ_APP_ID }}
+          private-key: ${{ secrets.CI_READ_PRIVATE_KEY }}
+          owner: ETHRoboticsClub
+          repositories: humanoid-urdf
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
           lfs: false
           persist-credentials: false
-      - name: Submodules
-        run: git submodule update --init --recursive
-      - name: Physics tests, one pytest process per file
+          token: ${{ steps.app.outputs.token }}
+      - run: docker build -f docker/Dockerfile -t humanoid-sim:ci .
+      - name: Build the assets and run the physics tests
         run: |
-          export PATH="$HOME/il-venv/bin:$HOME/.local/bin:$PATH"
-          uv pip install -q --python "$HOME/il-venv/bin/python" --no-deps -e .
-          humanoid-sim build-asset | tail -1
-          humanoid-sim build-asset --base-joints | tail -1
-          for r in g1_29dof_rev_1_0 g1_29dof_with_hand_rev_1_0; do humanoid-sim --robot "$r" build-asset | tail -1; done
-          # The rtx tests need Isaac Sim (Kit) and an RTX GPU, the data tests need robot captures.
-          sel='physics and not rtx and not data'
-          files=$(pytest -m "$sel" --collect-only -q | grep '::' | cut -d: -f1 | sort -u)
-          test -n "$files" || { echo "::error::no physics tests collected"; exit 1; }
-          mkdir -p physics-logs
-          failed=""
-          {
-            echo "### Physics tests ($sel)"
-            echo
-            echo "| File | Result | Seconds |"
-            echo "|---|---|---|"
-          } >> "$GITHUB_STEP_SUMMARY"
-          for f in $files; do
-            start=$(date +%s)
-            echo "::group::$f"
-            rc=0
-            pytest -m "$sel" "$f" > "physics-logs/$(basename "$f").log" 2>&1 || rc=$?
-            tail -40 "physics-logs/$(basename "$f").log"
-            if [ "$rc" = 0 ]; then res=passed; else res=FAILED; failed="$failed $f"; fi
-            echo "::endgroup::"
-            echo "| $f | $res | $(($(date +%s) - start)) |" >> "$GITHUB_STEP_SUMMARY"
+          docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci build-asset
+          docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci build-asset --base-joints
+          for r in g1_29dof_rev_1_0 g1_29dof_with_hand_rev_1_0; do
+            docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci --robot "$r" build-asset
           done
-          if [ -n "$failed" ]; then echo "::error::failed files:$failed"; exit 1; fi
-      - name: Clean the workspace
-        if: always()
-        run: git clean -ffdx || true
+          docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci \
+            pytest -m physics

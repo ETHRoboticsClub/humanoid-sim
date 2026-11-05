@@ -44,7 +44,7 @@ Every test lives in `tests/`. The last column lists the markers in each file; fi
 
 A test skips when something it needs is missing: Isaac Lab (`isaaclab_newton`), Newton, the Rerun SDK, scipy, the built robot asset, the captures, CUDA or a C compiler. The skip reason names it, and pytest prints every reason at the end of the run (`-ra` is set in `pyproject.toml`). A physics run without the built assets therefore passes with most tests skipped; read the skip summary after a physics run.
 
-Five tests need the built plain assets but carry no marker, because they use host kinematics (Newton, with the `newton` extra) and step no physics: `test_kinematic_model_mass_and_bodies`, `test_home_pose_levels_both_soles_at_one_height`, `test_home_and_start_poses_have_no_self_contact` and `test_the_v1_standing_pose_pitches_its_soles` in `test_physics.py`, and `test_view_runtime_records_frames_from_a_segment` in `test_runtime_view.py`, which also needs the Rerun SDK (the `viz` extra). They run natively once the asset exists in `outputs/assets/`, and skip without it. None of them runs in CI: the `cpu-contracts` job has no asset. All of them run under a plain `pytest` in the image and in the `e2e` task.
+Five tests need the built plain assets but carry no marker, because they use host kinematics (Newton, with the `newton` extra) and step no physics: `test_kinematic_model_mass_and_bodies`, `test_home_pose_levels_both_soles_at_one_height`, `test_home_and_start_poses_have_no_self_contact` and `test_the_v1_standing_pose_pitches_its_soles` in `test_physics.py`, and `test_view_runtime_records_frames_from_a_segment` in `test_runtime_view.py`, which also needs the Rerun SDK (the `viz` extra). They run natively once the asset exists in `outputs/assets/`, and skip without it. None of them runs in CI: the `cpu-contracts` job has no asset, and the `isaaclab-image` job selects `-m physics`. All of them run under a plain `pytest` in the image and in the `e2e` task.
 
 ## Markers
 
@@ -70,7 +70,7 @@ The `data` tests look for captures in the directory named by `HUMANOID_SIM_DATAS
 
 Natively you need the `dev`, `newton`, `kinematics-check` and `viz` extras (`uv sync --extra dev --extra newton --extra kinematics-check --extra viz`), as CI installs them; without `newton`, the tests that need scipy or Newton skip, without `kinematics-check` (MuJoCo, for kinematics only) the static-box and scan placement tests skip, and without `viz` (Rerun, and Pillow for images) the scan tests skip. On an Apple silicon Mac with those extras and both robots' plain assets built, the native command reports 146 passed and 62 deselected (the `physics` and `data` tests) in about 20 s.
 
-The image includes pytest (`docker/Dockerfile` installs `pytest>=9,<10`). Build the V1's two assets and both G1s' first, or most physics tests skip. The sequence:
+The image includes pytest (`docker/Dockerfile` installs `pytest>=9,<10`). Build the V1's two assets and both G1s' first, or most physics tests skip. This is the `isaaclab-image` CI job's sequence:
 
 ```bash
 docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:dev build-asset
@@ -101,15 +101,15 @@ uv run ruff check src tests spikes examples docs
 
 ## CI
 
-Two workflows run on the self-hosted Spark runner, as described in [ci.md](ci.md). `.github/workflows/ci.yaml` runs on every pull request and push to master; the test jobs are skipped for changes to Markdown only, and `ci-ok` reports either way. `.github/workflows/physics.yaml` runs the physics tests.
+Two workflows run on GitHub-hosted runners, as described in [ci.md](ci.md). `.github/workflows/ci.yaml` runs on every pull request and push to master; the test jobs are skipped for changes to Markdown only, and `ci-ok` reports either way. `.github/workflows/physics.yaml` runs the physics tests on the CPU.
 
-| Job | Trigger | Steps |
-|---|---|---|
-| `cpu-contracts` | pull request, push to master | Check out, update the submodules over the deploy key aliases, `uv sync --python 3.12 --extra dev --extra newton --extra kinematics-check --extra viz --extra bag`, `uv run ruff check src tests spikes examples docs`, `uv run --extra dev pytest -m "not physics and not data"` |
-| `controls-pins` | pull request, push to master | Compare the humanoid-urdf commit with the one Controls pins |
-| `physics` | the `physics` label, manual dispatch, nightly | `pytest -m "physics and not rtx and not data"` in `~/il-venv` on the Spark runner's GPU, one process per test file, after building the V1 and G1 assets. Not a required check |
+| Job | Trigger | Runner | Steps |
+|---|---|---|---|
+| `cpu-contracts` | pull request, push to master | `ubuntu-24.04` (x86) | Check out with submodules, install uv 0.13.1, `uv sync --locked --python 3.12 --extra dev --extra newton --extra kinematics-check --extra viz --extra bag`, `uv run ruff check src tests spikes examples docs`, `uv run pytest -m "not physics and not data"` |
+| `controls-pins` | pull request, push to master | `ubuntu-24.04` | Compare the humanoid-urdf commit with the one Controls pins |
+| `isaaclab-image` (`physics.yaml`) | the `physics` label on a pull request, manual dispatch, nightly | `ubuntu-24.04` (x86) | Check out with submodules, `docker build -f docker/Dockerfile -t humanoid-sim:ci .` (amd64), build the V1's two assets and both G1s', run `pytest -m physics` in the image on Warp's CPU device. Not a required check |
 
-The runner has no captures, so the `data` tests run wherever the captures are (natively, in the image or in the `e2e` task). The benchmarks, the replays and the examples run through the `e2e` task.
+No CI runner has a GPU or the captures. The `data` tests run wherever the captures are (natively, in the image or in the `e2e` task), and the CUDA tests only on a GPU node, through the `e2e` task. GPU physics for a branch also runs in humanoid-learning's `Physics` workflow (job `sim-physics`).
 
 ### Controls pins
 
@@ -119,15 +119,14 @@ humanoid-urdf must be at the same commit as in Controls. The `controls-pins` job
 |---|---|
 | `third_party/humanoid-urdf` | `ros2_ws/src/description/humanoid-urdf` |
 
-Two repository settings control the job:
+The job reads two repository settings:
 
-- `SUBMODULES_TOKEN` is a repository secret: a GitHub token that can read Controls' repository and the submodule repositories. The job uses it to read Controls' pins through the GitHub API. Without it, the job prints a warning and passes without checking anything. The submodules are fetched with the runner's deploy keys, not this token.
-- `CONTROLS_REF` is a repository variable: the Controls branch, tag or commit whose pins are compared. It defaults to `master`.
+- The "ETHRC CI read" GitHub App supplies the access: the repository variable `CI_READ_APP_ID` and the repository secret `CI_READ_PRIVATE_KEY`. The job mints a token for ETHRC-Humanoid-Controls only and reads Controls' pins through the GitHub API with it. The checkout of the humanoid-urdf submodule in `cpu-contracts` and `isaaclab-image` uses a token for humanoid-urdf only. Pull requests from forks and from Dependabot get no secrets, so these jobs are skipped for them; see [ci.md](ci.md).
+- `CONTROLS_REF` is a repository variable: the Controls branch, tag or commit whose pins are compared. It defaults to `master` and may contain only letters, digits and `.`, `_`, `/`, `-`.
 
-Set them with the GitHub CLI (`gh`), or under Settings, Secrets and variables, Actions:
+Set the variable with the GitHub CLI (`gh`), or under Settings, Secrets and variables, Actions:
 
 ```bash
-gh secret set SUBMODULES_TOKEN
 gh variable set CONTROLS_REF --body master
 ```
 

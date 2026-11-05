@@ -1,67 +1,44 @@
-# CI and the self-hosted runner
+# CI
 
-CI runs on a self-hosted runner, not on GitHub-hosted runners. GitHub-hosted runners run out of quota and cannot clone the private submodules. The same setup is used by humanoid-learning and humanoid-urdf, which link to this page.
-
-## Runner
-
-The runner is the SkyPilot cluster `ci-runner`, a long-lived Kubernetes pod on the `ssh/spark` pool (a DGX Spark: aarch64, Ubuntu 22.04, one GB10 GPU). It runs as the unprivileged user `sky`, never as root. There is no Docker in the pod. It runs three GitHub Actions runners, one each for humanoid-sim, humanoid-learning and humanoid-urdf, sharing the pod's one GPU (the pool cannot hand out a fraction of a GPU, so a physics run blocks that repository's CI until it ends), and has Isaac Lab in `~/il-venv` for the physics lane. There is no volume: the deploy keys, `~/.ssh` (a link to `~/ci/ssh`), the runner registrations and the work directories live in `~/ci` in the pod.
-
-The launch task is `~/ETHRC/tools/ci-runner/ci-runner.sky.yaml` on the maintainer's machine; it is not in a repository. Its header has the commands. To restart the runners while the pod is up (they show offline under Settings, Actions, Runners), run `sky exec -d ci-runner --secret GH_TOKEN="$(gh auth token)" ~/ETHRC/tools/ci-runner/ci-runner.sky.yaml`: the keys and registrations in `~/ci` are kept. If the pod itself was restarted, `~/ci` is gone: relaunch with `sky launch` as in the task header. That reruns setup, generates new deploy keys and registers the runners again with `--replace`; delete the stale deploy keys titled "ci-runner spark (read-only)" in the three repositories afterwards. A supervisor loop restarts a runner whose process dies. The cluster has no autostop.
-
-Labels: `self-hosted`, `linux`, `arm64`, `spark`. Every job uses `runs-on: [self-hosted, linux, arm64, spark]`.
-
-The runner user needs:
-
-- `git` and `uv` 0.13.1 on its `PATH` (`/home/sky/.local/bin/uv`), with its cache in `~/.cache/uv`. `uv sync --python 3.12` fetches Python itself.
-- Read-only deploy keys for humanoid-urdf, humanoid-sim and ETHRC-Humanoid-Controls, generated on the cluster, kept in `~/ci/ssh` and never in GitHub secrets, with `github.com` in `~/.ssh/known_hosts`.
-
-Expected `~/.ssh/config`, one alias per deploy key (the key files sit in `~/ci/ssh`, and the launch task writes this file):
-
-```
-Host github-humanoid-urdf
-  HostName github.com
-  User git
-  IdentityFile ~/.ssh/deploy_humanoid_urdf
-  IdentitiesOnly yes
-
-Host github-humanoid-sim
-  HostName github.com
-  User git
-  IdentityFile ~/.ssh/deploy_humanoid_sim
-  IdentitiesOnly yes
-
-Host github-controls
-  HostName github.com
-  User git
-  IdentityFile ~/.ssh/deploy_controls
-  IdentitiesOnly yes
-```
-
-Each workflow checks out with `submodules: false`, then runs `git submodule update --init --recursive`. The job's environment sets `GIT_CONFIG_*` variables that rewrite the submodule URLs (`git@github.com:ETHRoboticsClub/<repo>.git`) to `<alias>:ETHRoboticsClub/<repo>.git`. The rewrite applies to that job only, including nested submodules, and nothing is written to a global git config.
-
-## Security
-
-A self-hosted runner executes whatever a workflow tells it to, so a pull request that reaches it has code execution on the pod. The rules:
-
-- Only code from this organisation's own branches runs on the runner. Every job skips when the head repository is not this repository, so pull requests from forks never reach it. Keep that guard on every job, including new workflows.
-- Never use `pull_request_target`, and never check out a pull request's head in a workflow triggered by anything other than `pull_request`.
-- The pod holds nothing worth stealing beyond read access: read-only deploy keys for humanoid-urdf, humanoid-sim and ETHRC-Humanoid-Controls, no GitHub token, no cloud credentials, no repository secrets. The token used to register the runners is dropped before any runner starts.
-- Before a repository goes public, its pull request lanes move to GitHub-hosted runners (free for public repositories), and the Spark runner only serves pushes to master, the nightly physics run and `workflow_dispatch` by maintainers. Also set the organisation's Actions setting to require approval for workflows from outside contributors.
+humanoid-sim is a public repository, so CI runs on GitHub-hosted runners only. No self-hosted runner may serve it, and none is registered. The private repositories humanoid-learning and humanoid-urdf have their own CI.
 
 ## Workflows
 
 | Workflow | Triggers | What runs | Timeout |
 |---|---|---|---|
-| `CI` (`ci.yaml`) | pull request, push to master | `changes` decides whether anything besides Markdown and `docs/images` changed. If so: `cpu-contracts` (ruff, `pytest -m "not physics and not data"`) and `controls-pins` (humanoid-urdf against Controls' pin, read over the Controls deploy key). `ci-ok` always runs and passes when those passed or were skipped | 20 min |
-| `Physics` (`physics.yaml`) | the `physics` label on a pull request, manual dispatch, nightly at 02:00 UTC | The `physics` tests (not `rtx`, not `data`) in `~/il-venv` on the GPU, one pytest process per test file, a per-file table in the job summary | 6 h |
+| `CI` (`ci.yaml`) | pull request, push to master | `changes` decides whether anything besides Markdown and `docs/images` changed and whether the run has secrets. If it changed code and has secrets: `cpu-contracts` (ruff, `pytest -m "not physics and not data"` on `ubuntu-24.04`) and `controls-pins` (humanoid-urdf against Controls' pin). `ci-ok` always runs and passes when those passed or were skipped by the path filter | 20 min |
+| `Physics` (`physics.yaml`) | the `physics` label on a pull request from this repository, manual dispatch, nightly at 02:00 UTC | `isaaclab-image`: builds the Isaac Lab image, the V1's assets and both G1s', and runs `pytest -m physics` on the CPU, on `ubuntu-24.04` | 3 h |
 
-`ci-ok` is the check to require on master. It is not affected by the path filter, which is why the filter is a job and not a workflow `paths` setting. The `Physics` job has `continue-on-error` and is not a dependency of `ci-ok`: Isaac Lab on the Spark is slow, so physics is informational and never a required check. A pull request from a fork gets no `ci-ok`, so it cannot merge on a green check.
+`ci-ok` is the check to require on master. It is not affected by the path filter, which is why the filter is a job and not a workflow `paths` setting. `Physics` is informational and not a dependency of `ci-ok`. A newer push to the same ref cancels the run in progress.
 
-Pull requests from forks never run on the runner: every job skips unless the head repository is this repository. A newer push to the same ref cancels the run in progress. The workflows have `contents: read` and none uses `pull_request_target`.
+## Access to private repositories
+
+The humanoid-urdf submodule and Controls are private. The jobs that need them mint a short-lived installation token with `actions/create-github-app-token` from the "ETHRC CI read" GitHub App:
+
+- The app has Contents read on humanoid-urdf and ETHRC-Humanoid-Controls only. Its ID is the repository variable `CI_READ_APP_ID` and its private key is the repository secret `CI_READ_PRIVATE_KEY`.
+- Each job narrows the token with `repositories:` to the one repository it needs: humanoid-urdf for `cpu-contracts` and `isaaclab-image`, ETHRC-Humanoid-Controls for `controls-pins`. The token expires with the job.
+- Checkouts use `persist-credentials: false`, so the token is not left in the workspace's git config.
+- The key is rotated when someone with write access leaves the organisation.
+
+## Pull requests from forks
+
+Pull requests from forks, and from Dependabot, get no repository secrets, so they cannot mint the token and cannot read humanoid-urdf. The jobs that need it are skipped for them, and `ci-ok` fails with a message saying so. `changes` runs for everyone, so docs-only pull requests from forks still pass.
+
+To get a fork's change through CI, a maintainer reads the diff, then pushes the branch to `ETHRoboticsClub/humanoid-sim` and opens a pull request from it. That runs the full CI as a same-repository pull request. Never push a fork's branch unread: CI executes whatever the branch contains.
+
+## Security
+
+- No self-hosted runner for a public repository: any GitHub user can open a pull request whose workflow file runs on it. Keep every `runs-on` GitHub-hosted. The organisation's runner groups must keep "Allow public repositories" off.
+- Never use `pull_request_target` or `workflow_run` with code from a pull request, and never put pull request text (title, branch name, label) into a `run:` script; pass values through `env:`.
+- Workflows start with `permissions: {}`, and each job asks for `contents: read` only.
+- Every action is pinned to a full commit SHA with its version in a comment, and `.github/dependabot.yml` proposes updates weekly. Python dependencies come from `uv.lock` (`uv sync --locked`), with uv at a fixed version.
+- Branch protection on master should require a pull request and the `ci-ok` check.
 
 ## Physics
 
-The `Physics` workflow runs on the runner's GPU in `~/il-venv`, the environment that `sky/setup.sh` builds. Start it by adding the `physics` label to a pull request, from Actions, Physics, Run workflow, or with `gh workflow run physics.yaml --ref <branch>`. It also runs nightly. It can take hours; the job summary lists each test file with its result and time.
+The `Physics` workflow runs the `physics` tests in the Isaac Lab image on the CPU. Start it by adding the `physics` label to a pull request from this repository, from Actions, Physics, Run workflow, or with `gh workflow run physics.yaml --ref <branch>`. It also runs nightly.
+
+GPU physics for a branch runs in humanoid-learning's `Physics` workflow: its `sim-physics` job takes a `sim_ref` input (default `master`), checks out that branch of humanoid-sim and runs the `physics and not rtx and not data` tests on a GPU runner. The results appear in humanoid-learning's Actions, not on the pull request here. Run it for a branch before merging when GPU physics matters.
 
 The same tests can run on a separate SkyPilot GPU node, with the cluster stopped afterwards (`-i 10`):
 
@@ -72,31 +49,36 @@ sky logs hsim-e2e
 
 The `e2e` task also runs the benchmarks, the replays and the examples. See [testing-and-gpu.md](testing-and-gpu.md) for the tiers.
 
+## The private repositories
+
+humanoid-urdf runs on GitHub-hosted runners. humanoid-learning runs its GPU physics lane on ephemeral, single-job runners, each a fresh unprivileged container that is deleted when the job ends. Neither repository has a self-hosted runner that serves humanoid-sim.
+
 ## Run the CI commands locally
 
 From a clone with submodules (`git submodule update --init --recursive`):
 
 ```
-uv sync --python 3.12 --extra dev --extra newton --extra kinematics-check --extra viz --extra bag
+uv sync --locked --python 3.12 --extra dev --extra newton --extra kinematics-check --extra viz --extra bag
 uv run ruff check src tests spikes examples docs
-uv run --extra dev pytest -m "not physics and not data"
+uv run pytest -m "not physics and not data"
 ```
 
 ### humanoid-learning
 
 ```
-uv sync --python 3.12 --extra dev
+uv sync --locked --python 3.12 --extra dev
 uv run ruff check src tests
 uv run pytest -m "not physics"
 ```
 
-Its `Physics` workflow runs `pytest -m "physics and not data" --device cuda:0` per file in `~/il-venv`. On a separate node: `sky launch -y -d -c hl-smoke -i 10 sky/smoke.sky.yaml`.
+On a SkyPilot node: `sky launch -y -d -c hl-smoke -i 10 sky/smoke.sky.yaml`.
 
 ### humanoid-urdf
 
 It has one workflow, with no submodules and no physics lane:
 
 ```
-uv run --no-project --python 3.12 --with pytest --with numpy --with pyyaml --with usd-core \
-  env PYTHONPATH=ethrc_v1/v1_description pytest ethrc_v1/v1_description/test
+uv venv --python 3.12
+uv pip install --require-hashes -r ci/requirements-ci.txt
+PYTHONPATH=ethrc_v1/v1_description .venv/bin/python -m pytest ethrc_v1/v1_description/test
 ```
