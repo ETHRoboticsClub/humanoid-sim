@@ -101,15 +101,15 @@ uv run ruff check src tests spikes examples docs
 
 ## CI
 
-`.github/workflows/ci.yaml` runs three jobs on every push and pull request.
+Two workflows run on GitHub-hosted runners, as described in [ci.md](ci.md). `.github/workflows/ci.yaml` runs on every pull request and push to master; the test jobs are skipped for changes to Markdown only, and `ci-ok` reports either way. `.github/workflows/physics.yaml` runs the physics tests on the CPU.
 
-| Job | Runner | Steps |
-|---|---|---|
-| `cpu-contracts` | `ubuntu-24.04` (x86) and `ubuntu-24.04-arm`, each its own job | Check out with submodules, install uv 0.13.1, `uv sync --python 3.12 --extra dev --extra newton`, `uv run ruff check src tests spikes examples docs`, `uv run pytest -m "not physics and not data"` |
-| `isaaclab-image` | `ubuntu-24.04` (x86) | Check out with submodules, `docker build -f docker/Dockerfile -t humanoid-sim:ci .` (amd64), build the V1's two assets and both G1s', run `pytest -m physics` in the image on Warp's CPU device |
-| `controls-pins` | `ubuntu-24.04` | Compare the humanoid-urdf commit with the one Controls pins |
+| Job | Trigger | Runner | Steps |
+|---|---|---|---|
+| `cpu-contracts` | pull request, push to master | `ubuntu-24.04` (x86) | Check out with submodules, install uv 0.13.1, `uv sync --locked --python 3.12 --extra dev --extra newton --extra kinematics-check --extra viz --extra bag`, `uv run ruff check src tests spikes examples docs`, `uv run pytest -m "not physics and not data"` |
+| `controls-pins` | pull request, push to master | `ubuntu-24.04` | Compare the humanoid-urdf commit with the one Controls pins |
+| `isaaclab-image` (`physics.yaml`) | the `physics` label on a pull request, manual dispatch, nightly | `ubuntu-24.04` (x86) | Check out with submodules, `docker build -f docker/Dockerfile -t humanoid-sim:ci .` (amd64), build the V1's two assets and both G1s', run `pytest -m physics` in the image on Warp's CPU device. Not a required check |
 
-No CI runner has a GPU or the captures. The `data` tests run wherever the captures are (natively, in the image or in the `e2e` task), and the CUDA tests only on a GPU node, through the `e2e` task.
+No CI runner has a GPU or the captures. The `data` tests run wherever the captures are (natively, in the image or in the `e2e` task), and the CUDA tests only on a GPU node, through the `e2e` task. GPU physics for a branch also runs in humanoid-learning's `Physics` workflow (job `sim-physics`).
 
 ### Controls pins
 
@@ -119,15 +119,14 @@ humanoid-urdf must be at the same commit as in Controls. The `controls-pins` job
 |---|---|
 | `third_party/humanoid-urdf` | `ros2_ws/src/description/humanoid-urdf` |
 
-Two repository settings control the job:
+The job reads two repository settings:
 
-- `SUBMODULES_TOKEN` is a repository secret: a GitHub token that can read Controls' repository and the submodule repositories. The job uses it to read Controls' pins through the GitHub API. Without it, the job prints a warning and passes without checking anything. The checkout steps of `cpu-contracts` and `isaaclab-image` also use it to fetch the submodules, falling back to the workflow's own token when it is unset.
-- `CONTROLS_REF` is a repository variable: the Controls branch, tag or commit whose pins are compared. It defaults to `master`.
+- The "ETHRC CI read" GitHub App supplies the access: the repository variable `CI_READ_APP_ID` and the repository secret `CI_READ_PRIVATE_KEY`. The job mints a token for ETHRC-Humanoid-Controls only and reads Controls' pins through the GitHub API with it. The checkout of the humanoid-urdf submodule in `cpu-contracts` and `isaaclab-image` uses a token for humanoid-urdf only. Pull requests from forks and from Dependabot get no secrets, so these jobs are skipped for them; see [ci.md](ci.md).
+- `CONTROLS_REF` is a repository variable: the Controls branch, tag or commit whose pins are compared. It defaults to `master` and may contain only letters, digits and `.`, `_`, `/`, `-`.
 
-Set them with the GitHub CLI (`gh`), or under Settings, Secrets and variables, Actions:
+Set the variable with the GitHub CLI (`gh`), or under Settings, Secrets and variables, Actions:
 
 ```bash
-gh secret set SUBMODULES_TOKEN
 gh variable set CONTROLS_REF --body master
 ```
 

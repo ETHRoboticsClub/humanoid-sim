@@ -1,0 +1,54 @@
+# Physics tests for humanoid-sim on a GitHub-hosted runner, on the CPU: builds the Isaac Lab image (docker/Dockerfile), builds
+# the V1's assets and both G1s', and runs `pytest -m physics` in the image. Triggers: the `physics` label on a same-repository
+# pull request (it needs the submodule token), workflow_dispatch, and nightly at 02:00 UTC. GPU physics runs in
+# humanoid-learning's Physics workflow (job sim-physics). Setup: docs/ci.md.
+name: Physics
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
+
+permissions: {}
+
+concurrency:
+  group: physics-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  isaaclab-image:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.label.name == 'physics' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.user.login != 'dependabot[bot]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.CI_READ_APP_ID }}
+          private-key: ${{ secrets.CI_READ_PRIVATE_KEY }}
+          owner: ETHRoboticsClub
+          repositories: humanoid-urdf
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+          lfs: false
+          persist-credentials: false
+          token: ${{ steps.app.outputs.token }}
+      - run: docker build -f docker/Dockerfile -t humanoid-sim:ci .
+      - name: Build the assets and run the physics tests
+        run: |
+          docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci build-asset
+          docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci build-asset --base-joints
+          for r in g1_29dof_rev_1_0 g1_29dof_with_hand_rev_1_0; do
+            docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci --robot "$r" build-asset
+          done
+          docker run --rm -v "$PWD":/workspace/humanoid-sim -w /workspace/humanoid-sim humanoid-sim:ci \
+            pytest -m physics
