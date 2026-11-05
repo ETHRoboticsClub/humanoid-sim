@@ -43,7 +43,7 @@ Pull requests from forks never run on the runner: every job skips unless the hea
 
 ## Physics on SkyPilot
 
-Physics needs Docker or a full Isaac Lab environment and a GPU. The runner pod has neither Docker nor spare GPUs, so physics is not run from CI yet; running it from CI is a follow-up. Run it by hand on a SkyPilot GPU node, with the cluster stopped afterwards (`-i 10` stops it after 10 idle minutes):
+Physics needs Docker or a full Isaac Lab environment and a datacenter GPU. The Sparks are only the CPU runner: Isaac Lab on their GB10 is far too slow to be usable, so physics never runs there. Run it by hand on a cloud GPU node (L40S first, then A10G or L4), with the cluster stopped afterwards (`-i 10` stops it after 10 idle minutes):
 
 ```
 sky launch -y -d -c hsim-e2e -i 10 sky/e2e.sky.yaml
