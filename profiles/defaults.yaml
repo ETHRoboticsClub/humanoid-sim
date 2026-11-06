@@ -92,6 +92,24 @@ physics:
     # Contact buffer per world, the same for every world; Newton drops contacts beyond it. An estimate (about
     # 100 contacts for a fallen robot, from MJWarp's constraint rows), not counted on Kamino.
     max_contacts_per_world: 128
+    # The ankle cranks' stops of a native USD (physics/crank_stops.py, KaminoCrankStops). Kamino's joint limits are
+    # hard constraints with no softness, and a torque on a crank joint goes through the drive's bounded PD row (its
+    # effort limit would cap the stop). So a soft stop is an explicit torque on the crank joint past the crank's
+    # window, k (N m/rad) times the overshoot plus b (N m s/rad) times the speed, never pulling back; the hard limit
+    # moves out to backstop_rad past the window and stays as the backstop. Explicit, so bounded by the solver step:
+    # with I the joint's armature and dt the period, k dt^2/I + 2 b dt/I must stay under 2 (stable below 4;
+    # Jury's test of the discrete spring-damper), which the plant checks for every env's realized values. The
+    # V1's 1 ms and crank armature of 0.0056 kg m^2 allow k up to 11,000 N m/rad at b = 0 (and b up to 5.6 N m
+    # s/rad at k = 0); at 4 ms, 700 N m/rad, below the nominal. soft: false keeps the hard
+    # limits (today's behaviour); randomizing crank_stop_stiffness or crank_stop_damping turns the soft stops on
+    # whatever soft says. The nominal is as stiff as MJWarp's ankle_stop_solref at the 22 N m/rad baseline spring
+    # (a crank pushed 1 rad past rests 13 mrad past: about 1700 N m/rad). Modeled: the real stops' stiffness is not
+    # measured.
+    crank_stops:
+      soft: false
+      stiffness_nm_per_rad: 2000.0
+      damping_nm_s_per_rad: 2.0
+      backstop_rad: 0.5
 
 solver_gains: baseline        # constant per-episode PD = the description's baseline gains
 

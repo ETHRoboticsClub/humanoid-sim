@@ -136,6 +136,17 @@ class SimCore:
 
         self.gantry = Gantry(self.backend.robot, harness=resolve_harness(self.desc, self.profile["support"]["harness"]))
         self.gantry.cuda_graph = cuda_graph
+        # Kamino's soft crank stops, when the profile asks for them (physics.kamino.crank_stops.soft): torques on the
+        # crank joints every step. A plant that randomizes the stops adds them later (kamino_crank_stops).
+        self.crank_stops = None
+        if self.solver == "kamino":
+            from humanoid_sim.physics.crank_stops import kamino_crank_stops
+
+            try:
+                self.crank_stops = kamino_crank_stops(self.backend.robot, self.desc, phys, period_s)
+            except Exception:
+                self.backend.close()  # Isaac Lab allows one simulation per process
+                raise
         self.t_ns = 0
         self.feedback: DriveFeedback | None = None
         self._state_written = True  # joint state changed outside a step: the plant's post-step state is stale
@@ -273,6 +284,9 @@ class SimCore:
             self.backend.set_targets(bt, effort=effort)
         self.write_friction()
         self.gantry.apply(self.t_ns)
+        stops = self.crank_stops or getattr(self.backend.robot, "_kamino_crank_stops", None)
+        if stops is not None:
+            stops.apply()
         if self._base_acceleration is not None:
             self.backend.apply_base_acceleration(self._base_acceleration)
         if self.backend.objects is not None:

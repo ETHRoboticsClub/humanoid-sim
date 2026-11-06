@@ -55,10 +55,12 @@ PARAMS: dict[str, Param] = {
     "shape_friction": Param("physics", "shape", doc="Coulomb friction coefficient per robot collision shape"),
     "restitution": Param("physics", "env", doc="restitution coefficient of every robot shape, in [0, 1]; Kamino only, "
                                                "MuJoCo's contacts have none"),
-    "crank_stop_stiffness": Param("physics", "env", doc="stiffness of the ankle cranks' stops over the profile's "
-                                                        "ankle_stop_solref; MJWarp only (Kamino's stops are hard)"),
-    "crank_stop_damping": Param("physics", "env", doc="damping of the ankle cranks' stops over the profile's "
-                                                      "ankle_stop_solref; MJWarp only (Kamino's stops are hard)"),
+    "crank_stop_stiffness": Param("physics", "env", doc="stiffness of the ankle cranks' stops, as a ratio over the "
+                                                        "nominal: MJWarp's profile ankle_stop_solref, Kamino's "
+                                                        "physics.kamino.crank_stops (soft stops, native ankle)"),
+    "crank_stop_damping": Param("physics", "env", doc="damping of the ankle cranks' stops, as a ratio over the "
+                                                      "nominal: MJWarp's profile ankle_stop_solref, Kamino's "
+                                                      "physics.kamino.crank_stops (soft stops, native ankle)"),
     "ankle_spring_stiffness": Param("physics", "crank", unit="N m/rad",
                                     doc="ankle linkage compliance: stiffness of the spring between a crank drive's "
                                         "output and its crank arm, per crank (an asset built with ankle compliance); "

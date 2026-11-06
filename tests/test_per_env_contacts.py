@@ -1,5 +1,6 @@
 """Per-env contact restitution (Kamino) and crank-stop stiffness (MJWarp) in the solver. Runs in the Isaac Lab image
-on CUDA; the arithmetic and the support checks are in test_crank_stop_solref.py."""
+on CUDA; the arithmetic and the support checks are in test_crank_stop_solref.py, Kamino's crank stops in
+test_kamino_crank_stops_physics.py."""
 
 import pytest
 import torch
@@ -87,12 +88,6 @@ def test_mjwarp_has_no_restitution_to_randomize(request, solver):
     sim = _sim(request, solver, 2, fixed_base=True)
     with pytest.raises(ValueError, match="no contact restitution"):
         _plant(sim, [ParamSpec("restitution", "uniform", (0.0, 1.0), "set")])
-
-
-def test_kamino_has_no_crank_stop_stiffness(request):
-    sim = _sim(request, "kamino", 2, fixed_base=True)
-    with pytest.raises(ValueError, match="hard constraints"):
-        _plant(sim, [ParamSpec("crank_stop_stiffness", "uniform", (0.1, 1.0), "scale")])
 
 
 def _crank_overshoot_rad(sim, plant, steps=150, past=0.3):
