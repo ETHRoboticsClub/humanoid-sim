@@ -1,7 +1,9 @@
 """Validate physical crank stops and enabled native loop closures."""
 
 
-def check_native_cranks(desc):
+def check_native_cranks(desc, pads=(0.0,)):
+    """The crank joints are in the articulation with the description's stops, each bound moved out by one of ``pads``
+    (rad) the same on both sides, and the loop closures are enabled."""
     import numpy as np
     from isaaclab_newton.physics import NewtonManager
     from pxr import Usd, UsdPhysics
@@ -20,7 +22,8 @@ def check_native_cranks(desc):
         counts.add(len(indices))
         for index in indices:
             actual = [lower[starts[index]], upper[starts[index]]]
-            if not np.allclose(actual, desc.drives[drive].shaft_limits, atol=1e-6, rtol=0):
+            lo, hi = desc.drives[drive].shaft_limits
+            if not any(np.allclose(actual, [lo - pad, hi + pad], atol=1e-6, rtol=0) for pad in pads):
                 raise RuntimeError(f"native crank {name} has incorrect physical stops: {actual}")
     stage = Usd.Stage.Open(str(desc.usd_path))
     enabled = model.joint_enabled.numpy()

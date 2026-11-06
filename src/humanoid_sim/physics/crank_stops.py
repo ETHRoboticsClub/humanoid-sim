@@ -31,12 +31,22 @@ native USD, to its crank joints' raw ``solreflimit``. MuJoCo's constraint has st
 damping ``b = 2 / (d_max τ)`` for the time constant ``τ`` and damping ratio ``ζ`` of ``solref`` (``d_max`` the impedance
 at full penetration), so scaling ``k`` by ``s`` and ``b`` by ``c`` is ``τ' = τ / c`` and ``ζ' = ζ c / √s``
 (:func:`scaled_solref`). MuJoCo raises a time constant below twice the step to that, so a stop at the profile's
-``ankle_stop_solref`` cannot get stiffer by shortening it. Kamino's stops are hard constraints and take no setting.
+``ankle_stop_solref`` cannot get stiffer by shortening it.
+
+Kamino's joint limits are hard constraints with no softness, and a torque on a crank joint goes through the drive's
+bounded implicit PD row (the crank's effort limit, 30 N m, would cap what a stop can hold). Its soft stops are
+therefore an explicit torque pair on the crank joint's two bodies (:class:`KaminoCrankStops`, the wrench composer
+Isaac Lab clears after every physics step), outside that row: past the crank's window a one-sided spring and damper,
+``k`` times the overshoot plus ``b`` times the speed, never pulling the crank back out. The crank joint itself is
+pushed past its window, so the drive's encoder reads the overshoot as on the robot. The hard limit stays as a
+backstop, ``backstop_rad`` further out. An explicit torque has a stability limit at the solver step
+(:func:`stability_measure`); the plant checks every env's realized ``k`` and ``b`` against it.
 """
 
 from __future__ import annotations
 
 import contextlib
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -328,7 +338,9 @@ def check_crank_stops(robot: str, physics: dict) -> int:
     if desc.usd_path is not None:
         from humanoid_sim.physics.native import check_native_cranks
 
-        check_native_cranks(desc)
+        # Kamino's soft stops move the hard limit out to the backstop (KaminoCrankStops).
+        pads = (0.0, kamino_stop_settings(physics).backstop_rad) if solver == "kamino" else (0.0,)
+        check_native_cranks(desc, pads)
         return 0
     expected = 4 * len(desc.linkages) if ankle_stops_setting(physics, solver) == "cranks" else 0
     found = 0
@@ -424,13 +436,253 @@ class StopSolref:
 
 
 def check_stop_solref_support(robot: str, physics: dict, solver: str) -> None:
-    """Raise unless the running solver has crank stops whose stiffness can be randomized: MJWarp, on a robot with
-    ankle linkages, as tendons (``ankle_stops: cranks``) or as the native USD's crank joint limits."""
+    """Raise unless the running solver has crank stops whose stiffness can be randomized: on a robot with ankle
+    linkages, MJWarp with the stops as tendons (``ankle_stops: cranks``) or as the native USD's crank joint limits,
+    or Kamino with a native USD (its crank joints carry :class:`KaminoCrankStops`)."""
     desc = Description.load(robot)
-    if solver != "mjwarp":
-        raise ValueError(f"{solver} has no crank-stop stiffness to randomize: its stops are hard constraints. "
-                         "crank_stop_stiffness and crank_stop_damping need MJWarp")
     if not desc.linkages:
         raise ValueError(f"{robot} has no ankle linkages, hence no crank stops")
+    if solver == "kamino":
+        if desc.usd_path is None:
+            raise ValueError("crank-stop stiffness on Kamino needs the native ankle: its crank joints carry the "
+                             "stops (the reduced model has no cranks)")
+        kamino_stop_settings(physics)
+        return
+    if solver != "mjwarp":
+        raise ValueError(f"{solver} has no crank-stop stiffness to randomize: mjwarp or kamino")
     if desc.usd_path is None and ankle_stops_setting(physics, solver) != "cranks":
         raise ValueError("crank-stop stiffness needs the stops as tendons: physics.mjwarp.ankle_stops: cranks")
+
+
+# -- Kamino: explicit soft stops on the crank joints ----------------------------------------------------------------
+
+STOP_KEYS = ("soft", "stiffness_nm_per_rad", "damping_nm_s_per_rad", "backstop_rad")
+# An explicit spring-damper on an inertia I at step dt (stiffness k, damping b) is stable, in the symplectic Euler
+# step the solver takes, when k dt²/I + 2 b dt/I < 4 and b dt/I < 2 (Jury's test of its 2x2 map). The plant keeps to
+# half the first bound: the realized stiffness and damping may use at most this much of it.
+STABLE_MEASURE = 2.0
+
+
+@dataclass(frozen=True)
+class KaminoStopSettings:
+    """The profile's ``physics.kamino.crank_stops``: the nominal soft stop of every crank."""
+
+    soft: bool
+    stiffness: float  # N m/rad
+    damping: float  # N m s/rad
+    backstop_rad: float  # how far past the crank's window the hard limit stays
+
+
+def kamino_stop_settings(physics: dict) -> KaminoStopSettings:
+    """The validated ``physics.kamino.crank_stops`` block."""
+    block = physics.get("kamino", {}).get("crank_stops")
+    if not isinstance(block, dict) or set(block) != set(STOP_KEYS):
+        raise ValueError(f"physics.kamino.crank_stops: a mapping with exactly {', '.join(STOP_KEYS)}")
+    if not isinstance(block["soft"], bool):
+        raise ValueError("physics.kamino.crank_stops.soft must be true or false")
+    for key in STOP_KEYS[1:]:
+        v = block[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+            raise ValueError(f"physics.kamino.crank_stops.{key} must be a positive number, not {v!r}")
+    return KaminoStopSettings(block["soft"], float(block["stiffness_nm_per_rad"]),
+                              float(block["damping_nm_s_per_rad"]), float(block["backstop_rad"]))
+
+
+def stability_measure(stiffness: torch.Tensor, damping: torch.Tensor, inertia: torch.Tensor,
+                      period_s: float) -> torch.Tensor:
+    """``k dt²/I + 2 b dt/I`` of an explicit spring-damper (broadcasting): stable below 4, kept below
+    :data:`STABLE_MEASURE`. ``inertia`` is the joint's armature, the least inertia its row can have."""
+    return (stiffness * period_s + 2.0 * damping) * period_s / inertia
+
+
+def stop_torque(q: torch.Tensor, qd: torch.Tensor, lower: torch.Tensor, upper: torch.Tensor,
+                stiffness: torch.Tensor, damping: torch.Tensor) -> torch.Tensor:
+    """The soft stops' torque on a joint at ``q, q̇`` (broadcasting): zero inside ``[lower, upper]``; past ``upper`` by
+    ``x`` it is ``-(k x + b q̇)``, past ``lower`` ``k x - b q̇``, each clamped at zero so that a stop only pushes the
+    joint back in and never holds it out while it moves back."""
+    over, under = q - upper, lower - q
+    high = -(stiffness * over + damping * qd).clamp(min=0.0) * (over > 0)
+    low = (stiffness * under - damping * qd).clamp(min=0.0) * (under > 0)
+    return high + low
+
+
+def _rotate(quat_xyzw: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """Rotate ``v`` ``[..., 3]`` by unit quaternions ``[..., 4]`` (x, y, z, w)."""
+    xyz, w = quat_xyzw[..., :3], quat_xyzw[..., 3:]
+    t = 2.0 * torch.cross(xyz, v, dim=-1)
+    return v + w * t + torch.cross(xyz, t, dim=-1)
+
+
+def _matrix(quat_xyzw: torch.Tensor) -> torch.Tensor:
+    """Rotation matrices ``[..., 3, 3]`` of unit quaternions ``[..., 4]`` (x, y, z, w)."""
+    x, y, z, w = (quat_xyzw[..., i] for i in range(4))
+    return torch.stack([1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
+                        2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
+                        2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)], dim=-1).unflatten(-1, (3, 3))
+
+
+def _about(axis: np.ndarray, angle: torch.Tensor) -> torch.Tensor:
+    """Rotation matrices ``[..., 3, 3]`` about the unit ``axis`` by ``angle`` ``[...]`` (Rodrigues)."""
+    k = torch.tensor([[0.0, -axis[2], axis[1]], [axis[2], 0.0, -axis[0]], [-axis[1], axis[0], 0.0]],
+                     dtype=angle.dtype, device=angle.device)
+    eye = torch.eye(3, dtype=angle.dtype, device=angle.device)
+    return eye + torch.sin(angle)[..., None, None] * k + (1 - torch.cos(angle))[..., None, None] * (k @ k)
+
+
+class KaminoCrankStops:
+    """The soft crank stops of a native V1 on Kamino: per env stiffness and damping (``k = nominal * stiffness_scale``,
+    likewise ``b``), applied as an explicit torque pair on each crank joint's bodies every physics step.
+
+    The torque is :func:`stop_torque` of the crank joint's state at the step start, about the joint's axis in the
+    world, ``+`` on the child body and ``-`` on the parent. It enters Kamino as body wrenches, not through the joint:
+    the crank's PD row is bounded by the drive's effort limit and would cap it. Building it moves each crank's hard
+    limit ``backstop_rad`` past the window (the limit's existence is fixed for Kamino, its value is not). Call
+    :meth:`apply` once per physics step, before it; the wrench composer is cleared after each. Use
+    :func:`kamino_crank_stops` to build or find the articulation's one."""
+
+    def __init__(self, robot, desc: Description, settings: KaminoStopSettings, period_s: float):
+        from humanoid_sim.model.usd import crank_joints
+        from humanoid_sim.transmissions.compliance import output_body
+
+        self.robot, self.settings, self.period_s = robot, settings, float(period_s)
+        self.device = torch.device(robot.device)
+        self.num_envs = robot.num_instances
+        e = self.num_envs
+        cranks = crank_joints(desc)
+        self.drives = list(cranks)
+        self.joints = list(cranks.values())
+        self.ids = torch.tensor([robot.joint_names.index(n) for n in self.joints], device=self.device)
+        window = torch.tensor([desc.drives[d].shaft_limits for d in self.drives], device=self.device,
+                              dtype=torch.float32)
+        self.lower, self.upper = window[:, 0], window[:, 1]
+        source = desc.usd_model
+        bodies = list(robot.body_names)
+        parents, children, axes, self._frames = [], [], [], []
+        for joint in self.joints:
+            parent, child = source.joint_bodies(joint)
+            child = output_body(joint) if output_body(joint) in bodies else child  # an asset with compliance
+            for name in (parent, child):
+                if name not in bodies:
+                    raise RuntimeError(f"crank {joint}: the articulation has no body {name!r}")
+            parents.append(bodies.index(parent))
+            children.append(bodies.index(child))
+            frame0, frame1 = source.joint_frames(joint)
+            axis = source.joint_axis(joint)
+            axes.append(frame0[:3, :3] @ axis)
+            self._frames.append((frame0[:3, :3], frame1[:3, :3], axis))
+        self.parent = torch.tensor(parents, device=self.device)
+        self.child = torch.tensor(children, device=self.device)
+        self.axis = torch.tensor(np.array(axes), device=self.device, dtype=torch.float32)  # in the parent body frame
+        # The torque pair's bodies: each distinct body once, with the signed share of every crank that acts on it.
+        involved = sorted({*parents, *children})
+        self._bodies = torch.tensor(involved, device=self.device)
+        share = torch.zeros(2 * len(self.joints), len(involved), device=self.device)
+        for c, (parent, child) in enumerate(zip(parents, children, strict=True)):
+            share[c, involved.index(child)] = 1.0
+            share[len(self.joints) + c, involved.index(parent)] = -1.0
+        self._share = share
+        self._all = torch.arange(e, device=self.device)
+        self._no_force = torch.zeros(e, len(involved), 3, device=self.device)
+        self.stiffness_scale = torch.ones(e, 1, device=self.device)
+        self.damping_scale = torch.ones(e, 1, device=self.device)
+        self.torque = torch.zeros(e, len(self.joints), device=self.device)  # the last step's, on the joints
+        self.check_frames()
+        self._widen_limits()
+        self.set_scales()
+
+    # -- setup ------------------------------------------------------------------------------------------------
+
+    def _widen_limits(self) -> None:
+        """Move each crank's hard limit ``backstop_rad`` past its window."""
+        pad = self.settings.backstop_rad
+        limits = torch.stack([self.lower - pad, self.upper + pad], dim=-1)
+        self.robot.write_joint_position_limit_to_sim_index(
+            limits=limits.unsqueeze(0).expand(self.num_envs, -1, -1).contiguous(), joint_ids=self.ids,
+            warn_limit_violation=False)
+
+    def check_frames(self, tolerance: float = 1e-3) -> None:
+        """Raise unless each crank child's world rotation is its parent's turned by the joint's axis and angle, as the
+        torque's axis assumes (the USD frames the axis comes from, against the solver's state)."""
+        pose = self.robot.data.body_link_pose_w.torch
+        q = self.robot.data.joint_pos.torch[:, self.ids]
+        for c, (r0, r1, axis) in enumerate(self._frames):
+            r0, r1 = (torch.tensor(r, device=self.device, dtype=torch.float32) for r in (r0, r1))
+            predicted = _matrix(pose[:, self.parent[c], 3:]) @ r0 @ _about(axis, q[:, c]) @ r1.T
+            actual = _matrix(pose[:, self.child[c], 3:])
+            error = (predicted - actual).abs().max()
+            if float(error) > tolerance:
+                raise RuntimeError(f"crank {self.joints[c]}: its bodies' rotation differs from the joint's frames and "
+                                   f"axis by {float(error):.2e}; the stop torque's axis would be wrong")
+
+    # -- knobs ------------------------------------------------------------------------------------------------
+
+    def set_scales(self, stiffness: torch.Tensor | None = None, damping: torch.Tensor | None = None) -> None:
+        """The realized stiffness and damping as ratios ``[E, 1]`` over the profile's nominal (``None``: 1). Raises for
+        a non-positive or non-finite ratio, or a stop the solver step cannot carry explicitly."""
+        one = torch.ones(self.num_envs, 1, device=self.device)
+        new = []
+        for name, scale in (("stiffness", stiffness), ("damping", damping)):
+            scale = one if scale is None else scale.to(self.device, torch.float32).reshape(self.num_envs, 1)
+            if not bool((torch.isfinite(scale) & (scale > 0)).all()):
+                raise ValueError(f"crank_stop_{name} must be positive and finite")
+            new.append(scale)
+        armature = self.robot.data.joint_armature.torch[:, self.ids]
+        if not bool((armature > 0).all()):
+            raise ValueError("Kamino's soft crank stops are explicit: they need an armature on the crank joints")
+        k, b = (self.settings.stiffness * new[0]), (self.settings.damping * new[1])
+        measure = stability_measure(k, b, armature, self.period_s)
+        if bool((measure > STABLE_MEASURE).any()):
+            worst = int(measure.max(dim=1).values.argmax())
+            raise ValueError(
+                f"crank stops stiffness {float(k[worst, 0]):.0f} N m/rad and damping {float(b[worst, 0]):.1f} "
+                f"N m s/rad exceed what an explicit stop carries at the {self.period_s * 1e3:g} ms step on an armature "
+                f"of {float(armature[worst].min()):.3g} kg m² (k dt²/I + 2 b dt/I = {float(measure[worst].max()):.2f}, "
+                f"at most {STABLE_MEASURE:g})")
+        self.stiffness_scale, self.damping_scale = new
+
+    @property
+    def stiffness(self) -> torch.Tensor:
+        """The realized stiffness ``[E, 1]``, N m/rad."""
+        return self.settings.stiffness * self.stiffness_scale
+
+    @property
+    def damping(self) -> torch.Tensor:
+        """The realized damping ``[E, 1]``, N m s/rad."""
+        return self.settings.damping * self.damping_scale
+
+    # -- every physics step -----------------------------------------------------------------------------------
+
+    def torques(self) -> torch.Tensor:
+        """The stop torque ``[E, C]`` on each crank joint at the current state."""
+        data = self.robot.data
+        return stop_torque(data.joint_pos.torch[:, self.ids], data.joint_vel.torch[:, self.ids], self.lower,
+                           self.upper, self.stiffness, self.damping)
+
+    def apply(self) -> None:
+        """Add this physics step's stop torques to the articulation's wrench composer."""
+        tau = self.torques()
+        self.torque.copy_(tau)
+        quat = self.robot.data.body_link_pose_w.torch[:, self.parent, 3:]  # [E, C, 4]
+        axis_w = _rotate(quat, self.axis.expand_as(quat[..., :3]))  # [E, C, 3]
+        pair = tau.unsqueeze(-1) * axis_w
+        both = torch.cat([pair, pair], dim=1)  # child share +1, parent share -1: rows of self._share
+        wrench = torch.einsum("ebx,bu->eux", both, self._share).contiguous()
+        self.robot.instantaneous_wrench_composer.add_forces_and_torques_index(
+            forces=self._no_force, torques=wrench, body_ids=self._bodies, env_ids=self._all, is_global=True)
+
+
+def kamino_crank_stops(robot, desc: Description, physics: dict, period_s: float, *,
+                       require: bool = False) -> KaminoCrankStops | None:
+    """The articulation's soft crank stops on Kamino: the existing ones, else new when the profile asks for them
+    (``physics.kamino.crank_stops.soft``) or ``require`` (the plant randomizes the stops), else ``None`` (hard limits).
+    ``None`` as well for a robot without a native ankle."""
+    stops = getattr(robot, "_kamino_crank_stops", None)
+    if stops is not None:
+        return stops
+    if desc.usd_path is None or not desc.linkages:
+        return None
+    settings = kamino_stop_settings(physics)
+    if not (settings.soft or require):
+        return None
+    stops = robot._kamino_crank_stops = KaminoCrankStops(robot, desc, settings, period_s)
+    return stops
