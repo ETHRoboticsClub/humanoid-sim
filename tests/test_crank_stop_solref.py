@@ -84,13 +84,15 @@ def test_physics_scope_is_startup_only():
         ParamSpec("crank_stop_stiffness", "uniform", (0.5, 1.0), "scale", scope="reset")
 
 
-def test_only_mjwarp_with_ankle_linkages_has_stops_to_soften():
+def test_only_robots_with_ankle_linkages_have_stops_to_soften():
     physics = load_profile(ROBOT)["physics"]
     check_stop_solref_support(ROBOT, physics, "mjwarp")
-    with pytest.raises(ValueError, match="hard constraints"):
-        check_stop_solref_support(ROBOT, physics, "kamino")
-    with pytest.raises(ValueError, match="no ankle linkages"):
-        check_stop_solref_support("g1_29dof_rev_1_0", load_profile("g1_29dof_rev_1_0")["physics"], "mjwarp")
+    check_stop_solref_support(ROBOT, physics, "kamino")  # the native ankle's crank joints carry soft stops
+    for solver in ("mjwarp", "kamino"):
+        with pytest.raises(ValueError, match="no ankle linkages"):
+            check_stop_solref_support("g1_29dof_rev_1_0", load_profile("g1_29dof_rev_1_0")["physics"], solver)
+    with pytest.raises(ValueError, match="mjwarp or kamino"):
+        check_stop_solref_support(ROBOT, physics, "other")
 
 
 def _plant_stub(solver, manager=object()):
@@ -111,12 +113,15 @@ def test_restitution_needs_kamino_and_the_physics_manager():
         _plant_stub("kamino", None)._contact_knobs({"restitution"})
 
 
-def test_crank_stops_need_mjwarp_and_the_physics_manager_from_the_plant():
+def test_mjwarp_crank_stops_need_the_physics_manager_from_the_plant():
     _plant_stub("mjwarp")._contact_knobs({"crank_stop_stiffness"})
-    with pytest.raises(ValueError, match="hard constraints"):
-        _plant_stub("kamino")._contact_knobs({"crank_stop_damping"})
+    _plant_stub("kamino")._contact_knobs({"crank_stop_damping"})
     with pytest.raises(ValueError, match="physics manager"):
         _plant_stub("mjwarp", None)._contact_knobs({"crank_stop_damping"})
+    # Kamino's stops are torques on the crank joints: no solver model to write.
+    _plant_stub("kamino", None)._contact_knobs({"crank_stop_damping"})
+    with pytest.raises(ValueError, match="physics manager"):
+        _plant_stub("kamino", None)._contact_knobs({"crank_stop_damping", "restitution"})
     _plant_stub("kamino")._contact_knobs({"friction"})  # the other parameters are not this check's business
 
 
