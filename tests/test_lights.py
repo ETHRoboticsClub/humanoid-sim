@@ -12,6 +12,7 @@ from humanoid_sim.sensors.lights import (
     Fixture,
     Lighting,
     Sun,
+    ambient_level,
     as_lighting,
     dome_nits,
     fixture_prims,
@@ -26,7 +27,7 @@ FILE = {"fixtures": [{"position_m": [1.0, 2.0, 7.5], "size_m": [0.6, 1.2], "inte
         "dome_intensity": 50.0}
 SUN = {"azimuth_deg": 90.0, "elevation_deg": 30.0, "intensity": 3000.0, "angle_deg": 1.0, "temperature_k": 5800}
 LOOK = {"fixtures": [{"position_m": [0, 0, 3], "sphere_radius_m": 0.1, "intensity": 800, "temperature_k": 2700}],
-        "dome_intensity": 20.0, "dome_temperature_k": 9000, "sun": SUN}
+        "dome_intensity": 20.0, "dome_temperature_k": 9000, "ambient_intensity": 0.0, "sun": SUN}
 
 
 def test_a_file_is_read_with_its_fixtures_and_dome(tmp_path):
@@ -41,19 +42,21 @@ def test_a_file_is_read_with_its_fixtures_and_dome(tmp_path):
     assert as_lighting(path) == as_lighting(str(path)) == lighting
 
 
-def test_a_file_may_give_only_the_dome_or_the_sun():
+def test_a_file_may_give_only_the_dome_the_ambient_light_or_the_sun():
     assert Lighting.parse({"dome_temperature_k": 4000}).dome_temperature_k == 4000.0
+    assert Lighting.parse({"ambient_intensity": 0}).ambient_intensity == 0.0
     assert Lighting.parse({"sun": SUN}).sun == Sun(90.0, 30.0, 3000.0, 1.0, (1.0, 1.0, 1.0), 5800.0)
     lighting = Lighting.parse(LOOK)
     (bulb,) = lighting.fixtures
     assert (lighting.dome_temperature_k, bulb.sphere_radius_m, bulb.temperature_k) == (9000.0, 0.1, 2700.0)
-    assert Lighting.parse(FILE).sun is None
+    assert Lighting.parse(FILE).sun is None and Lighting.parse(FILE).ambient_intensity is None
     assert all(f.temperature_k is None for f in Lighting.parse(FILE).fixtures)  # untinted unless asked
 
 
 def test_code_builds_the_same_lighting_a_file_gives():
     built = Lighting(fixtures=[Fixture(position_m=[0, 0, 3], sphere_radius_m=0.1, intensity=800, temperature_k=2700)],
-                     dome_intensity=20, dome_temperature_k=9000, sun=Sun(90, 30, 3000, angle_deg=1, temperature_k=5800))
+                     dome_intensity=20, dome_temperature_k=9000, ambient_intensity=0,
+                     sun=Sun(90, 30, 3000, angle_deg=1, temperature_k=5800))
     assert built == Lighting.parse(LOOK)
     assert as_lighting(built) is built and as_lighting(None) is None
     with pytest.raises(TypeError):
@@ -77,6 +80,13 @@ def test_the_dome_a_lighting_leaves_in_the_session(file_dome, session, used):
 
 def test_without_lighting_the_session_dome_stays():
     assert (dome_nits(600.0, None), dome_nits(0.0, None)) == (600.0, None)
+
+
+def test_the_ambient_light_a_lighting_leaves_in_the_session():
+    assert ambient_level(1.0, None) == 1.0
+    assert ambient_level(1.0, Lighting.parse({"dome_intensity": 0})) == 1.0  # the dome off leaves the ambient light
+    assert ambient_level(1.0, Lighting.parse({"dome_intensity": 0, "ambient_intensity": 0})) == 0.0
+    assert ambient_level(1.0, Lighting(ambient_intensity=0.25)) == 0.25
 
 
 def test_the_dome_is_white_unless_a_temperature_tints_it():
@@ -124,6 +134,9 @@ def test_the_sun_faces_the_horizon_bearing():
     {"dome_temperature_k": 500},
     {"dome_temperature_k": 1e6},
     {"dome_temperature_k": "warm"},
+    {"ambient_intensity": -0.1},
+    {"ambient_intensity": True},
+    {"ambient_intensity": "dim"},
     {"sun": [90, 30, 3000]},
     {"sun": {**SUN, "elevation_deg": -5}},
     {"sun": {**SUN, "elevation_deg": 95}},

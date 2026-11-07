@@ -1,13 +1,14 @@
 """A scene's lighting for the RTX renderer beyond the session's white dome: the dome's intensity and colour
-temperature, extra lights (fixtures) and a sun. A :class:`Lighting` is built in code by whoever chooses the look (a
-task, a low-light preset) or read from a file a room's owner writes; both are checked the same way.
+temperature, RTX's ambient light, extra lights (fixtures) and a sun. A :class:`Lighting` is built in code by whoever
+chooses the look (a task, a low-light preset) or read from a file a room's owner writes; both are checked the same
+way.
 
 The file (JSON), every key optional though it must give one::
 
     {"fixtures": [{"position_m": [x, y, z], "size_m": [w, l], "intensity": 3000, "color": [1, 1, 1]},
                   {"position_m": [x, y, z], "radius_m": 0.3, "intensity": 3000},
                   {"position_m": [x, y, z], "sphere_radius_m": 0.05, "intensity": 800, "temperature_k": 2700}],
-     "dome_intensity": 100, "dome_temperature_k": 4500,
+     "dome_intensity": 100, "dome_temperature_k": 4500, "ambient_intensity": 1.0,
      "sun": {"azimuth_deg": 135, "elevation_deg": 40, "intensity": 3000, "angle_deg": 0.53}}
 
 Fixtures are given in the scan's frame and moved into the world frame by ``-spawn`` like the room's boxes, scan and
@@ -17,7 +18,9 @@ splat. A fixture with ``size_m`` is a rectangle (USD ``RectLight``, ``w`` along 
 emitting surface's luminance in nits, ``color`` linear RGB (white when left out). ``temperature_k`` on a fixture or the
 sun, and ``dome_temperature_k`` for the dome, set a colour temperature in Kelvin (USD ``enableColorTemperature``,
 multiplied with ``color``); left out, the light is not tinted. ``dome_intensity``, when given, replaces the session's
-dome light (the ambient fill, nits; 0 for none).
+dome light (nits; 0 for none). ``ambient_intensity``, when given, replaces the level of RTX's ambient light
+(``rtx.AMBIENT_INTENSITY``, dimensionless), a uniform fill without direction or shadows that lights every surface
+whether or not there is a dome: a dark scene needs it at 0 as well as the dome.
 
 ``sun`` is a ``DistantLight`` in the world frame, not moved by the spawn: ``azimuth_deg`` (the sun's bearing, from +x
 towards +y) and ``elevation_deg`` (above the horizon, 0 to 90) say where the sun is in the sky, ``intensity`` is its
@@ -90,6 +93,7 @@ class Lighting:
     fixtures: tuple[Fixture, ...] = ()
     dome_intensity: float | None = None  # nits, replaces the session's; 0: no dome; None: the session's
     dome_temperature_k: float | None = None  # None: a white dome
+    ambient_intensity: float | None = None  # RTX's ambient light level; None: the session's; 0: none
     sun: Sun | None = None
 
     def __post_init__(self):
@@ -101,6 +105,8 @@ class Lighting:
         if self.dome_intensity is not None:
             _set(self, "dome_intensity", _number(self.dome_intensity, "dome_intensity", non_negative=True))
         _set(self, "dome_temperature_k", _kelvin(self.dome_temperature_k, "dome_temperature_k"))
+        if self.ambient_intensity is not None:
+            _set(self, "ambient_intensity", _number(self.ambient_intensity, "ambient_intensity", non_negative=True))
 
     @classmethod
     def load(cls, path: str | Path) -> Lighting:
@@ -111,7 +117,7 @@ class Lighting:
         """A lighting file's contents; it must give at least one setting."""
         if not isinstance(data, dict) or not data:
             raise ValueError(f"{source}: an object with at least one of fixtures, dome_intensity, "
-                             f"dome_temperature_k and sun")
+                             f"dome_temperature_k, ambient_intensity and sun")
         fixtures = data.get("fixtures") or []
         if not isinstance(fixtures, list):
             raise ValueError(f"{source}: fixtures must be a list")
@@ -121,7 +127,7 @@ class Lighting:
             fields["sun"] = _build(Sun, fields["sun"], f"{source}: sun")
         lighting = _build(cls, fields, source)
         if lighting == cls():
-            raise ValueError(f"{source}: no fixtures, dome setting or sun")
+            raise ValueError(f"{source}: no fixtures, dome or ambient setting, or sun")
         return lighting
 
     def placed(self, spawn_m: tuple[float, float]) -> list[tuple[float, float, float]]:
@@ -143,6 +149,12 @@ def dome_nits(session_nits: float, lighting: Lighting | None) -> float | None:
     session's; None for no dome."""
     nits = session_nits if lighting is None or lighting.dome_intensity is None else lighting.dome_intensity
     return nits or None
+
+
+def ambient_level(session_level: float, lighting: Lighting | None) -> float:
+    """The level of RTX's ambient light a session renders with: the lighting's ``ambient_intensity`` when it gives
+    one, else the session's (``rtx.AMBIENT_INTENSITY``); 0 for none."""
+    return session_level if lighting is None or lighting.ambient_intensity is None else lighting.ambient_intensity
 
 
 def _build(cls, fields, where: str):
@@ -239,5 +251,5 @@ def set_color_temperature(prim, kelvin: float | None) -> None:
     light.CreateColorTemperatureAttr(float(kelvin))
 
 
-__all__ = ["LIGHTS_PRIM", "SUN_PRIM", "TEMPERATURE_RANGE_K", "Fixture", "Lighting", "Sun", "as_lighting", "dome_nits",
-           "fixture_prims", "lighting_prims", "set_color_temperature", "sun_prim"]
+__all__ = ["LIGHTS_PRIM", "SUN_PRIM", "TEMPERATURE_RANGE_K", "Fixture", "Lighting", "Sun", "ambient_level",
+           "as_lighting", "dome_nits", "fixture_prims", "lighting_prims", "set_color_temperature", "sun_prim"]

@@ -77,7 +77,7 @@ class SensorSession:
         from humanoid_sim.model.poses import STANDING_CLEARANCE_M, initial_pose
         from humanoid_sim.sensors import rigs, rtx
         from humanoid_sim.sensors.geometry import Mount, camera_spec
-        from humanoid_sim.sensors.lights import as_lighting, dome_nits, lighting_prims
+        from humanoid_sim.sensors.lights import ambient_level, as_lighting, dome_nits, lighting_prims
         from humanoid_sim.sim import SimCore
         from humanoid_sim.world.boxes import StaticBoxes
         from humanoid_sim.world.objects import WorldObjects
@@ -102,6 +102,7 @@ class SensorSession:
         self.lighting = as_lighting(cfg.lights)
         self.dome_nits = dome_nits(cfg.light, self.lighting)
         self.dome_temperature_k = None if self.lighting is None else self.lighting.dome_temperature_k
+        self.ambient = ambient_level(rtx.AMBIENT_INTENSITY, self.lighting)
         if self.dome_nits:
             entities["dome_light"] = rtx.light_entity(self.dome_nits, self.dome_temperature_k)
         if cfg.splat:
@@ -136,7 +137,7 @@ class SensorSession:
             self.lidars = [RtxLidar(s, self.mounts[s.name], f"{rtx.ROBOT_ROOT}/{bodies[self.mounts[s.name].link]}",
                                     noise=cfg.lidar_noise) for s in lidars]
         color = any(st.kind != "depth" for c in self.camera_specs for st in c.streams)
-        self.render = rtx.KitRender(self.sim.backend.sim, color=color)
+        self.render = rtx.KitRender(self.sim.backend.sim, color=color, ambient=self.ambient)
         self.last_images: dict[tuple[str, str], np.ndarray] = {}
         self.sweeps = deque(maxlen=cfg.keep_sweeps) if cfg.keep_sweeps else None
         self.feeds = {}
@@ -360,6 +361,7 @@ class SensorSession:
                           "lights": str(self.cfg.lights) if isinstance(self.cfg.lights, (str, Path)) else None,
                           "lighting": None if self.lighting is None else asdict(self.lighting),
                           "dome_light_nits": self.dome_nits, "dome_temperature_k": self.dome_temperature_k,
+                          "ambient_intensity": self.ambient,
                           "rays": None if self.room_rays is None else self.room_rays.describe()},
                 "rtx_post": self.render.post_settings(),
                 "counts": self.counts, "ms": {k: stats(v) for k, v in self.ms.items()},
