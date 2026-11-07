@@ -174,6 +174,8 @@ The sun has `azimuth_deg` (the sun's bearing from +x towards +y), `elevation_deg
  "sun": {"azimuth_deg": 135, "elevation_deg": 40, "intensity": 3000, "angle_deg": 0.53, "temperature_k": 5800}}
 ```
 
+On a splat, the lights light the robot and change only the shadows on the splat: the room renders as bright under the dome with ceiling fixtures or a sun as under the dome alone (each camera's mean within 1%, `tests/test_rtx_lights.py`), and the ambient light hardly reaches it. Geometry the cameras see, the robot above all, shadows the splat by the share of the stage's lights it hides, whatever their intensities: under the dome and a sun the robot's shadow on the splat is half as bright as the floor around it, however faint the sun (an intensity of 30 darkens it as much as 3000), and under the sun alone it is black; ceiling fixtures give it a soft shadow a few percent deep. USD's `shadow:enable` on the sun does not change this.
+
 The summary's `scene.lights` names the file (null without one, or for a `Lighting` given in code), `scene.lighting` records every setting the stage was lit with (null without any), `scene.dome_light_nits` the dome (null without one), `scene.dome_temperature_k` its colour temperature (null: white) and `scene.ambient_intensity` the ambient light's level; `rtx_post` has the level Kit rendered with.
 
 A Lambertian panel of area `A` and luminance `L` puts out `pi L A`; a grid with one panel per `s` by `s` of floor lights it at about `pi L A / s^2` (lux, with nits for `L`).
