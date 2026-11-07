@@ -32,6 +32,7 @@ from humanoid_sim.devices.demand import LAW_DISABLED, DriveDemand
 from humanoid_sim.devices.envelope import TorqueSpeedEnvelope
 from humanoid_sim.devices.feedback import DriveFeedback
 from humanoid_sim.devices.shaping import outside_stable_region, shaped_position_target
+from humanoid_sim.devices.winding import current_limits
 from humanoid_sim.model.description import Description
 from humanoid_sim.timing.clock import NS_PER_MS, check_period
 from humanoid_sim.transmissions.drive_map import DriveJointMap, NativeDriveJointMap
@@ -46,6 +47,8 @@ class PlantCfg:
     robot: str = "ethrc_v1"
     physics_period_ns: int = 4 * NS_PER_MS
     queue_capacity: int = 4
+    output_current_limit: bool = False  # clip applied torque at the output current limit (profile devices.current)
+    winding_i2t: bool = False  # limit applied torque to nominal while the winding is hot (profile devices.current)
     device: str = "cpu"
     dtype: torch.dtype = torch.float32
 
@@ -64,8 +67,10 @@ class PlantCore:
         drives = [desc.drives[n] for n in self.map.drive_names]
         self.envelope = TorqueSpeedEnvelope([desc.torque_speed(d.family) for d in drives],
                                             braking=[desc.braking_limit(d.name) for d in drives], device=dev, dtype=dt)
+        limit, winding = current_limits(desc, self.map.drive_names, output_current_limit=cfg.output_current_limit,
+                                        winding_i2t=cfg.winding_i2t, device=dev, dtype=dt)
         self.bank = DriveBank(self.envelope, num_envs, self.map.num_drives, queue_capacity=cfg.queue_capacity,
-                              device=dev, dtype=dt)
+                              current_limit_nm=limit, winding=winding, device=dev, dtype=dt)
         self.drive_stiffness = torch.tensor([d.baseline_stiffness for d in drives], device=dev, dtype=dt)
         self.drive_damping = torch.tensor([d.baseline_damping for d in drives], device=dev, dtype=dt)
         standing = torch.tensor([desc.joints[n].standing_offset_rad if n in desc.joints else 0.0

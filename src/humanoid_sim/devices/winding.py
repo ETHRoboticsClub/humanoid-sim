@@ -25,6 +25,51 @@ from dataclasses import dataclass
 
 import torch
 
+CURRENT_KEYS = ("output_current_limit", "winding_i2t")  # also the PlantCfg fields they set
+
+
+def profile_current(profile: dict) -> dict[str, bool]:
+    """The profile's ``devices.current`` block: which current limits the drives model, each off when absent.
+
+    ``output_current_limit`` clips the applied torque at the output current limit; ``winding_i2t`` limits it to the
+    nominal torque while the winding is hot. Unknown keys and values that are not booleans raise."""
+    block = profile.get("devices", {}).get("current") or {}
+    unknown = set(block) - set(CURRENT_KEYS)
+    if unknown:
+        raise ValueError(f"devices.current: unknown keys {sorted(unknown)}; known: {list(CURRENT_KEYS)}")
+    for key, value in block.items():
+        if not isinstance(value, bool):
+            raise ValueError(f"devices.current.{key} must be true or false, got {value!r}")
+    return {key: block.get(key, False) for key in CURRENT_KEYS}
+
+
+def current_limits(desc, drive_names: list[str], *, output_current_limit: bool, winding_i2t: bool, device="cpu",
+                   dtype=torch.float32) -> tuple[torch.Tensor | None, WindingI2t | None]:
+    """The bank's ``current_limit_nm`` ``[D]`` and :class:`WindingI2t` for a description's drives, each None when not
+    asked for. A limit asked for on a drive whose description lacks its figures raises: there is no fallback.
+
+    The output limit is :meth:`Description.current_limit_torque_nm`; the winding's nominal torque is the drive's
+    ``effort_nominal`` (the torque at its nominal current, as the output limit's conversion takes it) and its time
+    constant :meth:`Description.winding_time_constant_ns`."""
+    limit = winding = None
+    if output_current_limit:
+        values = [desc.current_limit_torque_nm(n) for n in drive_names]
+        missing = [n for n, v in zip(drive_names, values, strict=True) if v is None]
+        if missing:
+            raise ValueError(f"{desc.robot}: devices.current.output_current_limit needs max_current_a, "
+                             f"nominal_current_a and effort_nominal for drives {missing}")
+        limit = torch.tensor(values, device=device, dtype=dtype)
+    if winding_i2t:
+        nominal = [desc.drives[n].effort_nominal for n in drive_names]
+        tau = [desc.winding_time_constant_ns(n) for n in drive_names]
+        missing = [n for n, a, b in zip(drive_names, nominal, tau, strict=True) if a is None or b is None]
+        if missing:
+            raise ValueError(f"{desc.robot}: devices.current.winding_i2t needs effort_nominal and "
+                             f"winding_time_constant_s for drives {missing}")
+        winding = WindingI2t(torch.tensor(nominal, device=device, dtype=dtype),
+                             torch.tensor(tau, device=device, dtype=torch.int64))
+    return limit, winding
+
 
 @dataclass(frozen=True)
 class WindingI2t:
