@@ -34,12 +34,17 @@ def ethrc_v1() -> Rig:
         # stream (2026-11-02, sub-pixel off) is 21339 mm px over a whole number, 283.60 px times the 75.243 mm
         # baseline of /tf_static, so it reports depths 0.5 % farther than they are.
         # The raw streams' lenses are rational polynomials, as their camera_info gives them (2026-11-02: Controls'
-        # backend reads the device's calibration and refits fx, fy, cx, cy, p1, p2 without its thin-prism terms);
-        # depth is rectified, a plain pinhole. Each stream's place and orientation are the unit's calibration, as
-        # /tf_static gives them (2026-11-02): mono_left is the camera frame's origin at the nominal orientation; the
-        # rectified depth view is turned 0.38 deg from it, mono_right sits 75.243 mm away, turned 0.12 deg, and rgb
-        # 37.65 mm away, turned 0.78 deg.
-        camera0=OakDW("camera1_link", width=640, height=400, frame_period_ns=33_333_333,
+        # backend reads the device's calibration and refits fx, fy, cx, cy, p1, p2 without its tilt terms tau_x,
+        # tau_y, 0.08 to 0.20 deg; its thin-prism terms are zero); depth is rectified, a plain pinhole. Each stream's
+        # place and orientation are the unit's calibration, as /tf_static gives them (2026-11-02): mono_left is the
+        # camera frame's origin at the nominal orientation; the rectified depth view is turned 0.38 deg from it,
+        # mono_right sits 75.243 mm away, turned 0.12 deg, and rgb 37.65 mm away, turned 0.78 deg. The device's own
+        # calibration (readCalibration(), 2026-11-07: its factory calibration) agrees to 0.42 px.
+        # The camera frame is mono_left's link, camera2_link, turned in it: no camera link is a camera frame
+        # (humanoid-urdf's known gaps). The V1's USD, which places it here, points the camera links x left, y down
+        # and z backward; its URDF points them x left, y up and z forward, a half turn about x from the USD's.
+        # Modeled until the description has the camera's own frame.
+        camera0=OakDW("camera2_link", width=640, height=400, frame_period_ns=33_333_333,
                       intrinsics={"rgb": (283.087462, 282.805448, 325.969479, 198.375709),
                                   "mono_left": (283.604271, 283.556541, 321.744194, 196.769579),
                                   "mono_right": (282.176691, 282.201086, 322.219193, 195.29002),
@@ -64,7 +69,8 @@ def ethrc_v1() -> Rig:
                           "mono_right": (-0.4991427636162324, 0.5004618262050996, -0.5004456956959954,
                                          0.4999485650548041),
                           "rgb": (0.5022736427256218, -0.5015980737137385, 0.5019821939719118, -0.49409962275329394)},
-                      depth_focal_px=283.604271),
+                      depth_focal_px=283.604271,
+                      link_from_camera_xyzw=(0.5, 0.5, -0.5, 0.5)),  # camera x, y, z along the link's -z, x, -y
     )
 
 

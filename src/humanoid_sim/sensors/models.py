@@ -247,14 +247,17 @@ class Camera(Sensor):
                  distortion: dict[str, tuple[str, tuple[float, ...]]] | None = None,
                  stream_offsets_m: dict[str, tuple[float, float, float]] | None = None,
                  stream_rotations_xyzw: dict[str, tuple[float, float, float, float]] | None = None,
-                 depth_focal_px: float | None = None):
+                 depth_focal_px: float | None = None,
+                 link_from_camera_xyzw: tuple[float, float, float, float] | None = None):
         """Every stream at one resolution and rate; per stream the unit's pinhole calibration ``(fx, fy, cx, cy)`` in
         pixels (OpenCV's: pixel (u, v) centred at u, v), its lens distortion ``(model, coefficients)`` (model
         ``plumb_bob``, ``rational_polynomial`` or ``equidistant``; none when absent) and, where the unit's
         calibration gives them, its optical centre in the camera frame, replacing the model's nominal one, and its
         optical frame's orientation in the camera frame (a unit quaternion x, y, z, w), replacing the nominal one
         (x right, y down, z forward). ``depth_focal_px`` is the focal length the unit turns disparity back into depth
-        with, where it is not the depth stream's own (None: the stream's)."""
+        with, where it is not the depth stream's own (None: the stream's). ``link_from_camera_xyzw`` is the camera
+        frame's orientation in its rig frame (a unit quaternion x, y, z, w), for a link whose axes are not the camera
+        frame's (None: the link is the camera frame); the camera frame's origin is the link's."""
         super().__init__(frame)
         where = f"{type(self).__name__} at {frame!r}"
         if not (isinstance(width, int) and isinstance(height, int)) or width <= 0 or height <= 0:
@@ -278,6 +281,9 @@ class Camera(Sensor):
         for stream, q in rotations.items():
             if len(q) != 4 or abs(math.hypot(*q) - 1.0) > 1e-6:
                 raise ValueError(f"{where}: rotation {stream!r}: expected a unit quaternion (x, y, z, w)")
+        q = link_from_camera_xyzw
+        if q is not None and (len(q) != 4 or abs(math.hypot(*q) - 1.0) > 1e-6):
+            raise ValueError(f"{where}: link_from_camera_xyzw {q}: expected a unit quaternion (x, y, z, w)")
         self.width, self.height = width, height
         self.frame_period_ns = _positive_ns("frame_period_ns", frame_period_ns)
         self.intrinsics = dict(intrinsics)
@@ -285,6 +291,7 @@ class Camera(Sensor):
         self.stream_offsets_m = {**self.nominal_offsets_m, **(stream_offsets_m or {})}
         self.stream_rotations_xyzw = {s: tuple(float(v) for v in q) for s, q in rotations.items()}
         self.depth_focal_px = depth_focal_px
+        self.link_from_camera_xyzw = None if q is None else tuple(float(v) for v in q)
 
     @property
     def rtx_ready(self) -> bool:
