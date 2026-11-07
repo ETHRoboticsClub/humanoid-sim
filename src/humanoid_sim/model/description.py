@@ -312,6 +312,33 @@ class Description:
             raise ValueError(f"{self.robot}: backend control_period_s {value!r} must be finite and positive")
         return round(value * 1e9)
 
+    def current_limit_torque_nm(self, drive: str) -> float | None:
+        """The torque at a drive's output current limit (``max_current_a``, EPOS4 ``0x3001:02``), or None when its
+        family records no current figures. Modeled: the output torque per ampere is taken from the family's nominal
+        pair, ``effort_nominal / nominal_current_a`` (the gear of the drive's own object 0x3003 is not in the
+        description)."""
+        d = self.drives[drive]
+        keys = ("max_current_a", "nominal_current_a")
+        if d.effort_nominal is None or any(self.family_value(d.family, k) is None for k in keys):
+            return None
+        maximum, nominal = (float(self.family_value(d.family, k)) for k in keys)
+        if not (math.isfinite(maximum) and math.isfinite(nominal) and maximum > 0 and nominal > 0):
+            raise ValueError(f"{self.robot}: {d.family} current figures must be finite and positive")
+        return maximum * d.effort_nominal / nominal
+
+    def winding_time_constant_ns(self, drive: str) -> int | None:
+        """The thermal time constant of a drive's motor winding (the family's ``winding_time_constant_s``, EPOS4
+        ``0x3001:04``) in integer ns, which sets how long the drive holds a current above its nominal one. None when
+        the family records none."""
+        family = self.drives[drive].family
+        value = self.family_value(family, "winding_time_constant_s")
+        if value is None:
+            return None
+        value = float(value)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{self.robot}: {family} winding_time_constant_s {value!r} must be finite and positive")
+        return round(value * 1e9)
+
     def family_value(self, family: str, key: str, default=None):
         """A motor family's ``key``, or ``default`` when the family does not record it."""
         return self.table.get("families", {}).get(family, {}).get(key, default)
