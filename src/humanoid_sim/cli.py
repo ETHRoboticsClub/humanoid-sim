@@ -39,6 +39,33 @@ def compile_without_precompiled_headers() -> None:
     warp.config.use_precompiled_headers = False
 
 
+PCH_BUILD_ATTEMPTS = 3
+PCH_RETRY_DELAY_S = 2.0
+_PCH_FAILURE_MARKERS = ("unable to obtain mapped memory", "kernel build failed with error code 6")
+
+
+def is_precompiled_header_failure(error: BaseException) -> bool:
+    """Whether a Warp kernel build failed the way a NVRTC precompiled header that cannot be mapped does."""
+    text = str(error)
+    return any(marker in text for marker in _PCH_FAILURE_MARKERS)
+
+
+def retry_kernel_build(build, *, attempts: int = PCH_BUILD_ATTEMPTS, delay_s: float = PCH_RETRY_DELAY_S,
+                       sleep=time.sleep):
+    """Call build(), trying again (at most `attempts` calls in all) when it fails with the intermittent NVRTC
+    precompiled-header mapping error; any other failure, and the last one, propagate. Warp builds the kernels a
+    second time from scratch, which usually passes."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return build()
+        except Exception as error:  # noqa: BLE001 - only the one known build failure is retried
+            if attempt == attempts or not is_precompiled_header_failure(error):
+                raise
+            print(f"warp kernel build failed with the NVRTC precompiled header mapping error "
+                  f"(attempt {attempt}/{attempts}): {error}; retrying in {delay_s:g} s", file=sys.stderr, flush=True)
+            sleep(delay_s)
+
+
 def _usd(args, *, base_joints: bool = False) -> Path:
     if args.usd:
         return Path(args.usd)
@@ -265,15 +292,15 @@ def cmd_serve(args) -> int:
 
     if args.truth_every is not None and (args.truth_every < 1 or (args.trajectory and args.truth_every != 1)):
         raise SystemExit("--truth-every must be at least 1, and 1 with --trajectory (it records every step)")
-    host = RuntimeHost(args.segment, _usd(args), device=args.device, robot=args.robot, solver=args.solver,
-                       support=args.support, pose=args.pose, scene=_scene(args), gantry=_gantry(args),
-                       terrain=_terrain(args),
-                       objects=_objects(args),
-                       bus_period_ns=int(args.bus_period_us * 1000),
-                       client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
-                       sim_revision=_revision(),
-                       truth_every=args.truth_every or (1 if args.trajectory else 5), trajectory=args.trajectory,
-                       extra_rig=args.sensors)
+    usd, scene, gantry, terrain, objects = _usd(args), _scene(args), _gantry(args), _terrain(args), _objects(args)
+    host = retry_kernel_build(lambda: RuntimeHost(
+        args.segment, usd, device=args.device, robot=args.robot, solver=args.solver,
+        support=args.support, pose=args.pose, scene=scene, gantry=gantry, terrain=terrain, objects=objects,
+        bus_period_ns=int(args.bus_period_us * 1000),
+        client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
+        sim_revision=_revision(),
+        truth_every=args.truth_every or (1 if args.trajectory else 5), trajectory=args.trajectory,
+        extra_rig=args.sensors))
     try:
         while True:
             print(json.dumps({"segment": str(args.segment), "session_id": host.session_id, "ready": True}),

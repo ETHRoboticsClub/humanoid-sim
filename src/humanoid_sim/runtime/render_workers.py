@@ -29,8 +29,10 @@ def render_configs(cfg, rig) -> dict:
 
 
 def _render(segment, cfg, kwargs):
+    from humanoid_sim.cli import compile_without_precompiled_headers
     from humanoid_sim.runtime.render import render_runtime
 
+    compile_without_precompiled_headers()  # a spawned worker does not inherit the parent's Warp config
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     render_runtime(segment, cfg, **kwargs)
