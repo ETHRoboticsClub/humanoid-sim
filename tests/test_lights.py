@@ -14,7 +14,6 @@ from humanoid_sim.sensors.lights import (
     ceiling_light_prims,
     dome_nits,
     dome_temperature,
-    set_dome_temperature,
     sun_prim,
 )
 
@@ -154,7 +153,15 @@ def test_malformed_lighting_is_refused(bad):
         CeilingLights.parse(bad)
 
 
-def test_the_stage_gets_a_sphere_light_a_tinted_dome_and_a_sun():
+def test_the_dome_is_white_unless_a_temperature_tints_it():
+    from humanoid_sim.sensors.rtx import dome_light_args
+
+    assert dome_light_args(20.0) == {"intensity": 20.0, "color": (1.0, 1.0, 1.0)}  # no colour temperature enabled
+    assert dome_light_args(20.0, 9000) == {"intensity": 20.0, "color": (1.0, 1.0, 1.0),
+                                           "enable_color_temperature": True, "color_temperature": 9000.0}
+
+
+def test_the_stage_gets_a_sphere_light_and_a_sun():
     pytest.importorskip("pxr")
     from pxr import Gf, Usd, UsdGeom, UsdLux
 
@@ -164,13 +171,6 @@ def test_the_stage_gets_a_sphere_light_a_tinted_dome_and_a_sun():
     assert sphere.IsA(UsdLux.SphereLight) and UsdLux.SphereLight(sphere).GetRadiusAttr().Get() == pytest.approx(0.1)
     api = UsdLux.LightAPI(sphere)
     assert api.GetEnableColorTemperatureAttr().Get() is True and api.GetColorTemperatureAttr().Get() == 2700.0
-
-    UsdLux.DomeLight.Define(stage, "/World/DomeLight").CreateIntensityAttr(20.0)
-    set_dome_temperature(stage, 9000.0)
-    dome = UsdLux.LightAPI(stage.GetPrimAtPath("/World/DomeLight"))
-    assert dome.GetEnableColorTemperatureAttr().Get() is True and dome.GetColorTemperatureAttr().Get() == 9000.0
-    with pytest.raises(ValueError):
-        set_dome_temperature(stage, 9000.0, "/World/Missing")
 
     sun = sun_prim(stage, lights.sun)
     light = UsdLux.DistantLight(sun)
@@ -182,11 +182,8 @@ def test_the_stage_gets_a_sphere_light_a_tinted_dome_and_a_sun():
 
 def test_an_untinted_light_has_no_colour_temperature_authored():
     pytest.importorskip("pxr")
-    from pxr import Usd, UsdLux
+    from pxr import Usd
 
     stage = Usd.Stage.CreateInMemory()
     prim = ceiling_light_prims(stage, CeilingLights.parse({"fixtures": FILE["fixtures"]}), SPAWN)[0]
     assert not prim.GetAttribute("inputs:enableColorTemperature").HasAuthoredValue()
-    UsdLux.DomeLight.Define(stage, "/World/DomeLight")
-    set_dome_temperature(stage, None)
-    assert not stage.GetPrimAtPath("/World/DomeLight").GetAttribute("inputs:colorTemperature").HasAuthoredValue()

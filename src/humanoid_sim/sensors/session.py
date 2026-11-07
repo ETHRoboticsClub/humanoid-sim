@@ -81,7 +81,6 @@ class SensorSession:
             ceiling_light_prims,
             dome_nits,
             dome_temperature,
-            set_dome_temperature,
             sun_prim,
         )
         from humanoid_sim.sim import SimCore
@@ -110,7 +109,7 @@ class SensorSession:
         self.dome_temperature_k = dome_temperature(cfg.light_temperature_k, ceiling)
         self.sun = None if ceiling is None else ceiling.sun
         if self.dome_nits:
-            entities["dome_light"] = rtx.light_entity(self.dome_nits)
+            entities["dome_light"] = rtx.light_entity(self.dome_nits, self.dome_temperature_k)
         if cfg.splat:
             entities["splat"] = rtx.splat_entity(cfg.splat)
         self.boxes = StaticBoxes.load(cfg.scene, cfg.spawn_m) if cfg.scene else None
@@ -132,10 +131,6 @@ class SensorSession:
             ceiling_light_prims(stage, ceiling, cfg.spawn_m)
             if ceiling.sun is not None:
                 sun_prim(stage, ceiling.sun)
-        if self.dome_nits and self.dome_temperature_k is not None:
-            import isaaclab.sim as sim_utils
-
-            set_dome_temperature(sim_utils.get_current_stage(), self.dome_temperature_k)
         plant = self.sim.plant
         q = pose.to(device=plant.cfg.device, dtype=self.sim.joint_state()[0].dtype).unsqueeze(0)
         self.sim.write_joint_state(q, torch.zeros_like(q))

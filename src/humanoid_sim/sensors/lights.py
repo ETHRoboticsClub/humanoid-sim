@@ -30,7 +30,6 @@ from pathlib import Path
 
 LIGHTS_PRIM = "/World/CeilingLights"
 SUN_PRIM = "/World/Sun"
-DOME_PRIM = "/World/DomeLight"
 TEMPERATURE_RANGE_K = (1000.0, 40000.0)  # USD's colour temperature range
 
 
@@ -206,14 +205,6 @@ def set_color_temperature(prim, kelvin: float | None) -> None:
     light.CreateColorTemperatureAttr(float(kelvin))
 
 
-def set_dome_temperature(stage, kelvin: float | None, prim_path: str = DOME_PRIM) -> None:
-    """Set the dome light's colour temperature (Kelvin); the dome prim must exist."""
-    prim = stage.GetPrimAtPath(prim_path)
-    if kelvin is not None and not prim.IsValid():
-        raise ValueError(f"no dome light at {prim_path}")
-    set_color_temperature(prim, kelvin)
-
-
 def sun_prim(stage, sun: Sun, prim_path: str = SUN_PRIM):
     """Author ``sun`` as a ``DistantLight`` on ``stage`` (world frame), turned to shine away from the sun."""
     from pxr import Gf, UsdGeom, UsdLux
@@ -229,5 +220,5 @@ def sun_prim(stage, sun: Sun, prim_path: str = SUN_PRIM):
     return light.GetPrim()
 
 
-__all__ = ["DOME_PRIM", "LIGHTS_PRIM", "SUN_PRIM", "CeilingLights", "Fixture", "Sun", "ceiling_light_prims",
-           "dome_nits", "dome_temperature", "set_color_temperature", "set_dome_temperature", "sun_prim"]
+__all__ = ["LIGHTS_PRIM", "SUN_PRIM", "CeilingLights", "Fixture", "Sun", "ceiling_light_prims",
+           "dome_nits", "dome_temperature", "set_color_temperature", "sun_prim"]

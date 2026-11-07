@@ -218,12 +218,23 @@ def splat_entity(usd_path: str, prim_path: str = SPLAT_PRIM):
     return AssetBaseCfg(prim_path=prim_path, spawn=sim_utils.UsdFileCfg(usd_path=str(usd_path)))
 
 
-def light_entity(intensity: float = DOME_INTENSITY, prim_path: str = "/World/DomeLight"):
-    """A white dome light: the robot and the boxes are lit evenly; the splat is emissive and needs none."""
+def dome_light_args(intensity: float = DOME_INTENSITY, temperature_k: float | None = None) -> dict:
+    """``DomeLightCfg``'s arguments: white, tinted to ``temperature_k`` (Kelvin) when given; without one no colour
+    temperature is enabled, so the dome is the plain white one."""
+    args = {"intensity": float(intensity), "color": (1.0, 1.0, 1.0)}
+    if temperature_k is not None:
+        args |= {"enable_color_temperature": True, "color_temperature": float(temperature_k)}
+    return args
+
+
+def light_entity(intensity: float = DOME_INTENSITY, temperature_k: float | None = None,
+                 prim_path: str = "/World/DomeLight"):
+    """A dome light, white unless ``temperature_k`` tints it: the robot and the boxes are lit evenly; the splat is
+    emissive and needs none."""
     import isaaclab.sim as sim_utils
     from isaaclab.assets import AssetBaseCfg
 
-    return AssetBaseCfg(prim_path=prim_path, spawn=sim_utils.DomeLightCfg(intensity=intensity, color=(1.0, 1.0, 1.0)))
+    return AssetBaseCfg(prim_path=prim_path, spawn=sim_utils.DomeLightCfg(**dome_light_args(intensity, temperature_k)))
 
 
 class KitRender:
