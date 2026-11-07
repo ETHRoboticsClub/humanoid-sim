@@ -25,7 +25,8 @@ class DriveStepGraph:
         self.q, self.qd = q.clone(), qd.clone()
         self.t_ns = torch.zeros((), dtype=torch.int64, device=q.device)
         bank, queue = core.bank, core.bank.queue
-        mutable = [bank.frozen, bank.last_kind, queue.arrival, queue.count, queue.overflows,
+        mutable = [bank.frozen, bank.last_kind, bank.winding_heat.heat, bank.winding_heat.limited,
+                   queue.arrival, queue.count, queue.overflows,
                    *queue.active.values(), *queue.pending.values(), core.passive_effort]
         saved = [t.clone() for t in mutable]
         previous = None if core.last is None else [getattr(core.last, f.name).clone() for f in fields(core.last)]
