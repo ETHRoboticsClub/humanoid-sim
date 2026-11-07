@@ -94,7 +94,8 @@ SUSPENDED_LIFT_M = 0.3  # a suspended robot's soles above the ground
 
 # What the runtime does not model (published in the descriptor).
 FIDELITY_GAPS = [
-    "drive current, thermal and backlash models absent; applied torque is the envelope-clipped control law",
+    "drive thermal and backlash models absent; the current limit and the torque overload trip apply only when the "
+    "profile enables devices.protection (off: applied torque is the envelope-clipped control law)",
     "upper-body passive joint parameters (waist, shoulders, elbows) are description values, not identified",
     "ankle as pitch and roll hinges driven through the crank transmission (no closed chain)",
     "IMU errors from the rig's model: white noise, turn-on bias, Gauss-Markov drift (SET_FIDELITY ideal turns them "
@@ -1035,13 +1036,15 @@ class RuntimeHost:
         return buf.numpy()
 
     def _feedback_flat(self) -> torch.Tensor:
-        """The feedback's fields as one float64 vector on the device; the integer fields travel bit-for-bit."""
+        """The feedback's fields as one float64 vector on the device (the drives' position, velocity, applied and
+        demanded torque and status, then the IMU); the integer fields travel bit-for-bit."""
         sim = self.sim
         fb = sim.feedback if sim.feedback is not None else sim.plant.feedback(*sim.solver_state())
         imu = sim.imu.samples
         ints = torch.cat([imu.seq[0], imu.sample_ns[0], imu.stamp_ns[0], imu.count[:1]]).view(torch.float64)
         flat = torch.cat([fb.position_rad[0], fb.velocity_rad_s[0], fb.applied_torque_nm[0],
-                          fb.demanded_torque_nm[0], imu.gyro[0].reshape(-1), imu.specific_force[0].reshape(-1),
+                          fb.demanded_torque_nm[0], sim.plant.bank.overload.status()[0],
+                          imu.gyro[0].reshape(-1), imu.specific_force[0].reshape(-1),
                           ]).to(torch.float64)
         return torch.cat([flat, ints, *self._extra_imu_flat()])
 
@@ -1059,12 +1062,12 @@ class RuntimeHost:
     def _write_feedback(self, host: np.ndarray) -> None:
         sim, n = self.sim, len(self.drives)
         h = sim.imu.samples.gyro.shape[1]
-        drive = host[: 4 * n].reshape(4, n)
+        drive = host[: 5 * n].reshape(5, n)
         for (position, velocity), d in self._frozen_encoders():
             drive[0, d], drive[1, d] = position, velocity
-        gyro = host[4 * n: 4 * n + 3 * h].reshape(h, 3)
-        accel = host[4 * n + 3 * h: 4 * n + 6 * h].reshape(h, 3)
-        ints = host[4 * n + 6 * h: 4 * n + 9 * h + 1].view(np.int64)
+        gyro = host[5 * n: 5 * n + 3 * h].reshape(h, 3)
+        accel = host[5 * n + 3 * h: 5 * n + 6 * h].reshape(h, 3)
+        ints = host[5 * n + 6 * h: 5 * n + 9 * h + 1].view(np.int64)
         seqs, sample_ns, stamp_ns, total = ints[:h], ints[h:2 * h], ints[2 * h:3 * h], int(ints[3 * h])
 
         now = abi.mono_ns()
@@ -1077,15 +1080,16 @@ class RuntimeHost:
         self._mono_minus_plant_ns = now - sim.t_ns
         valid = min(total, h, abi.IMU_SAMPLES)
         rec["imu_count"] = valid
-        for k, name in enumerate(abi.DRIVE_FEEDBACK.names):
+        for k, name in enumerate(abi.DRIVE_FEEDBACK.names[:4]):
             rec["drive"][name][:n] = drive[k]
+        rec["drive"]["status"][:n] = drive[4].astype(np.uint32)
         imu_rec = rec["imu"]
         imu_rec["seq"][:valid], imu_rec["sample_ns"][:valid], imu_rec["stamp_ns"][:valid] = \
             seqs[:valid], sample_ns[:valid], stamp_ns[:valid]
         imu_rec["gyro_rad_s"][:valid], imu_rec["specific_force_m_s2"][:valid] = gyro[:valid], accel[:valid]
         if self.imu_log is not None:
             self.imu_log.append(imu_rec[:valid])
-        at = 4 * n + 9 * h + 1  # the extra IMUs follow the body IMU's integers: gyro, specific force, integers each
+        at = 5 * n + 9 * h + 1  # the extra IMUs follow the body IMU's integers: gyro, specific force, integers each
         for name, log in self.extra_imu_logs.items():
             gyro_x, accel_x = host[at: at + 3 * h].reshape(h, 3), host[at + 3 * h: at + 6 * h].reshape(h, 3)
             log.append(imu_samples(gyro_x, accel_x, host[at + 6 * h: at + 9 * h + 1].view(np.int64), h))

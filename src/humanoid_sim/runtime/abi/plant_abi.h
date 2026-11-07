@@ -16,10 +16,10 @@ extern "C" {
 #endif
 
 #define HSIM_PLANT_ABI_MAJOR 3
-#define HSIM_PLANT_ABI_MINOR 5
+#define HSIM_PLANT_ABI_MINOR 6
 #define HSIM_PLANT_MAGIC "HSIMPLNT"
-#define HSIM_PLANT_LAYOUT_HASH 0xea3a9ede154d3cadULL
-#define HSIM_PLANT_SEGMENT_BYTES 56320
+#define HSIM_PLANT_LAYOUT_HASH 0x0f58bc5e8f8a4c02ULL
+#define HSIM_PLANT_SEGMENT_BYTES 56832
 
 #define HSIM_PLANT_MAX_DRIVES 64
 #define HSIM_PLANT_MAX_JOINTS 64
@@ -77,9 +77,14 @@ typedef struct {
   double torque_limit_nm; // a cap on the applied torque; INFINITY: none
 } HsimDriveDemand;
 
-// Physical feedback at the drive output (what Controls' fake_bank_feedback takes for an EPOS4).
+// Drive status bits (HsimDriveFeedback.status).
+#define HSIM_DRIVE_STATUS_OVERLOAD 1u // tripped on torque overload: demand above the torque limit for the dwell
+
+// Physical feedback at the drive output (what Controls' fake_bank_feedback takes for an EPOS4), and the
+// drive's status: 0 while the sim models no drive protection.
 typedef struct {
   double position_rad, velocity_rad_s, applied_torque_nm, demanded_torque_nm;
+  uint32_t status, _pad0;
 } HsimDriveFeedback;
 
 typedef struct {
@@ -180,21 +185,21 @@ typedef struct {
 #define HSIM_OFFSET_DESCRIPTOR 320
 #define HSIM_OFFSET_DEMANDS 16768
 #define HSIM_OFFSET_FEEDBACK 45632
-#define HSIM_OFFSET_MAILBOX 50112
-#define HSIM_OFFSET_ACK 54272
-#define HSIM_OFFSET_TRUTH 54592
+#define HSIM_OFFSET_MAILBOX 50624
+#define HSIM_OFFSET_ACK 54784
+#define HSIM_OFFSET_TRUTH 55104
 
 #ifdef __cplusplus
 static_assert(sizeof(HsimHeader) == 272, "header layout");
 static_assert(sizeof(HsimDemandRecord) == 3600, "demand record layout");
 static_assert(sizeof(HsimDemands) == 28848, "demands layout");
-static_assert(sizeof(HsimFeedback) == 4440, "feedback layout");
+static_assert(sizeof(HsimFeedback) == 4952, "feedback layout");
 static_assert(sizeof(HsimTruth) == 1728, "truth layout");
 #else
 _Static_assert(sizeof(HsimHeader) == 272, "header layout");
 _Static_assert(sizeof(HsimDemandRecord) == 3600, "demand record layout");
 _Static_assert(sizeof(HsimDemands) == 28848, "demands layout");
-_Static_assert(sizeof(HsimFeedback) == 4440, "feedback layout");
+_Static_assert(sizeof(HsimFeedback) == 4952, "feedback layout");
 _Static_assert(sizeof(HsimTruth) == 1728, "truth layout");
 #endif
 

@@ -149,7 +149,7 @@ The header is written when the file is created; afterwards only `state` and `hea
 | Field | Type | Meaning |
 |---|---|---|
 | `magic` | char[8] | `HSIMPLNT`, written last when the file is filled |
-| `abi_major`, `abi_minor` | u16 | 3, 3 |
+| `abi_major`, `abi_minor` | u16 | 3, 6 |
 | `header_bytes` | u32 | 272 |
 | `layout_hash` | u64 | Hash of the layout (see [Validating a segment](#validating-a-segment)) |
 | `segment_bytes` | u64 | 56,256 |
@@ -235,7 +235,7 @@ The descriptor region holds one JSON object (sorted keys, at most 16,384 bytes) 
 
 The fidelity gaps the runtime publishes:
 
-- drive current, thermal and backlash models absent; applied torque is the envelope-clipped control law
+- drive thermal and backlash models absent; the current limit and the torque overload trip apply only when the profile enables devices.protection (off: applied torque is the envelope-clipped control law)
 - upper-body passive joint parameters (waist, shoulders, elbows) are description values, not identified
 - ankle as pitch and roll hinges driven through the crank transmission (no closed chain)
 - IMU errors from the rig's model: white noise, turn-on bias, Gauss-Markov drift (SET_FIDELITY ideal turns them off); the turn-on bias is redrawn at every IMU reset, not only at power-on
@@ -296,7 +296,7 @@ The host writes the feedback region every period, paused or not.
 | `imu_total` | u64 | IMU samples delivered since the IMU was last reset (session start or `RESET`) |
 | `demand_records` | u64 | Demand records taken from the ring in this session |
 | `demand_overruns` | u64 | Records the ring overwrote before the host took them |
-| `drive` | `HsimDriveFeedback[32]` | Per drive: `position_rad`, `velocity_rad_s`, `applied_torque_nm`, `demanded_torque_nm` |
+| `drive` | `HsimDriveFeedback[32]` | Per drive: `position_rad`, `velocity_rad_s`, `applied_torque_nm`, `demanded_torque_nm` and `status` (ABI 3.6): bit 0 is set while the drive is tripped on torque overload ([drives.md](drives.md#current-limit-and-overload)); 0 while the profile has no drive protection |
 | `imu` | `HsimImuSample[32]` | The latest delivered IMU samples, newest first |
 
 Drive feedback is SI in the physical drive-output frame, as Controls' `fake_bank_feedback` takes it. `applied` is the torque after the torque-speed envelope and the cap, `demanded` the control law's output before them.

@@ -63,7 +63,7 @@ from pathlib import Path
 import numpy as np
 
 ABI_MAJOR = 3
-ABI_MINOR = 5
+ABI_MINOR = 6
 MAGIC = b"HSIMPLNT"
 ALIGN = 64
 
@@ -185,12 +185,17 @@ DRIVE_DEMAND = np.dtype(
     align=True,
 )
 
+# DriveFeedback.status bits.
+DRIVE_STATUS_OVERLOAD = 1  # the drive tripped on torque overload (demand above its torque limit for the dwell)
+
 DRIVE_FEEDBACK = np.dtype(
     [
         ("position_rad", "<f8"),
         ("velocity_rad_s", "<f8"),
         ("applied_torque_nm", "<f8"),
         ("demanded_torque_nm", "<f8"),
+        ("status", "<u4"),  # DRIVE_STATUS_* bits; 0 while the sim models no drive protection
+        ("_pad0", "<u4"),
     ],
     align=True,
 )

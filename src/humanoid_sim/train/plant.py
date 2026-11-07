@@ -37,6 +37,7 @@ from humanoid_sim.core import PlantCfg, PlantCore
 from humanoid_sim.devices.demand import DriveDemand
 from humanoid_sim.devices.feedback import DriveFeedback
 from humanoid_sim.devices.models import drive_models
+from humanoid_sim.devices.protection import profile_response
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.physics.crank_stops import scaled_solref
@@ -179,6 +180,7 @@ class RobotPlant:
                                             compile_batch_size=e if cfg.compile else None)
         self.core = PlantCore(self.desc, self.joints, e, PlantCfg(robot=cfg.robot, physics_period_ns=self.period_ns,
                                                                   queue_capacity=cfg.queue_capacity,
+                                                                  protection=profile_response(self.profile),
                                                                   device=str(self.device)), solver_joint_names=physical)
         self.solver_joint_ids = torch.tensor([robot.joint_names.index(n) for n in self.core.solver_map.joint_names],
                                             device=self.device)

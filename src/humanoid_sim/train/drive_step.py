@@ -26,7 +26,8 @@ class DriveStepGraph:
         self.t_ns = torch.zeros((), dtype=torch.int64, device=q.device)
         bank, queue = core.bank, core.bank.queue
         mutable = [bank.frozen, bank.last_kind, queue.arrival, queue.count, queue.overflows,
-                   *queue.active.values(), *queue.pending.values(), core.passive_effort]
+                   *queue.active.values(), *queue.pending.values(), core.passive_effort,
+                   bank.overload.over_since_ns, bank.overload.tripped]
         saved = [t.clone() for t in mutable]
         previous = None if core.last is None else [getattr(core.last, f.name).clone() for f in fields(core.last)]
         # Materialize PlantCore's persistent outputs before tracing; no allocation/rebinding
