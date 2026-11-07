@@ -18,7 +18,9 @@ training, identity otherwise): ``p_scale``/``d_scale`` (realized over demanded g
 envelope and cap) and ``position_offset`` (the drive's position reading minus the truth, so it regulates the
 offset reading).
 
-With a :class:`~humanoid_sim.devices.winding.WindingI2t` the bank also limits each drive's applied torque to its
+With ``current_limit_nm`` the bank clips each drive's applied torque at the torque of its output current limit (the
+drive's current loop saturates there; the demanded torque is not clipped). With a
+:class:`~humanoid_sim.devices.winding.WindingI2t` the bank also limits each drive's applied torque to its
 nominal torque while its winding is hot (``winding_heat``); without one it is exactly as above.
 """
 
@@ -46,9 +48,17 @@ class DriveOutput:
 
 class DriveBank:
     def __init__(self, envelope: TorqueSpeedEnvelope, num_envs: int, num_drives: int, *,
-                 queue_capacity: int = 4, winding: WindingI2t | None = None, device="cpu",
-                 dtype=torch.float32):
+                 queue_capacity: int = 4, current_limit_nm: torch.Tensor | None = None,
+                 winding: WindingI2t | None = None, device="cpu", dtype=torch.float32):
+        """``current_limit_nm`` ``[D]``: the torque at each drive's output current limit (inf: none)."""
         self.envelope = envelope
+        if current_limit_nm is not None:
+            if current_limit_nm.shape != (num_drives,):
+                raise ValueError(f"current_limit_nm must be [{num_drives}], got {tuple(current_limit_nm.shape)}")
+            if not bool((current_limit_nm > 0).all()):
+                raise ValueError("current limit torques must be positive (inf: no limit)")
+            current_limit_nm = current_limit_nm.to(device=device, dtype=dtype)
+        self.current_limit_nm = current_limit_nm
         self.winding = winding
         self.winding_heat = WindingHeat(num_envs, num_drives, device=device, dtype=dtype)
         self.num_envs, self.num_drives = num_envs, num_drives
@@ -102,6 +112,9 @@ class DriveBank:
         cap = torch.where(torch.isinf(limit), limit, limit * ts)  # inf: no cap (and inf * 0 would be NaN)
         applied = torch.maximum(torch.minimum(applied, cap), -cap)
         applied = torch.where(kind == OFF, torch.zeros_like(applied), applied)
+        current = self.current_limit_nm
+        if current is not None:
+            applied = torch.maximum(torch.minimum(applied, current), -current)
         winding = self.winding
         if winding is not None:
             hot = self.winding_heat.bound(winding).unsqueeze(1)
