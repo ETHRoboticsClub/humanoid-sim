@@ -141,12 +141,21 @@ The furniture boxes enclose the scanned furniture by up to tens of centimetres a
 
 ### Lights
 
-The stage is lit by a white dome light (600 nits, `rtx.DOME_INTENSITY`): the robot and the boxes are lit evenly and cast no shadows; the splat is emissive, and a light never brightens it (`--splat-intensity` scales its emission). A room's owner changes the lighting with `render-runtime --lights PATH` (`SessionCfg.lights`, `src/humanoid_sim/sensors/lights.py`), a JSON file whose keys are all optional, though it must give at least one. Without the file the scene is the one above, exactly. Lights are authored as UsdLux prims when the session is built.
+The stage is lit by a white dome light (600 nits, `rtx.DOME_INTENSITY`): the robot and the boxes are lit evenly and cast no shadows; the splat is emissive, and a light never brightens it (`--splat-intensity` scales its emission). `SessionCfg.lights` changes the lighting (`src/humanoid_sim/sensors/lights.py`): a `Lighting` built in code, which is how a task or a low-light preset sets it, or the path of a JSON file with the same fields, which is how a room's owner sets it (`render-runtime --lights PATH`). Both are checked the same way; a file's keys are all optional, though it must give at least one. Without either, the scene is the one above, exactly. The dome is spawned with its intensity and colour temperature; the other lights are authored as UsdLux prims when the session is built.
+
+```python
+from humanoid_sim.sensors.lights import Fixture, Lighting, Sun
+
+dusk = Lighting(dome_intensity=40, dome_temperature_k=3200,
+                fixtures=[Fixture(position_m=(0.0, 2.0, 7.5), size_m=(0.6, 1.2), intensity=1500)],
+                sun=Sun(azimuth_deg=250, elevation_deg=5, intensity=200, temperature_k=2500))
+SessionCfg(lights=dusk)
+```
 
 | Key | Meaning |
 |---|---|
 | `dome_intensity` | replaces the dome's intensity (nits); 0 turns the dome off |
-| `dome_temperature_k` | dome colour temperature in Kelvin (1000 to 40000; USD `enableColorTemperature` and `colorTemperature`); left out, the dome stays white. `SessionCfg.light_temperature_k` sets it without a file, and the file wins |
+| `dome_temperature_k` | dome colour temperature in Kelvin (1000 to 40000; Isaac Lab's `DomeLightCfg.color_temperature`); left out, the dome stays white |
 | `fixtures` | extra lights, in the scan's frame (the frame the room's boxes file uses), placed in the world frame by the host's spawn point as the boxes and scan are |
 | `sun` | one distant light for outdoor scenes, in the world frame |
 
@@ -163,7 +172,7 @@ The sun has `azimuth_deg` (the sun's bearing from +x towards +y), `elevation_deg
  "sun": {"azimuth_deg": 135, "elevation_deg": 40, "intensity": 3000, "angle_deg": 0.53, "temperature_k": 5800}}
 ```
 
-The summary's `scene.lights` names the file, `scene.dome_light_nits` the dome the stage was lit by (null without one), `scene.dome_temperature_k` its colour temperature (null: white) and `scene.sun` the sun (null without one).
+The summary's `scene.lights` names the file (null without one, or for a `Lighting` given in code), `scene.lighting` records every setting the stage was lit with (null without any), `scene.dome_light_nits` the dome (null without one) and `scene.dome_temperature_k` its colour temperature (null: white).
 
 A Lambertian panel of area `A` and luminance `L` puts out `pi L A`; a grid with one panel per `s` by `s` of floor lights it at about `pi L A / s^2` (lux, with nits for `L`).
 
