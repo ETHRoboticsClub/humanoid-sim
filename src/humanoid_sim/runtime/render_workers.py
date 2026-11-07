@@ -11,6 +11,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from humanoid_sim.runtime.render import VIEWPORT_HZ
+
 STOP_TIMEOUT_S = 20.0  # Let Kit close before terminating an unresponsive worker.
 
 
@@ -36,14 +38,16 @@ def _render(segment, cfg, kwargs):
     render_runtime(segment, cfg, **kwargs)
 
 
-def render_runtime_workers(segment, cfg, *, seconds=None, wait_s=60.0, summary=None, window=False):
+def render_runtime_workers(segment, cfg, *, seconds=None, wait_s=60.0, summary=None, window=False,
+                           viewport_hz=VIEWPORT_HZ):
     from humanoid_sim.model.description import Description
     from humanoid_sim.runtime.render import render_runtime
     from humanoid_sim.sensors import rigs
 
     configurations = render_configs(cfg, rigs.load(cfg.robot, Description.load(cfg.robot), cfg.sensors))
     if len(configurations) == 1:
-        return render_runtime(segment, cfg, seconds=seconds, wait_s=wait_s, summary=summary, window=window)
+        return render_runtime(segment, cfg, seconds=seconds, wait_s=wait_s, summary=summary, window=window,
+                              viewport_hz=viewport_hz)
 
     context = multiprocessing.get_context("spawn")  # Kit/CUDA must never inherit a forked runtime.
     stopped = False
@@ -62,7 +66,7 @@ def render_runtime_workers(segment, cfg, *, seconds=None, wait_s=60.0, summary=N
             try:
                 for name, worker_cfg in configurations.items():
                     kwargs = dict(seconds=seconds, wait_s=wait_s, summary=str(outputs[name]),
-                                  window=window and name == "cameras")
+                                  window=window and name == "cameras", viewport_hz=viewport_hz)
                     process = context.Process(target=_render, name=f"hsim-render-{name}",
                                               args=(str(segment), worker_cfg, kwargs))
                     process.start()

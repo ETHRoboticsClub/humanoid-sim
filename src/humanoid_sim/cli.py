@@ -298,7 +298,8 @@ def cmd_render_runtime(args) -> int:
                      lidar=not args.no_lidar, feeds=args.feeds, lidar_domain=args.lidar_domain, rrd=args.rrd, images=args.images,
                      depth_noise=args.depth_noise, device=args.device, assets=args.assets)
     render = render_runtime if args.combined else render_runtime_workers
-    render(args.segment, cfg, seconds=args.seconds, wait_s=args.wait, summary=args.summary, window=args.window)
+    render(args.segment, cfg, seconds=args.seconds, wait_s=args.wait, summary=args.summary, window=args.window,
+           viewport_hz=args.viewport_hz)
     return 0
 
 
@@ -440,6 +441,10 @@ def main(argv: list[str] | None = None) -> int:
     rr_.add_argument("--wait", type=float, default=60.0, help="seconds to wait for the segment to appear")
     rr_.add_argument("--window", action="store_true",
                      help="show Kit's window and viewport on $DISPLAY (e.g. a VNC display) instead of headless")
+    from humanoid_sim.runtime.render import VIEWPORT_HZ
+
+    rr_.add_argument("--viewport-hz", type=float, default=VIEWPORT_HZ,
+                     help="minimum requested Kit render rate with --window; sensor rates stay unchanged (default: %(default)s)")
     rr_.set_defaults(func=cmd_render_runtime)
 
     rt = sub.add_parser("render-trajectory", help="render the rig's RTX cameras and lidars along a `serve --trajectory` "

@@ -168,7 +168,7 @@ command fail. `--summary` contains separate worker summaries and exit codes; ima
 exports belong to the camera worker and a LiDAR Rerun recording uses `.lidar.rrd`.
 
 
-`humanoid-sim render-runtime <segment>` renders a running `serve`'s robot with the same sensors and outputs (`src/humanoid_sim/runtime/render.py`). It never steps physics and never writes to the segment: each render it takes the latest truth (base pose and joint positions), poses the robot there by forward kinematics (`SensorSession.pose`) and renders at that plant time (`SensorSession.render_at`). It renders as fast as Kit allows, at most once per camera period (the lidar's sweep period without cameras), and a render that falls behind skips to the latest truth; the host keeps real time on its own. Stamps map plant time onto the realtime clock through the host's own mapping (the feedback region's `written_mono_ns` at `sim_time_ns`). The scene is the host's: its boxes and scan from the descriptor when the files are readable here with the same digests, plus `--splat` for the cameras and `--lights` ([Lights](#lights)). It follows a `--persist` host's next session.
+`humanoid-sim render-runtime <segment>` renders a running `serve`'s robot with the same sensors and outputs (`src/humanoid_sim/runtime/render.py`). It never steps physics and never writes to the segment: each render it takes the latest truth (base pose and joint positions), poses the robot there by forward kinematics (`SensorSession.pose`) and renders at that plant time (`SensorSession.render_at`). Headless rendering follows the camera period (the lidar's sweep period without cameras); a window can request a faster cadence as described below. A render that falls behind skips to the latest truth; the host keeps real time on its own. Stamps map plant time onto the realtime clock through the host's own mapping (the feedback region's `written_mono_ns` at `sim_time_ns`). The scene is the host's: its boxes and scan from the descriptor when the files are readable here with the same digests, plus `--splat` for the cameras and `--lights` ([Lights](#lights)). It follows a `--persist` host's next session.
 
 ```bash
 humanoid-sim serve --segment /run/hsim/plant --truth-every 1 --scene $H/hangar_proxy.npz --spawn -4.42 3.48 \
@@ -177,7 +177,28 @@ humanoid-sim render-runtime /run/hsim/plant --splat outputs/rtx/hangar_splat.usd
   --feeds /run/ethrc-camera-feed --lidar-domain 7 --summary outputs/rtx/render.json
 ```
 
-The summary adds `render_rate_hz`, `lag_ms` (the host's plant time when a render's frames are out, minus the render's plant time) and `host_keeping_up` (the share of renders during which the host kept real time). Controls runs it as `just sim-isaac-rtx`. A heartbeat older than 500 ms or from a different monotonic clock ends rendering for that session, including when plant time is frozen. The renderer waits up to 10 s for a fresh session at the same path and then exits if the host does not return; a normally paused host keeps publishing its heartbeat and remains connected.
+With `--window`, the viewport requests at least 30 renders/s independently of slower
+sensors. `--viewport-hz HZ` changes that request (for example, `--viewport-hz 10`
+reduces display work or `--viewport-hz 60` requests a faster display). Faster sensors
+still set the minimum cadence. Headless rendering keeps its sensor-driven cadence.
+Kit renders cameras and the viewport together, but camera readout/publication keeps
+each stream's declared rate; LiDAR partial readouts still accumulate into sweeps at
+the rig's configured period. This does not add a camera to a robot's inventory.
+Deadlines keep their phase across plant ticks and skip missed periods, with no
+catch-up replay. A paused plant produces no duplicate frames; a new runtime session
+resets the display and camera acquisition schedules.
+
+The summary adds `render_period_ns` (requested cadence), `render_rate_hz` (achieved cadence),
+`lag_ms` (the host's plant time when a render's frames are out, minus the render's plant time)
+and `host_keeping_up` (the share of renders during which the host kept real time).
+The requested viewport rate is modeled until the actual cadence, host keeping-up
+fraction, sensor output rates and display transport have been checked on the target
+GPU. A faster viewport increases GPU and network work; it does not guarantee lower
+end-to-end latency. Controls runs it as `just sim-isaac-rtx`. A heartbeat older than
+500 ms or from a different monotonic clock ends rendering for that session, including
+when plant time is frozen. The renderer waits up to 10 s for a fresh session at the
+same path and then exits if the host does not return; a normally paused host keeps
+publishing its heartbeat and remains connected.
 
 Camera stamps and lidar sweep-start stamps use the host's plant-to-monotonic mapping. The mapping advances through rendering and readout, so a slow render delays delivery without moving the recorded capture time. The two eyes of a stereo frame share one exposure stamp.
 

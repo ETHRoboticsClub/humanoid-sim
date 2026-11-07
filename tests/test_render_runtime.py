@@ -67,6 +67,9 @@ def runtime(tmp_path, monkeypatch):
         def close(self):
             pass
 
+        def reset_capture_schedule(self):
+            pass
+
     monkeypatch.setattr(session, "SensorSession", Sensors)
     cfg = session.SessionCfg(robot="fixture")
     truth, fb = np.zeros((), abi.TRUTH), np.zeros((), abi.FEEDBACK)
@@ -94,6 +97,44 @@ def test_a_paused_host_stays_alive_but_a_stopped_heartbeat_ends_rendering(runtim
     assert not renderer.frame()
 
 
+def test_viewport_follows_latest_truth_at_30_hz_with_a_10_hz_sensor(runtime, monkeypatch):
+    host, renderer, _, _, cfg = runtime
+    # The fake sensor owns a 100 ms acquisition period, independent of display.
+    from humanoid_sim.sensors import session
+
+    class SlowSensors(session.SensorSession):
+        def __init__(self, cfg):
+            super().__init__(cfg)
+            self.render_ns = 100_000_000
+
+    monkeypatch.setattr(session, "SensorSession", SlowSensors)
+    display = RuntimeRender(host.path, cfg, viewport_hz=30)
+    try:
+        times = []
+        display.session.render_at = lambda t, dt: times.append(t)
+        for t in range(1_000_000_000, 2_000_000_000, 4_000_000):
+            truth = np.zeros((), abi.TRUTH)
+            truth["sim_time_ns"] = t
+            host.regions["truth"].write(truth)
+            assert display.frame()
+        assert len(times) == 30
+        assert max(np.diff(times)) <= 36_000_000  # 250 Hz host quantization, no cumulative drift
+        assert display.session.render_ns == 100_000_000
+        # A long stall renders only the newest truth, once, never a catch-up loop.
+        truth["sim_time_ns"] = 3_000_000_000
+        host.regions["truth"].write(truth)
+        assert display.frame() and display.frame()
+        assert times[-1] == 3_000_000_000 and len(times) == 31
+    finally:
+        display.close()
+
+
+@pytest.mark.parametrize("hz", [0, -1, float("nan"), float("inf"), 2e9])
+def test_invalid_viewport_rate_is_rejected_before_opening_the_plant(hz):
+    with pytest.raises(ValueError, match="viewport_hz"):
+        RuntimeRender("does-not-exist", None, viewport_hz=hz)
+
+
 def test_a_future_dated_heartbeat_ends_rendering(runtime):
     host, renderer, clock, _, _ = runtime
     host.header["heartbeat_mono_ns"] = clock[0] + 1
@@ -111,6 +152,7 @@ def test_reopen_refuses_the_dead_file_and_accepts_a_replacement_session(runtime)
         renderer.reopen(wait_s=0)
         assert renderer.session_id == replacement.session_id != old_session
         assert renderer._last_t is None
+        assert renderer._next_t is None
     finally:
         replacement.close()
 
@@ -159,10 +201,10 @@ def test_render_latency_does_not_move_camera_or_lidar_capture_timestamps(runtime
             self.render_ns = 33_333_333
             self.sim = SimpleNamespace(t_ns=1_000_000_000,
                                        plant=SimpleNamespace(cfg=SimpleNamespace(device="cpu")))
-            self.cfg = SimpleNamespace(images=None)
+            self.cfg = SimpleNamespace(images=None, depth_noise=False)
             self.recorder = None
             self.camera_specs = [SimpleNamespace(camera_id="stereo", streams=[
-                SimpleNamespace(name=name, kind="mono") for name in ("left", "right")])]
+                SimpleNamespace(name=name, kind="mono", rate_hz=30) for name in ("left", "right")])]
             self.cameras = SimpleNamespace(update=lambda _dt: None,
                                            image=lambda *_args: np.zeros((2, 2), dtype=np.uint8))
             self.feeds = {"stereo": SimpleNamespace(publish=lambda _name, stamp, _image:
@@ -176,6 +218,7 @@ def test_render_latency_does_not_move_camera_or_lidar_capture_timestamps(runtime
             self.ms = {key: [] for key in ("render", "camera_read", "lidar_read", "publish")}
             self.last_images, self._last_sweep, self._saved = {}, {}, {}
             self.sweeps = None
+            self.reset_capture_schedule()
 
         def pose(self, *_args):
             pass

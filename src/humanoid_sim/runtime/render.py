@@ -3,8 +3,9 @@ it, and the frames and sweeps go out as Controls reads them (its camera feed, Un
 
 The renderer never steps physics and never writes to the segment. Each render it takes the latest truth (base pose
 and joint positions), poses the robot there by forward kinematics (``SensorSession.pose``) and renders at that plant
-time. It renders as fast as Kit allows, at most once per camera period (the lidar's sweep period without cameras);
-the host keeps real time on its own, and a render that falls behind skips to the latest truth. Stamps map plant time
+time. Headless rendering follows the sensor period; an interactive viewport can request a faster cadence without
+accelerating sensor publication. The host keeps real time on its own, and a late render skips to the latest truth.
+Stamps map plant time
 onto the realtime clock through the host's own mapping (``plant_abi``: the feedback region's ``written_mono_ns``
 at ``sim_time_ns``).
 
@@ -18,6 +19,7 @@ each render moves those parts to where the truth has the crane. Needs the Isaac 
 from __future__ import annotations
 
 import dataclasses
+import math
 import signal
 import time
 from pathlib import Path
@@ -28,7 +30,16 @@ from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.sensors.feeds import ClockMapping
 
 FOLLOW_S = 10.0  # how long to wait for the next session of a `serve --persist` host
+VIEWPORT_HZ = 30.0  # interactive display; sensor publication keeps the rig's own rates
 EDITOR_PANELS = ("Stage", "Layer", "Render Settings", "Property", "Content", "Console")  # hidden in the window
+
+
+def _viewport_period_ns(rate_hz: float | None) -> int | None:
+    if rate_hz is None:
+        return None
+    if not math.isfinite(rate_hz) or not 0 < rate_hz <= 1e9:
+        raise ValueError("viewport_hz must be finite and in (0, 1e9]")
+    return int(round(1e9 / rate_hz))
 
 
 def plant_now_ns(feedback, mono_now_ns: int) -> int:
@@ -85,10 +96,12 @@ def move_crane(crane: dict, position_m) -> None:
 class RuntimeRender:
     """Renders one segment's robot; :meth:`frame` renders once if a render is due."""
 
-    def __init__(self, segment: str | Path, cfg, *, wait_s: float = 60.0):
+    def __init__(self, segment: str | Path, cfg, *, wait_s: float = 60.0,
+                 viewport_hz: float | None = None):
         from humanoid_sim.model.description import Description
         from humanoid_sim.sensors.session import SensorSession
 
+        viewport_ns = _viewport_period_ns(viewport_hz)
         self.path = Path(segment)
         desc = Description.load(cfg.robot)
         self._identity = {"robot_id": desc.robot, "description_digest": desc.digest}
@@ -102,12 +115,16 @@ class RuntimeRender:
                                   spawn_m=cfg.spawn_m if cfg.scene else spawn,
                                   scan_mesh=cfg.scan_mesh or scan_mesh)
         self.session = SensorSession(cfg)
+        sensor_ns = self.session.render_ns
+        self.render_period_ns = (sensor_ns if viewport_ns is None else
+                                 min(sensor_ns, viewport_ns) if sensor_ns else viewport_ns)
         self._crane = self._crane_parts(record.get("gantry")) if cfg.splat else {}
         self.gantry = record.get("gantry")
         joints = record["joints"]
         self._order = [joints.index(n) for n in desc.joints]  # the description's order, from the host's
         self.session_id = self.seg.session_id
         self._last_t = None
+        self._next_t = None
         self.lag_ms: list[float] = []  # plant time now minus the render's, when its frames are out
         self.host_keeping_up: list[bool] = []
 
@@ -142,7 +159,7 @@ class RuntimeRender:
             return True
         t_ns = int(truth[1]["sim_time_ns"])
         session = self.session
-        if self._last_t is not None and t_ns - self._last_t < session.render_ns:
+        if (self._last_t == t_ns or (self._next_t is not None and t_ns < self._next_t)):
             return True
         tr = truth[1]
         device = session.sim.plant.cfg.device
@@ -151,9 +168,15 @@ class RuntimeRender:
         session.pose(t_ns, torch.as_tensor(q, device=device)[None], torch.as_tensor(base, device=device)[None])
         self._move_crane(tr)
         session.clock = ClockMapping(int(fb[1]["sim_time_ns"]), int(fb[1]["written_mono_ns"]))
-        dt = session.render_ns if self._last_t is None else t_ns - self._last_t
+        dt = self.render_period_ns if self._last_t is None else t_ns - self._last_t
         session.render_at(t_ns, dt)
         self._last_t = t_ns
+        # Keep phase across the host's discrete time ticks; skip missed deadlines,
+        # never replay stale poses after a slow render.
+        period = self.render_period_ns
+        if period:
+            deadline = t_ns if self._next_t is None else self._next_t
+            self._next_t = deadline + ((t_ns - deadline) // period + 1) * period
         self.lag_ms.append((plant_now_ns(fb[1], abi.mono_ns()) - t_ns) / 1e6)
         self.host_keeping_up.append(bool(fb[1]["keeping_up"]))
         return True
@@ -166,11 +189,14 @@ class RuntimeRender:
                                     max_heartbeat_age_ns=abi.HEARTBEAT_TIMEOUT_NS, **self._identity)
         self.session_id = self.seg.session_id
         self._last_t = None
+        self._next_t = None
+        self.session.reset_capture_schedule()
 
     def summary(self, wall_s: float) -> dict:
         out = self.session.summary(wall_s)
         lag = np.asarray(self.lag_ms) if self.lag_ms else None
         out["render_rate_hz"] = self.session.counts["renders"] / wall_s
+        out["render_period_ns"] = self.render_period_ns
         out["lag_ms"] = None if lag is None else {"median": float(np.median(lag)), "p95": float(np.percentile(lag, 95)),
                                                    "max": float(lag.max())}
         out["host_keeping_up"] = (sum(self.host_keeping_up) / len(self.host_keeping_up)
@@ -200,7 +226,7 @@ def _viewport_only(gantry: dict | None) -> None:
 
 
 def render_runtime(segment: str | Path, cfg, *, seconds: float | None = None, wait_s: float = 60.0,
-                   summary: str | None = None, window: bool = False) -> dict:
+                   summary: str | None = None, window: bool = False, viewport_hz: float = VIEWPORT_HZ) -> dict:
     """Render ``segment``'s robot (waiting up to ``wait_s`` for it) until its host is gone or for ``seconds``,
     following a ``serve --persist`` host's next session; with ``window`` Kit shows its viewport on ``$DISPLAY``. The
     summary is printed (and written to ``summary``) before Kit closes, which may end the process."""
@@ -208,6 +234,8 @@ def render_runtime(segment: str | Path, cfg, *, seconds: float | None = None, wa
 
     from humanoid_sim.sensors.rtx import start_kit
 
+    if window:
+        _viewport_period_ns(viewport_hz)  # refuse invalid input before starting Kit
     with start_kit(cfg.device, window=window):
         stopped = False
 
@@ -218,7 +246,7 @@ def render_runtime(segment: str | Path, cfg, *, seconds: float | None = None, wa
 
         previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM)}
         try:
-            render = RuntimeRender(segment, cfg, wait_s=wait_s)
+            render = RuntimeRender(segment, cfg, wait_s=wait_s, viewport_hz=viewport_hz if window else None)
             start = time.monotonic()
             end = None if seconds is None else start + seconds
             try:

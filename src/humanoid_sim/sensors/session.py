@@ -8,8 +8,9 @@ lidar the RTX sensors can simulate (``Sensor.rtx_ready``) is simulated; the othe
 ``SensorSession.unsimulated``.
 
 Timing: the physics steps every period (4 ms) and the stage renders every camera period (33 ms at 30 Hz; the lidar's
-sweep period without cameras) at the plant time, which Kit's timeline follows. Each render gives every camera stream
-a frame; a lidar fires its pattern over the time since the previous render and hands over a sweep whenever one
+sweep period without cameras) at the plant time, which Kit's timeline follows. An external runtime may render more
+often for its viewport; each camera stream publishes at its own configured rate. A lidar fires its pattern over
+the time since the previous render and hands over a sweep whenever one
 completes. Stamps are the realtime clock's reading at the frame's or sweep's plant time (``feeds.ros_time_s``). The
 robot is welded at its spawn point in its home pose (a G1 topples on a fixed-gain hold), feet just above the floor,
 unless ``fixed_base`` is off.
@@ -160,6 +161,7 @@ class SensorSession:
         self._saved: dict[str, bool] = {}  # every image stream seen: whether it is depth
         self._last_sweep: dict[str, tuple] = {}
         self.clock: ClockMapping | None = None  # supplied by a host that steps physics separately
+        self.reset_capture_schedule()
         self.render_ns = min([int(round(1e9 / s.rate_hz)) for c in self.camera_specs for s in c.streams]
                              or [lidar.period_ns for lidar in self.lidars] or [0])
 
@@ -229,8 +231,8 @@ class SensorSession:
             self.render_at(now, self.render_ns)
 
     def render_at(self, now_ns: int, dt_ns: int) -> None:
-        """Render the stage at plant time ``now_ns``, ``dt_ns`` after the previous render, and hand every camera's
-        frames and every completed lidar sweep to the outputs."""
+        """Render at plant time ``now_ns``, ``dt_ns`` after the previous render; publish due camera frames and
+        completed lidar sweeps."""
         t = time.perf_counter()
         timeline_ns = self.lidars[0].render_time(now_ns) if self.lidars else now_ns
         self.render(timeline_ns)
@@ -249,19 +251,39 @@ class SensorSession:
             for sweep in sweeps:
                 self._lidar(now_ns, lidar, sweep)
 
+    def reset_capture_schedule(self) -> None:
+        """A new plant timeline starts a new camera phase (including after runtime reset)."""
+        self._camera_next_ns: dict[tuple[str, str], int] = {}
+
     def _cameras(self, now_ns: int) -> None:
         from humanoid_sim.sensors.feeds import depth_mm, ros_time_s
 
         stamp = ros_time_s(now_ns, self.now_ns)
         for cam in self.camera_specs:
+            due = set()
+            for stream in cam.streams:
+                key = (cam.camera_id, stream.name)
+                deadline = self._camera_next_ns.get(key, now_ns)
+                if now_ns >= deadline:
+                    period_ns = int(round(1e9 / stream.rate_hz))
+                    self._camera_next_ns[key] = deadline + ((now_ns - deadline) // period_ns + 1) * period_ns
+                    due.add(stream.name)
+            if not due:
+                continue
             frames = {}
             for s in cam.streams:
+                # Stereo depth needs its reference imager from this same render,
+                # even when that imager is not itself due for publication.
+                if s.name not in due and not self.cfg.depth_noise:
+                    continue
                 t = time.perf_counter()
                 image = self.cameras.image(cam, s)
                 self.ms["camera_read"].append(1e3 * (time.perf_counter() - t))
                 if s.kind == "depth" and self.cfg.depth_noise:
                     image = self._stereo_depth(cam, s, image, frames)
                 frames[s.name] = image
+                if s.name not in due:
+                    continue
                 frame = depth_mm(image, s.range_m) if s.kind == "depth" else image
                 if cam.camera_id in self.feeds:
                     t = time.perf_counter()
