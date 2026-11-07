@@ -15,6 +15,7 @@ of the robot's weight are ``/sim/0/gantry/{tension_n,tension_share,length_m}`` (
 
 from __future__ import annotations
 
+import math
 import time
 from pathlib import Path
 
@@ -233,6 +234,9 @@ def view_runtime(segment: str | Path, usd: Path, *, rrd: str | None = None, conn
     ``detail`` (``full`` into a file, ``live`` otherwise, unless given)."""
     from humanoid_sim.world.scan import SKY_RGB
 
+    if not math.isfinite(fps) or not 0 < fps <= 1e9:
+        raise ValueError("fps must be finite and in (0, 1e9]")
+    period_ns = int(round(1e9 / fps))
     log = SignalLog("humanoid-sim runtime", init=True)
     view = RuntimeView(segment, usd, log, wait_s=wait_s, robot=robot, draw=draw,
                        detail=detail or ("full" if rrd else "live"))
@@ -244,16 +248,26 @@ def view_runtime(segment: str | Path, usd: Path, *, rrd: str | None = None, conn
     else:
         log.rr.spawn(default_blueprint=bp)
     view.log_static()
-    period = 1.0 / fps
-    end = None if seconds is None else time.monotonic() + seconds
+    deadline_ns = time.monotonic_ns()
+    end_ns = None if seconds is None else deadline_ns + int(seconds * 1e9)
     try:
-        while end is None or time.monotonic() < end:
+        while end_ns is None or time.monotonic_ns() < end_ns:
             if not view.frame():
                 try:
                     view.reopen(FOLLOW_S)
                 except (abi.AbiError, FileNotFoundError):
                     break  # the server is gone
-            time.sleep(period)
+            # The requested period includes reading, FK and logging. Sleeping a
+            # full period after that work silently reduced the actual cadence.
+            deadline_ns += period_ns
+            now_ns = time.monotonic_ns()
+            if now_ns > deadline_ns:
+                deadline_ns += ((now_ns - deadline_ns) // period_ns + 1) * period_ns
+            delay_ns = deadline_ns - now_ns
+            if end_ns is not None:
+                delay_ns = min(delay_ns, end_ns - now_ns)
+            if delay_ns > 0:
+                time.sleep(delay_ns / 1e9)
     except KeyboardInterrupt:
         pass
     finally:

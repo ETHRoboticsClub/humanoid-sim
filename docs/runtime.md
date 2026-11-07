@@ -633,6 +633,19 @@ humanoid-sim view-runtime /run/hsim/plant --save runtime.rrd   # writes a record
 
 Each read logs the truth and feedback records that are new since the last read, at their `sim_time_ns` on Rerun's `time` timeline (plant time in seconds). The recording therefore samples the host about `--fps` times per second, not every 4 ms step, and the robot's pose moves only as often as the host publishes the truth (every `--truth-every` steps, 20 ms by default).
 
+The requested period includes reading, kinematics and logging. Polling follows
+monotonic nanosecond deadlines; overruns skip missed polls instead of replaying a
+backlog. `--seconds` bounds the final wait. Higher `--fps` values request more
+state samples, but achieved cadence also depends on CPU work, the SDK's batching,
+network delivery and the viewer's frame rate.
+
+With `--connect`, the host sends geometry and authoritative state transforms to
+the viewer, which renders the 3D view on its own machine. This is a read-only
+state view, not a video of the RTX viewport or a replacement for camera sensor
+images. Measure source-state age and viewer frame time when comparing it with
+remote desktop video; do not treat command targets or predicted poses as measured
+robot feedback.
+
 When a session ends, the viewer follows the next session at the same path if it becomes ready within 10 s (`FOLLOW_S` in `view.py`), as with `serve --persist`, and logs the new session id under `/sim/0/host/session`. Plant time runs on across sessions, so the recording stays on one timeline. If no session follows, or after `--seconds`, or on Ctrl-C, it stops and prints how many robot frames it logged.
 
 The viewer maps the segment file, so it runs on the machine the host runs on. It needs Newton and the Rerun SDK (the `newton` and `viz` extras natively; the Isaac Lab image has both) and the plain robot asset (or `--usd`), whose bodies it places with host kinematics. It refuses a segment whose robot id or description digest differs from the description it loaded (`--robot`). `Segment.open` maps the file read-write, so the viewer's user needs write permission on the file, as a client does, although the viewer writes nothing. With the host in a container, the simplest way is a second container on the same volume writing a recording, opened afterwards on any machine with `rerun runtime.rrd` (see [getting-started.md](getting-started.md#serve-the-runtime)). [visualization.md](visualization.md) shows the viewer's layout with screenshots.
