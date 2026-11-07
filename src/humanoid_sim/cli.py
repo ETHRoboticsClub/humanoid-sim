@@ -423,7 +423,8 @@ def main(argv: list[str] | None = None) -> int:
                      help="the room's scan (OBJ) for the lidar (default: the host's, when readable here); added only "
                           "with a lidar, so without --splat --no-lidar changes the cameras' depth")
     rr_.add_argument("--lights", default=None,
-                     help="the room's ceiling lights (JSON, in the scan's frame; placed with the host's spawn)")
+                     help="the room's lighting (JSON): ceiling lights in the scan's frame (placed with the host's spawn), "
+                          "dome intensity and colour temperature, a sun")
     rr_.add_argument("--no-cameras", action="store_true")
     rr_.add_argument("--no-lidar", action="store_true")
     rr_.add_argument("--combined", action="store_true",
@@ -452,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
     rt.add_argument("--splat", default=None, help="the room's Gaussian splat as USD (`splat-usd`), for the cameras")
     rt.add_argument("--splat-intensity", type=float, default=1.0)
     rt.add_argument("--scan-mesh", default=None, help="the room's scan (OBJ) for the lidar (default: the host's)")
-    rt.add_argument("--lights", default=None, help="the room's ceiling lights (JSON)")
+    rt.add_argument("--lights", default=None, help="the room's lighting (JSON): ceiling lights, dome intensity and colour temperature, a sun")
     rt.add_argument("--no-cameras", action="store_true")
     rt.add_argument("--no-lidar", action="store_true")
     rt.add_argument("--start", type=float, default=None, help="first plant time to render (s)")
