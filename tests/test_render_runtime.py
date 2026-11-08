@@ -175,6 +175,7 @@ def test_render_latency_does_not_move_camera_or_lidar_capture_timestamps(runtime
             self.counts = {key: 0 for key in ("renders", "camera_frames", "lidar_sweeps", "lidar_points")}
             self.ms = {key: [] for key in ("render", "camera_read", "lidar_read", "publish")}
             self.last_images, self._last_sweep, self._saved = {}, {}, {}
+            self.imaging = {}
             self.sweeps = None
 
         def pose(self, *_args):

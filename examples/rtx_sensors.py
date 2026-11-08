@@ -28,6 +28,8 @@ ROBOT = "g1_29dof_with_hand_rev_1_0"
 
 
 def main() -> None:
+    from humanoid_sim.sensors.imaging import parse_effects
+
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--robot", default=ROBOT)
     p.add_argument("--sensors", default=None,
@@ -45,6 +47,9 @@ def main() -> None:
     p.add_argument("--no-lidar", action="store_true")
     p.add_argument("--depth-noise", action="store_true",
                    help="the stereo cameras' depth errors (noise, occlusion and texture holes); off: exact depth")
+    p.add_argument("--camera-effects", type=parse_effects, default=(),
+                   help="the cameras' imaging (exposure, noise; comma-separated, or all; sensors/imaging.py); "
+                        "default: the RTX render")
     p.add_argument("--feeds", default=None, help="camera feed root (ethrc-camera-sim-feed/v1)")
     p.add_argument("--lidar-domain", type=int, default=None, help="publish the Mid-360 on Unitree's DDS domain")
     p.add_argument("--rrd", default=None)
@@ -63,7 +68,7 @@ def main() -> None:
         robot=args.robot, sensors=args.sensors, scene=args.scene, spawn_m=tuple(args.spawn), splat=args.splat,
         splat_intensity=args.splat_intensity, scan_mesh=args.scan_mesh, cameras=not args.no_cameras,
         lidar=not args.no_lidar, feeds=args.feeds, lidar_domain=args.lidar_domain, rrd=args.rrd, images=args.images,
-        depth_noise=args.depth_noise, device=args.device, assets=args.assets))
+        depth_noise=args.depth_noise, camera_effects=args.camera_effects, device=args.device, assets=args.assets))
     try:
         start = time.perf_counter()
         session.run(args.seconds)

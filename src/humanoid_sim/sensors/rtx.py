@@ -67,6 +67,9 @@ EXPOSURE = {AUTO_EXPOSURE: False,
 # (measured against ray-cast masks in tests/test_rtx_sensors.py: half a pixel in both axes, both models).
 RTX_PIXEL_CENTRE_PX = 0.5
 LUMA_BT601 = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+# Isaac Lab's linear colour output (the HdrColor AOV), exposed by EXPOSURE: the 8-bit "rgb" is it tone mapped
+# (sensors/imaging.py). A camera asks for one or the other: with both, Isaac Lab's "rgb" comes out linear.
+HDR = "rgb_hdr"
 HIDDEN_FROM_CAMERAS = "primvars:hideForCamera"
 CASTS_NO_SHADOWS = "primvars:doNotCastShadows"
 SPLAT_PRIM = "/World/Splat"  # RTX: primary camera rays skip the prim; other rays still hit it
@@ -147,9 +150,10 @@ def body_paths(usd_path, bodies) -> dict[str, str]:
 
 
 def camera_entities(cameras: list[tuple[CameraSpec, Mount]], bodies: dict[str, str],
-                    robot_prim: str = ROBOT_PRIM) -> dict:
+                    robot_prim: str = ROBOT_PRIM, *, hdr: bool = False) -> dict:
     """Isaac Lab camera configs, by :func:`entity_name`, for every stream of ``cameras`` (each with its mount), each
-    a child of its body's prim (``bodies``: :func:`body_paths`)."""
+    a child of its body's prim (``bodies``: :func:`body_paths`). With ``hdr`` the colour and grey streams render
+    linear light (``rgb_hdr``) for the imaging chain (``sensors/imaging.py``) instead of 8-bit RGB."""
     import isaaclab.sim as sim_utils
     from isaaclab.sensors.camera import CameraCfg
     from isaaclab_physx.renderers import IsaacRtxRendererCfg
@@ -165,7 +169,7 @@ def camera_entities(cameras: list[tuple[CameraSpec, Mount]], bodies: dict[str, s
             out[entity_name(cam, s)] = CameraCfg(
                 prim_path=f"{robot_prim}/{body}/{entity_name(cam, s)}", update_period=0.0,
                 height=lens.height_px, width=lens.width_px,
-                data_types=["distance_to_image_plane"] if s.kind == "depth" else ["rgb"],
+                data_types=["distance_to_image_plane"] if s.kind == "depth" else [HDR if hdr else "rgb"],
                 spawn=spawn, offset=CameraCfg.OffsetCfg(pos=pos, rot=rot, convention="world"),
                 renderer_cfg=IsaacRtxRendererCfg())
     return out
@@ -282,6 +286,11 @@ class RtxCameras:
     def update(self, dt_s: float) -> None:
         for _, _, camera in self.streams:
             camera.update(dt_s)
+
+    def hdr(self, camera: CameraSpec, stream: Stream):
+        """A colour or grey stream's linear light, ``[H, W, 3]`` float on the render's device (the cameras built with
+        ``camera_entities(..., hdr=True)``)."""
+        return self.backend.scene[entity_name(camera, stream)].data.output[HDR][0, ..., :3]
 
     def image(self, camera: CameraSpec, stream: Stream) -> np.ndarray:
         sensor = self.backend.scene[entity_name(camera, stream)]
