@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import ClassVar
 
@@ -183,12 +184,65 @@ class ZedMiniImu(Imu):
     gyro_turn_on_bias_rad_s = 7.2e-3  # modeled
 
 
+@dataclass(frozen=True)
+class Imager:
+    """An image sensor as the imaging chain (``sensors/imaging.py``) models it: the electrons that read white at unity
+    gain (``full_well_e``: the well fills there, so an exposure that collects more clips), its read noise (electrons,
+    1 sigma), and the exposure times (ns) and analog gains (1: unity) its device can set."""
+
+    part: str
+    full_well_e: float
+    read_noise_e: float
+    exposure_ns: tuple[int, int]
+    gain: tuple[float, float]
+    source: str
+
+    def __post_init__(self):
+        lo, hi = self.exposure_ns
+        if not (self.full_well_e > 0 and self.read_noise_e >= 0 and 0 < lo <= hi and 1.0 <= self.gain[0] <= self.gain[1]):
+            raise ValueError(f"imager {self.part}: expected full_well_e > 0, read_noise_e >= 0, exposure_ns "
+                             f"0 < low <= high and gain 1 <= low <= high")
+        _positive_ns(f"imager {self.part} exposure_ns", lo)
+
+
+@dataclass(frozen=True)
+class AutoExposure:
+    """A camera's auto exposure, as its firmware runs it: it meters each frame's mean signal (linear, before the tone
+    curve) and moves the exposure towards the one whose signal reads ``target`` (a fraction of full scale, after the
+    tone curve), by ``1 - exp(-dt / time_constant)`` of the way (in log exposure) per frame ``dt`` apart. It
+    lengthens the exposure time first, up to the frame period or the imager's longest, then raises the gain."""
+
+    target: float
+    time_constant_ns: int
+    source: str
+
+    def __post_init__(self):
+        if not 0.0 < self.target < 1.0:
+            raise ValueError(f"auto exposure target {self.target}: expected a fraction of full scale in (0, 1)")
+        _positive_ns("auto exposure time_constant_ns", self.time_constant_ns)
+
+
+def _exposure_setting(where: str, imager: Imager, setting):
+    if setting == "auto":
+        return setting
+    if not (isinstance(setting, tuple) and len(setting) == 2):
+        raise ValueError(f"{where}: exposure {setting!r}: expected 'auto' or (exposure ns, gain)")
+    ns, gain = setting
+    _positive_ns(f"{where}: exposure", ns)
+    if not (imager.exposure_ns[0] <= ns <= imager.exposure_ns[1] and imager.gain[0] <= gain <= imager.gain[1]):
+        raise ValueError(f"{where}: exposure {setting!r}: outside {imager.part}'s {imager.exposure_ns} ns and gain "
+                         f"{imager.gain}")
+    return (int(ns), float(gain))
+
+
 class Camera(Sensor):
     """A camera product. Its frame is its reference imager's optical centre (x forward, y left, z up, as Controls'
     camera calibration has it); ``nominal_offsets_m`` places every stream's optical centre in it (a unit's
     calibration replaces them). ``stream_kinds`` gives each stream as Controls' backend publishes it: ``color``,
     ``mono`` (grey) or ``depth`` (metres along the optical axis, within ``depth_range_m``). ``rolling_shutter`` names
-    the streams whose imager has a rolling shutter, as Controls' backend declares them; the others are global."""
+    the streams whose imager has a rolling shutter, as Controls' backend declares them; the others are global.
+    ``imagers`` gives each colour and grey stream's image sensor and ``auto_exposure`` the device's auto exposure, for
+    the imaging chain (``sensors/imaging.py``), applied when a session asks for it."""
 
     kind = "camera"
     streams: ClassVar[tuple[str, ...]]
@@ -197,6 +251,8 @@ class Camera(Sensor):
     nominal_offsets_m: ClassVar[Mapping[str, tuple[float, float, float]]] = MappingProxyType({})
     depth_range_m: ClassVar[tuple[float, float] | None] = None
     rolling_shutter: ClassVar[frozenset[str]] = frozenset()
+    imagers: ClassVar[Mapping[str, Imager]] = MappingProxyType({})
+    auto_exposure: ClassVar[AutoExposure | None] = None
     # Stereo depth errors (sensors/stereo_depth.py), applied when a session asks for them: the matcher's disparity
     # error (pixels, 1 sigma; with a texture exponent, at a texture of 1 grey level), how it grows on plain surfaces
     # (sigma * t^-exponent at a reference-image texture t, held within the range; 0: the same everywhere), the blur
@@ -227,6 +283,10 @@ class Camera(Sensor):
                              f"{STREAM_KINDS}")
         if not cls.rolling_shutter <= set(cls.streams):
             raise ValueError(f"{where}: rolling_shutter {set(cls.rolling_shutter)}: expected streams it has")
+        cls.imagers = MappingProxyType(dict(cls.imagers))
+        images = {s for s in cls.streams if cls.stream_kinds.get(s) != "depth"}
+        if not set(cls.imagers) <= images or not all(isinstance(i, Imager) for i in cls.imagers.values()):
+            raise ValueError(f"{where}: imagers {sorted(cls.imagers)}: expected an Imager per colour or grey stream")
         if cls.depth_range_m is not None and not 0 <= cls.depth_range_m[0] < cls.depth_range_m[1]:
             raise ValueError(f"{where}: depth_range_m {cls.depth_range_m}: expected (min, max)")
         if min(cls.depth_disparity_sigma_px, cls.depth_noise_texture_exponent, cls.depth_noise_blur_px,
@@ -248,7 +308,8 @@ class Camera(Sensor):
                  stream_offsets_m: dict[str, tuple[float, float, float]] | None = None,
                  stream_rotations_xyzw: dict[str, tuple[float, float, float, float]] | None = None,
                  depth_focal_px: float | None = None,
-                 link_from_camera_xyzw: tuple[float, float, float, float] | None = None):
+                 link_from_camera_xyzw: tuple[float, float, float, float] | None = None,
+                 exposure: dict[str, object] | None = None):
         """Every stream at one resolution and rate; per stream the unit's pinhole calibration ``(fx, fy, cx, cy)`` in
         pixels (OpenCV's: pixel (u, v) centred at u, v), its lens distortion ``(model, coefficients)`` (model
         ``plumb_bob``, ``rational_polynomial`` or ``equidistant``; none when absent) and, where the unit's
@@ -257,7 +318,9 @@ class Camera(Sensor):
         (x right, y down, z forward). ``depth_focal_px`` is the focal length the unit turns disparity back into depth
         with, where it is not the depth stream's own (None: the stream's). ``link_from_camera_xyzw`` is the camera
         frame's orientation in its rig frame (a unit quaternion x, y, z, w), for a link whose axes are not the camera
-        frame's (None: the link is the camera frame); the camera frame's origin is the link's."""
+        frame's (None: the link is the camera frame); the camera frame's origin is the link's. ``exposure`` sets a
+        colour or grey stream's exposure as the robot's stack configures it, when the imaging chain models it:
+        ``"auto"`` (the device's auto exposure, the default for every stream) or ``(exposure ns, gain)``."""
         super().__init__(frame)
         where = f"{type(self).__name__} at {frame!r}"
         if not (isinstance(width, int) and isinstance(height, int)) or width <= 0 or height <= 0:
@@ -292,6 +355,12 @@ class Camera(Sensor):
         self.stream_rotations_xyzw = {s: tuple(float(v) for v in q) for s, q in rotations.items()}
         self.depth_focal_px = depth_focal_px
         self.link_from_camera_xyzw = None if q is None else tuple(float(v) for v in q)
+        exposure = dict(exposure or {})
+        unknown = set(exposure) - set(self.imagers)
+        if unknown:
+            raise ValueError(f"{where}: exposure for streams without an imager: {sorted(unknown)}")
+        self.exposure = {s: _exposure_setting(f"{where} {s}", self.imagers[s], exposure.get(s, "auto"))
+                         for s in self.imagers}
 
     @property
     def rtx_ready(self) -> bool:
@@ -300,6 +369,19 @@ class Camera(Sensor):
         return (streams <= set(self.intrinsics) and streams <= set(self.stream_offsets_m)
                 and streams <= set(self.stream_kinds)
                 and ("depth" not in self.stream_kinds.values() or self.depth_range_m is not None))
+
+
+# The imaging chain's figures, MODELED until a unit is measured (#40): the vendors publish no full well or read noise
+# for these imagers. Full wells and read noises are guesses of their pixels' size class (about 3 um global-shutter
+# pixels for the grey imagers, 1.4-2 um rolling-shutter ones for colour); a smaller well gives more shot noise for
+# the same output level. Auto exposure: a target of 0.46 of full scale in the 8-bit output (18 % grey, sRGB 118, the
+# usual metering target) and a quarter-second time constant, both modeled.
+MODELED_IMAGER = "MODELED GUESS: the vendor publishes no full well or read noise"
+MODELED_AUTO_EXPOSURE = AutoExposure(target=0.46, time_constant_ns=250_000_000,
+                                     source="MODELED: target and time constant not published or measured")
+# depthai's CameraControl.setManualExposure takes 1 to 33000 us and ISO 100 to 1600 (ISO 100: unity gain).
+DEPTHAI_EXPOSURE_NS = (1_000, 33_000_000)
+DEPTHAI_GAIN = (1.0, 16.0)
 
 
 class OakDW(Camera):
@@ -338,6 +420,14 @@ class OakDW(Camera):
     depth_median_px = 5
     depth_lr_check_px = 10.0
     depth_disparity_step_px = 1.0
+    # Controls' depthai backend sets no exposure: the device's auto exposure runs on every imager, the stereo pair
+    # exposed together.
+    imagers = {"rgb": Imager("IMX378", 6000.0, 2.0, DEPTHAI_EXPOSURE_NS, DEPTHAI_GAIN,
+                             f"{MODELED_IMAGER}; exposure and gain ranges: depthai's manual exposure"),
+               **{s: Imager("OV9282", 10000.0, 4.0, DEPTHAI_EXPOSURE_NS, DEPTHAI_GAIN,
+                            f"{MODELED_IMAGER}; exposure and gain ranges: depthai's manual exposure")
+                  for s in ("mono_left", "mono_right")}}
+    auto_exposure = MODELED_AUTO_EXPOSURE
 
 
 class RealSenseD435i(Camera):
@@ -362,6 +452,12 @@ class RealSenseD435i(Camera):
     # near an 8-bit imager's read noise.
     depth_disparity_sigma_px = 0.08
     depth_min_texture = 2.0
+    # Controls' realsense backend sets no exposure: auto exposure on the colour imager and on the infrared pair.
+    imagers = {"rgb": Imager("D435i colour imager", 6000.0, 2.0, (1_000, 33_000_000), (1.0, 16.0),
+                             f"{MODELED_IMAGER}; exposure and gain ranges modeled"),
+               **{s: Imager("D435i infrared imager", 10000.0, 4.0, (1_000, 33_000_000), (1.0, 16.0),
+                            f"{MODELED_IMAGER}; exposure and gain ranges modeled") for s in ("mono_left", "mono_right")}}
+    auto_exposure = MODELED_AUTO_EXPOSURE
 
 
 class ZedMini(Camera):
@@ -376,6 +472,10 @@ class ZedMini(Camera):
     stream_kinds = {"left": "mono", "right": "mono"}
     nominal_offsets_m = {"left": (0.0, 0.0, 0.0), "right": (0.0, -0.063, 0.0)}
     rolling_shutter = frozenset({"left", "right"})  # as zed_backend.py declares
+    # Controls' zed backend sets no exposure: the camera's auto exposure, both eyes exposed together.
+    imagers = {s: Imager("ZED Mini imager", 6000.0, 2.0, (1_000, 33_000_000), (1.0, 16.0),
+                         f"{MODELED_IMAGER}; exposure and gain ranges modeled") for s in ("left", "right")}
+    auto_exposure = MODELED_AUTO_EXPOSURE
 
 
 class Lidar(Sensor):
@@ -463,5 +563,5 @@ class Rig:
             raise ValueError(f"the IMU sits at {self.imu.frame!r}, but imu_joint mounts {desc.imu_link()!r}")
 
 
-__all__ = ["RTX_KINDS", "Camera", "Imu", "Lidar", "LivoxMid360", "Mti610", "OakDW", "RealSenseD435i", "Rig", "Sensor",
+__all__ = ["RTX_KINDS", "AutoExposure", "Camera", "Imager", "Imu", "Lidar", "LivoxMid360", "Mti610", "OakDW", "RealSenseD435i", "Rig", "Sensor",
            "UnitreeG1Imu", "ZedMini", "ZedMiniImu"]
