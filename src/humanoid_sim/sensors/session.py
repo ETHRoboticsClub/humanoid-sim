@@ -90,7 +90,8 @@ class SensorSession:
         lidars = [s for s in ready if s.kind == "lidar"] if cfg.lidar else []
         simulated = {s.name for s in cameras + lidars} | {n for n, s in self.rig.sensors.items() if s.simulated}
         self.unsimulated = [n for n in self.rig.sensors if n not in simulated]
-        self.mounts = {s.name: Mount.from_description(desc, s.frame) for s in cameras + lidars}
+        self.mounts = {s.name: Mount.from_description(desc, s.frame).turned(getattr(s, "link_from_camera_xyzw", None))
+                       for s in cameras + lidars}
         self.camera_specs = [camera_spec(s) for s in cameras]
         self.camera_models = {spec.camera_id: s for spec, s in zip(self.camera_specs, cameras, strict=True)}
         self.rng = np.random.default_rng(cfg.seed)

@@ -55,6 +55,35 @@ def test_a_mount_composes_fixed_joints_to_the_kept_body(tmp_path):
     np.testing.assert_allclose(m.R @ [1.0, 0.0, 0.0], (0.0, 1.0, 0.0), atol=1e-12)
 
 
+def test_a_camera_on_a_link_with_other_axes_is_turned_to_look_along_the_links_z(tmp_path):
+    from humanoid_sim.sensors.rtx import stream_offset
+
+    # A camera link pointing z forward, x left and y up on its body (rpy pi/2, 0, pi/2): read as a camera frame, it
+    # would look along the body's y. Turned (camera x, y, z along the link's z, x, y), it looks along the body's x.
+    urdf = tmp_path / "r.urdf"
+    urdf.write_text("""<robot name="r">
+      <link name="base"/><link name="cam"/>
+      <joint name="c" type="fixed"><origin xyz="0.1 0.2 0.9" rpy="1.5707963267948966 0 1.5707963267948966"/>
+        <parent link="base"/><child link="cam"/></joint>
+    </robot>""")
+    link = geometry.Mount.from_urdf(urdf, "cam")
+    np.testing.assert_allclose(link.R @ [1.0, 0.0, 0.0], (0.0, 1.0, 0.0), atol=1e-12)
+    m = link.turned((-0.5, -0.5, -0.5, 0.5))
+    assert (m.sensor_link, m.link, m.translation_m) == (link.sensor_link, link.link, link.translation_m)
+    np.testing.assert_allclose(m.R, np.eye(3), atol=1e-12)
+    assert link.turned(None) is link
+
+    pinhole = (300.0, 300.0, 320.0, 200.0)
+    camera = OakDW("cam", width=640, height=400, frame_period_ns=33_333_333,
+                   intrinsics={s: pinhole for s in OakDW.streams}, link_from_camera_xyzw=(-0.5, -0.5, -0.5, 0.5))
+    camera.name = "cam"
+    left = geometry.camera_spec(camera).stream("mono_left")
+    _, q_rtx = stream_offset(link.turned(camera.link_from_camera_xyzw), left)
+    # The RTX camera (x forward, z up) looks along the body's x with its up along the body's z.
+    np.testing.assert_allclose(geometry.quat_matrix(q_rtx) @ [1.0, 0.0, 0.0], (1.0, 0.0, 0.0), atol=1e-12)
+    np.testing.assert_allclose(geometry.quat_matrix(q_rtx) @ [0.0, 0.0, 1.0], (0.0, 0.0, 1.0), atol=1e-12)
+
+
 def test_a_pinhole_maps_angles_to_pixels():
     lens = geometry.Lens.from_fov(640, 480, 90.0)
     # A 90 deg field across 640 px: f = 320 px. A point 45 deg right of the axis lands on the right edge; 0.5 m up

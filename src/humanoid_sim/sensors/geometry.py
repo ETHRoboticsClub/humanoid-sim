@@ -88,6 +88,14 @@ class Mount:
         T[:3, :3], T[:3, 3] = self.R, self.translation_m
         return T
 
+    def turned(self, link_from_frame_xyzw: tuple[float, float, float, float] | None) -> Mount:
+        """The mount of a frame at this one's origin, turned in it by ``link_from_frame_xyzw`` (x, y, z, w; None:
+        not turned): a camera frame on a link whose axes are not the camera frame's."""
+        if link_from_frame_xyzw is None:
+            return self
+        R = self.R @ quat_matrix(link_from_frame_xyzw)
+        return Mount(self.sensor_link, self.link, self.translation_m, tuple(tuple(float(v) for v in row) for row in R))
+
     @classmethod
     def from_description(cls, desc, sensor_link: str) -> Mount:
         if desc.usd_model is None:
