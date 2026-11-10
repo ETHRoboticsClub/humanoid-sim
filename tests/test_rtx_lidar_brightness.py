@@ -26,7 +26,7 @@ pytest.importorskip("isaacsim", reason="RTX sensors need the Isaac Sim image (do
 if shutil.which("nvidia-smi") is None:
     pytest.skip("RTX sensors need an NVIDIA GPU with RT cores", allow_module_level=True)
 
-from rtx_oracles import CAMERAS, G1, SETTLE_S, WALLS, write_box_obj  # noqa: E402
+from rtx_oracles import CAMERAS, G1, SETTLE_S, WALLS, splat_positions, write_box_obj, write_splat_ply  # noqa: E402
 
 pytestmark = pytest.mark.rtx
 
@@ -34,12 +34,6 @@ REPO = Path(__file__).resolve().parents[1]
 SECONDS = SETTLE_S + 0.4
 # The scan mesh: a closed box just inside the walls and over their tops, so every Gaussian is under it.
 SCAN_SHELL = ((0.0, 0.0, 1.6), (2.95, 2.45, 1.6))
-# The splat: grey Gaussians every SPLAT_SPACING_M over the floor and the walls' inner faces.
-SPLAT_SPACING_M = 0.1
-SPLAT_SIGMA_M = 0.06  # more than half the spacing: the surface has no gaps
-SPLAT_OPACITY = 0.95
-SPLAT_GREY = 0.6  # linear base colour
-SH_C0 = 0.28209479177387814  # degree-0 spherical harmonic, 1 / (2 sqrt(pi)): colour = 0.5 + SH_C0 * f_dc (3DGS)
 LUMA_BT601 = (0.299, 0.587, 0.114)
 # A camera's mean luminance with and without the lidar (8-bit levels): the renders differ only by the renderer's
 # sampling noise, averaged over at least 640 x 400 pixels to well under a level; hiding the dome from the splat
@@ -49,35 +43,6 @@ LIT_LEVELS = 20.0  # the splat must show: a black frame would match itself
 PINNED_EXPOSURE = {"/rtx/post/histogram/enabled": False, "/rtx/post/tonemap/op": 6,  # ACES
                    "/rtx/post/tonemap/filmIso": 100.0, "/rtx/post/tonemap/exposureTime": 0.02,
                    "/rtx/post/tonemap/fNumber": 5.0}
-
-
-def splat_positions() -> np.ndarray:
-    """``[N, 3]``: the floor and the four walls' inner faces of rtx_oracles.WALLS, every SPLAT_SPACING_M."""
-    x_in = min(c[0] - h[0] for c, h in WALLS if c[0] > 0)
-    y_in = min(c[1] - h[1] for c, h in WALLS if c[1] > 0)
-    top = max(c[2] + h[2] for c, h in WALLS)
-    xs = np.arange(-x_in, x_in + 1e-9, SPLAT_SPACING_M)
-    ys = np.arange(-y_in, y_in + 1e-9, SPLAT_SPACING_M)
-    zs = np.arange(0.0, top + 1e-9, SPLAT_SPACING_M)
-    floor = [(x, y, 0.0) for x in xs for y in ys]
-    x_walls = [(s * x_in, y, z) for s in (-1, 1) for y in ys for z in zs]
-    y_walls = [(x, s * y_in, z) for s in (-1, 1) for x in xs for z in zs]
-    return np.array(floor + x_walls + y_walls)
-
-
-def write_splat_ply(path: Path, positions: np.ndarray) -> None:
-    """A degree-0 3DGS PLY (log scales, logit opacities, real-first quaternions) of isotropic grey Gaussians."""
-    names = ["x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "scale_1", "scale_2",
-             "rot_0", "rot_1", "rot_2", "rot_3"]
-    rows = np.zeros((len(positions), len(names)), dtype=np.float32)
-    rows[:, 0:3] = positions
-    rows[:, 3:6] = (SPLAT_GREY - 0.5) / SH_C0
-    rows[:, 6] = np.log(SPLAT_OPACITY / (1 - SPLAT_OPACITY))
-    rows[:, 7:10] = np.log(SPLAT_SIGMA_M)
-    rows[:, 10] = 1.0  # identity rotation
-    header = f"ply\nformat binary_little_endian 1.0\nelement vertex {len(rows)}\n"
-    header += "".join(f"property float {n}\n" for n in names) + "end_header\n"
-    path.write_bytes(header.encode("ascii") + rows.tobytes())
 
 
 def luminance(png: Path) -> float:

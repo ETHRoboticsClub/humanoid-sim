@@ -42,6 +42,9 @@ def main() -> None:
     p.add_argument("--scan-mesh", default=None,
                    help="the room's scan (OBJ): the lidar's surfaces with the boxes; added only with a lidar, so "
                         "without --splat --no-lidar changes the cameras' depth")
+    p.add_argument("--lights", default=None,
+                   help="the room's lighting (JSON, sensors/lights.py): fixtures in the scan's frame, the dome's "
+                        "intensity and colour temperature, the ambient light, a sun")
     p.add_argument("--seconds", type=float, default=5.0)
     p.add_argument("--no-cameras", action="store_true")
     p.add_argument("--no-lidar", action="store_true")
@@ -66,7 +69,7 @@ def main() -> None:
 
     session = SensorSession(SessionCfg(
         robot=args.robot, sensors=args.sensors, scene=args.scene, spawn_m=tuple(args.spawn), splat=args.splat,
-        splat_intensity=args.splat_intensity, scan_mesh=args.scan_mesh, cameras=not args.no_cameras,
+        splat_intensity=args.splat_intensity, scan_mesh=args.scan_mesh, lights=args.lights, cameras=not args.no_cameras,
         lidar=not args.no_lidar, feeds=args.feeds, lidar_domain=args.lidar_domain, rrd=args.rrd, images=args.images,
         depth_noise=args.depth_noise, camera_effects=args.camera_effects, device=args.device, assets=args.assets))
     try:

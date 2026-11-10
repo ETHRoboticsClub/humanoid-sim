@@ -50,7 +50,10 @@ def test_inertial_loading_against_static_torque_and_translating_support(tmp_path
 
     device = request.config.getoption("--replay-device")
     physics = load_profile("ethrc_v1")["physics"]
-    context = SimulationContext(simulation_cfg(physics, device=device, period_s=0.004))
+    # Keep the stiff support's integration period consistent with the selected profile.
+    dt_ns = physics["period_ns"]
+    dt = dt_ns * 1e-9
+    context = SimulationContext(simulation_cfg(physics, device=device, period_s=dt))
     request.addfinalizer(SimulationContext.clear_instance)
     scene = instantiate(SceneCfg(num_envs=4, env_spacing=3, replicate_physics=True))
     context.reset()
@@ -61,8 +64,6 @@ def test_inertial_loading_against_static_torque_and_translating_support(tmp_path
     field._inertial_bodies = [i for i, n in enumerate(robot.body_names) if n != "support"]
     initial = robot.data.default_joint_pos.torch.clone()
     initial[:, ids] = torch.tensor([0, 0.4, 0.3], device=device)
-    dt_ns = 4_000_000
-    dt = dt_ns * 1e-9
 
     def reset():
         robot.write_joint_position_to_sim_index(position=initial)

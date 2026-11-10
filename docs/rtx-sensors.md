@@ -160,15 +160,42 @@ The furniture boxes enclose the scanned furniture by up to tens of centimetres a
 
 ### Lights
 
-The stage is lit by a white dome light (600 nits): the robot and the boxes are lit evenly and cast no shadows; the splat is emissive, and a light never brightens it. A room's owner can add ceiling lights with `render-runtime --lights PATH` (`SessionCfg.lights`, `src/humanoid_sim/sensors/lights.py`): a JSON file of fixtures in the scan's frame, the frame the room's boxes file uses, placed in the world frame by the host's spawn point as the boxes and scan are. Each fixture is an area light facing straight down, a rectangle (`size_m`, USD `RectLight`) or a disk (`radius_m`, `DiskLight`), with its luminance in nits and an optional linear RGB colour; `dome_intensity` replaces the dome's, so the ceiling lights dominate and the dome is left as ambient fill:
+The stage is lit by a white dome light (600 nits, `rtx.DOME_INTENSITY`) and RTX's ambient light (level 1, `rtx.AMBIENT_INTENSITY`, the level Isaac Lab's rendering app sets; a uniform fill without direction or shadows): the robot and the boxes are lit evenly and cast no shadows; the splat is emissive, and a light never brightens it (`--splat-intensity` scales its emission). `SessionCfg.lights` changes the lighting (`src/humanoid_sim/sensors/lights.py`): a `Lighting` built in code, which is how a task or a low-light preset sets it, or the path of a JSON file with the same fields, which is how a room's owner sets it (`render-runtime --lights PATH`, `examples/rtx_sensors.py --lights PATH`). Both are checked the same way; a file's keys are all optional, though it must give at least one. Without either, the scene is the one above, exactly. The dome is spawned with its intensity and colour temperature; the other lights are authored as UsdLux prims when the session is built.
 
-```json
-{"fixtures": [{"position_m": [0.0, 2.0, 7.5], "size_m": [0.6, 1.2], "intensity": 3000, "color": [1, 1, 1]},
-              {"position_m": [3.5, 2.0, 7.5], "radius_m": 0.4, "intensity": 3000}],
- "dome_intensity": 100}
+```python
+from humanoid_sim.sensors.lights import Fixture, Lighting, Sun
+
+dusk = Lighting(dome_intensity=40, dome_temperature_k=3200, ambient_intensity=0,
+                fixtures=[Fixture(position_m=(0.0, 2.0, 7.5), size_m=(0.6, 1.2), intensity=1500)],
+                sun=Sun(azimuth_deg=250, elevation_deg=5, intensity=200, temperature_k=2500))
+SessionCfg(lights=dusk)
 ```
 
-The summary's `scene.lights` names the file and `scene.dome_light_nits` the dome the stage was lit by (null without one).
+| Key | Meaning |
+|---|---|
+| `dome_intensity` | replaces the dome's intensity (nits); 0 turns the dome off, and the ambient light still lights the scene |
+| `dome_temperature_k` | dome colour temperature in Kelvin (1000 to 40000; Isaac Lab's `DomeLightCfg.color_temperature`); left out, the dome stays white. The ambient light stays white: at its default level it dilutes the tint (a 3000 K dome raises the D435i's red-to-blue ratio from 1.0 to 1.5 with it, to 3.3 without) |
+| `ambient_intensity` | replaces the ambient light's level (Kit's `/rtx/sceneDb/ambientLightIntensity`, dimensionless, 1 by default); 0 turns it off. It lights every surface the same whatever the other lights: with it at 1 and the dome off, a grey floor still renders about half as bright as under the default dome (in 8-bit levels), so a dark scene turns both off |
+| `fixtures` | extra lights, in the scan's frame (the frame the room's boxes file uses), placed in the world frame by the host's spawn point as the boxes and scan are |
+| `sun` | one distant light for outdoor scenes, in the world frame |
+
+Each fixture has a `position_m`, its `intensity` (luminance in nits for an area light), an optional linear RGB `color` (white by default) and an optional `temperature_k` (multiplied with `color`), and exactly one shape. A rectangle (`size_m`, USD `RectLight`) or a disk (`radius_m`, `DiskLight`) faces straight down, like a hangar ceiling panel; a sphere (`sphere_radius_m`, `SphereLight`) radiates in all directions, a point-like bulb.
+
+The sun has `azimuth_deg` (the sun's bearing from +x towards +y), `elevation_deg` (above the horizon, 0 to 90), `intensity` (illuminance in USD distant light units), `angle_deg` (angular diameter, 0.53 by default; a larger angle softens shadows) and optional `color` and `temperature_k`. The light shines from that direction towards the scene. Low-light presets are humanoid-learning's choice of these values.
+
+```json
+{"fixtures": [{"position_m": [0.0, 2.0, 7.5], "size_m": [0.6, 1.2], "intensity": 3000, "temperature_k": 4000},
+              {"position_m": [3.5, 2.0, 7.5], "radius_m": 0.4, "intensity": 3000},
+              {"position_m": [-2.0, 1.0, 2.5], "sphere_radius_m": 0.08, "intensity": 800, "temperature_k": 2700}],
+ "dome_intensity": 100,
+ "dome_temperature_k": 6500,
+ "ambient_intensity": 0.5,
+ "sun": {"azimuth_deg": 135, "elevation_deg": 40, "intensity": 3000, "angle_deg": 0.53, "temperature_k": 5800}}
+```
+
+On a splat, the lights light the robot and change only the shadows on the splat: the room renders as bright under the dome with ceiling fixtures or a sun as under the dome alone (each camera's mean within 1%, `tests/test_rtx_lights.py`), and the ambient light hardly reaches it. Geometry the cameras see, the robot above all, shadows the splat by the share of the stage's lights it hides, whatever their intensities: under the dome and a sun the robot's shadow on the splat is half as bright as the floor around it, however faint the sun (an intensity of 30 darkens it as much as 3000), and under the sun alone it is black; ceiling fixtures give it a soft shadow a few percent deep. USD's `shadow:enable` on the sun does not change this.
+
+The summary's `scene.lights` names the file (null without one, or for a `Lighting` given in code), `scene.lighting` records every setting the stage was lit with (null without any), `scene.dome_light_nits` the dome (null without one), `scene.dome_temperature_k` its colour temperature (null: white) and `scene.ambient_intensity` the ambient light's level; `rtx_post` has the level Kit rendered with.
 
 A Lambertian panel of area `A` and luminance `L` puts out `pi L A`; a grid with one panel per `s` by `s` of floor lights it at about `pi L A / s^2` (lux, with nits for `L`).
 

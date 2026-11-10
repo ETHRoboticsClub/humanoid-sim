@@ -8,7 +8,7 @@ it. Needs the Isaac Sim image (``docker/Dockerfile.kit``); training and the kitl
   body each is mounted on (its rig frame, merged into that body), with the stream's lens: OpenCV's fisheye or
   pinhole model (rational or not), which RTX renders natively (``omni:lensdistortion``).
 * :func:`splat_entity` places a room's Gaussian splat (``world/splat.py``) for the cameras, :func:`light_entity` a
-  dome light for everything else.
+  dome light for everything else, which RTX's ambient light (:data:`AMBIENT_LIGHT`) fills in.
 * :class:`KitRender` renders the stage at a plant time: Kit's timeline at that time (RTX lidars fire on it), the
   physics' body poses copied into Fabric, one Kit update.
 * :class:`RtxCameras` reads each stream of the last render as its feed wants it.
@@ -62,6 +62,11 @@ EXPOSURE = {AUTO_EXPOSURE: False,
             "/rtx/post/tonemap/whitepoint": WHITE_POINT,
             "/rtx/post/tonemap/colorMode": SRGB_LINEAR,
             "/rtx/post/tonemap/enableSrgbToGamma": True}
+# RTX's ambient light: a uniform fill without direction or shadows that lights every surface, with or without a dome.
+# Isaac Lab's rendering app turns it on (apps/isaaclab.python.headless.rendering.kit); it is pinned here at that
+# level, at which the dome's intensity was chosen. A lighting's ``ambient_intensity`` replaces it (sensors/lights.py).
+AMBIENT_LIGHT = "/rtx/sceneDb/ambientLightIntensity"
+AMBIENT_INTENSITY = 1.0  # Kit's level, dimensionless
 # RTX's OpenCV lens models put pixel (u, v)'s centre at (u + 0.5, v + 0.5), OpenCV's calibration at (u, v): the
 # principal point given to RTX is moved by half a pixel so the images match the calibration Controls publishes
 # (measured against ray-cast masks in tests/test_rtx_sensors.py: half a pixel in both axes, both models).
@@ -222,24 +227,35 @@ def splat_entity(usd_path: str, prim_path: str = SPLAT_PRIM):
     return AssetBaseCfg(prim_path=prim_path, spawn=sim_utils.UsdFileCfg(usd_path=str(usd_path)))
 
 
-def light_entity(intensity: float = DOME_INTENSITY, prim_path: str = "/World/DomeLight"):
-    """A white dome light: the robot and the boxes are lit evenly; the splat is emissive and needs none."""
+def dome_light_args(intensity: float = DOME_INTENSITY, temperature_k: float | None = None) -> dict:
+    """``DomeLightCfg``'s arguments: white, tinted to ``temperature_k`` (Kelvin) when given; without one no colour
+    temperature is enabled, so the dome is the plain white one."""
+    args = {"intensity": float(intensity), "color": (1.0, 1.0, 1.0)}
+    if temperature_k is not None:
+        args |= {"enable_color_temperature": True, "color_temperature": float(temperature_k)}
+    return args
+
+
+def light_entity(intensity: float = DOME_INTENSITY, temperature_k: float | None = None,
+                 prim_path: str = "/World/DomeLight"):
+    """A dome light, white unless ``temperature_k`` tints it: the robot and the boxes are lit evenly; the splat is
+    emissive and needs none."""
     import isaaclab.sim as sim_utils
     from isaaclab.assets import AssetBaseCfg
 
-    return AssetBaseCfg(prim_path=prim_path, spawn=sim_utils.DomeLightCfg(intensity=intensity, color=(1.0, 1.0, 1.0)))
+    return AssetBaseCfg(prim_path=prim_path, spawn=sim_utils.DomeLightCfg(**dome_light_args(intensity, temperature_k)))
 
 
 class KitRender:
     """Renders the stage at plant times. Kit's timeline stops advancing on its own and is set to each render's time:
     its plant time, or behind it where a lidar holds it back (``RtxLidar.render_time``). Every camera renders at the
-    one fixed exposure :data:`EXPOSURE`.
+    one fixed exposure :data:`EXPOSURE`, the stage with RTX's ambient light at ``ambient`` (:data:`AMBIENT_LIGHT`).
 
     With ``color``, colour rendering is kept on: Isaac Lab's RTX renderer turns it off for the whole app
     (``/rtx/sdg/force/disableColorRender``) when it sets up a camera without a colour output, such as a depth stream,
     and every colour camera then renders black (Isaac Lab 3.0, ``IsaacRtxRenderer.create_render_data``)."""
 
-    def __init__(self, sim, *, color: bool = True):
+    def __init__(self, sim, *, color: bool = True, ambient: float = AMBIENT_INTENSITY):
         import omni.timeline
 
         self.sim = sim
@@ -251,6 +267,7 @@ class KitRender:
         settings = get_settings_manager()
         for name, value in EXPOSURE.items():
             settings.set(name, value)
+        settings.set(AMBIENT_LIGHT, float(ambient))
         if not self.timeline.is_playing():
             self.timeline.play()
         self.timeline.commit()
@@ -268,11 +285,12 @@ class KitRender:
 
     @staticmethod
     def post_settings() -> dict[str, object]:
-        """The active value of each of :data:`EXPOSURE`'s settings, as Kit's settings return it."""
+        """The active value of each of :data:`EXPOSURE`'s settings and of :data:`AMBIENT_LIGHT`, as Kit's settings
+        return it."""
         from isaaclab.app.settings_manager import get_settings_manager
 
         settings = get_settings_manager()
-        return {name: settings.get(name) for name in EXPOSURE}
+        return {name: settings.get(name) for name in (*EXPOSURE, AMBIENT_LIGHT)}
 
 
 class RtxCameras:

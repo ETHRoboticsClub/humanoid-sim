@@ -383,8 +383,6 @@ def test_a_replay_runs_the_solver_pd_at_the_captures_gains(request, device):
     from humanoid_sim.replay.replay import solver_gains_of
     from humanoid_sim.sim import SimCore
 
-    if not device.startswith("cuda"):
-        pytest.skip("robot physics requires --device cuda:0 in the Isaac Lab image")
     sim = SimCore(built_usd("ethrc_v1"), device=device, robot="ethrc_v1", num_envs=4, fixed_base=True)
     request.addfinalizer(sim.close)
     plant = sim.plant
