@@ -141,15 +141,29 @@ The furniture boxes enclose the scanned furniture by up to tens of centimetres a
 
 ### Lights
 
-The stage is lit by a white dome light (600 nits): the robot and the boxes are lit evenly and cast no shadows; the splat is emissive, and a light never brightens it. A room's owner can add ceiling lights with `render-runtime --lights PATH` (`SessionCfg.lights`, `src/humanoid_sim/sensors/lights.py`): a JSON file of fixtures in the scan's frame, the frame the room's boxes file uses, placed in the world frame by the host's spawn point as the boxes and scan are. Each fixture is an area light facing straight down, a rectangle (`size_m`, USD `RectLight`) or a disk (`radius_m`, `DiskLight`), with its luminance in nits and an optional linear RGB colour; `dome_intensity` replaces the dome's, so the ceiling lights dominate and the dome is left as ambient fill:
+The stage is lit by a white dome light (600 nits, `rtx.DOME_INTENSITY`): the robot and the boxes are lit evenly and cast no shadows; the splat is emissive, and a light never brightens it (`--splat-intensity` scales its emission). A room's owner changes the lighting with `render-runtime --lights PATH` (`SessionCfg.lights`, `src/humanoid_sim/sensors/lights.py`), a JSON file whose keys are all optional, though it must give at least one. Without the file the scene is the one above, exactly. Lights are authored as UsdLux prims when the session is built.
+
+| Key | Meaning |
+|---|---|
+| `dome_intensity` | replaces the dome's intensity (nits); 0 turns the dome off |
+| `dome_temperature_k` | dome colour temperature in Kelvin (1000 to 40000; USD `enableColorTemperature` and `colorTemperature`); left out, the dome stays white. `SessionCfg.light_temperature_k` sets it without a file, and the file wins |
+| `fixtures` | extra lights, in the scan's frame (the frame the room's boxes file uses), placed in the world frame by the host's spawn point as the boxes and scan are |
+| `sun` | one distant light for outdoor scenes, in the world frame |
+
+Each fixture has a `position_m`, its `intensity` (luminance in nits for an area light), an optional linear RGB `color` (white by default) and an optional `temperature_k` (multiplied with `color`), and exactly one shape. A rectangle (`size_m`, USD `RectLight`) or a disk (`radius_m`, `DiskLight`) faces straight down, like a hangar ceiling panel; a sphere (`sphere_radius_m`, `SphereLight`) radiates in all directions, a point-like bulb.
+
+The sun has `azimuth_deg` (the sun's bearing from +x towards +y), `elevation_deg` (above the horizon, 0 to 90), `intensity` (illuminance in USD distant light units), `angle_deg` (angular diameter, 0.53 by default; a larger angle softens shadows) and optional `color` and `temperature_k`. The light shines from that direction towards the scene. Low-light presets are humanoid-learning's choice of these values.
 
 ```json
-{"fixtures": [{"position_m": [0.0, 2.0, 7.5], "size_m": [0.6, 1.2], "intensity": 3000, "color": [1, 1, 1]},
-              {"position_m": [3.5, 2.0, 7.5], "radius_m": 0.4, "intensity": 3000}],
- "dome_intensity": 100}
+{"fixtures": [{"position_m": [0.0, 2.0, 7.5], "size_m": [0.6, 1.2], "intensity": 3000, "temperature_k": 4000},
+              {"position_m": [3.5, 2.0, 7.5], "radius_m": 0.4, "intensity": 3000},
+              {"position_m": [-2.0, 1.0, 2.5], "sphere_radius_m": 0.08, "intensity": 800, "temperature_k": 2700}],
+ "dome_intensity": 100,
+ "dome_temperature_k": 6500,
+ "sun": {"azimuth_deg": 135, "elevation_deg": 40, "intensity": 3000, "angle_deg": 0.53, "temperature_k": 5800}}
 ```
 
-The summary's `scene.lights` names the file and `scene.dome_light_nits` the dome the stage was lit by (null without one).
+The summary's `scene.lights` names the file, `scene.dome_light_nits` the dome the stage was lit by (null without one), `scene.dome_temperature_k` its colour temperature (null: white) and `scene.sun` the sun (null without one).
 
 A Lambertian panel of area `A` and luminance `L` puts out `pi L A`; a grid with one panel per `s` by `s` of floor lights it at about `pi L A / s^2` (lux, with nits for `L`).
 

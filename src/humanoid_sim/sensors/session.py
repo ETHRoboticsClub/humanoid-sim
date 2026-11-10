@@ -25,7 +25,7 @@ import json
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
@@ -59,6 +59,7 @@ class SessionCfg:
     depth_noise: bool = False  # the stereo cameras' depth errors (sensors/stereo_depth.py); off: exact depth
     seed: int = 0  # the depth errors' random generator
     light: float = DOME_INTENSITY  # the dome light (nits); 0 for none
+    light_temperature_k: float | None = None  # the dome's colour temperature (Kelvin); None: white; a lights file may set it
     lights: str | None = None  # ceiling lights (JSON, sensors/lights.py), placed with spawn_m; may set the dome
     keep_sweeps: int = 0  # the last sweeps to keep in ``SensorSession.sweeps``
     device: str = "cuda:0"
@@ -75,7 +76,14 @@ class SensorSession:
         from humanoid_sim.model.poses import STANDING_CLEARANCE_M, initial_pose
         from humanoid_sim.sensors import rigs, rtx
         from humanoid_sim.sensors.geometry import Mount, camera_spec
-        from humanoid_sim.sensors.lights import CeilingLights, ceiling_light_prims, dome_nits
+        from humanoid_sim.sensors.lights import (
+            CeilingLights,
+            ceiling_light_prims,
+            dome_nits,
+            dome_temperature,
+            set_dome_temperature,
+            sun_prim,
+        )
         from humanoid_sim.sim import SimCore
         from humanoid_sim.world.boxes import StaticBoxes
         from humanoid_sim.world.objects import WorldObjects
@@ -100,6 +108,8 @@ class SensorSession:
                                                                                      strict=True)], bodies)
         ceiling = CeilingLights.load(cfg.lights) if cfg.lights else None
         self.dome_nits = dome_nits(cfg.light, ceiling)
+        self.dome_temperature_k = dome_temperature(cfg.light_temperature_k, ceiling)
+        self.sun = None if ceiling is None else ceiling.sun
         if self.dome_nits:
             entities["dome_light"] = rtx.light_entity(self.dome_nits)
         if cfg.splat:
@@ -119,7 +129,14 @@ class SensorSession:
         if ceiling is not None:
             import isaaclab.sim as sim_utils
 
-            ceiling_light_prims(sim_utils.get_current_stage(), ceiling, cfg.spawn_m)
+            stage = sim_utils.get_current_stage()
+            ceiling_light_prims(stage, ceiling, cfg.spawn_m)
+            if ceiling.sun is not None:
+                sun_prim(stage, ceiling.sun)
+        if self.dome_nits and self.dome_temperature_k is not None:
+            import isaaclab.sim as sim_utils
+
+            set_dome_temperature(sim_utils.get_current_stage(), self.dome_temperature_k)
         plant = self.sim.plant
         q = pose.to(device=plant.cfg.device, dtype=self.sim.joint_state()[0].dtype).unsqueeze(0)
         self.sim.write_joint_state(q, torch.zeros_like(q))
@@ -355,7 +372,8 @@ class SensorSession:
                 "lidars": [lidar.sensor.name for lidar in self.lidars], "unsimulated": self.unsimulated,
                 "scene": {"boxes": self.cfg.scene, "spawn_m": list(self.cfg.spawn_m), "scan_mesh": self.scan_mesh,
                           "splat": self.cfg.splat, "splat_intensity": self.cfg.splat_intensity,
-                          "lights": self.cfg.lights, "dome_light_nits": self.dome_nits,
+                          "lights": self.cfg.lights, "dome_light_nits": self.dome_nits, "dome_temperature_k": self.dome_temperature_k,
+                          "sun": None if self.sun is None else asdict(self.sun),
                           "rays": None if self.room_rays is None else self.room_rays.describe()},
                 "rtx_post": self.render.post_settings(),
                 "counts": self.counts, "ms": {k: stats(v) for k, v in self.ms.items()},
