@@ -38,6 +38,25 @@ By default the depth is exact. With `depth_noise` (`SessionCfg.depth_noise`, `--
 
 The OAK-D-W's figures were measured on the V1's unit with the matcher as Controls configures it (`HIGH_DENSITY`, sub-pixel off), from 60 s of a static lab scene: every reported depth is the device's `f b` over a whole number of pixels. The noise, its texture exponent and its blur are the values with which the whole chain (noise, rounding, 5 x 5 median), run on the recorded scene, flickers like the recording: each pixel's flicker over time per texture (from 0.54 px on the plainest surfaces to 0.04 px on the most textured), and how much neighbours flicker together (0.74, 0.57 and 0.36 at 1, 2 and 4 px). Turning sub-pixel on in Controls would make the step 1/8 px. The D435i's are modeled until a unit is measured. The errors are drawn from the session's `seed`. Pixels without depth are 0 in the published 16UC1 image, as the cameras report them.
 
+### Camera imaging
+
+By default every colour and grey stream is the RTX render as it is: one fixed exposure for every camera, no noise. With `camera_effects` (`SessionCfg.camera_effects`, `--camera-effects` on `examples/rtx_sensors.py`, `render-runtime` and `render-trajectory`: names separated by commas, or `all`), each stream goes through its imager instead (`sensors/imaging.py`), from the figures of its model (`sensors/models.py`: `Camera.imagers`, `Camera.auto_exposure`):
+
+| Effect | Model |
+|---|---|
+| `exposure` | Each stream at the exposure its instance sets (`Camera.exposure`). `"auto"` is the default for every stream, as Controls' backends leave every camera at the device's auto exposure; `(ns, gain)` sets one. An imager at time `t` and gain `g` collects `e = W (x / X) t / t_ref` electrons and reads out `g X e / W` of light, tone mapped as RTX does. `x` is the rendered light, `W` its full well, `X` the light the tone curve takes to white (7.24) and `t_ref` the render's 1/50 s. The auto exposure meters each frame's mean signal (linear, before the tone curve). It moves the exposure towards the signal that tone maps to its target, by `1 - exp(-dt / τ)` of the way in log exposure per frame: time first, up to the frame period and the imager's longest, then gain. A stereo pair shares one exposure, as the devices expose it together. Without `exposure`, every imager is at the reference exposure (1/50 s, gain 1) |
+| `noise` | Shot noise (Poisson in the electrons collected) and the imager's read noise (Gaussian, electrons), so a short exposure read at high gain is noisy; the well and the output clip |
+
+At the reference exposure without noise the chain gives the plain render back, to the rounding. The chain reads Isaac Lab's linear colour output (`rgb_hdr`), already exposed by `rtx.EXPOSURE`. RTX's 8-bit render of it is ACES (Narkowicz's fit) per channel, then the sRGB encoding: within one level at the 99th percentile on every stream, measured on an RTX A5000, from the darkest pixels to past white, on the plain ground, boxes and a splat. A camera reads one or the other, never both: asked for both, Isaac Lab's 8-bit output comes out linear. A grey imager tone maps the luminance of the light (BT.601 weights). The plain grey stream takes the luma of the tone-mapped colours instead, the same on neutral surfaces. The stereo depth errors read the imaged grey stream as their reference image, so a dark, noisy pair loses texture.
+
+| Figure | OAK-D-W | D435i | ZED Mini |
+|---|---|---|---|
+| Full well, read noise | rgb (IMX378) 6000 e, 2 e; monos (OV9282) 10000 e, 4 e | colour 6000 e, 2 e; infrared 10000 e, 4 e | 6000 e, 2 e |
+| Exposure, gain | 1 µs to 33 ms, gain 1 to 16 (depthai's manual exposure range, ISO 100 to 1600) | 1 µs to 33 ms, gain 1 to 16 | 1 µs to 33 ms, gain 1 to 16 |
+| Auto exposure | target 0.46 of full scale (18 % grey), τ = 250 ms | the same | the same |
+
+Every figure but depthai's ranges is modeled: the vendors publish no full well or read noise, and no unit's auto exposure has been measured. The noise is drawn per camera from the session's `seed`, apart from the depth errors' draws. The summary's `camera_effects` names the effects and `imaging` each sync group's exposure: its mode, the frames taken, the next frame's exposure and gain, and their range.
+
 Two Isaac Lab 3.0 behaviours are handled in `sensors/rtx.py`:
 
 - A camera without a colour output (a depth stream) turns colour rendering off for the whole app (`/rtx/sdg/force/disableColorRender`), and every colour camera then renders black. `KitRender` turns it back on before each render.
@@ -237,7 +256,9 @@ A render serves every sensor due; the cameras render every 33 ms of plant time, 
 
 ## What is not modeled
 
-- Camera exposure, noise, motion blur and rolling shutter: every frame is a global-shutter render at the frame's plant time, every camera at one fixed exposure: RTX's auto exposure off and its tone mapping set by `rtx.EXPOSURE` (ACES, ISO 100, 1/50 s at f/5: Isaac Sim 6.2's defaults, pinned so a Kit upgrade cannot change how bright a room renders); the summary's `rtx_post` records the values Kit ran with. The D435i's infrared imagers see visible light, without the projector's pattern.
+- Motion blur and rolling shutter: every frame is a global-shutter render at the frame's plant time. Without `camera_effects` every camera renders at one fixed exposure: RTX's auto exposure off and its tone mapping set by `rtx.EXPOSURE` (ACES, ISO 100, 1/50 s at f/5: Isaac Sim 6.2's defaults, pinned so a Kit upgrade cannot change how bright a room renders); the summary's `rtx_post` records the values Kit ran with. The D435i's infrared imagers see visible light, without the projector's pattern.
+- The imaging chain's limits: no dark current, fixed-pattern noise, vignetting, white balance or the cameras' own denoising and sharpening, one tone curve (RTX's) for every camera, and 8-bit output.
+- Camera frame latency and dropped frames: every frame is delivered as soon as it is rendered.
 - Stereo depth is exact unless `depth_noise` is on, and then it has the errors above only: no correlation of the noise farther than its blur and the median reach (the OAK-D-W's errors stay correlated past 30 px, more along rows than along columns), no confidence threshold of its own (the texture threshold stands for it), no widening of foreground edges by the matcher's window, no grazing-angle failures or flying pixels at edges, and none of the cameras' post-processing filters other than the median.
 - With the ZED Mini's fisheye calibration, RTX leaves the corners of the image, beyond about 46 deg off axis, empty (light grey).
 - The Mid-360's real rosette, its reflectivity-dependent reach and intensities. Within one render the lidar sees the scene as it is at that render (Kit's motion BVH is off), so a moving robot's sweep is built from three renders.

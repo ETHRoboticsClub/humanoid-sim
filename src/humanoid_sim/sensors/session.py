@@ -32,6 +32,7 @@ import numpy as np
 import torch
 
 from humanoid_sim.sensors.feeds import ClockMapping
+from humanoid_sim.sensors.imaging import ImagingChain, camera_seed, check_effects
 from humanoid_sim.sensors.lights import Lighting
 from humanoid_sim.sensors.models import RTX_KINDS
 from humanoid_sim.sensors.room_rays import RoomRays, room_rays
@@ -58,7 +59,9 @@ class SessionCfg:
     images: str | None = None
     lidar_noise: bool = True  # the lidar model's range and angular errors; off for exact geometry
     depth_noise: bool = False  # the stereo cameras' depth errors (sensors/stereo_depth.py); off: exact depth
-    seed: int = 0  # the depth errors' random generator
+    seed: int = 0  # the depth errors' and the camera noise's random generators
+    # the cameras' imaging (sensors/imaging.py): any of imaging.CAMERA_EFFECTS; none: the RTX render as it is
+    camera_effects: tuple[str, ...] = ()
     light: float = DOME_INTENSITY  # the dome light (nits); 0 for none
     # the lighting beyond that dome (sensors/lights.py): a JSON file's path or a Lighting; fixtures placed with spawn_m
     lights: str | Lighting | None = None
@@ -97,9 +100,14 @@ class SensorSession:
         self.camera_specs = [camera_spec(s) for s in cameras]
         self.camera_models = {spec.camera_id: s for spec, s in zip(self.camera_specs, cameras, strict=True)}
         self.rng = np.random.default_rng(cfg.seed)
+        self.camera_effects = check_effects(cfg.camera_effects)
+        self.imaging = {spec.camera_id: ImagingChain(self.camera_models[spec.camera_id], spec, self.camera_effects,
+                                                     camera_seed(cfg.seed, spec.camera_id))
+                        for spec in self.camera_specs} if self.camera_effects else {}
         bodies = rtx.body_paths(self.usd, {m.link for m in self.mounts.values()})
         entities = rtx.camera_entities([(spec, self.mounts[s.name]) for spec, s in zip(self.camera_specs, cameras,
-                                                                                     strict=True)], bodies)
+                                                                                     strict=True)], bodies,
+                                       hdr=bool(self.imaging))
         self.lighting = as_lighting(cfg.lights)
         self.dome_nits = dome_nits(cfg.light, self.lighting)
         self.dome_temperature_k = None if self.lighting is None else self.lighting.dome_temperature_k
@@ -260,9 +268,13 @@ class SensorSession:
         stamp = ros_time_s(now_ns, self.now_ns)
         for cam in self.camera_specs:
             frames = {}
+            imaging = self.imaging.get(cam.camera_id)
             for s in cam.streams:
                 t = time.perf_counter()
-                image = self.cameras.image(cam, s)
+                if imaging and s.kind != "depth":
+                    image = imaging.image(s, self.cameras.hdr(cam, s))
+                else:
+                    image = self.cameras.image(cam, s)
                 self.ms["camera_read"].append(1e3 * (time.perf_counter() - t))
                 if s.kind == "depth" and self.cfg.depth_noise:
                     image = self._stereo_depth(cam, s, image, frames)
@@ -275,6 +287,8 @@ class SensorSession:
                 self.counts["camera_frames"] += 1
                 self.last_images[(cam.camera_id, s.name)] = image
                 self._record_image(f"{cam.camera_id}/{s.name}", image, now_ns, depth=s.kind == "depth")
+            if imaging:
+                imaging.end_frame(now_ns)
 
     def _stereo_depth(self, cam, depth, image: np.ndarray, frames: dict[str, np.ndarray]) -> np.ndarray:
         """The depth ``image`` as the stereo camera ``cam`` reports it, its reference imager's frame of this render
@@ -365,6 +379,8 @@ class SensorSession:
                           "ambient_intensity": self.ambient,
                           "rays": None if self.room_rays is None else self.room_rays.describe()},
                 "rtx_post": self.render.post_settings(),
+                "camera_effects": list(self.camera_effects),
+                "imaging": {camera_id: chain.describe() for camera_id, chain in self.imaging.items()},
                 "counts": self.counts, "ms": {k: stats(v) for k, v in self.ms.items()},
                 "camera_frame_rate_hz": self.counts["camera_frames"] / max(streams, 1) / wall_s,
                 "lidar_sweep_rate_hz": self.counts["lidar_sweeps"] / max(len(self.lidars), 1) / wall_s,
