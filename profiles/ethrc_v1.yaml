@@ -57,7 +57,8 @@ devices:
   # The IMU's path past its CAN receipt stamp to the controller's topic, mean: the training plant holds each sample
   # this long before delivery (passive /rt/imu subscriber on the idle V1, 2026-10-31, 24000 samples: 2.09 ms mean,
   # 1.25-5.12 ms p5-p95, Madgwick and the relay 0.6 ms of it). The MTi's own delay before the stamp is unmeasured
-  # (the datasheet gives none); the rig's random delivery phase, 0-2.5 ms, stands in for it.
+  # alone (the datasheet gives none; a tap test, 2026-11-07, puts it 5-7 ms shorter than the drive feedback's,
+  # docs/sensors.md); the rig's random delivery phase, 0-2.5 ms, stands in for it.
   imu_path: {sample_to_host_ns: 2100000}
   # How often the master gets a drive's feedback (PDO), as whole bus cycles (backend.control_period_s, 1.5 ms) between
   # samples. pdo_feedback.csv of the excitation captures exc-53f09771 and exc-5fd2bcca (2026-10-28), t_source_ros_ns
