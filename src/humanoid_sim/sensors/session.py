@@ -25,13 +25,14 @@ import json
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
 import torch
 
 from humanoid_sim.sensors.feeds import ClockMapping
+from humanoid_sim.sensors.lights import Lighting
 from humanoid_sim.sensors.models import RTX_KINDS
 from humanoid_sim.sensors.room_rays import RoomRays, room_rays
 from humanoid_sim.sensors.rtx import DOME_INTENSITY
@@ -59,7 +60,8 @@ class SessionCfg:
     depth_noise: bool = False  # the stereo cameras' depth errors (sensors/stereo_depth.py); off: exact depth
     seed: int = 0  # the depth errors' random generator
     light: float = DOME_INTENSITY  # the dome light (nits); 0 for none
-    lights: str | None = None  # ceiling lights (JSON, sensors/lights.py), placed with spawn_m; may set the dome
+    # the lighting beyond that dome (sensors/lights.py): a JSON file's path or a Lighting; fixtures placed with spawn_m
+    lights: str | Lighting | None = None
     keep_sweeps: int = 0  # the last sweeps to keep in ``SensorSession.sweeps``
     device: str = "cuda:0"
     assets: str = "outputs/assets"
@@ -75,7 +77,7 @@ class SensorSession:
         from humanoid_sim.model.poses import STANDING_CLEARANCE_M, initial_pose
         from humanoid_sim.sensors import rigs, rtx
         from humanoid_sim.sensors.geometry import Mount, camera_spec
-        from humanoid_sim.sensors.lights import CeilingLights, ceiling_light_prims, dome_nits
+        from humanoid_sim.sensors.lights import ambient_level, as_lighting, dome_nits, lighting_prims
         from humanoid_sim.sim import SimCore
         from humanoid_sim.world.boxes import StaticBoxes
         from humanoid_sim.world.objects import WorldObjects
@@ -98,10 +100,12 @@ class SensorSession:
         bodies = rtx.body_paths(self.usd, {m.link for m in self.mounts.values()})
         entities = rtx.camera_entities([(spec, self.mounts[s.name]) for spec, s in zip(self.camera_specs, cameras,
                                                                                      strict=True)], bodies)
-        ceiling = CeilingLights.load(cfg.lights) if cfg.lights else None
-        self.dome_nits = dome_nits(cfg.light, ceiling)
+        self.lighting = as_lighting(cfg.lights)
+        self.dome_nits = dome_nits(cfg.light, self.lighting)
+        self.dome_temperature_k = None if self.lighting is None else self.lighting.dome_temperature_k
+        self.ambient = ambient_level(rtx.AMBIENT_INTENSITY, self.lighting)
         if self.dome_nits:
-            entities["dome_light"] = rtx.light_entity(self.dome_nits)
+            entities["dome_light"] = rtx.light_entity(self.dome_nits, self.dome_temperature_k)
         if cfg.splat:
             entities["splat"] = rtx.splat_entity(cfg.splat)
         self.boxes = StaticBoxes.load(cfg.scene, cfg.spawn_m) if cfg.scene else None
@@ -116,10 +120,10 @@ class SensorSession:
             import isaaclab.sim as sim_utils
 
             rtx.set_splat_intensity(sim_utils.get_current_stage(), cfg.splat_intensity)
-        if ceiling is not None:
+        if self.lighting is not None:
             import isaaclab.sim as sim_utils
 
-            ceiling_light_prims(sim_utils.get_current_stage(), ceiling, cfg.spawn_m)
+            lighting_prims(sim_utils.get_current_stage(), self.lighting, cfg.spawn_m)
         plant = self.sim.plant
         q = pose.to(device=plant.cfg.device, dtype=self.sim.joint_state()[0].dtype).unsqueeze(0)
         self.sim.write_joint_state(q, torch.zeros_like(q))
@@ -134,7 +138,7 @@ class SensorSession:
             self.lidars = [RtxLidar(s, self.mounts[s.name], f"{rtx.ROBOT_ROOT}/{bodies[self.mounts[s.name].link]}",
                                     noise=cfg.lidar_noise) for s in lidars]
         color = any(st.kind != "depth" for c in self.camera_specs for st in c.streams)
-        self.render = rtx.KitRender(self.sim.backend.sim, color=color)
+        self.render = rtx.KitRender(self.sim.backend.sim, color=color, ambient=self.ambient)
         self.last_images: dict[tuple[str, str], np.ndarray] = {}
         self.sweeps = deque(maxlen=cfg.keep_sweeps) if cfg.keep_sweeps else None
         self.feeds = {}
@@ -355,7 +359,10 @@ class SensorSession:
                 "lidars": [lidar.sensor.name for lidar in self.lidars], "unsimulated": self.unsimulated,
                 "scene": {"boxes": self.cfg.scene, "spawn_m": list(self.cfg.spawn_m), "scan_mesh": self.scan_mesh,
                           "splat": self.cfg.splat, "splat_intensity": self.cfg.splat_intensity,
-                          "lights": self.cfg.lights, "dome_light_nits": self.dome_nits,
+                          "lights": str(self.cfg.lights) if isinstance(self.cfg.lights, (str, Path)) else None,
+                          "lighting": None if self.lighting is None else asdict(self.lighting),
+                          "dome_light_nits": self.dome_nits, "dome_temperature_k": self.dome_temperature_k,
+                          "ambient_intensity": self.ambient,
                           "rays": None if self.room_rays is None else self.room_rays.describe()},
                 "rtx_post": self.render.post_settings(),
                 "counts": self.counts, "ms": {k: stats(v) for k, v in self.ms.items()},

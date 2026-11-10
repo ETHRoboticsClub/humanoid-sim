@@ -23,10 +23,20 @@ D435_CX_PX, D435_CY_PX = D435_WIDTH_PX / 2, D435_HEIGHT_PX / 2
 # D435i depth, D400 datasheet: 87 x 58 deg, depth reported out to 10 m.
 D435_DEPTH_F = (D435_CX_PX / math.tan(math.radians(87.0 / 2)), D435_CY_PX / math.tan(math.radians(58.0 / 2)))
 D435_DEPTH_MAX_M = 10.0
+# D435i colour, D400 datasheet: 69 deg across the image; 15 mm right of depth.
+D435_COLOR_F = D435_CX_PX / math.tan(math.radians(69.0 / 2))
+D435_COLOR_AT = (0.0, -0.015, 0.0)
 
 # The test room: walls 0.2 m thick and 3 m tall around the robot (centre, half extents in m).
 WALLS = [((3.1, 0.0, 1.5), (0.1, 2.7, 1.5)), ((-3.1, 0.0, 1.5), (0.1, 2.7, 1.5)),
          ((0.0, 2.6, 1.5), (3.2, 0.1, 1.5)), ((0.0, -2.6, 1.5), (3.2, 0.1, 1.5))]
+
+# The test room's splat: grey Gaussians every SPLAT_SPACING_M over the floor and the walls' inner faces.
+SPLAT_SPACING_M = 0.1
+SPLAT_SIGMA_M = 0.06  # more than half the spacing: the surface has no gaps
+SPLAT_OPACITY = 0.95
+SPLAT_GREY = 0.6  # linear base colour
+SH_C0 = 0.28209479177387814  # degree-0 spherical harmonic, 1 / (2 sqrt(pi)): colour = 0.5 + SH_C0 * f_dc (3DGS)
 
 # Depth and range: the renderer's precision.
 DEPTH_TOL_M = 0.01
@@ -183,3 +193,32 @@ def write_box_obj(path, center, half):
     for a, b, c, d in quads:
         lines += [f"f {a + 1}/1 {b + 1}/1 {c + 1}/1", f"f {a + 1}/1 {c + 1}/1 {d + 1}/1"]
     path.write_text("\n".join(lines) + "\n")
+
+
+def splat_positions() -> np.ndarray:
+    """``[N, 3]``: the floor and the four walls' inner faces of WALLS, every SPLAT_SPACING_M."""
+    x_in = min(c[0] - h[0] for c, h in WALLS if c[0] > 0)
+    y_in = min(c[1] - h[1] for c, h in WALLS if c[1] > 0)
+    top = max(c[2] + h[2] for c, h in WALLS)
+    xs = np.arange(-x_in, x_in + 1e-9, SPLAT_SPACING_M)
+    ys = np.arange(-y_in, y_in + 1e-9, SPLAT_SPACING_M)
+    zs = np.arange(0.0, top + 1e-9, SPLAT_SPACING_M)
+    floor = [(x, y, 0.0) for x in xs for y in ys]
+    x_walls = [(s * x_in, y, z) for s in (-1, 1) for y in ys for z in zs]
+    y_walls = [(x, s * y_in, z) for s in (-1, 1) for x in xs for z in zs]
+    return np.array(floor + x_walls + y_walls)
+
+
+def write_splat_ply(path, positions: np.ndarray) -> None:
+    """A degree-0 3DGS PLY (log scales, logit opacities, real-first quaternions) of isotropic grey Gaussians."""
+    names = ["x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "scale_1", "scale_2",
+             "rot_0", "rot_1", "rot_2", "rot_3"]
+    rows = np.zeros((len(positions), len(names)), dtype=np.float32)
+    rows[:, 0:3] = positions
+    rows[:, 3:6] = (SPLAT_GREY - 0.5) / SH_C0
+    rows[:, 6] = np.log(SPLAT_OPACITY / (1 - SPLAT_OPACITY))
+    rows[:, 7:10] = np.log(SPLAT_SIGMA_M)
+    rows[:, 10] = 1.0  # identity rotation
+    header = f"ply\nformat binary_little_endian 1.0\nelement vertex {len(rows)}\n"
+    header += "".join(f"property float {n}\n" for n in names) + "end_header\n"
+    path.write_bytes(header.encode("ascii") + rows.tobytes())
