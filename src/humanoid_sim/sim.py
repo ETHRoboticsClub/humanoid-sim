@@ -148,7 +148,7 @@ class SimCore:
                 self.backend.close()  # Isaac Lab allows one simulation per process
                 raise
         self.t_ns = 0
-        self.feedback: DriveFeedback | None = None
+        self._feedback: DriveFeedback | None = None
         self._state_written = True  # joint state changed outside a step: the plant's post-step state is stale
         self.imu = None
         if imu:
@@ -193,6 +193,13 @@ class SimCore:
         q, qd = self.backend.joint_state()
         return q[:, self._to_solver].to(self.plant.cfg.dtype), qd[:, self._to_solver].to(self.plant.cfg.dtype)
 
+    @property
+    def feedback(self) -> DriveFeedback:
+        """Drive feedback at the current joint state, also after a write without a physics step."""
+        if self._feedback is None:
+            self._feedback = self.plant.feedback(*self.solver_state())
+        return self._feedback
+
     def write_joint_state(self, q: torch.Tensor, qd: torch.Tensor) -> None:
         bq, bqd = self.backend.joint_state()
         bq, bqd = bq.clone(), bqd.clone()
@@ -207,6 +214,7 @@ class SimCore:
         bqd[:, self._springs] = 0.0
         self.backend.write_state(bq, bqd)
         self._state_written = True
+        self._feedback = None
 
     def reset_objects(self) -> None:
         """Start the moving objects' paths again from the current plant time and put the free bodies back at their
@@ -294,7 +302,7 @@ class SimCore:
         self.backend.step()
         self.t_ns += self.period_ns
         q, qd = self.solver_state()
-        self.feedback = self._graphs.post(q, qd) if self._graphs is not None else self.plant.feedback(q, qd)
+        self._feedback = self._graphs.post(q, qd) if self._graphs is not None else self.plant.feedback(q, qd)
         self._state_written = False
         return self.feedback
 
