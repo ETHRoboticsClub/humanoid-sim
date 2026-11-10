@@ -44,6 +44,7 @@ from humanoid_sim.randomization import PARAMS, ParamSpec, Randomizer, parse_spec
 from humanoid_sim.sensors import rigs
 from humanoid_sim.sensors.imu import ImuDelivery, ImuSamples, pending_slots
 from humanoid_sim.timing.clock import NS_PER_S
+from humanoid_sim.world.harness import resolve_harness
 from humanoid_sim.world.supports import Gantry
 
 
@@ -81,6 +82,9 @@ class Truth:
     root_ang_vel_b: torch.Tensor  # [E, 3]
     drive: DriveFeedback  # [E, D] physical drive frame, no offsets
     contact_forces_w: torch.Tensor | None  # [E, B, 3] net force per body
+    # [E, C] each crank arm's angle past its drive's reading (drive frame), in RobotPlant.cranks order; None without
+    # ankle compliance. The foot's own deflection is in joint_pos.
+    ankle_spring_rad: torch.Tensor | None = None
 
 
 def command_latency_ns(profile: dict, drive_delay_ns: torch.Tensor) -> torch.Tensor:
@@ -146,7 +150,8 @@ def imu_latency_bounds(specs, nominal_ns: int) -> tuple[float, float]:
 
 
 class RobotPlant:
-    _stops = None  # StopSolref when crank_stop_stiffness or crank_stop_damping is randomized
+    _stops = None  # StopSolref when crank_stop_stiffness or crank_stop_damping is randomized on MJWarp
+    _kamino_stops = None  # KaminoCrankStops: on Kamino, when the profile or the randomization asks for soft stops
 
     def __init__(self, robot, cfg: TrainPlantCfg | None = None, *, imu=None, contacts=None, physics_manager=None):
         """``robot``: the scene's articulation; ``imu`` / ``contacts``: its sensors (optional);
@@ -177,6 +182,19 @@ class RobotPlant:
                                                                   device=str(self.device)), solver_joint_names=physical)
         self.solver_joint_ids = torch.tensor([robot.joint_names.index(n) for n in self.core.solver_map.joint_names],
                                             device=self.device)
+        # Ankle linkage compliance: the asset's crank springs (transmissions/compliance.py), by crank drive.
+        from humanoid_sim.transmissions.compliance import spring_joints
+
+        springs = spring_joints(self.desc) if self.native_state is not None else {}
+        present = [n in robot.joint_names for n in springs.values()]
+        if any(present) and not all(present):
+            raise ValueError("the articulation has some of the ankle crank springs, not all")
+        self.cranks = [d for d in self.desc.drives if self.desc.drives[d].crank is not None]
+        self.springs = springs if all(present) and springs else {}
+        self.spring_ids = torch.tensor([robot.joint_names.index(self.springs[d]) for d in self.cranks
+                                        if d in self.springs], device=self.device, dtype=torch.long)
+        self._spring_sign = torch.tensor([float(self.desc.drives[d].sign) for d in self.cranks if d in self.springs],
+                                         device=self.device)
         self.drives = self.core.map.drive_names
         d = len(self.drives)
         self.t_ns = 0
@@ -188,8 +206,8 @@ class RobotPlant:
         self.latency_ns = self.command_latency_ns.expand(e, -1).clone()  # before the drive, randomized
         self._targets = robot.data.default_joint_pos.torch.clone()
         self._physics_manager = physics_manager
-        harness = self.profile["support"]["harness"]
-        self.gantry = Gantry(robot, harness=None if harness is None else harness["body"])  # no rope until hung
+        # No rope until hung; its attachment points are the description's gantry attachment links, else the profile's.
+        self.gantry = Gantry(robot, harness=resolve_harness(self.desc, self.profile["support"]["harness"]))
         # Every env starts at the articulation's default joint state, the pose the scene chose (standing or flat
         # feet). (At spawn the joints sit at the URDF zero, the calibration pose.)
         robot.write_joint_state_to_sim_index(position=self._targets.clone(), velocity=torch.zeros_like(self._targets))
@@ -245,14 +263,16 @@ class RobotPlant:
                 raise ValueError(f"{cfg.robot}: scaling imu_latency needs the profile's devices.imu_path")
         if "imu_drop_probability" in used and self.imu is None:
             raise ValueError("randomizing imu_drop_probability needs the IMU")
+        if used & {"ankle_spring_stiffness", "ankle_spring_damping"} and not self.springs:
+            raise ValueError("randomizing ankle_spring_* needs an asset built with ankle compliance")
         if {"friction", "shape_friction"} <= used:
             raise ValueError("choose per-env friction or per-shape friction, not both")
         self.randomizer = Randomizer(specs, {k: v for k, v in nominal.items() if k in used},
                                      {"body": list(robot.body_names), "joint": self.core.solver_map.joint_names,
-                                      "drive": self.drives,
+                                      "drive": self.drives, "crank": [d for d in self.cranks if d in self.springs],
                                       "shape": [f"shape_{i}" for i in range(nominal.get("shape_friction", torch.empty(e, 0)).shape[1])]},
                                      num_envs=e, device=self.device, seed=cfg.seed, level=cfg.level)
-        from humanoid_sim.physics.crank_stops import StopSolref, check_crank_stops
+        from humanoid_sim.physics.crank_stops import StopSolref, check_crank_stops, kamino_crank_stops
         from humanoid_sim.physics.isaaclab import (
             apply_heightfield_base,
             apply_joint_limits,
@@ -272,8 +292,14 @@ class RobotPlant:
 
         self._contact_capacity = contact_capacity_guard(self.profile["physics"], e, self.device)
         if used & {"crank_stop_stiffness", "crank_stop_damping"}:
-            self._stops = StopSolref(robot, physics_manager.get_model(), self.desc, e)
-            self._stops_solref0 = self._stops.read()
+            if self._solver == "kamino":
+                self._kamino_stops = kamino_crank_stops(robot, self.desc, self.profile["physics"], self.period_ns / NS_PER_S,
+                                                        require=True)
+            else:
+                self._stops = StopSolref(robot, physics_manager.get_model(), self.desc, e)
+                self._stops_solref0 = self._stops.read()
+        elif self._solver == "kamino":  # soft stops the profile asked for, or a SimCore's, whose knobs stay nominal
+            self._kamino_stops = kamino_crank_stops(robot, self.desc, self.profile["physics"], self.period_ns / NS_PER_S)
         self._write_physics()
         self._write_device(torch.arange(e, device=self.device))
         self._drive_graph = None
@@ -308,6 +334,9 @@ class RobotPlant:
             out["restitution"] = self._shape_restitution()[:, :1].clone()
         out["crank_stop_stiffness"] = torch.ones(self.num_envs, 1, device=self.device)
         out["crank_stop_damping"] = torch.ones(self.num_envs, 1, device=self.device)
+        if self.springs:  # the gains the scene spawned the springs with (the profile's physics.ankle_compliance)
+            out["ankle_spring_stiffness"] = data.joint_stiffness.torch[:, self.spring_ids].clone()
+            out["ankle_spring_damping"] = data.joint_damping.torch[:, self.spring_ids].clone()
         return out
 
     def _device_nominal(self) -> dict[str, torch.Tensor]:
@@ -341,7 +370,8 @@ class RobotPlant:
 
     def _contact_knobs(self, used: set[str]) -> None:
         """Raise unless the running solver can randomize the contact and stop parameters the specs use."""
-        knobs = used & {"restitution", "crank_stop_stiffness", "crank_stop_damping"}
+        knobs = used & ({"restitution"} | ({"crank_stop_stiffness", "crank_stop_damping"} if self._solver != "kamino"
+                                           else set()))
         if knobs and self._physics_manager is None:
             raise ValueError(f"randomizing {sorted(knobs)} needs the physics manager (env.sim.physics_manager)")
         if "restitution" in used and self._solver != "kamino":
@@ -362,6 +392,12 @@ class RobotPlant:
                     nominal = self._nominal_physics[name]
                     if bool(((v[name] < 0) | ((v[name] == 0) != (nominal == 0))).any()):
                         raise ValueError(f"Kamino requires {name} to preserve the nominal zero/nonzero structure")
+        for name, gain in (("ankle_spring_stiffness", "stiffness"), ("ankle_spring_damping", "damping")):
+            if name in v:
+                # Positive always: a zero gain is a different joint structure for Kamino (and no linkage at all).
+                if not bool((v[name] > 0).all()):
+                    raise ValueError(f"{name} must be positive")
+                getattr(r, f"write_joint_{gain}_to_sim_index")(**{gain: v[name].float()}, joint_ids=self.spring_ids)
         if "body_mass" in v:
             r.set_masses_index(masses=v["body_mass"])
         if "body_mass" in v or "body_inertia" in v:
@@ -397,6 +433,8 @@ class RobotPlant:
             bounce = self._shape_restitution()
             bounce[:] = v["restitution"].to(bounce.dtype)
             self._physics_manager.add_model_change(ModelFlags.SHAPE_PROPERTIES)
+        if self._kamino_stops is not None:
+            self._kamino_stops.set_scales(v.get("crank_stop_stiffness"), v.get("crank_stop_damping"))
         if self._stops is not None:
             ones = torch.ones_like(self._nominal_physics["crank_stop_stiffness"])
             self._stops.write(scaled_solref(self._stops_solref0, v.get("crank_stop_stiffness", ones),
@@ -482,6 +520,10 @@ class RobotPlant:
         self.robot.write_joint_state_to_sim_index(
             position=torch.stack([values[n] for n in names], -1).to(q.dtype),
             velocity=torch.stack([rates[n] for n in names], -1).to(qd.dtype), joint_ids=ids, env_ids=env_ids)
+        if len(self.spring_ids):  # crank springs relaxed: the linkage closes as the rigid one does
+            zero = torch.zeros(len(env_ids), len(self.spring_ids), device=self.device, dtype=q.dtype)
+            self.robot.write_joint_state_to_sim_index(position=zero, velocity=zero, joint_ids=self.spring_ids,
+                                                      env_ids=env_ids)
 
     def _write_friction(self) -> None:
         """Write the back-drive joints' solver friction (:meth:`PlantCore.joint_friction`) if a reset or a demand
@@ -523,6 +565,8 @@ class RobotPlant:
         tc.set_effort_index(value=effort)
         self._write_friction()
         self.gantry.apply(self.t_ns)
+        if self._kamino_stops is not None:
+            self._kamino_stops.apply()
         self.t_ns += self.period_ns
 
     def _push_history(self, fb: DriveFeedback) -> None:
@@ -558,8 +602,11 @@ class RobotPlant:
         q, qd = self.joint_state()
         data = self.robot.data
         forces = self.contacts.data.net_forces_w.torch if self.contacts is not None else None
+        spring = None
+        if len(self.spring_ids):
+            spring = data.joint_pos.torch[:, self.spring_ids] * self._spring_sign
         return Truth(q, qd, data.root_link_pose_w.torch, data.root_com_vel_w.torch[:, :3],
-                     data.root_com_ang_vel_b.torch, self.core.feedback(*self.solver_state()), forces)
+                     data.root_com_ang_vel_b.torch, self.core.feedback(*self.solver_state()), forces, spring)
 
     # -- reset ------------------------------------------------------------------------------------
 

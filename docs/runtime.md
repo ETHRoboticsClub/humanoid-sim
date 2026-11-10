@@ -65,7 +65,7 @@ A session starts in the support chosen at startup, reported in the descriptor's 
 
 | Support | Base | What `SET_SUPPORT` can do |
 |---|---|---|
-| `suspended` | Hanging from the lab gantry: one cable from an anchor overhead to a spreader bar over the harness hook on the torso (the midpoint of the shoulders, the profile's `support.harness`), a strap from each end to a shoulder, carrying the robot's weight, the feet 0.3 m above the floor in the start pose, turned to rest under the hook; a swing dies away over several periods. With a crane (`--gantry`) the cable hangs from its hook, the trolley over the harness, and a robot out of the crane's reach is refused. A reset to a named pose puts the robot back there; every reset rehangs the cable where the robot then is. | Let the robot down (`free`), put it back on the harness at the spawn (`suspended`) or hang another rope (`gantry`). Any `base_pose` argument is rejected. |
+| `suspended` | Hanging from the lab gantry: one cable from an anchor overhead to a spreader bar over the harness hook on the torso (the midpoint of the shoulders, the profile's `support.harness`), a strap from each end to a shoulder (or, when the robot description has links named `gantry_attachment_link` or `gantry_attachment_link_<n>`, from each end to one of those links, at most two; see [world.md](world.md#gantry-rope)), carrying the robot's weight, the feet 0.3 m above the floor in the start pose, turned to rest under the hook; a swing dies away over several periods. With a crane (`--gantry`) the cable hangs from its hook, the trolley over the harness, and a robot out of the crane's reach is refused. A reset to a named pose puts the robot back there; every reset rehangs the cable where the robot then is. | Let the robot down (`free`), put it back on the harness at the spawn (`suspended`) or hang another rope (`gantry`). Any `base_pose` argument is rejected. |
 | `free` | Standing on the floor in the start pose, upright, at the origin | Hang a gantry rope (tension program or slack cable) or the harness (`suspended`), and release it with `{"support": "free"}` |
 
 The gantry and the floor are described in [world.md](world.md).
@@ -218,7 +218,7 @@ The descriptor region holds one JSON object (sorted keys, at most 16,384 bytes) 
 | `joints` | The joint names, in the order of the truth's joint arrays |
 | `support` | `suspended` or `free`: the support the session started in |
 | `bodies` | The articulation's body names, for `APPLY_DISTURBANCE` and gantry `attachment_bodies` |
-| `harness` | The profile's `support.harness`: `{"body", "shoulders": [l, r]}`, the body a suspended robot hangs by and the two bodies whose midpoint is the hook, or null. ABI 3.3 added it. |
+| `harness` | `{"body", "shoulders": [l, r]}`, the body a suspended robot hangs by and the two bodies whose midpoint is the hook (the profile's `support.harness`), or null. When the description has gantry attachment links it is `{"body", "attachment_links": [name, ...]}` instead: the body that carries them and the links, in rope order, whose midpoint is the hook. ABI 3.3 added it. |
 | `description` | `robot`, `description_digest` and `description_revision` (the humanoid-urdf checkout's git `HEAD`, or null) |
 | `physics` | `engine` (`isaaclab/mjwarp` or `isaaclab/kamino`), `period_ns`, `integrator` |
 | `units` | One sentence each for `drive`, `joint`, `imu` and `time` |

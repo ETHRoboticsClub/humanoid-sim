@@ -17,7 +17,7 @@ class ImuStepGraph:
         state = [v for v in vars(imu).values() if isinstance(v, torch.Tensor)]
         state.extend(getattr(imu.samples, f.name) for f in fields(imu.samples))
         saved = [v.clone() for v in state]
-        rng, drop_rng = imu.generator.get_state(), imu.drop_generator.get_state()
+        rng = [g.get_state() for g in imu.generators()]
         run = torch.compile(self._run, dynamic=False) if compile else self._run
         side = torch.cuda.Stream(device=imu.device)
         side.wait_stream(torch.cuda.current_stream(imu.device))
@@ -27,16 +27,16 @@ class ImuStepGraph:
                     run()
             torch.cuda.current_stream(imu.device).wait_stream(side)
             self.graph = torch.cuda.CUDAGraph()
-            self.graph.register_generator_state(imu.generator)
-            self.graph.register_generator_state(imu.drop_generator)
+            for g in imu.generators():
+                self.graph.register_generator_state(g)
             with torch.cuda.graph(self.graph, stream=side):
                 run()
         finally:
             torch.cuda.current_stream(imu.device).wait_stream(side)
             for dst, src in zip(state, saved, strict=True):
                 dst.copy_(src)
-            imu.generator.set_state(rng)
-            imu.drop_generator.set_state(drop_rng)
+            for g, state in zip(imu.generators(), rng, strict=True):
+                g.set_state(state)
 
     def _run(self):
         self.imu.step(self.t_ns, self.gyro, self.acc, period_ns=self.period_ns)

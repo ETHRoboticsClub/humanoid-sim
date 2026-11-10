@@ -13,7 +13,6 @@ Needs the Isaac Sim image (``docker/Dockerfile.kit``) on an RTX GPU, and its own
 from __future__ import annotations
 
 import atexit
-import math
 import os
 import shutil
 from pathlib import Path
@@ -28,6 +27,8 @@ if shutil.which("nvidia-smi") is None:
 
 from rtx_oracles import (  # noqa: E402
     CAMERAS,
+    D435_COLOR_AT,
+    D435_COLOR_F,
     D435_CX_PX,
     D435_CY_PX,
     D435_DEPTH_MAX_M,
@@ -62,9 +63,6 @@ pytestmark = pytest.mark.rtx
 ZED_LEFT = (771.4, 771.14, 629.115, 353.0685, (-0.0358597, 0.0185157, -0.00496448, 0.00194007))
 ZED_RIGHT = (772.01, 771.55, 641.75, 346.6085, (-0.0368591, 0.0234426, -0.0128113, 0.00625172))
 ZED_RIGHT_EYE = (0.000233734, -0.0628272, 0.000181381)  # device frame: TZ, -Baseline, -TY
-# D435i, D400 datasheet: colour 69 deg across the image; colour 15 mm right of depth.
-D435_COLOR_F = D435_CX_PX / math.tan(math.radians(69.0 / 2))
-D435_COLOR_AT = (0.0, -0.015, 0.0)
 
 # The room (rtx_oracles.WALLS) and its targets (centre, half extents, colour): plates 2 mm thick, so a camera sees one
 # face of each and nothing of their sides. The ZED Mini's eyes are grey: its target is a white plate on a black one

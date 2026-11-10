@@ -383,8 +383,6 @@ def test_a_replay_runs_the_solver_pd_at_the_captures_gains(request, device):
     from humanoid_sim.replay.replay import solver_gains_of
     from humanoid_sim.sim import SimCore
 
-    if not device.startswith("cuda"):
-        pytest.skip("robot physics requires --device cuda:0 in the Isaac Lab image")
     sim = SimCore(built_usd("ethrc_v1"), device=device, robot="ethrc_v1", num_envs=4, fixed_base=True)
     request.addfinalizer(sim.close)
     plant = sim.plant
@@ -395,3 +393,33 @@ def test_a_replay_runs_the_solver_pd_at_the_captures_gains(request, device):
     stiffness = sim.backend.robot.data.joint_stiffness.torch[:, ids].to(plant.k0.dtype)
     assert torch.allclose(plant.k0[:, lin_j], kp[lin_d].expand(4, -1))
     assert torch.allclose(stiffness, kp[lin_d].expand(4, -1), rtol=1e-5)
+
+
+@pytest.mark.physics
+@pytest.mark.parametrize("robot", PHYSICS_ROBOTS[:1])
+def test_cuda_graph_imu_drops_samples_at_the_set_rate(robot):
+    """Every generator the IMU step draws from is registered with the step graphs, so the capture works and each
+    replay draws new drops."""
+    pytest.importorskip("isaaclab_newton")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA graphs need a GPU")
+    from humanoid_sim.sim import SimCore
+
+    usd = built_usd(robot)
+
+    def lost_fraction(rate):
+        sim = SimCore(usd, device="cuda:0", robot=robot, fixed_base=True, cuda_graph=True, imu=True)
+        try:
+            sim.imu.drop_probability.fill_(rate)
+            for _ in range(300):
+                sim.step()
+            imu = sim.imu
+            measured = int(imu.seq[0])
+            kept = int(imu.pending_count[0] + imu.samples.count[0])
+            assert measured > 100
+            return 1 - kept / measured
+        finally:
+            sim.close()
+
+    assert lost_fraction(0.0) == 0.0
+    assert lost_fraction(0.5) == pytest.approx(0.5, abs=0.15)

@@ -136,21 +136,28 @@ class Imu(Sensor):
 class Mti610(Imu):
     model = "mti-610"
     product = "Xsens (Movella) MTi-610"
-    source = ("Movella MTi-610 leaflet (May 2023), as Controls' ethrc_ssot/imu_sensors.py MTI_610 carries it; "
-              "turn-on bias and correlation time modeled")
+    source = ("Movella MTi-610 leaflet (May 2023), as Controls' ethrc_ssot/imu_sensors.py MTI_610 carries it, borne "
+              "out by the V1's unit at rest (2026-11-02, 2026-11-05); turn-on biases and correlation time modeled from "
+              "that unit (docs/sensors.md, The V1's MTi-610 at rest)")
     gyro_noise_density_rad_s_sqrt_hz = 0.007 * DEG
     accel_noise_density_m_s2_sqrt_hz = 60e-6 * G0
-    # Modeled from the size of one power-on's bias on the V1 (chip-axis means, 2026-10-06, hanging, drives off,
-    # 60 s, their RMS); the spread across power-ons is unmeasured. Accelerometer: unmeasured.
-    gyro_turn_on_bias_rad_s = 1.5e-3
+    # Modeled from the V1's unit at rest, drives off: the RMS of its chip-axis means on 2026-10-06, 2026-11-02 and
+    # 2026-11-05. Three power-ons on 2026-11-05 moved them by 0.3e-3 rad/s at most; the days differ by up to 2.3e-3.
+    gyro_turn_on_bias_rad_s = 1.8e-3
+    # Modeled from the size of the same unit's gravity norm, 0.02 m/s^2 below local gravity at every power-on (a bias
+    # or a scale error: gravity hides which); its means moved by 3e-3 m/s^2 at most across those power-ons.
+    accel_turn_on_bias_m_s2 = 0.02
     gyro_bias_instability_rad_s = 8.0 * DEG / 3600.0
     accel_bias_instability_m_s2 = 15e-6 * G0  # the worse (z) axis
-    bias_correlation_time_ns = 100_000_000_000  # modeled: the leaflet gives none
+    # Modeled: a Gauss-Markov fit to 45 min at rest (2026-11-05) gives 100 to 290 s on the four axes it constrains,
+    # longer on the other two; the leaflet gives none.
+    bias_correlation_time_ns = 200_000_000_000
     # Full scale ±2000 deg/s and ±10 g (MTi 600-series datasheet MT1603P 2020.B); samples are clipped to it.
     gyro_range_rad_s = 2000.0 * DEG
     accel_range_m_s2 = 10.0 * G0
-    # Not modeled: 0.05 deg non-orthogonality, 0.1 %FS non-linearity (same datasheet). No source gives a run-to-run
-    # bias or a correlation time. The output latency is the profile's devices.imu_path (measured), not the model's.
+    # Not modeled: 0.05 deg non-orthogonality, 0.1 %FS non-linearity (same datasheet). No datasheet gives a
+    # run-to-run bias or a correlation time. The output latency is the profile's devices.imu_path (measured), not the
+    # model's.
 
 
 class UnitreeG1Imu(Imu):
@@ -247,14 +254,17 @@ class Camera(Sensor):
                  distortion: dict[str, tuple[str, tuple[float, ...]]] | None = None,
                  stream_offsets_m: dict[str, tuple[float, float, float]] | None = None,
                  stream_rotations_xyzw: dict[str, tuple[float, float, float, float]] | None = None,
-                 depth_focal_px: float | None = None):
+                 depth_focal_px: float | None = None,
+                 link_from_camera_xyzw: tuple[float, float, float, float] | None = None):
         """Every stream at one resolution and rate; per stream the unit's pinhole calibration ``(fx, fy, cx, cy)`` in
         pixels (OpenCV's: pixel (u, v) centred at u, v), its lens distortion ``(model, coefficients)`` (model
         ``plumb_bob``, ``rational_polynomial`` or ``equidistant``; none when absent) and, where the unit's
         calibration gives them, its optical centre in the camera frame, replacing the model's nominal one, and its
         optical frame's orientation in the camera frame (a unit quaternion x, y, z, w), replacing the nominal one
         (x right, y down, z forward). ``depth_focal_px`` is the focal length the unit turns disparity back into depth
-        with, where it is not the depth stream's own (None: the stream's)."""
+        with, where it is not the depth stream's own (None: the stream's). ``link_from_camera_xyzw`` is the camera
+        frame's orientation in its rig frame (a unit quaternion x, y, z, w), for a link whose axes are not the camera
+        frame's (None: the link is the camera frame); the camera frame's origin is the link's."""
         super().__init__(frame)
         where = f"{type(self).__name__} at {frame!r}"
         if not (isinstance(width, int) and isinstance(height, int)) or width <= 0 or height <= 0:
@@ -278,6 +288,9 @@ class Camera(Sensor):
         for stream, q in rotations.items():
             if len(q) != 4 or abs(math.hypot(*q) - 1.0) > 1e-6:
                 raise ValueError(f"{where}: rotation {stream!r}: expected a unit quaternion (x, y, z, w)")
+        q = link_from_camera_xyzw
+        if q is not None and (len(q) != 4 or abs(math.hypot(*q) - 1.0) > 1e-6):
+            raise ValueError(f"{where}: link_from_camera_xyzw {q}: expected a unit quaternion (x, y, z, w)")
         self.width, self.height = width, height
         self.frame_period_ns = _positive_ns("frame_period_ns", frame_period_ns)
         self.intrinsics = dict(intrinsics)
@@ -285,6 +298,7 @@ class Camera(Sensor):
         self.stream_offsets_m = {**self.nominal_offsets_m, **(stream_offsets_m or {})}
         self.stream_rotations_xyzw = {s: tuple(float(v) for v in q) for s, q in rotations.items()}
         self.depth_focal_px = depth_focal_px
+        self.link_from_camera_xyzw = None if q is None else tuple(float(v) for v in q)
 
     @property
     def rtx_ready(self) -> bool:

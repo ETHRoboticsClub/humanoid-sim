@@ -77,6 +77,7 @@ from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.runtime.trajectory import IMU_RECORD, ImuWriter, TrajectoryWriter
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.harness import resolve_harness
 from humanoid_sim.world.objects import WorldObjects
 from humanoid_sim.world.supports import GRAVITY_M_S2, NONE, _quat_rotate, level_under
 from humanoid_sim.world.terrain_io import Terrain, as_terrain, rest_base_height
@@ -261,8 +262,14 @@ class RuntimeHost:
         if support not in ("suspended", "free"):
             raise ValueError(f"support {support!r}: start suspended or free (hang a gantry by command)")
         self._support_cfg = load_profile(robot)["support"]
-        if support == "suspended" and self._support_cfg["harness"] is None:
-            raise ValueError(f"{robot}: its profile names no support.harness to suspend it by")
+        # The ropes' attachment: the description's gantry attachment links, else the profile's harness.
+        self._harness = resolve_harness(Description.load(robot), self._support_cfg["harness"])
+        if support == "suspended" and self._harness is None:
+            raise ValueError(f"{robot}: its description has no gantry attachment links and its profile names no "
+                             "support.harness to suspend it by")
+        if self._harness is not None and self._harness.num_points > abi.MAX_STRAPS:
+            raise ValueError(f"{robot}: {self._harness.num_points} gantry attachment points, but the plant ABI "
+                             f"carries {abi.MAX_STRAPS} straps")
         if scene is not None and scene.clearance_m() == 0.0:
             raise ValueError(f"spawn point {scene.spawn_m} is inside a box of {scene.file}: the robot starts there")
         terrain = as_terrain(terrain)
@@ -412,7 +419,7 @@ class RuntimeHost:
         root, vel = r.data.root_link_pose_w.torch.clone(), r.data.root_link_vel_w.torch.clone()
         for i in range(steps):
             self.sim.step()
-            if i == 0 and self._support_cfg["harness"] is not None:
+            if i == 0 and self._harness is not None:
                 self._harness_cable(dry_run=False)
         self.sim.gantry.release(torch.tensor([0], device=self.device))
         if self.trolley is not None:
@@ -432,7 +439,8 @@ class RuntimeHost:
         self._extra_imu_blocks = extra_imu_descriptors(self.desc, self._extra_rig)
         return {
             "robot": self.desc.robot, "drives": self.drives, "joints": self.joints, "support": support,
-            "bodies": list(self.robot.body_names), "harness": self._support_cfg["harness"],
+            "bodies": list(self.robot.body_names),
+            "harness": None if self._harness is None else self._harness.describe(),
             "description": self.desc.identity(),
             "physics": {"engine": f"isaaclab/{self.sim.solver}", "period_ns": self.period_ns,
                         "integrator": self.sim.integrator},
@@ -573,8 +581,9 @@ class RuntimeHost:
         (``--gantry``) whose travel reaches over the hook, the cable hangs from the crane's hook, the trolley placed
         over it and the hoist that stretch short; a suspended robot out of its reach is refused."""
         cfg = self._support_cfg
-        if cfg["harness"] is None:
-            raise ValueError(f"{self.desc.robot}: its profile names no support.harness to suspend it by")
+        if self._harness is None:
+            raise ValueError(f"{self.desc.robot}: its description has no gantry attachment links and its profile "
+                             "names no support.harness to suspend it by")
         mass = float(self._mass.sum())
         stiffness = mass * GRAVITY_M_S2 / cfg["full_weight_stretch_m"]
         env = torch.tensor([0], device=self.device)
@@ -598,22 +607,21 @@ class RuntimeHost:
         damping = 2.0 * math.sqrt(stiffness * mass)
         if crane is not None:
             self.trolley.place(env, torch.tensor(crane))
-            self.sim.gantry.hang_hoist(env, attachment_bodies=cfg["harness"]["shoulders"], stiffness_n_m=stiffness,
+            self.sim.gantry.hang_hoist(env, **self._harness.attachment(), stiffness_n_m=stiffness,
                                        damping_n_s_m=damping, swing_damping_n_s_m=swing_damping,
                                        spreader_width_m=cfg["spreader_width_m"])
             return
         self.sim.gantry.hang_cable(
-            env, self.sim.t_ns, attachment_bodies=cfg["harness"]["shoulders"],
+            env, self.sim.t_ns, **self._harness.attachment(),
             overhead_m=cfg["overhead_m"], length_breakpoints_s_m=[(0.0, cfg["overhead_m"] - cfg["full_weight_stretch_m"])],
             stiffness_n_m=stiffness, damping_n_s_m=damping, swing_damping_n_s_m=swing_damping,
             spreader_width_m=cfg["spreader_width_m"], dry_run=dry_run)
 
     def _hook_and_com(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """The harness hook (midway between the shoulder links, whose origins are their joints) and the centre of
-        mass, world frame."""
-        data, names = self.robot.data, self.robot.body_names
-        shoulders = [names.index(b) for b in self._support_cfg["harness"]["shoulders"]]
-        hook = data.body_link_pose_w.torch[0, shoulders, :3].mean(0)
+        """The harness hook (midway between the shoulder links, whose origins are their joints, or between the
+        attachment links) and the centre of mass, world frame."""
+        data = self.robot.data
+        hook = self.sim.gantry.harness_hook_w()
         com = (self._mass[:, None] * data.body_com_pos_w.torch[0]).sum(0) / self._mass.sum()
         return hook, com
 

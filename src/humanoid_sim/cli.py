@@ -2,7 +2,7 @@
 
     humanoid-sim [--solver mjwarp|kamino] <command>  Newton solver for the commands that step physics
                                                    (default: the profile's)
-    humanoid-sim build-asset [--base-joints]       robot USD from the description (Isaac Lab image)
+    humanoid-sim build-asset [--base-joints] [--ankle-compliance]  robot USD from the description (Isaac Lab image)
     humanoid-sim replay <exc-dir> [--period-ms PERIOD] [--base yaw|orientation|fixed] [--terrain FILE]
                                                    drive-level replay, scored against the capture;
                                                    base following the capture's IMU yaw (default), or fixed
@@ -39,6 +39,33 @@ def compile_without_precompiled_headers() -> None:
     warp.config.use_precompiled_headers = False
 
 
+PCH_BUILD_ATTEMPTS = 3
+PCH_RETRY_DELAY_S = 2.0
+_PCH_FAILURE_MARKERS = ("unable to obtain mapped memory", "kernel build failed with error code 6")
+
+
+def is_precompiled_header_failure(error: BaseException) -> bool:
+    """Whether a Warp kernel build failed the way a NVRTC precompiled header that cannot be mapped does."""
+    text = str(error)
+    return any(marker in text for marker in _PCH_FAILURE_MARKERS)
+
+
+def retry_kernel_build(build, *, attempts: int = PCH_BUILD_ATTEMPTS, delay_s: float = PCH_RETRY_DELAY_S,
+                       sleep=time.sleep):
+    """Call build(), trying again (at most `attempts` calls in all) when it fails with the intermittent NVRTC
+    precompiled-header mapping error; any other failure, and the last one, propagate. Warp builds the kernels a
+    second time from scratch, which usually passes."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return build()
+        except Exception as error:  # noqa: BLE001 - only the one known build failure is retried
+            if attempt == attempts or not is_precompiled_header_failure(error):
+                raise
+            print(f"warp kernel build failed with the NVRTC precompiled header mapping error "
+                  f"(attempt {attempt}/{attempts}): {error}; retrying in {delay_s:g} s", file=sys.stderr, flush=True)
+            sleep(delay_s)
+
+
 def _usd(args, *, base_joints: bool = False) -> Path:
     if args.usd:
         return Path(args.usd)
@@ -60,7 +87,7 @@ def cmd_build_asset(args) -> int:
     from humanoid_sim.model.description import Description
 
     usd = build_asset(Description.load(args.robot), load_profile(args.robot), Path(args.assets), force=args.force,
-                      base_joints=args.base_joints)
+                      base_joints=args.base_joints, ankle_compliance=args.ankle_compliance)
     print(usd)
     return 0
 
@@ -265,15 +292,15 @@ def cmd_serve(args) -> int:
 
     if args.truth_every is not None and (args.truth_every < 1 or (args.trajectory and args.truth_every != 1)):
         raise SystemExit("--truth-every must be at least 1, and 1 with --trajectory (it records every step)")
-    host = RuntimeHost(args.segment, _usd(args), device=args.device, robot=args.robot, solver=args.solver,
-                       support=args.support, pose=args.pose, scene=_scene(args), gantry=_gantry(args),
-                       terrain=_terrain(args),
-                       objects=_objects(args),
-                       bus_period_ns=int(args.bus_period_us * 1000),
-                       client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
-                       sim_revision=_revision(),
-                       truth_every=args.truth_every or (1 if args.trajectory else 5), trajectory=args.trajectory,
-                       extra_rig=args.sensors)
+    usd, scene, gantry, terrain, objects = _usd(args), _scene(args), _gantry(args), _terrain(args), _objects(args)
+    host = retry_kernel_build(lambda: RuntimeHost(
+        args.segment, usd, device=args.device, robot=args.robot, solver=args.solver,
+        support=args.support, pose=args.pose, scene=scene, gantry=gantry, terrain=terrain, objects=objects,
+        bus_period_ns=int(args.bus_period_us * 1000),
+        client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
+        sim_revision=_revision(),
+        truth_every=args.truth_every or (1 if args.trajectory else 5), trajectory=args.trajectory,
+        extra_rig=args.sensors))
     try:
         while True:
             print(json.dumps({"segment": str(args.segment), "session_id": host.session_id, "ready": True}),
@@ -362,6 +389,9 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--force", action="store_true")
     b.add_argument("--base-joints", action="store_true",
                    help="the variant with yaw/pitch/roll joints above the base, for replays with a moving base")
+    b.add_argument("--ankle-compliance", action="store_true",
+                   help="the variant with a spring between each ankle crank drive and its crank arm (physics."
+                        "ankle_compliance gives its stiffness and damping)")
     b.set_defaults(func=cmd_build_asset)
 
     r = sub.add_parser("replay")
@@ -420,7 +450,8 @@ def main(argv: list[str] | None = None) -> int:
                      help="the room's scan (OBJ) for the lidar (default: the host's, when readable here); added only "
                           "with a lidar, so without --splat --no-lidar changes the cameras' depth")
     rr_.add_argument("--lights", default=None,
-                     help="the room's ceiling lights (JSON, in the scan's frame; placed with the host's spawn)")
+                     help="the room's lighting (JSON): ceiling lights in the scan's frame (placed with the host's "
+                          "spawn), dome intensity and colour temperature, the ambient light, a sun")
     rr_.add_argument("--no-cameras", action="store_true")
     rr_.add_argument("--no-lidar", action="store_true")
     rr_.add_argument("--combined", action="store_true",
@@ -449,7 +480,9 @@ def main(argv: list[str] | None = None) -> int:
     rt.add_argument("--splat", default=None, help="the room's Gaussian splat as USD (`splat-usd`), for the cameras")
     rt.add_argument("--splat-intensity", type=float, default=1.0)
     rt.add_argument("--scan-mesh", default=None, help="the room's scan (OBJ) for the lidar (default: the host's)")
-    rt.add_argument("--lights", default=None, help="the room's ceiling lights (JSON)")
+    rt.add_argument("--lights", default=None,
+                    help="the room's lighting (JSON): ceiling lights, dome intensity and colour temperature, the "
+                         "ambient light, a sun")
     rt.add_argument("--no-cameras", action="store_true")
     rt.add_argument("--no-lidar", action="store_true")
     rt.add_argument("--start", type=float, default=None, help="first plant time to render (s)")

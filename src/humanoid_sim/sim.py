@@ -61,7 +61,8 @@ class SimCore:
                  contacts: bool = False, seed: int = 0, cuda_graph: bool = False, compile: bool = False,
                  imu_history: int | None = None, extra_rig: str | None = None, scene: StaticBoxes | None = None,
                  objects: WorldObjects | None = None, entities: dict | None = None, render_each_step: bool = True,
-                 queue_capacity: int | None = None, terrain: Terrain | object | None = None):
+                 queue_capacity: int | None = None, terrain: Terrain | object | None = None,
+                 physics_overrides: dict | None = None, gravity_m_s2: tuple[float, float, float] | None = None):
         check_asset_robot(usd_path, robot)
         self.terrain = as_terrain(terrain)
         self.desc = Description.load(robot)
@@ -75,10 +76,10 @@ class SimCore:
 
             extra_imus = {n: s for n, s in rigs.load(robot, self.desc, extra_rig).sensors.items()
                           if s.kind == "imu" and n != "imu"}
-        self.profile = load_profile(robot)
+        self.profile = load_profile(robot, physics_overrides=physics_overrides)
         phys = self.profile["physics"]
         self.period_ns = int(period_ns or phys["period_ns"])
-        from humanoid_sim.physics.isaaclab import IsaacLabCfg, IsaacLabRobot, solver_settings
+        from humanoid_sim.physics.isaaclab import IsaacLabCfg, IsaacLabRobot, solver_settings, spring_gains
 
         self.solver, settings = solver_settings(phys, solver)
         self.integrator = integrator or settings["integrator"]
@@ -106,7 +107,8 @@ class SimCore:
             base_joints=base_joints, ground_friction=self.profile["model"]["ground_friction"],
             imu=imu, extra_imus={n: s.frame for n, s in extra_imus.items()}, contacts=contacts, rerun=rerun,
             rerun_rrd=rerun_rrd, scene=scene, objects=objects, entities=entities,
-            render_each_step=render_each_step, terrain=None if self.terrain is None else self.terrain.cfg),
+            render_each_step=render_each_step, terrain=None if self.terrain is None else self.terrain.cfg,
+            springs=spring_gains(usd_path, phys) or None, gravity_m_s2=gravity_m_s2),
             props=props)
         self.scene = scene
         self.ground = self.backend.ground
@@ -116,17 +118,35 @@ class SimCore:
         order = [self.backend.joint_names.index(n) for n in joints]
         self._to_plant = torch.tensor(order, device=self.plant.cfg.device)
         self._to_solver = torch.tensor([self.backend.joint_names.index(n) for n in physical], device=device)
+        # Crank springs (an asset built with ankle compliance), in the description's crank drive order: held at a
+        # zero target, written at zero with every state write.
+        from humanoid_sim.model.asset import compliance_springs
+
+        self.springs = compliance_springs(usd_path)
+        self._springs = torch.tensor([self.backend.joint_names.index(n) for n in self.springs.values()],
+                                     device=device, dtype=torch.long)
         if self.native_state is not None:
             self.write_joint_state(*self.joint_state())
         self._base = (torch.tensor([self.backend.joint_names.index(n) for n, _ in BASE_JOINTS],
                                    device=self.plant.cfg.device) if base_joints else None)
         self._base_target: tuple[torch.Tensor, torch.Tensor] | None = None
         self._base_acceleration: torch.Tensor | None = None
+        from humanoid_sim.world.harness import resolve_harness
         from humanoid_sim.world.supports import Gantry
 
-        harness = self.profile["support"]["harness"]
-        self.gantry = Gantry(self.backend.robot, harness=None if harness is None else harness["body"])
+        self.gantry = Gantry(self.backend.robot, harness=resolve_harness(self.desc, self.profile["support"]["harness"]))
         self.gantry.cuda_graph = cuda_graph
+        # Kamino's soft crank stops, when the profile asks for them (physics.kamino.crank_stops.soft): torques on the
+        # crank joints every step. A plant that randomizes the stops adds them later (kamino_crank_stops).
+        self.crank_stops = None
+        if self.solver == "kamino":
+            from humanoid_sim.physics.crank_stops import kamino_crank_stops
+
+            try:
+                self.crank_stops = kamino_crank_stops(self.backend.robot, self.desc, phys, period_s)
+            except Exception:
+                self.backend.close()  # Isaac Lab allows one simulation per process
+                raise
         self.t_ns = 0
         self._feedback: DriveFeedback | None = None
         self._state_written = True  # joint state changed outside a step: the plant's post-step state is stale
@@ -190,6 +210,8 @@ class SimCore:
             for name in values:
                 i = self.backend.joint_names.index(name)
                 bq[:, i], bqd[:, i] = values[name].to(bq.dtype), rates[name].to(bqd.dtype)
+        bq[:, self._springs] = 0.0
+        bqd[:, self._springs] = 0.0
         self.backend.write_state(bq, bqd)
         self._state_written = True
         self._feedback = None
@@ -258,6 +280,7 @@ class SimCore:
         bt, _ = self.backend.joint_state()
         bt = bt.clone()
         bt[:, self._to_solver] = target.to(bt.dtype)
+        bt[:, self._springs] = 0.0
         effort = torch.zeros_like(bt)
         effort[:, self._to_solver] = self.plant.passive_effort.to(effort.dtype)
         if self._base_target is not None:
@@ -269,6 +292,9 @@ class SimCore:
             self.backend.set_targets(bt, effort=effort)
         self.write_friction()
         self.gantry.apply(self.t_ns)
+        stops = self.crank_stops or getattr(self.backend.robot, "_kamino_crank_stops", None)
+        if stops is not None:
+            stops.apply()
         if self._base_acceleration is not None:
             self.backend.apply_base_acceleration(self._base_acceleration)
         if self.backend.objects is not None:
@@ -284,8 +310,8 @@ class SimCore:
 class _StepGraphs:
     """The plant's per-step work as two CUDA graphs over static buffers: ``pre`` (IMU sampling at the step start,
     drive bank, target shaping) and ``post`` (drive feedback and the drive-frame state ``pre`` reuses). State lives
-    in the plant's tensors, updated in place; the step time is a device scalar; the IMU's generator is registered
-    with the graph so each replay draws new noise and burst times."""
+    in the plant's tensors, updated in place; the step time is a device scalar; the IMUs' generators (noise and
+    sample dropout) are registered with the graph so each replay draws new noise, burst times and drops."""
 
     def __init__(self, sim: SimCore, warmup: int = 3, compile: bool = False):
         self.sim = sim
@@ -309,7 +335,7 @@ class _StepGraphs:
                 self._post()
                 self._pre()
         torch.cuda.current_stream().wait_stream(side)
-        generators = ([sim.imu.generator] if sim.imu is not None else []) + [d.generator for d in sim.extra_imus.values()]
+        generators = [g for imu in (sim.imu, *sim.extra_imus.values()) if imu is not None for g in imu.generators()]
         self.g_post, self.g_pre = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
         for g in (self.g_post, self.g_pre):
             for gen in generators:
