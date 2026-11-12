@@ -17,6 +17,10 @@ Per env and drive, the bank also carries the drive's deviations from what it is 
 training, identity otherwise): ``p_scale``/``d_scale`` (realized over demanded gain), ``torque_scale`` (on the
 envelope and cap) and ``position_offset`` (the drive's position reading minus the truth, so it regulates the
 offset reading).
+
+With a :class:`~humanoid_sim.devices.protection.DriveProtection` the bank also clips the applied torque at each drive's
+output current limit and runs Controls' overload rule on the demanded torque (``overload``; a tripped drive applies
+no torque under the ``cut`` response). Without one the bank is exactly as above.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ import torch
 
 from humanoid_sim.devices.demand import LAW_DISABLED, LAW_FREEZE, LAW_PD, DriveDemand
 from humanoid_sim.devices.envelope import TorqueSpeedEnvelope
+from humanoid_sim.devices.protection import DriveProtection, OverloadState
 from humanoid_sim.timing import ArrivalQueue
 
 OFF, PD, FREEZE = LAW_DISABLED, LAW_PD, LAW_FREEZE
@@ -42,8 +47,11 @@ class DriveOutput:
 
 class DriveBank:
     def __init__(self, envelope: TorqueSpeedEnvelope, num_envs: int, num_drives: int, *,
-                 queue_capacity: int = 4, device="cpu", dtype=torch.float32):
+                 queue_capacity: int = 4, protection: DriveProtection | None = None, device="cpu",
+                 dtype=torch.float32):
         self.envelope = envelope
+        self.protection = protection
+        self.overload = OverloadState(num_envs, num_drives, device=device)
         self.num_envs, self.num_drives = num_envs, num_drives
         self.device, self.dtype = torch.device(device), dtype
         initial = DriveDemand.disabled(num_envs, num_drives, device=device, dtype=dtype).as_dict()
@@ -59,6 +67,7 @@ class DriveBank:
             demand = DriveDemand.disabled(len(env_ids), self.num_drives, device=self.device, dtype=self.dtype)
         self.queue.reset(env_ids, demand.as_dict())
         self.last_kind.index_fill_(0, env_ids, OFF)
+        self.overload.reset(env_ids)
 
     def submit(self, demand: DriveDemand, arrival_ns: torch.Tensor, env_mask: torch.Tensor | None = None):
         """Queue a demand taking effect at ``arrival_ns`` ``[E]`` (or ``[E, D]``: per drive)."""
@@ -94,6 +103,10 @@ class DriveBank:
         cap = torch.where(torch.isinf(limit), limit, limit * ts)  # inf: no cap (and inf * 0 would be NaN)
         applied = torch.maximum(torch.minimum(applied, cap), -cap)
         applied = torch.where(kind == OFF, torch.zeros_like(applied), applied)
+        protection = self.protection
+        if protection is not None:
+            current = protection.current_limit_nm.to(self.dtype)
+            applied = torch.maximum(torch.minimum(applied, current), -current)
 
         wk = w
         out = DriveOutput(
@@ -101,6 +114,10 @@ class DriveBank:
             enabled_fraction=((kind != OFF).to(self.dtype) * wk).sum(1),
             target_velocity=(vel * pd * wk).sum(1),
         )
+        if protection is not None:
+            tripped = self.overload.update(protection, out.demanded, out.enabled_fraction > 0, t0_ns)
+            if protection.response == "cut":
+                out.applied = out.applied * (~tripped)
         # The mode in force at the end of this step (the last record with a share of it), which the next step's
         # freeze entry compares against. Records are in arrival order.
         slots = torch.arange(w.shape[1], device=w.device).view(1, -1, 1).expand_as(w)

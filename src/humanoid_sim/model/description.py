@@ -312,6 +312,30 @@ class Description:
             raise ValueError(f"{self.robot}: backend control_period_s {value!r} must be finite and positive")
         return round(value * 1e9)
 
+    def overload_dwell_ns(self) -> int | None:
+        """How long a drive's torque demand may stay above its torque limit before it trips
+        (``backend.overload_dwell_s``) in integer ns. None when the description records none."""
+        value = self.table.get("backend", {}).get("overload_dwell_s")
+        if value is None:
+            return None
+        value = float(value)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{self.robot}: backend overload_dwell_s {value!r} must be finite and positive")
+        return round(value * 1e9)
+
+    def current_limit_torque_nm(self, drive: str) -> float | None:
+        """The torque at a drive's output current limit (``max_current_a``), or None when its family records no
+        current figures. Modeled: the output torque per ampere is taken from the family's nominal pair,
+        ``effort_nominal / nominal_current_a`` (the gear of the drive's own object 0x3003 is not in the description)."""
+        d = self.drives[drive]
+        keys = ("max_current_a", "nominal_current_a")
+        if d.effort_nominal is None or any(self.family_value(d.family, k) is None for k in keys):
+            return None
+        maximum, nominal = (float(self.family_value(d.family, k)) for k in keys)
+        if not (math.isfinite(maximum) and math.isfinite(nominal) and maximum > 0 and nominal > 0):
+            raise ValueError(f"{self.robot}: {d.family} current figures must be finite and positive")
+        return maximum * d.effort_nominal / nominal
+
     def family_value(self, family: str, key: str, default=None):
         """A motor family's ``key``, or ``default`` when the family does not record it."""
         return self.table.get("families", {}).get(family, {}).get(key, default)
