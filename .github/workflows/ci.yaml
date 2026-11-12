@@ -28,7 +28,7 @@ jobs:
       code: ${{ steps.filter.outputs.code }}
       secrets: ${{ steps.filter.outputs.secrets }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: false
           persist-credentials: false
@@ -64,7 +64,7 @@ jobs:
           private-key: ${{ secrets.CI_READ_PRIVATE_KEY }}
           owner: ETHRoboticsClub
           repositories: humanoid-urdf
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
           lfs: false
@@ -99,7 +99,7 @@ jobs:
           private-key: ${{ secrets.CI_READ_PRIVATE_KEY }}
           owner: ETHRoboticsClub
           repositories: ETHRC-Humanoid-Controls
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: false
           persist-credentials: false
