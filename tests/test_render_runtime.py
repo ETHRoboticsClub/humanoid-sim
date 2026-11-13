@@ -60,12 +60,20 @@ def runtime(tmp_path, monkeypatch):
             self.viewport_times = []
             self.poses = []
             self.sensor_intervals = []
+            self.deliveries = []  # plant times frames were handed over at
+            self.pending_dropped = 0
 
         def pose(self, t_ns, q, base):
             self.poses.append((t_ns, q.clone(), base.clone()))
 
         def render(self, t_ns):
             self.viewport_times.append(t_ns)
+
+        def deliver(self, now_ns):
+            self.deliveries.append(now_ns)
+
+        def drop_pending(self):
+            self.pending_dropped += 1
 
         def render_at(self, t_ns, dt_ns):
             self.renders += 1
@@ -149,6 +157,22 @@ def test_paused_reset_updates_the_viewport_without_publishing_sensor_frames(runt
     assert renderer.session.sensor_intervals[-1] == 100_000_000
 
 
+def test_frames_on_their_way_are_delivered_every_pass_while_the_host_runs(runtime):
+    host, renderer, clock, _, _ = runtime
+    assert renderer.frame()  # renders, and hands over what has arrived by the host's plant time now
+    clock[0] += 5_000_000
+    assert renderer.frame()  # no render due: still delivers
+    assert renderer.session.renders == 1
+    assert renderer.session.deliveries == [1_000_000_000, 1_005_000_000]
+    _, fb = host.regions["feedback"].read()
+    fb["paused"] = 1
+    host.regions["feedback"].write(fb)
+    clock[0] += 5_000_000
+    host.heartbeat()
+    assert renderer.frame()  # paused: plant time stands still, nothing arrives
+    assert renderer.session.deliveries == [1_000_000_000, 1_005_000_000]
+
+
 def test_headless_pause_does_not_render_or_publish(runtime):
     host, _, _, _, cfg = runtime
     _, fb = host.regions["feedback"].read()
@@ -175,6 +199,7 @@ def test_reopen_refuses_the_dead_file_and_accepts_a_replacement_session(runtime)
         renderer.reopen(wait_s=0)
         assert renderer.session_id == replacement.session_id != old_session
         assert renderer._last_t is None
+        assert renderer.session.pending_dropped == 1  # frames of the last session never go out
     finally:
         replacement.close()
 
@@ -240,6 +265,7 @@ def test_render_latency_does_not_move_camera_or_lidar_capture_timestamps(runtime
             self.ms = {key: [] for key in ("render", "camera_read", "lidar_read", "publish")}
             self.last_images, self._last_sweep, self._saved = {}, {}, {}
             self.imaging = {}
+            self.delivery, self.last_delivery, self._pending = {}, {}, []
             self.sweeps = None
 
         def pose(self, *_args):

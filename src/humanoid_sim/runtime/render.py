@@ -6,7 +6,8 @@ and joint positions), poses the robot there by forward kinematics (``SensorSessi
 time. It renders as fast as Kit allows, at most once per camera period (the lidar's sweep period without cameras);
 the host keeps real time on its own, and a render that falls behind skips to the latest truth. Stamps map plant time
 onto the realtime clock through the host's own mapping (``plant_abi``: the feedback region's ``written_mono_ns``
-at ``sim_time_ns``).
+at ``sim_time_ns``). With a camera latency (``sensors/delivery.py``) each frame goes to its feed once the host's
+plant reaches its arrival, checked every pass of the loop while the host runs.
 
 The scene is the host's: its static boxes and scan (from the descriptor, when the files are readable here with the
 same digests), and the room's splat for the cameras when one is given. With a gantry crane (the descriptor's ``gantry``,
@@ -147,6 +148,8 @@ class RuntimeRender:
         session = self.session
         paused = bool(fb[1]["paused"])
         present_ns = abi.mono_ns()
+        if not paused:
+            session.deliver(plant_now_ns(fb[1], present_ns))
         if paused:
             if not self._window:
                 return True
@@ -183,6 +186,7 @@ class RuntimeRender:
         self.session_id = self.seg.session_id
         self._last_t = None
         self._last_present_ns = None
+        self.session.drop_pending()
 
     def summary(self, wall_s: float) -> dict:
         out = self.session.summary(wall_s)

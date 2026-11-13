@@ -63,6 +63,18 @@ def test_a_dataset_indexes_every_frame_and_sweep_by_plant_time(tmp_path):
     assert z["points_m"].shape == (5, 3) and int(z["start_ns"]) == 100_000_000
     manifest = json.loads((tmp_path / "d/manifest.json").read_text())
     assert manifest["schema"] == SCHEMA and manifest["counts"] == {"cam/left": 3, "lidar": 1}
+    assert [int(r["arrival_ns"]) for r in rows] == [0, 33_333_333, 66_666_666]  # no latency: at the exposure
+    assert next(csv.reader(open(tmp_path / "d/lidars/lidar/index.csv"))) == ["seq", "stamp_ns", "file"]
+
+
+def test_a_camera_frame_records_its_arrival_never_before_its_exposure(tmp_path):
+    w = DatasetWriter(tmp_path / "d", {"robot": "r"})
+    w.camera_frame("cam", "left", 100, np.zeros((2, 2), dtype=np.uint8), arrival_ns=25_000_100)
+    with pytest.raises(ValueError, match="before the exposure"):
+        w.camera_frame("cam", "left", 200, np.zeros((2, 2), dtype=np.uint8), arrival_ns=199)
+    w.close()
+    rows = list(csv.reader(open(tmp_path / "d/cameras/cam/left/index.csv")))
+    assert rows == [["seq", "stamp_ns", "file", "arrival_ns"], ["0", "100", "000000.png", "25000100"]]
 
 
 def test_render_times_are_exact_multiples_of_the_period_from_the_start():
@@ -94,7 +106,7 @@ def fake_session(camera_name="zed", mounts=None):
     mount = SimpleNamespace(link="torso_link", sensor_link="camera0_camera", translation_m=(0.1, 0.0, 0.2),
                             rotation=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
     return SimpleNamespace(camera_specs=[spec], lidars=[lidar], cfg=SimpleNamespace(splat="room.usdc"),
-                           mounts=mounts or {camera_name: mount, "mid360": mount})
+                           mounts=mounts or {camera_name: mount, "mid360": mount}, delivery={})
 
 
 def test_the_manifest_finds_a_camera_mount_by_its_rig_name_not_its_feed_id(tmp_path, monkeypatch):
@@ -105,11 +117,30 @@ def test_the_manifest_finds_a_camera_mount_by_its_rig_name_not_its_feed_id(tmp_p
     w = DatasetWriter(tmp_path / "d", {})
     offline.describe_sensors(w, fake_session(), ["head_link", "pelvis"])
     assert w.manifest["cameras"]["sim-zed"]["mount"]["body"] == "torso_link"
+    assert w.manifest["cameras"]["sim-zed"]["delivery"] is None  # delivered as rendered
+    session = fake_session()
+    session.delivery = {"sim-zed": SimpleNamespace(latency_ns=(5, 9), drop_probability=0.25)}
+    delayed = DatasetWriter(tmp_path / "delayed", {})
+    offline.describe_sensors(delayed, session)
+    assert delayed.manifest["cameras"]["sim-zed"]["delivery"] == {"latency_ns": [5, 9], "drop_probability": 0.25}
     assert w.manifest["lidars"]["mid360"]["stage"] == {"splat": True, "robot_links_traced": ["head_link", "pelvis"]}
     assert w.manifest["lidars"]["mid360"]["range_min_m"] == 0.1
     assert w.manifest["lidars"]["mid360"]["period_ns"] == 100_000_000
     with pytest.raises(KeyError, match="no mount"):
         offline.describe_sensors(DatasetWriter(tmp_path / "e", {}), fake_session(mounts={"other": None}))
+
+
+def test_a_frame_arrives_at_its_render_without_a_delivery_and_never_when_lost():
+    from humanoid_sim.runtime.offline import frame_arrival
+
+    plain = SimpleNamespace(delivery={}, last_delivery={})
+    assert frame_arrival(plain, "cam", "left", 100) == 100
+    delayed = SimpleNamespace(delivery={"cam": object()},
+                              last_delivery={("cam", "left"): (100, 25_000_100), ("cam", "right"): (100, None)})
+    assert frame_arrival(delayed, "cam", "left", 100) == 25_000_100
+    assert frame_arrival(delayed, "cam", "right", 100) is None
+    with pytest.raises(RuntimeError, match="not of the render"):
+        frame_arrival(delayed, "cam", "left", 200)
 
 
 def test_a_sensor_that_wrote_nothing_is_reported():

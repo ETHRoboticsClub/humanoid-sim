@@ -40,7 +40,7 @@ The OAK-D-W's figures were measured on the V1's unit with the matcher as Control
 
 ### Camera imaging
 
-By default every colour and grey stream is the RTX render as it is: one fixed exposure for every camera, no noise. With `camera_effects` (`SessionCfg.camera_effects`, `--camera-effects` on `examples/rtx_sensors.py`, `render-runtime` and `render-trajectory`: names separated by commas, or `all`), each stream goes through its imager instead (`sensors/imaging.py`), from the figures of its model (`sensors/models.py`: `Camera.imagers`, `Camera.auto_exposure`):
+By default every colour and grey stream is the RTX render as it is: one fixed exposure for every camera, no noise. With the imaging effects of `camera_effects` (`SessionCfg.camera_effects`, `--camera-effects` on `examples/rtx_sensors.py`, `render-runtime` and `render-trajectory`: names separated by commas, or `all`; `latency` and `drops` are the [frames' delivery](#frame-latency-and-drops)), each stream goes through its imager instead (`sensors/imaging.py`), from the figures of its model (`sensors/models.py`: `Camera.imagers`, `Camera.auto_exposure`):
 
 | Effect | Model |
 |---|---|
@@ -56,6 +56,26 @@ At the reference exposure without noise the chain gives the plain render back, t
 | Auto exposure | target 0.46 of full scale (18 % grey), τ = 250 ms | the same | the same |
 
 Every figure but depthai's ranges is modeled: the vendors publish no full well or read noise, and no unit's auto exposure has been measured. The noise is drawn per camera from the session's `seed`, apart from the depth errors' draws. The summary's `camera_effects` names the effects and `imaging` each sync group's exposure: its mode, the frames taken, the next frame's exposure and gain, and their range.
+
+### Frame latency and drops
+
+By default every frame goes out as soon as it is rendered. The `latency` and `drops` camera effects (in `camera_effects` like the imaging's, and in `all`) model how frames reach the robot's stack instead (`sensors/delivery.py`), from the camera instance (`Camera.latency_ns`, `Camera.drop_probability`, [sensors.md](sensors.md#sensor-models-and-the-rig)) or, for every camera, `SessionCfg.camera_latency_ns` / `camera_drop_probability` (`--camera-latency-ms LOW [HIGH]`, `--camera-drop-probability P`; each needs its effect, or the session refuses it):
+
+| Effect | Model |
+|---|---|
+| `latency` | Each frame arrives a latency after its exposure, drawn uniformly in `(low, high)` per frame. A frame never arrives before the previous one of its stream; it is held until then. The stamp stays the exposure time, as the devices stamp their frames: only the delivery moves |
+| `drops` | Each frame is lost with the drop probability and never goes out. A stereo pair's two images are lost together, as they travel together; colour and depth are drawn on their own. The ring's entry numbers stay consecutive (the feed contract requires it), so a consumer sees the loss as a gap of a frame period in the stamps |
+
+| Figure | OAK-D-W (V1) | D435i | ZED Mini |
+|---|---|---|---|
+| Latency | 7.5 to 25 ms: Luxonis' 7.5 ms for a 400P mono stream over USB 3 (frame stamp to the host's receipt, "Optimizing FPS & Latency"), to that plus the stereo node's time, about 15 ms, for depth | 33 to 70 ms: a frame period to the 60 to 70 ms an Intel community reply gives for depth (Intel publishes none) | 67 to 100 ms: Stereolabs' 3 to 4 frames from capture to display for its USB 3 cameras, less the display, at 30 Hz |
+| Drop probability | 0 | 0 | 0 |
+
+Every figure is modeled until a unit is measured; no loss has been measured, so none is set, and `--camera-drop-probability` gives one. The draws come from their own generators per camera (one for the latency, one for the losses), from the session's `seed`: they change neither the imaging noise nor the depth errors, and turning losses on leaves the other frames' latencies as they were.
+
+On `render-runtime` a frame goes to its feed once the host's plant time reaches its arrival, checked every pass of the render loop (about 1 ms) while the host runs; a paused host receives nothing, and frames still on their way when the host starts a new session are forgotten. The renderer cannot deliver a frame before it has rendered it, so the modeled latency is a floor: a render slower than the latency delivers late. `examples/rtx_sensors.py` delivers every physics step (4 ms). `render-trajectory` writes each frame's arrival next to its stamp (`arrival_ns` in the dataset's `index.csv`) and leaves lost frames out. The Rerun recording and `--images` show every rendered frame at its exposure, lost or not.
+
+The summary's `camera_delivery` gives per camera the latency range and drop probability, the frames seen, lost and delivered, and `late_ms`: how much later than its arrival each delivered frame went out. `counts.camera_frames_dropped` totals the losses.
 
 Two Isaac Lab 3.0 behaviours are handled in `sensors/rtx.py`:
 
@@ -113,7 +133,7 @@ humanoid-sim render-trajectory /data/run1.traj --out /data/run1-sensors --sensor
 humanoid-sim export-truth /data/run1.traj --frames mid360_link camera0_camera imu_link --out /data/run1-truth
 ```
 
-`render-trajectory` poses the robot at each render time (the recording interpolated to it), renders every camera period (33.3 ms at 30 Hz) and lets the lidar complete its sweeps (10 Hz), however long the GPU takes. Every stream is rendered at the render period, the fastest stream's; a slower stream gets the first render at or after each of its periods. Each frame is stamped with the plant time it was rendered at, a sweep with the plant time its first ray fired, so stamps, ground truth and the runtime's feedback and IMU samples share one clock. The dataset it writes (`humanoid-sim-sensor-dataset/v1`, `sensors/dataset.py`) holds `manifest.json` (the camera calibrations as the feed descriptor has them, each sensor's mount on its body, nominal rates, counts, and `passes`: each render's sensors and summary, `complete` only if it finished), `cameras/<camera_id>/<stream>/` (8-bit grey, RGB or 16-bit millimetre PNGs and `index.csv`: `seq,stamp_ns,file`) and `lidars/<name>/` (one `.npz` per sweep with `points_m`, `hit`, `time_s`, `start_ns` and the sensor's world pose, and `index.csv`; `start_ns` and `time_s` are the sweep's start and each ray's firing time after it, but `origin_w` and `rotation_w` are the sensor's pose at the render that completed the sweep, about one sweep period after `start_ns`: to place a ray in the world at its firing time, take the sensor's pose at that time from the trajectory). A dataset holds one lidar's sweeps. The IMU is not rendered (the render never steps physics): the live run records it next to the trajectory (`FILE.imu`, [runtime.md](runtime.md#recording-a-run)), on the same plant clock.
+`render-trajectory` poses the robot at each render time (the recording interpolated to it), renders every camera period (33.3 ms at 30 Hz) and lets the lidar complete its sweeps (10 Hz), however long the GPU takes. Every stream is rendered at the render period, the fastest stream's; a slower stream gets the first render at or after each of its periods. Each frame is stamped with the plant time it was rendered at, a sweep with the plant time its first ray fired, so stamps, ground truth and the runtime's feedback and IMU samples share one clock. The dataset it writes (`humanoid-sim-sensor-dataset/v1`, `sensors/dataset.py`) holds `manifest.json` (the camera calibrations as the feed descriptor has them, each sensor's mount on its body, nominal rates, counts, and `passes`: each render's sensors and summary, `complete` only if it finished), `cameras/<camera_id>/<stream>/` (8-bit grey, RGB or 16-bit millimetre PNGs and `index.csv`: `seq,stamp_ns,file,arrival_ns`, `arrival_ns` the stamp unless the render modeled a [latency](#frame-latency-and-drops)) and `lidars/<name>/` (one `.npz` per sweep with `points_m`, `hit`, `time_s`, `start_ns` and the sensor's world pose, and `index.csv`; `start_ns` and `time_s` are the sweep's start and each ray's firing time after it, but `origin_w` and `rotation_w` are the sensor's pose at the render that completed the sweep, about one sweep period after `start_ns`: to place a ray in the world at its firing time, take the sensor's pose at that time from the trajectory). A dataset holds one lidar's sweeps. The IMU is not rendered (the render never steps physics): the live run records it next to the trajectory (`FILE.imu`, [runtime.md](runtime.md#recording-a-run)), on the same plant clock.
 
 ### Inputs for sensor-contract replay
 
@@ -260,7 +280,7 @@ A render serves every sensor due; the cameras render every 33 ms of plant time, 
 
 - Motion blur and rolling shutter: every frame is a global-shutter render at the frame's plant time. Without `camera_effects` every camera renders at one fixed exposure: RTX's auto exposure off and its tone mapping set by `rtx.EXPOSURE` (ACES, ISO 100, 1/50 s at f/5: Isaac Sim 6.2's defaults, pinned so a Kit upgrade cannot change how bright a room renders); the summary's `rtx_post` records the values Kit ran with. The D435i's infrared imagers see visible light, without the projector's pattern.
 - The imaging chain's limits: no dark current, fixed-pattern noise, vignetting, white balance or the cameras' own denoising and sharpening, one tone curve (RTX's) for every camera, and 8-bit output.
-- Camera frame latency and dropped frames: every frame is delivered as soon as it is rendered.
+- Frame latency and drops have no model of their causes: no latency growing with the USB link's load or the host's, no burst of losses, and none of the devices' own queues (depthai drops the oldest frame of a full non-blocking queue). The latency figures are modeled.
 - Stereo depth is exact unless `depth_noise` is on, and then it has the errors above only: no correlation of the noise farther than its blur and the median reach (the OAK-D-W's errors stay correlated past 30 px, more along rows than along columns), no confidence threshold of its own (the texture threshold stands for it), no widening of foreground edges by the matcher's window, no grazing-angle failures or flying pixels at edges, and none of the cameras' post-processing filters other than the median.
 - With the ZED Mini's fisheye calibration, RTX leaves the corners of the image, beyond about 46 deg off axis, empty (light grey).
 - The Mid-360's real rosette, its reflectivity-dependent reach and intensities. Within one render the lidar sees the scene as it is at that render (Kit's motion BVH is off), so a moving robot's sweep is built from three renders.

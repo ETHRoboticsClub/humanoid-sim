@@ -70,7 +70,12 @@ def ethrc_v1() -> Rig:
                                          0.4999485650548041),
                           "rgb": (0.5022736427256218, -0.5015980737137385, 0.5019821939719118, -0.49409962275329394)},
                       depth_focal_px=283.604271,
-                      link_from_camera_xyzw=(0.5, 0.5, -0.5, 0.5)),  # camera x, y, z along the link's -z, x, -y
+                      link_from_camera_xyzw=(0.5, 0.5, -0.5, 0.5),  # camera x, y, z along the link's -z, x, -y
+                      # MODELED until the unit is measured (#40): from Luxonis' 7.5 ms of a 400P mono stream over USB 3
+                      # (its frame stamp to the host's receipt, docs "Optimizing FPS & Latency") to that plus the
+                      # stereo node's time (about 15 ms with rectification, the same page's trace), for depth. No
+                      # frame loss measured: none.
+                      latency_ns=(7_500_000, 25_000_000)),
     )
 
 
@@ -96,6 +101,9 @@ def g1_cameras() -> Rig:
             distortion={"left": ("equidistant", (-0.0358597, 0.0185157, -0.00496448, 0.00194007)),
                         "right": ("equidistant", (-0.0368591, 0.0234426, -0.0128113, 0.00625172))},
             stream_offsets_m={"right": (0.000233734, -0.0628272, 0.000181381)},
+            # MODELED: Stereolabs gives its USB 3 cameras 3 to 4 frames from capture to display ("What is the latency
+            # of the ZED camera"); less the display, 2 to 3 frames at 30 Hz to the host. No frame loss measured: none.
+            latency_ns=(66_666_667, 100_000_000),
         ),
         # MODELED GUESS: the ZED's IMU at the left eye's optical centre, in the camera frame's axes. The real one sits
         # a few cm away (camera_imu_transform, per unit); 800 Hz is the datasheet's.
@@ -116,6 +124,9 @@ def g1_cameras_d435() -> Rig:
                         "mono_left": (337.2096, 432.9715, 320.0, 240.0),
                         "mono_right": (337.2096, 432.9715, 320.0, 240.0),
                         "depth": (337.2096, 432.9715, 320.0, 240.0)},
+            # MODELED GUESS: Intel publishes no latency; from a frame period to the 60 to 70 ms an Intel community
+            # reply gives for the depth stream. No frame loss measured: none.
+            latency_ns=(33_333_333, 70_000_000),
         ),
     ))
 
