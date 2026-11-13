@@ -69,6 +69,67 @@ def test_training_drive_graph_matches_eager(compile, queued_before_capture):
             torch.testing.assert_close(getattr(captured.bank.queue, name), getattr(eager.bank.queue, name), atol=0, rtol=0)
 
 
+
+@pytest.mark.physics
+@pytest.mark.parametrize('compile', [False, True])
+def test_training_drive_graph_carries_the_winding_heat(compile):
+    """With the current limits on, the captured step heats, limits, cools and resets the windings as eager does.
+
+    The winding time constant is a fixture value (the description may not record one) short enough for drives held
+    between their nominal torque and their peak to be limited within the run."""
+    if not torch.cuda.is_available():
+        pytest.skip('CUDA graphs need a GPU')
+    from humanoid_sim.train.drive_step import DriveStepGraph
+
+    desc = Description.load()
+    for family in desc.table['families'].values():
+        family['winding_time_constant_s'] = .01
+    names = native_joint_names(desc)
+    period_ns = 1_000_000
+    cfg = PlantCfg(device='cuda:0', physics_period_ns=period_ns, queue_capacity=8, output_current_limit=True,
+                   winding_i2t=True)
+    eager, captured = [PlantCore(desc, list(desc.joints), 4, cfg, solver_joint_names=names) for _ in range(2)]
+    q = torch.zeros(4, len(names), device='cuda:0')
+    qd = torch.zeros_like(q)
+    nominal = eager.bank.winding.nominal_nm
+    held = (nominal + torch.minimum(eager.envelope.peak, eager.bank.current_limit_nm)) / 2
+    sign = torch.tensor([1., -1., 1., -1.], device=q.device).unsqueeze(1)
+
+    def hold(core, t_ns):
+        target, _, _ = core.solver_map.drive_state(q, qd)
+        core.submit(DriveDemand.pd(target, 0., 0., feedforward=sign * held), torch.full((4,), t_ns, device=q.device))
+
+    for core in (eager, captured):
+        hold(core, 0)
+    graph = DriveStepGraph(captured, q, qd, compile=compile)
+    tol = 3e-5 if compile else 1e-6
+    limited_steps = []
+    for step in range(60):
+        t_ns = step * period_ns
+        q.fill_(.01 * (step % 3))
+        if step == 25:  # envs 1 and 3 restart cold and are held again
+            ids = torch.tensor([1, 3], device=q.device)
+            for core in (eager, captured):
+                core.reset(ids)
+                hold(core, t_ns)
+        if step == 40:  # env 0 switches off and cools
+            off = DriveDemand.disabled(4, len(held), device=q.device)
+            mask = torch.tensor([True, False, False, False], device=q.device)
+            for core in (eager, captured):
+                core.submit(off, torch.full((4,), t_ns, device=q.device), env_mask=mask)
+        expected = eager.pre_physics(t_ns, q, qd, eager.post_state)
+        actual, _ = graph.step(t_ns, q, qd)
+        torch.testing.assert_close(actual, expected, atol=tol, rtol=tol)
+        for name in ('applied', 'demanded'):
+            torch.testing.assert_close(getattr(captured.last, name), getattr(eager.last, name), atol=tol, rtol=tol)
+        heat, eager_heat = captured.bank.winding_heat, eager.bank.winding_heat
+        torch.testing.assert_close(heat.heat, eager_heat.heat, atol=tol, rtol=tol)
+        torch.testing.assert_close(heat.limited, eager_heat.limited, atol=0, rtol=0)
+        limited_steps.append(heat.limited.any(1).cpu())
+    limited = torch.stack(limited_steps)  # [steps, envs]
+    assert limited[24].all() and not limited[25, [1, 3]].any() and limited[39].all()  # held drives limited
+    assert not limited[59, 0] and limited[59, 1:].all()  # env 0 cooled below nominal; the others still held
+
 def test_compile_requires_explicit_graph_execution():
     from humanoid_sim.train.plant import RobotPlant, TrainPlantCfg
 

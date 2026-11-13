@@ -173,7 +173,7 @@ The bank returns a `DriveOutput`, kept as `PlantCore.last`. Each field is `[E, D
 | Field | Unit | Meaning |
 |---|---|---|
 | `demanded` | Nm | Control-law output before any clip |
-| `applied` | Nm | After the torque-speed envelope and the torque cap |
+| `applied` | Nm | After the torque-speed envelope, the torque cap and the [current limits](#current-limits) the profile enables |
 | `enabled_fraction` | | Fraction of the step the drive was not disabled |
 | `target_velocity` | rad/s | Velocity target (0 when disabled or frozen) |
 
@@ -184,13 +184,13 @@ The bank returns a `DriveOutput`, kept as `PlantCore.last`. Each field is `[E, D
 - Motoring (torque and velocity of the same sign): the curve at `|v|`, linearly interpolated between points, and zero at or beyond the last point (the no-load speed).
 - Braking (opposite signs) and standstill: the rated peak, the curve's first point.
 
-| Family | Curve points (rad/s, Nm) | Nominal torque (not enforced) |
+| Family | Curve points (rad/s, Nm) | Nominal torque (`effort_nominal`) |
 |---|---|---|
-| HEJ90-48-140 | (0, 140), (5, 140), (6, 135), (8, 100), (10, 25), (10.4, 0) | 80 Nm |
+| HEJ90-48-140 | (0, 140), (5, 140), (6, 135), (8, 100), (10, 25), (10.4, 0) | 75 Nm |
 | HEJ70-48-50 | (0, 50), (10, 45), (15, 30), (20, 10), (22, 0) | 19 Nm |
 | HEJ50-48-30 | (0, 30), (10, 25), (15, 20), (20, 5), (21, 0) | 11 Nm |
 
-The nominal (continuous) torque is `effort_nominal` in actuators.yaml. Nothing clips to it and there is no thermal derating, so a drive can hold its peak indefinitely.
+The nominal (continuous) torque is `effort_nominal` in actuators.yaml. The envelope does not clip to it: only the winding's I²t limit does, when the profile enables it ([Current limits](#current-limits)). Without it a drive holds its peak indefinitely.
 
 A finite `torque_limit_nm` then clips the applied torque to `±torque_limit_nm`. Both the envelope and the limit are multiplied by the drive's `torque_scale`. The demanded torque is never clipped.
 
@@ -203,6 +203,45 @@ desc = Description.load("ethrc_v1")
 env = TorqueSpeedEnvelope([desc.torque_speed("HEJ90-48-140")])
 lower, upper = env.limits(torch.tensor([[-7.0], [0.0], [7.0], [11.0]]))  # rad/s
 # lower: -117.5, -140, -140, -140 Nm; upper: 140, 140, 117.5, 0 Nm
+```
+
+## Current limits
+
+Two limits on a drive's current, both `modeled` and off by default, clip the applied torque after the envelope and the cap. The profile turns each on:
+
+```yaml
+devices:
+  current: {output_current_limit: true, winding_i2t: true}
+```
+
+`PlantCfg` has the same two fields, and `SimCore` (replays, the runtime) and the training `RobotPlant` pass the profile's block on. Unknown keys and values that are not booleans raise. A limit asked for on a drive whose description lacks its figures raises; nothing falls back.
+
+| Limit | What it models | Clip | Figures (actuators.yaml) |
+|---|---|---|---|
+| Output current limit | The drive's current loop saturating at its output current limit (EPOS4 `0x3001:02`) | `±max_current_a × effort_nominal / nominal_current_a` | `max_current_a`, `nominal_current_a`, `effort_nominal` per family |
+| Winding I²t | The drive protecting its motor winding (EPOS4 motor I²t): above the nominal current the winding heats, and once hot the drive falls back to its nominal current | `±effort_nominal` while the winding is hot | `effort_nominal`, `winding_time_constant_s` (EPOS4 `0x3001:04`) per family |
+
+The output limit converts current to torque with the family's nominal pair, `effort_nominal / nominal_current_a`, since the drive's own gear (object `0x3003`) is not in the description. On the V1 this puts the limit above every peak, so the envelope stays the tighter clip.
+
+The winding's heat (`DriveBank.winding_heat`, `[E, D]`) is a first-order low-pass of the squared applied torque with the time constant `τ`: over a step of `dt`, `heat ← sq + (heat − sq) · exp(−dt / τ)`, `sq` the step's time-weighted squared applied torque. While `heat ≥ effort_nominal²` the applied torque is clipped to `±effort_nominal`, and `winding_heat.limited` is set. From a cold winding, a constant torque `T` above nominal is limited after
+
+```
+t = τ · ln(T² / (T² − effort_nominal²))
+```
+
+and a drive under nominal torque, or off, cools. A reset starts the env's windings cold. Torque stands for current, so gear losses are ignored. The rule (low-passed I², fall back to nominal, no hysteresis) and the time constants are unverified: no capture of the drive's I²t level (`0x3200:01`) has checked them, nor has a read of `0x3001:04` on the drives. The V1's come from maxon's datasheets: HEJ 90 21 s, HEJ 70 12 s (from the HEJ 70-48-60 sheet, as the 48-50's gives none), HEJ 50 15.9 s. The G1's description records none, so `winding_i2t` raises on it.
+
+Neither limit changes the demanded torque, neither is scaled by `torque_scale`, and neither is reported to the runtime's client: the drive's status word is Controls' fake bank's.
+
+```python
+import torch
+from humanoid_sim.devices.bank import DriveBank
+from humanoid_sim.devices.envelope import TorqueSpeedEnvelope
+from humanoid_sim.devices.winding import WindingI2t
+
+winding = WindingI2t(torch.tensor([80.0]), torch.tensor([2_000_000_000]))  # 80 Nm nominal, τ = 2 s
+bank = DriveBank(TorqueSpeedEnvelope([[(0.0, 140.0), (10.4, 0.0)]]), 1, 1, winding=winding)
+# Held at 120 Nm from cold, the drive applies 120 Nm for 2 s · ln(120² / (120² − 80²)) ≈ 1.18 s, then 80 Nm.
 ```
 
 ## Per-drive deviations
@@ -344,7 +383,7 @@ The mailbox and its other commands are described in [runtime.md](runtime.md).
 
 The runtime publishes its known gaps in the segment descriptor (`fidelity_gaps` in `src/humanoid_sim/runtime/host.py`):
 
-- There are no drive current, thermal or backlash models. The applied torque is the envelope-clipped control law.
+- There are no current-loop dynamics and no backlash model. The output current limit and the winding I²t limit are modeled, unverified, and off unless the profile enables them ([Current limits](#current-limits)); without them the applied torque is the envelope-clipped control law.
 - The passive joint parameters of the upper body (waist, shoulders, elbows) are the description's values and have not been identified from captures.
 - The native USD ankle includes its closed chain. Stop stiffness, joint friction and compliance are modeled rather than verified against hardware traces.
 - IMU errors are the rig's model's: white noise, a turn-on bias and a slow drift (`SET_FIDELITY` ideal turns them off). See [sensors.md](sensors.md#sampling-and-errors).
@@ -353,4 +392,4 @@ The runtime publishes its known gaps in the segment descriptor (`fidelity_gaps` 
 - The backend's `mode_ramp_s` (the ramp when a drive's mode is enabled or disabled) and its control period's jitter are not modeled: the ramp is the controller's behavior and neither has been measured.
 - Angular momentum is not conserved under fast joint motion at the 4 ms MJWarp step. A hung robot whose waist and hips move fast picks up a spin about the vertical; the gantry's spreader bar turns it back and damps it ([world.md](world.md#suspended-the-lab-gantry)).
 
-For the drive model this means the applied torque follows the law within the step, with no current-loop dynamics, and a drive can hold its peak torque indefinitely. Gearbox losses are only the joints' Coulomb friction and viscous damping from actuators.yaml, plus the back-drive friction of an off drive. There is no integral term. The cranks' stops are enforced by the solver on MJWarp (see [The crank stops](#the-crank-stops)); the drive model itself does not clamp a crank's target to them.
+For the drive model this means the applied torque follows the law within the step, with no current-loop dynamics, and unless the winding I²t limit is on, a drive can hold its peak torque indefinitely. Gearbox losses are only the joints' Coulomb friction and viscous damping from actuators.yaml, plus the back-drive friction of an off drive. There is no integral term. The cranks' stops are enforced by the solver on MJWarp (see [The crank stops](#the-crank-stops)); the drive model itself does not clamp a crank's target to them.

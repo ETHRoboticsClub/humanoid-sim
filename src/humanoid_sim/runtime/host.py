@@ -94,7 +94,8 @@ SUSPENDED_LIFT_M = 0.3  # a suspended robot's soles above the ground
 
 # What the runtime does not model (published in the descriptor).
 FIDELITY_GAPS = [
-    "drive current, thermal and backlash models absent; applied torque is the envelope-clipped control law",
+    "drive current-loop dynamics and backlash absent; the output current limit and the winding I2t limit are "
+    "modeled, unverified, and off unless the profile's devices.current enables them",
     "upper-body passive joint parameters (waist, shoulders, elbows) are description values, not identified",
     "ankle as pitch and roll hinges driven through the crank transmission (no closed chain)",
     "IMU errors from the rig's model: white noise, turn-on bias, Gauss-Markov drift (SET_FIDELITY ideal turns them "
