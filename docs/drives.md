@@ -186,7 +186,7 @@ The bank returns a `DriveOutput`, kept as `PlantCore.last`. Each field is `[E, D
 
 | Family | Curve points (rad/s, Nm) | Nominal torque (`effort_nominal`) |
 |---|---|---|
-| HEJ90-48-140 | (0, 140), (5, 140), (6, 135), (8, 100), (10, 25), (10.4, 0) | 80 Nm |
+| HEJ90-48-140 | (0, 140), (5, 140), (6, 135), (8, 100), (10, 25), (10.4, 0) | 75 Nm |
 | HEJ70-48-50 | (0, 50), (10, 45), (15, 30), (20, 10), (22, 0) | 19 Nm |
 | HEJ50-48-30 | (0, 30), (10, 25), (15, 20), (20, 5), (21, 0) | 11 Nm |
 
@@ -229,7 +229,7 @@ The winding's heat (`DriveBank.winding_heat`, `[E, D]`) is a first-order low-pas
 t = τ · ln(T² / (T² − effort_nominal²))
 ```
 
-and a drive under nominal torque, or off, cools. A reset starts the env's windings cold. Torque stands for current, so gear losses are ignored. The rule (low-passed I², fall back to nominal, no hysteresis) and the time constants are unverified: no capture of the drive's I²t level (`0x3200:01`) has checked them, and the V1 description records no `winding_time_constant_s` yet, so `winding_i2t` raises on it.
+and a drive under nominal torque, or off, cools. A reset starts the env's windings cold. Torque stands for current, so gear losses are ignored. The rule (low-passed I², fall back to nominal, no hysteresis) and the time constants are unverified: no capture of the drive's I²t level (`0x3200:01`) has checked them, nor has a read of `0x3001:04` on the drives. The V1's come from maxon's datasheets: HEJ 90 21 s, HEJ 70 12 s (from the HEJ 70-48-60 sheet, as the 48-50's gives none), HEJ 50 15.9 s. The G1's description records none, so `winding_i2t` raises on it.
 
 Neither limit changes the demanded torque, neither is scaled by `torque_scale`, and neither is reported to the runtime's client: the drive's status word is Controls' fake bank's.
 
