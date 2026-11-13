@@ -242,6 +242,22 @@ def _exposure_setting(where: str, imager: Imager, setting):
     return (int(ns), float(gain))
 
 
+def frame_latency(where: str, value) -> tuple[int, int]:
+    """A camera's frame latency ``(low, high)``: integer ns, ``0 <= low <= high``."""
+    ok = isinstance(value, (tuple, list)) and len(value) == 2 and all(
+        isinstance(v, int) and not isinstance(v, bool) for v in value)
+    if not ok or not 0 <= value[0] <= value[1]:
+        raise ValueError(f"{where} {value!r}: expected (low, high) integer ns with 0 <= low <= high")
+    return (int(value[0]), int(value[1]))
+
+
+def frame_drop_probability(where: str, value) -> float:
+    """A camera's chance of losing a frame, in [0, 1]."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
+        raise ValueError(f"{where} {value!r}: expected a probability in [0, 1]")
+    return float(value)
+
+
 class Camera(Sensor):
     """A camera product. Its frame is its reference imager's optical centre (x forward, y left, z up, as Controls'
     camera calibration has it); ``nominal_offsets_m`` places every stream's optical centre in it (a unit's
@@ -316,7 +332,8 @@ class Camera(Sensor):
                  stream_rotations_xyzw: dict[str, tuple[float, float, float, float]] | None = None,
                  depth_focal_px: float | None = None,
                  link_from_camera_xyzw: tuple[float, float, float, float] | None = None,
-                 exposure: dict[str, object] | None = None):
+                 exposure: dict[str, object] | None = None, latency_ns: tuple[int, int] = (0, 0),
+                 drop_probability: float = 0.0):
         """Every stream at one resolution and rate; per stream the unit's pinhole calibration ``(fx, fy, cx, cy)`` in
         pixels (OpenCV's: pixel (u, v) centred at u, v), its lens distortion ``(model, coefficients)`` (model
         ``plumb_bob``, ``rational_polynomial`` or ``equidistant``; none when absent) and, where the unit's
@@ -327,7 +344,10 @@ class Camera(Sensor):
         frame's orientation in its rig frame (a unit quaternion x, y, z, w), for a link whose axes are not the camera
         frame's (None: the link is the camera frame); the camera frame's origin is the link's. ``exposure`` sets a
         colour or grey stream's exposure as the robot's stack configures it, when the imaging chain models it:
-        ``"auto"`` (the device's auto exposure, the default for every stream) or ``(exposure ns, gain)``."""
+        ``"auto"`` (the device's auto exposure, the default for every stream) or ``(exposure ns, gain)``.
+        ``latency_ns`` ``(low, high)`` is the time from a frame's exposure to its arrival at the robot's stack, drawn
+        uniformly per frame, and ``drop_probability`` the chance that a frame never arrives (a stereo pair's two
+        images together), when a session asks for them (``sensors/delivery.py``); default: none."""
         super().__init__(frame)
         where = f"{type(self).__name__} at {frame!r}"
         if not (isinstance(width, int) and isinstance(height, int)) or width <= 0 or height <= 0:
@@ -368,6 +388,8 @@ class Camera(Sensor):
             raise ValueError(f"{where}: exposure for streams without an imager: {sorted(unknown)}")
         self.exposure = {s: _exposure_setting(f"{where} {s}", self.imagers[s], exposure.get(s, "auto"))
                          for s in self.imagers}
+        self.latency_ns = frame_latency(f"{where} latency_ns", latency_ns)
+        self.drop_probability = frame_drop_probability(f"{where} drop_probability", drop_probability)
 
     @property
     def rtx_ready(self) -> bool:
@@ -571,4 +593,4 @@ class Rig:
 
 
 __all__ = ["RTX_KINDS", "AutoExposure", "Camera", "Imager", "Imu", "Lidar", "LivoxMid360", "Mti610", "OakDW", "RealSenseD435i", "Rig", "Sensor",
-           "UnitreeG1Imu", "ZedMini", "ZedMiniImu"]
+           "UnitreeG1Imu", "ZedMini", "ZedMiniImu", "frame_drop_probability", "frame_latency"]
