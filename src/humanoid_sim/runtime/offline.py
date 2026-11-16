@@ -81,7 +81,7 @@ def visual_links(urdf: str | Path) -> list[str]:
 
 
 def describe_sensors(writer, session, robot_links: list[str] | None = None) -> None:
-    """The manifest's cameras (calibration, mount) and lidars (frame, period, mount), each with what its rays can hit
+    """The manifest's cameras (calibration, mount, and the frames' latency and loss when modeled) and lidars (frame, period, mount), each with what its rays can hit
     besides the room: whether the splat is on the stage, and the robot's links (a sensor sits among the robot's own
     meshes and traces them: the Mid-360's head and shoulders occlude it, as the meshes are)."""
     from humanoid_sim.sensors import feeds
@@ -94,7 +94,11 @@ def describe_sensors(writer, session, robot_links: list[str] | None = None) -> N
             raise KeyError(f"no mount for camera {spec.camera_id!r} (mounts: {sorted(session.mounts)})")
         record = feeds.descriptor(spec, "dataset")
         record.pop("session", None)
-        writer.describe_camera(spec.camera_id, {**record, "mount": _mount(session, name), "stage": stage})
+        delivery = session.delivery.get(spec.camera_id)
+        writer.describe_camera(spec.camera_id, {**record, "mount": _mount(session, name), "stage": stage,
+                                                "delivery": None if delivery is None else {
+                                                    "latency_ns": list(delivery.latency_ns),
+                                                    "drop_probability": delivery.drop_probability}})
     for lidar in session.lidars:
         writer.describe_lidar(lidar.sensor.name, {
             "model": lidar.sensor.model, "product": lidar.sensor.product, "frame": lidar.sensor.frame,
@@ -109,6 +113,17 @@ def expected_sensors(session) -> list[str]:
     """The data sets a render of ``session`` writes: ``<camera_id>/<stream>`` per stream, a lidar's name."""
     return [f"{c.camera_id}/{s.name}" for c in session.camera_specs for s in c.streams] + [
         lidar.sensor.name for lidar in session.lidars]
+
+
+def frame_arrival(session, camera_id: str, stream: str, t_ns: int) -> int | None:
+    """When the stream's frame rendered at plant time ``t_ns`` reaches the robot's stack: ``t_ns`` without a modeled
+    delivery, None when it was lost (``sensors/delivery.py``)."""
+    if camera_id not in session.delivery:
+        return t_ns
+    stamp, arrival = session.last_delivery[(camera_id, stream)]
+    if stamp != t_ns:
+        raise RuntimeError(f"{camera_id}/{stream}: the last delivery is of {stamp} ns, not of the render at {t_ns} ns")
+    return arrival
 
 
 def missing_data(session, counts: dict[str, int]) -> list[str]:
@@ -167,9 +182,13 @@ def _render(traj, name, desc, order, cfg, out, start_s, end_s, gantry, log, *, t
                     if t < due[(spec.camera_id, s.name)]:
                         continue
                     due[(spec.camera_id, s.name)] += int(round(1e9 / s.rate_hz))
+                    arrival = frame_arrival(session, spec.camera_id, s.name, int(t))
+                    if arrival is None:
+                        continue  # lost on its way: never written
                     image = session.last_images[(spec.camera_id, s.name)]
                     writer.camera_frame(spec.camera_id, s.name, int(t),
-                                        feeds.depth_mm(image, s.range_m) if s.kind == "depth" else image)
+                                        feeds.depth_mm(image, s.range_m) if s.kind == "depth" else image,
+                                        arrival_ns=arrival)
             total = session.counts["lidar_sweeps"]
             if total > seen:
                 for sweep in list(session.sweeps)[max(0, len(session.sweeps) - (total - seen)):]:
@@ -183,7 +202,7 @@ def _render(traj, name, desc, order, cfg, out, start_s, end_s, gantry, log, *, t
         if empty:
             raise RuntimeError(f"the render produced no data for {empty} (frames and sweeps written: {counts})")
         summary = {"renders": len(times), "plant_s": float((t1 - t0) / 1e9), "wall_s": wall, "counts": counts,
-                   "render_ms": _median(session.ms["render"])}
+                   "render_ms": _median(session.ms["render"]), "camera_effects": list(session.camera_effects)}
         writer.finish_pass(summary)  # in the manifest, written below before Kit closes (which may end the process)
         log(json.dumps(summary, indent=1))
         return summary

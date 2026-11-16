@@ -17,10 +17,17 @@ unless ``fixed_base`` is off.
 With ``physics`` off the session never steps: the caller poses the robot (:meth:`SensorSession.pose`, the
 runtime's truth) and renders at plant times it chooses (:meth:`SensorSession.render_at`), providing the host's
 plant-to-monotonic mapping (``clock``) so capture stamps survive render delays (``runtime/render.py``).
+
+With the ``latency`` or ``drops`` camera effects (``sensors/delivery.py``), a camera frame goes to its feed when it
+arrives rather than when it is rendered: :meth:`SensorSession.deliver` hands over the frames that are due (each physics
+step, or the runtime's render loop) and lost frames never go out. The Rerun recording and the PNG frames show every
+rendered frame, at its exposure.
 """
 
 from __future__ import annotations
 
+import heapq
+import itertools
 import json
 import logging
 import time
@@ -31,8 +38,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from humanoid_sim.sensors.delivery import DELIVERY_EFFECTS, FrameDelivery, check_overrides, delivery_settings
 from humanoid_sim.sensors.feeds import ClockMapping
-from humanoid_sim.sensors.imaging import ImagingChain, camera_seed, check_effects
+from humanoid_sim.sensors.imaging import IMAGING_EFFECTS, ImagingChain, camera_seed, check_effects
 from humanoid_sim.sensors.lights import Lighting
 from humanoid_sim.sensors.models import RTX_KINDS
 from humanoid_sim.sensors.room_rays import RoomRays, room_rays
@@ -60,8 +68,12 @@ class SessionCfg:
     lidar_noise: bool = True  # the lidar model's range and angular errors; off for exact geometry
     depth_noise: bool = False  # the stereo cameras' depth errors (sensors/stereo_depth.py); off: exact depth
     seed: int = 0  # the depth errors' and the camera noise's random generators
-    # the cameras' imaging (sensors/imaging.py): any of imaging.CAMERA_EFFECTS; none: the RTX render as it is
+    # any of imaging.CAMERA_EFFECTS: the cameras' imaging (sensors/imaging.py) and their frames' latency and losses
+    # (sensors/delivery.py); none: the RTX render as it is, delivered as soon as it is rendered
     camera_effects: tuple[str, ...] = ()
+    # every camera's frame latency (low, high) ns and drop probability in place of its instance's (each needs its effect)
+    camera_latency_ns: tuple[int, int] | None = None
+    camera_drop_probability: float | None = None
     light: float = DOME_INTENSITY  # the dome light (nits); 0 for none
     # the lighting beyond that dome (sensors/lights.py): a JSON file's path or a Lighting; fixtures placed with spawn_m
     lights: str | Lighting | None = None
@@ -101,9 +113,21 @@ class SensorSession:
         self.camera_models = {spec.camera_id: s for spec, s in zip(self.camera_specs, cameras, strict=True)}
         self.rng = np.random.default_rng(cfg.seed)
         self.camera_effects = check_effects(cfg.camera_effects)
-        self.imaging = {spec.camera_id: ImagingChain(self.camera_models[spec.camera_id], spec, self.camera_effects,
+        imaging = [e for e in self.camera_effects if e in IMAGING_EFFECTS]
+        self.imaging = {spec.camera_id: ImagingChain(self.camera_models[spec.camera_id], spec, imaging,
                                                      camera_seed(cfg.seed, spec.camera_id))
-                        for spec in self.camera_specs} if self.camera_effects else {}
+                        for spec in self.camera_specs} if imaging else {}
+        check_overrides(self.camera_effects, cfg.camera_latency_ns, cfg.camera_drop_probability)
+        self.delivery = {}
+        if any(e in DELIVERY_EFFECTS for e in self.camera_effects):
+            for spec in self.camera_specs:
+                latency, drops = delivery_settings(self.camera_models[spec.camera_id], self.camera_effects,
+                                                   cfg.camera_latency_ns, cfg.camera_drop_probability)
+                self.delivery[spec.camera_id] = FrameDelivery(spec, latency, drops, cfg.seed)
+        # each stream's last frame: its exposure (plant ns) and arrival (None: lost), with a delivery
+        self.last_delivery: dict[tuple[str, str], tuple[int, int | None]] = {}
+        self._pending: list[tuple] = []  # frames on their way to a feed: (arrival, order, camera, stream, stamp, frame)
+        self._order = itertools.count()
         bodies = rtx.body_paths(self.usd, {m.link for m in self.mounts.values()})
         entities = rtx.camera_entities([(spec, self.mounts[s.name]) for spec, s in zip(self.camera_specs, cameras,
                                                                                      strict=True)], bodies,
@@ -168,7 +192,8 @@ class SensorSession:
             self.recorder = SceneRecorder(self.sim.backend, self.usd, rrd=cfg.rrd, app_id="humanoid-sim rtx sensors",
                                           scene=self.boxes, draw="boxes" if self.boxes else None,
                                           gantry=self.sim.gantry)
-        self.counts = {"steps": 0, "renders": 0, "camera_frames": 0, "lidar_sweeps": 0, "lidar_points": 0}
+        self.counts = {"steps": 0, "renders": 0, "camera_frames": 0, "camera_frames_dropped": 0, "lidar_sweeps": 0,
+                       "lidar_points": 0}
         self.ms = {"physics": [], "render": [], "camera_read": [], "lidar_read": [], "publish": []}
         self._saved: dict[str, bool] = {}  # every image stream seen: whether it is depth
         self._last_sweep: dict[str, tuple] = {}
@@ -236,6 +261,8 @@ class SensorSession:
             self.ms["physics"].append(1e3 * (time.perf_counter() - t))
             self.counts["steps"] += 1
             now = self.sim.t_ns
+            if self._pending:
+                self.deliver(now)
             if now < next_render:
                 continue
             next_render += self.render_ns
@@ -269,6 +296,7 @@ class SensorSession:
         for cam in self.camera_specs:
             frames = {}
             imaging = self.imaging.get(cam.camera_id)
+            delivery = self.delivery.get(cam.camera_id)
             for s in cam.streams:
                 t = time.perf_counter()
                 if imaging and s.kind != "depth":
@@ -280,7 +308,15 @@ class SensorSession:
                     image = self._stereo_depth(cam, s, image, frames)
                 frames[s.name] = image
                 frame = depth_mm(image, s.range_m) if s.kind == "depth" else image
-                if cam.camera_id in self.feeds:
+                if delivery is not None:
+                    arrival = delivery.decide(s.name, now_ns)
+                    self.last_delivery[(cam.camera_id, s.name)] = (now_ns, arrival)
+                    if arrival is None:
+                        self.counts["camera_frames_dropped"] += 1
+                    elif cam.camera_id in self.feeds:
+                        heapq.heappush(self._pending, (arrival, next(self._order), cam.camera_id, s.name, now_ns,
+                                                       frame))
+                elif cam.camera_id in self.feeds:
                     t = time.perf_counter()
                     self.feeds[cam.camera_id].publish(s.name, stamp, frame)
                     self.ms["publish"].append(1e3 * (time.perf_counter() - t))
@@ -289,6 +325,23 @@ class SensorSession:
                 self._record_image(f"{cam.camera_id}/{s.name}", image, now_ns, depth=s.kind == "depth")
             if imaging:
                 imaging.end_frame(now_ns)
+        if self._pending:
+            self.deliver(self.now_ns)
+
+    def deliver(self, now_ns: int) -> None:
+        """Hand every camera frame that has arrived by plant time ``now_ns`` to its feed, stamped with its exposure."""
+        from humanoid_sim.sensors.feeds import ros_time_s
+
+        while self._pending and self._pending[0][0] <= now_ns:
+            arrival, _, camera_id, stream, stamp_ns, frame = heapq.heappop(self._pending)
+            t = time.perf_counter()
+            self.feeds[camera_id].publish(stream, ros_time_s(stamp_ns, self.now_ns), frame)
+            self.ms["publish"].append(1e3 * (time.perf_counter() - t))
+            self.delivery[camera_id].delivered(arrival, now_ns)
+
+    def drop_pending(self) -> None:
+        """Forget the frames still on their way (a new host session: they belong to the last one)."""
+        self._pending.clear()
 
     def _stereo_depth(self, cam, depth, image: np.ndarray, frames: dict[str, np.ndarray]) -> np.ndarray:
         """The depth ``image`` as the stereo camera ``cam`` reports it, its reference imager's frame of this render
@@ -381,6 +434,7 @@ class SensorSession:
                 "rtx_post": self.render.post_settings(),
                 "camera_effects": list(self.camera_effects),
                 "imaging": {camera_id: chain.describe() for camera_id, chain in self.imaging.items()},
+                "camera_delivery": {camera_id: d.describe() for camera_id, d in self.delivery.items()},
                 "counts": self.counts, "ms": {k: stats(v) for k, v in self.ms.items()},
                 "camera_frame_rate_hz": self.counts["camera_frames"] / max(streams, 1) / wall_s,
                 "lidar_sweep_rate_hz": self.counts["lidar_sweeps"] / max(len(self.lidars), 1) / wall_s,
