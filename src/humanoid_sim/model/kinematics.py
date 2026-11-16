@@ -14,13 +14,25 @@ import torch
 
 class RobotKinematics:
     def __init__(self, usd_path: Path, joint_names: list[str], *, num_envs: int = 1,
-                 spacing_m: tuple[float, float, float] = (3.0, 3.0, 0.0), base_height_m: float = 1.0):
+                 spacing_m: tuple[float, float, float] = (3.0, 3.0, 0.0), base_height_m: float = 1.0,
+                 self_collision: bool | None = None):
+        """``self_collision``: whether the robot's own shapes collide in :attr:`model`, over what the USD authors
+        (the scene sets it at spawn, ``physics.self_collision``); None: as the USD authors it."""
         import newton
         import warp as wp
 
+        source = str(usd_path)
+        if self_collision is not None:
+            from pxr import Usd
+
+            source = Usd.Stage.Open(source)
+            source.SetEditTarget(source.GetSessionLayer())
+            for prim in source.Traverse():
+                if prim.HasAttribute("newton:selfCollisionEnabled"):
+                    prim.GetAttribute("newton:selfCollisionEnabled").Set(self_collision)
         robot = newton.ModelBuilder()
-        robot.add_usd(str(usd_path), xform=wp.transform((0.0, 0.0, base_height_m), wp.quat_identity()),
-                      floating=False)
+        robot.add_usd(source, xform=wp.transform((0.0, 0.0, base_height_m), wp.quat_identity()),
+                      floating=False, **({} if self_collision is None else {"enable_self_collisions": self_collision}))
         labels = [lbl.rsplit("/", 1)[-1] for lbl in robot.joint_label]
         missing = [n for n in joint_names if n not in labels]
         if missing:

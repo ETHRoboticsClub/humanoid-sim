@@ -29,6 +29,8 @@ physics:
   # Newton solver stepping the robot: mjwarp or kamino. Each has its own block below.
   solver: mjwarp
   self_collision: true
+  # Armature (kg m^2) on every ball joint coordinate (physics/crank_stops.py ball_joint_armature); 0: none.
+  ball_joint_armature: 0.0
   mjwarp:
     # RK4 conserves angular momentum under fast joint motion; the first-order integrators (euler, implicit,
     # implicitfast) do not at 4 ms. Free fall from rest, every 1:1 joint swinging at 3 Hz
