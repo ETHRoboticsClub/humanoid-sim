@@ -1,6 +1,8 @@
 """What a camera's imagers make of the light RTX renders: exposure time and gain (set, or the device's auto exposure),
 shot and read noise, a full well and an 8-bit output. Applied to the colour and grey streams when a session asks
-for it (``SessionCfg.camera_effects``); without it every stream is the RTX render as it is.
+for it (``SessionCfg.camera_effects``: :data:`IMAGING_EFFECTS`); without it every stream is the RTX render as it is.
+The camera effects also name the frames' delivery (:data:`~humanoid_sim.sensors.delivery.DELIVERY_EFFECTS`: latency
+and dropped frames, ``sensors/delivery.py``), which never changes an image.
 
 RTX renders each colour camera into linear light (Isaac Lab's ``rgb_hdr``), already exposed by the fixed exposure
 ``rtx.EXPOSURE`` (1/50 s at ISO 100 and f/5): doubling the exposure time or the ISO doubles it. The 8-bit ``rgb`` it
@@ -44,7 +46,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-CAMERA_EFFECTS = ("exposure", "noise")
+IMAGING_EFFECTS = ("exposure", "noise")  # what this chain applies
+CAMERA_EFFECTS = (*IMAGING_EFFECTS, "latency", "drops")  # with the frames' delivery (sensors/delivery.py)
 REFERENCE_EXPOSURE_NS = 20_000_000  # rtx.EXPOSURE_TIME_S: the exposure the RTX render is made at
 FULL_SCALE = 255.0  # an 8-bit stream's levels
 LUMA = (0.299, 0.587, 0.114)  # BT.601, as rtx.LUMA_BT601
@@ -130,11 +133,12 @@ class Exposure:
 
 class ImagingChain:
     """The imaging of one camera's colour and grey streams (``camera``: its model instance, ``spec``: its
-    :class:`~humanoid_sim.sensors.geometry.CameraSpec`), with ``effects`` among :data:`CAMERA_EFFECTS`. Per frame:
+    :class:`~humanoid_sim.sensors.geometry.CameraSpec`), with ``effects`` among :data:`CAMERA_EFFECTS` (those of
+    :data:`IMAGING_EFFECTS` apply). Per frame:
     :meth:`image` for each stream, then :meth:`end_frame`."""
 
     def __init__(self, camera, spec, effects: Iterable[str], seed: int):
-        self.effects = check_effects(effects)
+        self.effects = tuple(e for e in check_effects(effects) if e in IMAGING_EFFECTS)
         self.camera = camera
         self.period_ns = int(camera.frame_period_ns)
         where = f"camera {camera.name!r} ({camera.model})"
@@ -223,5 +227,5 @@ class ImagingChain:
         return {key: e.describe() for key, e in self.exposures.items()}
 
 
-__all__ = ["CAMERA_EFFECTS", "REFERENCE_EXPOSURE_NS", "WHITE_LIGHT", "ImagingChain", "camera_seed", "check_effects",
+__all__ = ["CAMERA_EFFECTS", "IMAGING_EFFECTS", "REFERENCE_EXPOSURE_NS", "WHITE_LIGHT", "ImagingChain", "camera_seed", "check_effects",
            "light_for", "parse_effects", "tone_level", "tone_map"]

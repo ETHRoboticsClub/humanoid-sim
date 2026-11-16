@@ -324,6 +324,27 @@ def _camera_effects(text: str) -> tuple[str, ...]:
         raise argparse.ArgumentTypeError(str(error)) from error
 
 
+def _add_camera_effect_args(parser) -> None:
+    parser.add_argument("--camera-effects", type=_camera_effects, default=(),
+                        help="the cameras' effects (comma-separated, or all): exposure (time, gain, the device's auto "
+                             "exposure) and noise (shot and read; sensors/imaging.py), latency and drops (each frame's "
+                             "arrival and losses; sensors/delivery.py); default: the RTX render, delivered at once")
+    parser.add_argument("--camera-latency-ms", nargs="+", type=float, default=None, metavar="MS",
+                        help="every camera's frame latency in place of its rig's: one value, or LOW HIGH drawn "
+                             "uniformly per frame (needs the latency effect)")
+    parser.add_argument("--camera-drop-probability", type=float, default=None, metavar="P",
+                        help="every camera's chance of losing a frame in place of its rig's (needs the drops effect)")
+
+
+def _camera_delivery(args) -> dict:
+    """The session's camera delivery overrides from ``--camera-latency-ms`` and ``--camera-drop-probability``."""
+    from humanoid_sim.sensors.delivery import check_overrides, latency_from_ms
+
+    latency = latency_from_ms(args.camera_latency_ms)
+    check_overrides(args.camera_effects, latency, args.camera_drop_probability)
+    return {"camera_latency_ns": latency, "camera_drop_probability": args.camera_drop_probability}
+
+
 def cmd_render_runtime(args) -> int:
     from humanoid_sim.runtime.render import render_runtime
     from humanoid_sim.runtime.render_workers import render_runtime_workers
@@ -332,8 +353,8 @@ def cmd_render_runtime(args) -> int:
     cfg = SessionCfg(robot=args.robot, sensors=args.sensors, splat=args.splat, splat_intensity=args.splat_intensity,
                      scan_mesh=args.scan_mesh, lights=args.lights, cameras=not args.no_cameras,
                      lidar=not args.no_lidar, feeds=args.feeds, lidar_domain=args.lidar_domain, rrd=args.rrd, images=args.images,
-                     depth_noise=args.depth_noise, camera_effects=args.camera_effects, device=args.device,
-                     assets=args.assets)
+                     depth_noise=args.depth_noise, camera_effects=args.camera_effects, **_camera_delivery(args),
+                     device=args.device, assets=args.assets)
     render = render_runtime if args.combined else render_runtime_workers
     render(args.segment, cfg, seconds=args.seconds, wait_s=args.wait, summary=args.summary, window=args.window)
     return 0
@@ -347,8 +368,8 @@ def cmd_render_trajectory(args) -> int:
     cfg = SessionCfg(robot=read_header(args.trajectory)["robot"], sensors=args.sensors, scene=args.scene,
                      spawn_m=tuple(args.spawn or (0.0, 0.0)), splat=args.splat, splat_intensity=args.splat_intensity,
                      scan_mesh=args.scan_mesh, lights=args.lights, cameras=not args.no_cameras,
-                     lidar=not args.no_lidar, camera_effects=args.camera_effects, device=args.device,
-                     assets=args.assets)
+                     lidar=not args.no_lidar, camera_effects=args.camera_effects, **_camera_delivery(args),
+                     device=args.device, assets=args.assets)
     render_trajectory(args.trajectory, cfg, args.out, start_s=args.start, end_s=args.end, window=args.window)
     return 0
 
@@ -469,9 +490,7 @@ def main(argv: list[str] | None = None) -> int:
                      help="render cameras and lidar in one Kit process instead of independent workers")
     rr_.add_argument("--depth-noise", action="store_true",
                      help="the stereo cameras' depth errors (noise, occlusion and texture holes); off: exact depth")
-    rr_.add_argument("--camera-effects", type=_camera_effects, default=(),
-                     help="the cameras' imaging (exposure, noise; comma-separated, or all): exposure time and gain, the "
-                         "device's auto exposure, shot and read noise (sensors/imaging.py); default: the RTX render")
+    _add_camera_effect_args(rr_)
     rr_.add_argument("--feeds", default=None, help="camera feed root (ethrc-camera-sim-feed/v1)")
     rr_.add_argument("--lidar-domain", type=int, default=None, help="publish the Mid-360 on Unitree's DDS domain")
     rr_.add_argument("--rrd", default=None)
@@ -499,9 +518,7 @@ def main(argv: list[str] | None = None) -> int:
                          "ambient light, a sun")
     rt.add_argument("--no-cameras", action="store_true")
     rt.add_argument("--no-lidar", action="store_true")
-    rt.add_argument("--camera-effects", type=_camera_effects, default=(),
-                    help="the cameras' imaging (exposure, noise; comma-separated, or all): exposure time and gain, the "
-                        "device's auto exposure, shot and read noise (sensors/imaging.py); default: the RTX render")
+    _add_camera_effect_args(rt)
     rt.add_argument("--start", type=float, default=None, help="first plant time to render (s)")
     rt.add_argument("--end", type=float, default=None, help="last plant time to render (s)")
     rt.add_argument("--device", default="cuda:0")
