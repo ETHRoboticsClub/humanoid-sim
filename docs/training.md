@@ -410,6 +410,8 @@ The full table is `PARAMS` in `src/humanoid_sim/randomization/spec.py`. E is the
 | `restitution` | physics | `[E, 1]` | coefficient | robot shape restitution (0) | Restitution coefficient of every robot shape, in [0, 1]. Kamino only: MuJoCo's contacts have no restitution, so MJWarp raises |
 | `crank_stop_stiffness` | physics | `[E, 1]` | ratio | 1 | Stiffness of the ankle cranks' stops over the nominal: MJWarp's profile `ankle_stop_solref`, Kamino's `physics.kamino.crank_stops.stiffness_nm_per_rad` ([drives.md](drives.md#the-crank-stops)). Kamino turns the soft stops on whatever `crank_stops.soft` says, and raises for a stop its step cannot carry |
 | `crank_stop_damping` | physics | `[E, 1]` | ratio | 1 | Damping of the same stops over the nominal (`damping_nm_s_per_rad` on Kamino) |
+| `joint_give_stiffness` | physics | `[E, G]` | N m/rad | the profile's, else the description's | Stiffness of the spring between a drive joint's encoder side and its link, per joint of an asset built with `--joint-give` (selector `give_joints`); positive ([drives.md](drives.md#joint-give)) |
+| `joint_give_damping` | physics | `[E, G]` | N m s/rad | the profile's, else the description's | Damping of that spring, per joint; positive |
 | `drive_stiffness` | device | `[E, 22]` | ratio | 1 | Realized P gain over the demanded one |
 | `drive_damping` | device | `[E, 22]` | ratio | 1 | Realized D gain over the demanded one |
 | `torque_limit` | device | `[E, 22]` | ratio | 1 | Scale on the torque-speed envelope and the torque cap |
