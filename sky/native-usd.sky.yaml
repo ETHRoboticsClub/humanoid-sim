@@ -29,7 +29,7 @@ run: |
   failed=0
   for f in test_native_usd test_native_integration test_description_delivery test_native_parameters test_native_physics \
       test_ankle_compliance test_ankle_compliance_physics test_kamino_crank_stops_physics test_joint_give \
-      test_joint_give_physics; do
+      test_joint_give_physics test_native_collision_physics; do
     pytest -v -s --junitxml="outputs/native-usd/$f.xml" "tests/$f.py" > "outputs/native-usd/$f.log" 2>&1 || failed=1
     echo "$f: $(tail -1 "outputs/native-usd/$f.log")"
   done
