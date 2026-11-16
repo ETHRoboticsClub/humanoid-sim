@@ -1,14 +1,17 @@
 """Sensor models and every robot's rig."""
 
+import configparser
 import math
+from pathlib import Path
 
+import numpy as np
 import pytest
 
 from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description, robots
 from humanoid_sim.model.urdf import PreparedUrdf
 from humanoid_sim.sensors import rigs
-from humanoid_sim.sensors.geometry import Mount
+from humanoid_sim.sensors.geometry import Mount, quat_matrix
 from humanoid_sim.sensors.models import (
     Camera,
     Imu,
@@ -23,6 +26,8 @@ from humanoid_sim.sensors.models import (
 )
 
 ROBOTS = robots()
+CALIBRATION = Path(__file__).resolve().parents[1] / "calibration"
+OPTICAL = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])  # optical axes (x right, y down, z forward)
 
 
 def test_the_mti_610_is_its_leaflet():
@@ -83,6 +88,36 @@ def test_an_extra_rig_adds_sensors_and_unknown_or_clashing_ones_are_refused():
         rigs.load(desc.robot, desc, "g1-lidars")
     with pytest.raises(ValueError, match="already in the rig"):
         rigs.rig(desc.robot).extended(Rig(mid360=LivoxMid360("mid360_link")))
+
+
+def _rotation_vector(v):
+    """The rotation matrix of a rotation vector (axis times angle in radians), Rodrigues' formula."""
+    theta = float(np.linalg.norm(v))
+    kx, ky, kz = np.asarray(v) / theta
+    k = np.array([[0.0, -kz, ky], [kz, 0.0, -kx], [-ky, kx, 0.0]])
+    return np.eye(3) + math.sin(theta) * k + (1.0 - math.cos(theta)) * (k @ k)
+
+
+def test_the_g1_zed_mini_is_its_units_factory_calibration():
+    """The ZED Mini against the factory file of the unit the G1 carries, at HD720 as Controls' zed backend opens it:
+    each eye's lens, and the right eye placed (Baseline, TY, TZ in mm) and turned (the rotation vector RX, CV, RZ) in
+    the left eye's optical frame."""
+    ini = configparser.ConfigParser()
+    ini.read(CALIBRATION / "zed-mini_SN19945568.conf")
+    zed = rigs.g1_cameras().sensors["zed"]
+    for eye in ("left", "right"):
+        lens = ini[f"{eye.upper()}_CAM_HD"]
+        assert zed.intrinsics[eye] == pytest.approx([float(lens[k]) for k in ("fx", "fy", "cx", "cy")])
+        model, coefficients = zed.distortion[eye]
+        assert model == "equidistant"
+        assert coefficients == pytest.approx([float(lens[k]) for k in ("k1", "k2", "k3", "k4")])
+    stereo = ini["STEREO"]
+    place_mm = [float(stereo[k]) for k in ("Baseline", "TY", "TZ")]
+    turn = [float(stereo[f"{k}_HD"]) for k in ("RX", "CV", "RZ")]
+    np.testing.assert_allclose(zed.stream_offsets_m["right"], OPTICAL @ place_mm / 1000.0, atol=1e-12)
+    np.testing.assert_allclose(quat_matrix(zed.stream_rotations_xyzw["right"]), OPTICAL @ _rotation_vector(turn),
+                               atol=1e-9)
+    assert zed.stream_offsets_m["left"] == (0.0, 0.0, 0.0) and "left" not in zed.stream_rotations_xyzw
 
 
 def test_a_robot_without_a_rig_has_no_imu():

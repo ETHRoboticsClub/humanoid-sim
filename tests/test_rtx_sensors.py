@@ -59,10 +59,22 @@ from rtx_oracles import (  # noqa: E402
 pytestmark = pytest.mark.rtx
 
 
-# ZED Mini SN19945568 at HD720, the factory file as Controls' test_zed_backend.py carries it.
+# ZED Mini SN19945568 at HD720, its factory file (calibration/zed-mini_SN19945568.conf).
 ZED_LEFT = (771.4, 771.14, 629.115, 353.0685, (-0.0358597, 0.0185157, -0.00496448, 0.00194007))
 ZED_RIGHT = (772.01, 771.55, 641.75, 346.6085, (-0.0368591, 0.0234426, -0.0128113, 0.00625172))
 ZED_RIGHT_EYE = (0.000233734, -0.0628272, 0.000181381)  # device frame: TZ, -Baseline, -TY
+
+
+def rotation_vector(v):
+    """The rotation matrix of a rotation vector (axis times angle in radians), Rodrigues' formula."""
+    theta = float(np.linalg.norm(v))
+    kx, ky, kz = np.asarray(v) / theta
+    k = np.array([[0.0, -kz, ky], [kz, 0.0, -kx], [-ky, kx, 0.0]])
+    return np.eye(3) + np.sin(theta) * k + (1.0 - np.cos(theta)) * (k @ k)
+
+
+# The right eye's optical frame in the left's: [STEREO] RX_HD, CV_HD, RZ_HD (0.40 deg).
+ZED_RIGHT_TURN = rotation_vector((-0.00267053, 0.00645504, 0.000385081))
 
 # The room (rtx_oracles.WALLS) and its targets (centre, half extents, colour): plates 2 mm thick, so a camera sees one
 # face of each and nothing of their sides. The ZED Mini's eyes are grey: its target is a white plate on a black one
@@ -123,13 +135,14 @@ def run(tmp_path_factory):
     atexit.register(kit.close)
 
 
-def target_weights(image, lens, device, offset, target, surround):
+def target_weights(image, lens, device, offset, target, surround, turn=np.eye(3)):
     """The target in the image and where it should be: per pixel, how much of the target the image shows (its
     contrast against the ``surround`` box's pixels, 0 to 1, the faintest tenth dropped as noise), and the share of
-    the pixel whose rays meet the target. A grey image's contrast is its brightness (a white target on a black
-    surround); a colour image's is how far green stands above red and blue (a green target)."""
+    the pixel whose rays meet the target. ``turn`` is the eye's optical frame in the nominal one. A grey image's
+    contrast is its brightness (a white target on a black surround); a colour image's is how far green stands above
+    red and blue (a green target)."""
     R, t = device
-    eye, optical = t + R @ np.asarray(offset), R @ OPTICAL
+    eye, optical = t + R @ np.asarray(offset), R @ OPTICAL @ turn
     expected = box_coverage(image.shape[:2], lens, eye, optical, *map(np.asarray, target[:2]))
     window = box_mask(image.shape[:2], lens, eye, optical, *map(np.asarray, surround[:2]))
     for _ in range(SURROUND_MARGIN_PX):  # off the surround's edge, where anti-aliasing mixes in what is behind it
@@ -149,12 +162,13 @@ def camera_sees(seen, expected):
     assert mn == pytest.approx(n, rel=COUNT_TOL)
 
 
-@pytest.mark.parametrize("eye,lens,offset", [("left", ZED_LEFT, (0.0, 0.0, 0.0)), ("right", ZED_RIGHT, ZED_RIGHT_EYE)])
-def test_the_zed_mini_sees_the_target_where_its_lens_projects_it(run, eye, lens, offset):
+@pytest.mark.parametrize("eye,lens,offset,turn", [("left", ZED_LEFT, (0.0, 0.0, 0.0), np.eye(3)),
+                                                  ("right", ZED_RIGHT, ZED_RIGHT_EYE, ZED_RIGHT_TURN)])
+def test_the_zed_mini_sees_the_target_where_its_lens_projects_it(run, eye, lens, offset, turn):
     image = run["images"][("sim-zed", eye)]
     assert image.shape == (720, 1280) and image.dtype == np.uint8  # grey, as Controls' zed backend publishes
     zed = device_pose(run["torso"], torso_mount(ZED_JOINT))
-    camera_sees(*target_weights(image, lens, zed, offset, TARGETS[0], TARGETS[1]))
+    camera_sees(*target_weights(image, lens, zed, offset, TARGETS[0], TARGETS[1], turn))
 
 
 def test_the_d435i_colour_sees_the_target_where_its_lens_projects_it(run):
