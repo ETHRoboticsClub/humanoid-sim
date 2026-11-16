@@ -43,7 +43,7 @@ Between humanoid-sim and humanoid-learning the line is mechanism against choice:
 | Concern | humanoid-sim: the mechanism | humanoid-learning: the choice |
 |---|---|---|
 | Terrain | `heightfield_terrain_cfg`: a terrain the physics can collide with, from the tiles and grid the caller gives; the same terrain in replays and the runtime (`terrain=`, `--terrain FILE`) | Terrain generators: tile mixes, sizes and difficulty, and the curriculum that moves envs between rows |
-| Disturbances | `ForcePush`, a push process with the caller's ranges; joint torques; the runtime's `APPLY_DISTURBANCE` | Which pushes a task trains and is tested against, and their schedule |
+| Disturbances | `ForcePush`, a push process with the caller's ranges; `JointTorquePerturbation`, random joint torques; joint torques; the runtime's `APPLY_DISTURBANCE` | Which pushes a task trains and is tested against, and their schedule |
 | Randomization | Models of the randomized parameters, their distributions as specs, a level knob | Which parameters, their ranges, and when the level moves |
 | Sensors | Sensor models and their knobs (the IMU's noise and delivery timing; cameras, lighting and LIDAR are not modeled yet, and come as knobs here when they are: a light's intensity, a sensor switched off) | Which sensors a policy reads, and ablations over them |
 | Evaluation | Checks of the sim itself: replays and system identification against robot captures, physics and model tests, benchmarks | Every evaluation of a policy: scenarios, metrics, robustness sweeps (terrain, pushes, latency, lighting) and sensor ablations (the LIDAR removed, vision only) |

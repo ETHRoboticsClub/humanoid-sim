@@ -485,6 +485,35 @@ class PushedPoseOffsets(PoseOffsets):  # PoseOffsets from training.md, "A minima
 
 `Component171_1` is the upper body, the body above the waist yaw joint. Body names are the merged URDF link names described in [robot-model.md](robot-model.md). They come from the CAD export and can mislead: the right foot is `bottom_universal_joint_l_1` (it hangs from `foot_roll_r`).
 
+### Joint torque perturbations in training
+
+`JointTorquePerturbation` (`src/humanoid_sim/world/disturbances.py`) holds a random torque on each selected revolute joint, as a robustness randomization. Per env and joint the torque is piecewise constant: uniform in `[-level * max_nm, +level * max_nm]`, held for a time uniform in `hold_s` (drawn in integer nanoseconds), then drawn again. Each draw is zero with probability `1 - active_share`. Every value is the caller's: the sim picks none.
+
+The torque `+tau` is applied about the joint's axis in the world frame, on the joint's child link, and `-tau` on its parent link, so it is a pure joint torque and the net external wrench on the robot is zero. The axis comes from the running Newton model (the joint's axis and its frame in the child body, turned by the child link's pose). The drives do not see it, and the joint's own limits, friction and give act as usual. It reaches the solver through the articulation's permanent wrench composer, so it stays applied between calls and runs on the device without host syncs.
+
+| Call | Meaning |
+|---|---|
+| `JointTorquePerturbation(robot, joints, *, max_nm, hold_s, active_share, level=1.0, seed=0)` | `joints`: a joint name or regex (full match), or a list of them, in the order given; revolute joints only. `max_nm`: one number, or one per selected joint in the order of `joint_names`. `hold_s`: `(low, high)` in s, `0 < low <= high`. `active_share`: the probability that a draw is not zero. `level`: a float or an `[E]` tensor, applied to draws made from then on |
+| `reset(env_ids, t_ns)` | Zero torque for these envs; their next draw is due at `t_ns`, so the next `step` draws afresh |
+| `step(t_ns)` | Draw for the joints whose hold has ended and write the torques; once per physics step or once per policy step |
+| `torque_nm` | `[E, J]` the torque being applied, N m, for logging and critics |
+| `joint_names` | The selected joints, the order of `torque_nm`'s columns |
+
+`max_nm` is not derived here. A caller that wants a share of each drive's peak reads the peaks from the description and passes `share * peak`. Calling `step` in `apply_actions` times the draws to the 4 ms physics step, in `process_actions` to the policy step, as for `ForcePush`.
+
+```python
+from humanoid_sim.world.disturbances import JointTorquePerturbation
+
+self.perturbation = JointTorquePerturbation(self._asset, ["knee_flexion_.*", "hip_flexion_.*"], max_nm=peaks * 0.2,
+                                            hold_s=(0.2, 0.8), active_share=0.5, level=0.5, seed=2)
+self.perturbation.reset(torch.arange(self.num_envs, device=self.device), self.plant.t_ns)
+# every step: self.perturbation.step(self.plant.t_ns); on a reset: self.perturbation.reset(env_ids, self.plant.t_ns)
+```
+
+The composer's `set_forces_and_torques_index` zeroes every body of the envs it is given before it writes, so two disturbances that each set their own wrench would erase each other. `ForcePush` and `JointTorquePerturbation` therefore each keep their wrench in a slot of the articulation's `WrenchMixer` (`wrench_mixer(robot)`), and every step writes the sum over slots on every body any of them touches. A push on a body that is also a parent or child of a perturbed joint adds to the joint's torque, in either order of the two `step` calls, and two pushes add. Other bodies of the composer are left as they are. Something else that sets the permanent composer on these bodies still replaces the sum until the next `step`.
+
+`plant.core.external_torque` (next section) is the other way to load a joint: it adds to the drive's torque inside the solver step, in joint space, with the caller writing every value. The perturbation is the randomized process, with its own holds, share and level, applied as link wrenches.
+
 ### Joint torques in training
 
 `plant.core.external_torque` is an `[E, 22]` tensor of joint torques (Nm, description joint order) that the plant adds to the drives' joint torques in every step (`PlantCore.pre_physics` in `src/humanoid_sim/core.py`). It acts outside the drives: their feedback does not include it. Write it in place; `plant.reset` zeroes it for the envs it resets.
