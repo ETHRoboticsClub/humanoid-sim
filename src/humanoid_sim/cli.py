@@ -2,7 +2,7 @@
 
     humanoid-sim [--solver mjwarp|kamino] <command>  Newton solver for the commands that step physics
                                                    (default: the profile's)
-    humanoid-sim build-asset [--base-joints] [--ankle-compliance] [--joint-give JOINT ...]
+    humanoid-sim build-asset [--base-joints] [--ankle-compliance] [--joint-give JOINT ...] [--load-tilt JOINT ...]
                                                    robot USD from the description (Isaac Lab image)
     humanoid-sim replay <exc-dir> [--period-ms PERIOD] [--base yaw|orientation|fixed] [--terrain FILE]
                                                    drive-level replay, scored against the capture;
@@ -86,12 +86,15 @@ def _usd(args, *, base_joints: bool = False) -> Path:
 def cmd_build_asset(args) -> int:
     from humanoid_sim.model.asset import build_asset, load_profile
     from humanoid_sim.model.description import Description
-    from humanoid_sim.transmissions.compliance import resolve_give
+    from humanoid_sim.transmissions.compliance import resolve_give, resolve_tilt
 
     desc = Description.load(args.robot)
+    profile = load_profile(args.robot)
     give = resolve_give(desc, args.joint_give) if args.joint_give else ()
-    usd = build_asset(desc, load_profile(args.robot), Path(args.assets), force=args.force,
-                      base_joints=args.base_joints, ankle_compliance=args.ankle_compliance, joint_give=give)
+    tilt = resolve_tilt(desc, profile, args.load_tilt) if args.load_tilt else ()
+    usd = build_asset(desc, profile, Path(args.assets), force=args.force,
+                      base_joints=args.base_joints, ankle_compliance=args.ankle_compliance, joint_give=give,
+                      load_tilt=tilt)
     print(usd)
     return 0
 
@@ -432,6 +435,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="the variant with a spring between each named drive joint's encoder side and its link: joint "
                         "names or regexes over them (physics.joint_give, else the description, gives the stiffness "
                         "and damping)")
+    b.add_argument("--load-tilt", nargs="+", metavar="JOINT",
+                   help="the variant with a tilt behind each named leg joint that the leg's vertical load sets: joint "
+                        "names or regexes over the leg's 1:1 drive joints (physics.load_tilt gives the joint's "
+                        "gains and the nominal angle; the plant's load_tilt_* knobs the per-env values)")
     b.set_defaults(func=cmd_build_asset)
 
     r = sub.add_parser("replay")
@@ -549,6 +556,9 @@ def main(argv: list[str] | None = None) -> int:
     be.add_argument("--period-ms", type=float, default=None,
                     help="physics period for --train (default: the profile's); must divide the 20 ms policy period")
     be.add_argument("--no-self-collision", action="store_true")
+    be.add_argument("--tilt", nargs=2, type=float, metavar=("ANGLE_RAD", "SATURATION_N"), default=None,
+                    help="for --train on an asset with load tilt (--usd): the nominal angle and saturation load; the "
+                         "workload then draws both per env around them")
     be.add_argument("--train", action="store_true", help="Train-Time API scene: RobotPlant, IMU, contacts")
     be.add_argument("--runtime", action="store_true", help="the real-time host's whole step, unpaced")
     _add_scene_args(be)

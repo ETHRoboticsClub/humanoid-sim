@@ -34,6 +34,18 @@ damping ``c`` (N m s/rad) per joint, from the profile's ``physics.joint_give`` o
 (drive feedback, :meth:`~humanoid_sim.train.plant.RobotPlant.measured`, ``Truth.joint_pos``) stays the drive side's,
 while the link sits ``θ`` further, ``Truth.joint_give_rad``, in the joint's own coordinates. Statics: a torque ``τ`` on
 the link about the joint's axis, held by the drive, deflects the link by ``τ / k`` (:func:`give_deflection`).
+
+Load tilt is the same construction for a tilt that no torque on the joint sets but the leg's vertical load does. An asset
+built with ``load_tilt`` (:func:`humanoid_sim.model.usd.build_asset`) adds, behind each named joint on a leg's chain
+(:func:`tilt_legs`), a body and a coaxial revolute joint ``<joint>_tilt`` between that body and the link. The joint is
+a stiff joint PD whose target the plant sets every physics step from the vertical contact force on the leg's sole,
+``θ = θ_max min(1, F / F_sat)`` (:func:`load_tilt`): the link, and everything it carries (for the knee, the shank and the
+ankle), sits ``θ`` past the pose the encoders imply, and ``F`` the sole's vertical force from the step before. The
+encoders read the drive side: the measured joint positions stay the drive's, ``Truth.load_tilt_rad`` is the tilt. ``θ_max``
+(``load_tilt_angle``, signed, in the joint's own coordinates, 0 turns it off) and ``F_sat`` (``load_tilt_saturation_load``)
+are per env and joint knobs (selector ``tilt_joints``); the PD's stiffness and damping are solver choices
+(``physics.load_tilt``), stiff enough that a drive torque through the joint moves the tilt only by ``τ / k``. A joint can
+carry both give and tilt: the drive, the give and the tilt are three joints in series on one axis.
 """
 
 from __future__ import annotations
@@ -44,6 +56,7 @@ import torch
 
 SPRING_SUFFIX = "_spring"
 GIVE_SUFFIX = "_give"
+TILT_SUFFIX = "_tilt"
 OUTPUT_SUFFIX = "_output"
 
 
@@ -87,6 +100,71 @@ def resolve_give(desc, patterns) -> tuple[str, ...]:
             raise ValueError(f"joint give: {pattern!r} selects no joint of {candidates}")
         chosen.update(found)
     return tuple(n for n in candidates if n in chosen)
+
+
+def tilt_joint(joint: str) -> str:
+    """The name of the load-tilt joint the asset adds behind drive joint ``joint``."""
+    return joint + TILT_SUFFIX
+
+
+def tilt_output_body(joint: str) -> str:
+    """The name of the body between the drive side and the load-tilt joint of ``joint``."""
+    return joint + TILT_SUFFIX + OUTPUT_SUFFIX
+
+
+def _leg_chains(desc, profile: dict) -> dict[str, list[str]]:
+    """``{sole body: the description's joints from the base down to it}`` for each sole the profile names
+    (``model.sole.joints``: the joint whose child is the foot), walking the native USD's joint tree."""
+    source = desc.usd_model
+    if source is None:
+        raise ValueError("load tilt needs the native USD (a profile with model.usd)")
+    parent = {}
+    for name in desc.joints:
+        up, child = source.joint_bodies(name)
+        parent[child] = (up, name)
+    chains = {}
+    for joint in profile["model"]["sole"]["joints"].values():
+        body = source.joint_bodies(joint)[1]
+        chain, at = [], body
+        while at in parent:
+            at, name = parent[at][0], parent[at][1]
+            chain.append(name)
+        chains[body] = chain[::-1]
+    return chains
+
+
+def tilt_legs(desc, profile: dict) -> dict[str, str]:
+    """``{joint: sole body}`` of every joint that can carry load tilt, in the description's order: the 1:1 drive joints
+    on the chain from the base to one sole only (the V1's hips and knee), each with the sole whose vertical load drives it."""
+    chains = _leg_chains(desc, profile)
+    out = {}
+    for name in give_candidates(desc):
+        soles = [sole for sole, chain in chains.items() if name in chain]
+        if len(soles) == 1:  # a joint above both legs (the waist) carries no one leg's load
+            out[name] = soles[0]
+    return out
+
+
+def resolve_tilt(desc, profile: dict, patterns) -> tuple[str, ...]:
+    """The joint names ``patterns`` select (each a joint name or a regex over them, matched in full) among those that
+    can carry load tilt (:func:`tilt_legs`), in the description's order. Raises for a pattern that selects nothing."""
+    if isinstance(patterns, str):
+        patterns = [patterns]
+    candidates = list(tilt_legs(desc, profile))
+    chosen = set()
+    for pattern in patterns:
+        found = [n for n in candidates if re.fullmatch(pattern, n)]
+        if not found:
+            raise ValueError(f"load tilt: {pattern!r} selects no joint of {candidates}")
+        chosen.update(found)
+    return tuple(n for n in candidates if n in chosen)
+
+
+def load_tilt(load: torch.Tensor, angle: torch.Tensor, saturation_load: torch.Tensor) -> torch.Tensor:
+    """The tilt (rad, in the joint's own coordinates) under a vertical load of ``load`` (N): ``angle`` at and above
+    ``saturation_load``, ``angle * load / saturation_load`` below it, zero without load (a foot never pulls). The
+    broadcasting arguments are per env and joint."""
+    return angle * (load / saturation_load).clamp(0.0, 1.0)
 
 
 def give_deflection(load: torch.Tensor, stiffness: torch.Tensor) -> torch.Tensor:

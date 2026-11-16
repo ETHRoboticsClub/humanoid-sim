@@ -45,6 +45,7 @@ from humanoid_sim.randomization import PARAMS, ParamSpec, Randomizer, parse_spec
 from humanoid_sim.sensors import rigs
 from humanoid_sim.sensors.imu import ImuDelivery, ImuSamples, pending_slots
 from humanoid_sim.timing.clock import NS_PER_S
+from humanoid_sim.transmissions.compliance import load_tilt
 from humanoid_sim.world.harness import resolve_harness
 from humanoid_sim.world.supports import Gantry
 
@@ -89,6 +90,9 @@ class Truth:
     # [E, G] each give joint's link angle past the joint's reading (the drive's side, ``joint_pos``), in the joint's own
     # coordinates, in RobotPlant.give_joints order; None without joint give. The link's angle is the sum.
     joint_give_rad: torch.Tensor | None = None
+    # [E, T] each load-tilt joint's angle: the link past what the joint's reading (``joint_pos``) implies, in the joint's
+    # own coordinates, in RobotPlant.tilt_joints order; None without load tilt.
+    load_tilt_rad: torch.Tensor | None = None
 
 
 def command_latency_ns(profile: dict, drive_delay_ns: torch.Tensor) -> torch.Tensor:
@@ -153,9 +157,27 @@ def imu_latency_bounds(specs, nominal_ns: int) -> tuple[float, float]:
     return lo, hi
 
 
+def tilt_load_floor(specs, nominal: float) -> float:
+    """The least ``load_tilt_saturation_load`` (N) the specs can draw around ``nominal``, specs in their order (each
+    taken to apply to every joint, and a draw to leave the joint at its value or move it): the check that the saturation
+    load stays positive without reading a draw back at every reset."""
+    lo = float(nominal)
+    for s in specs:
+        if s.param != "load_tilt_saturation_load":
+            continue
+        if s.dist == "normal":
+            raise ValueError("load_tilt_saturation_load needs a bounded distribution (uniform, log_uniform or "
+                             "discrete_uniform)")
+        a, b = s.range
+        new = {"set": a, "scale": lo * min(a, 1.0), "add": lo + min(a, 0.0)}[s.op]
+        lo = min(lo, new)
+    return lo
+
+
 class RobotPlant:
     _stops = None  # StopSolref when crank_stop_stiffness or crank_stop_damping is randomized on MJWarp
     _kamino_stops = None  # KaminoCrankStops: on Kamino, when the profile or the randomization asks for soft stops
+    tilts = None  # {joint: tilt joint} of an asset with load tilt (set at construction)
 
     def __init__(self, robot, cfg: TrainPlantCfg | None = None, *, imu=None, contacts=None, physics_manager=None):
         """``robot``: the scene's articulation; ``imu`` / ``contacts``: its sensors (optional);
@@ -207,6 +229,21 @@ class RobotPlant:
         self.gives = {n: give_joint(n) for n in self.give_joints}
         self.give_ids = torch.tensor([robot.joint_names.index(g) for g in self.gives.values()], device=self.device,
                                      dtype=torch.long)
+        # Load tilt: the asset's stiff joints behind leg joints, whose target the plant sets from the leg's sole load.
+        from humanoid_sim.transmissions.compliance import tilt_joint
+
+        self.tilt_joints = [n for n in self.joints if tilt_joint(n) in robot.joint_names]
+        self.tilts = {n: tilt_joint(n) for n in self.tilt_joints}
+        self.tilt_ids = torch.tensor([robot.joint_names.index(t) for t in self.tilts.values()], device=self.device,
+                                     dtype=torch.long)
+        self._tilt_soles = self._tilt_sole_contacts(contacts)
+        # The drive of each tilt joint and its sign (a torque through the joint, joint frame = sign * drive frame), and the
+        # stiffness the tilt joints hold their target with: the plant adds that torque over this to the target.
+        self._tilt_drives = torch.tensor([list(self.core.map.drive_names).index(self.desc.joints[n].device)
+                                          for n in self.tilt_joints], device=self.device, dtype=torch.long)
+        self._tilt_sign = torch.tensor([float(self.desc.drives[self.desc.joints[n].device].sign)
+                                        for n in self.tilt_joints], device=self.device)
+        self._tilt_k = robot.data.joint_stiffness.torch[:, self.tilt_ids].clone()
         self.drives = self.core.map.drive_names
         d = len(self.drives)
         self.t_ns = 0
@@ -265,6 +302,8 @@ class RobotPlant:
         self.core.enabled_friction.copy_(self._nominal_physics["joint_friction"])
         nominal = {name: v for name, v in self._nominal_physics.items()} | self._device_nominal()
         self._ratio = nominal["joint_friction_ratio"]
+        self._tilt_angle = nominal["load_tilt_angle"].clone() if self.tilts else None  # [E, T], the realized values
+        self._tilt_load = nominal["load_tilt_saturation_load"].clone() if self.tilts else None
         used = {s.param for s in specs}
         if any(s.param == "latency" and s.op == "scale" for s in specs) and "command_path" not in self.profile["devices"]:
             raise ValueError(f"{cfg.robot}: scaling latency needs the profile's devices.command_path")
@@ -279,12 +318,17 @@ class RobotPlant:
             raise ValueError("randomizing ankle_spring_* needs an asset built with ankle compliance")
         if used & {"joint_give_stiffness", "joint_give_damping"} and not self.gives:
             raise ValueError("randomizing joint_give_* needs an asset built with joint give")
+        if used & {"load_tilt_angle", "load_tilt_saturation_load"} and not self.tilts:
+            raise ValueError("randomizing load_tilt_* needs an asset built with load tilt")
+        if "load_tilt_saturation_load" in used and not tilt_load_floor(
+                specs, float(nominal["load_tilt_saturation_load"].min())) > 0:
+            raise ValueError("load_tilt_saturation_load must stay positive: the specs can draw it to zero or below")
         if {"friction", "shape_friction"} <= used:
             raise ValueError("choose per-env friction or per-shape friction, not both")
         self.randomizer = Randomizer(specs, {k: v for k, v in nominal.items() if k in used},
                                      {"body": list(robot.body_names), "joint": self.core.solver_map.joint_names,
                                       "drive": self.drives, "crank": [d for d in self.cranks if d in self.springs],
-                                      "give": self.give_joints,
+                                      "give": self.give_joints, "tilt": self.tilt_joints,
                                       "shape": [f"shape_{i}" for i in range(nominal.get("shape_friction", torch.empty(e, 0)).shape[1])]},
                                      num_envs=e, device=self.device, seed=cfg.seed, level=cfg.level)
         from humanoid_sim.physics.crank_stops import StopSolref, check_crank_stops, kamino_crank_stops
@@ -357,6 +401,36 @@ class RobotPlant:
             out["joint_give_damping"] = data.joint_damping.torch[:, self.give_ids].clone()
         return out
 
+    def _tilt_sole_contacts(self, contacts) -> torch.Tensor:
+        """Each load-tilt joint's sole body in the contact sensor's bodies ``[T]``: the sole of the leg whose chain the
+        joint is on, whose vertical contact force drives its tilt."""
+        if not self.tilts:
+            return torch.zeros(0, dtype=torch.long, device=self.device)
+        if contacts is None:
+            raise ValueError("an asset with load tilt needs the contact sensor (the scene's contacts): the tilt follows "
+                             "the sole's vertical load")
+        from humanoid_sim.transmissions.compliance import tilt_legs
+
+        legs = tilt_legs(self.desc, self.profile)
+        names = [n.rsplit("/", 1)[-1] for n in contacts.sensor_names]
+        return torch.tensor([names.index(legs[n]) for n in self.tilt_joints], device=self.device, dtype=torch.long)
+
+    def _tilt_nominal(self) -> dict[str, torch.Tensor]:
+        """The profile's ``physics.load_tilt`` angle and saturation load per env and tilt joint."""
+        block = self.profile["physics"].get("load_tilt") or {}
+        out = {}
+        for key, name, default in (("angle_rad", "load_tilt_angle", 0.0), ("saturation_load_n", "load_tilt_saturation_load",
+                                                                            None)):
+            v = block.get(key)
+            vals = [v.get(n) if isinstance(v, dict) else v for n in self.tilt_joints]
+            vals = [default if x is None else x for x in vals]
+            if any(x is None or not math.isfinite(float(x)) for x in vals):
+                raise ValueError(f"an asset with load tilt needs physics.load_tilt.{key} for {self.tilt_joints}")
+            if key == "saturation_load_n" and any(float(x) <= 0 for x in vals):
+                raise ValueError("physics.load_tilt.saturation_load_n must be positive")
+            out[name] = torch.tensor([float(x) for x in vals], device=self.device).expand(self.num_envs, -1).clone()
+        return out
+
     def _device_nominal(self) -> dict[str, torch.Tensor]:
         e, d = self.num_envs, len(self.drives)
         ones = torch.ones(e, d, device=self.device)
@@ -365,7 +439,8 @@ class RobotPlant:
         dynamic = torch.tensor([self.desc.joints[n].dynamic_friction if n in self.desc.joints else 0.0
                                 for n in self.core.solver_map.joint_names], device=self.device)
         ratio = torch.where(static > 0, dynamic / static.clamp(min=1e-12), torch.ones_like(static))
-        return {"drive_stiffness": ones, "drive_damping": ones.clone(), "torque_limit": ones.clone(),
+        tilt = self._tilt_nominal() if self.tilts else {}
+        return {**tilt, "drive_stiffness": ones, "drive_damping": ones.clone(), "torque_limit": ones.clone(),
                 "latency": (self.command_latency_ns / NS_PER_S).to(ones.dtype).expand(e, -1).clone(),
                 "encoder_offset": torch.zeros_like(ones),
                 "joint_friction_ratio": ratio.expand(e, -1).clone(),
@@ -478,6 +553,10 @@ class RobotPlant:
             ratio = v["joint_friction_ratio"][env_ids] if "joint_friction_ratio" in v else self._ratio[env_ids]
             relief = self.core.friction_relief
             relief[env_ids] = (static * (1 - ratio.clamp(0, 1))).to(relief.dtype)
+        if self.tilts:
+            for name, target in (("load_tilt_angle", self._tilt_angle), ("load_tilt_saturation_load", self._tilt_load)):
+                if name in v:
+                    target[env_ids] = v[name][env_ids].to(target.dtype)
         if self.imu is not None:
             for name, target in (("imu_gyro_bias", self.imu.gyro_bias), ("imu_accel_bias", self.imu.accel_bias),
                                  ("imu_misalignment", self.imu.misalignment)):
@@ -543,8 +622,8 @@ class RobotPlant:
         self.robot.write_joint_state_to_sim_index(
             position=torch.stack([values[n] for n in names], -1).to(q.dtype),
             velocity=torch.stack([rates[n] for n in names], -1).to(qd.dtype), joint_ids=ids, env_ids=env_ids)
-        relaxed = torch.cat([self.spring_ids, self.give_ids])
-        if len(relaxed):  # crank springs and joint give relaxed: the linkage closes as the rigid one does
+        relaxed = torch.cat([self.spring_ids, self.give_ids, self.tilt_ids])
+        if len(relaxed):  # crank springs, joint give and load tilt relaxed: the linkage closes as the rigid one does
             zero = torch.zeros(len(env_ids), len(relaxed), device=self.device, dtype=q.dtype)
             self.robot.write_joint_state_to_sim_index(position=zero, velocity=zero, joint_ids=relaxed,
                                                       env_ids=env_ids)
@@ -581,6 +660,13 @@ class RobotPlant:
         if self._drive_graph is None:
             target = self.core.pre_physics(self.t_ns, q, qd, self.core.post_state)  # feedback converted q above
         self._targets[:, self.solver_joint_ids] = target.to(self._targets.dtype)
+        if len(self.tilt_ids):
+            # The law of the sole's vertical load at the step start, plus the drive's torque through the joint over the
+            # joint's stiffness (which the joint would otherwise give by that much): the tilt is the law.
+            load = self.contacts.data.net_forces_w.torch[:, self._tilt_soles, 2]
+            through = fb.applied_torque_nm[:, self._tilt_drives] * self._tilt_sign
+            self._targets[:, self.tilt_ids] = (load_tilt(load, self._tilt_angle, self._tilt_load)
+                                               + through / self._tilt_k).to(self._targets.dtype)
         tc = self.robot.actuators.target_command
         tc.set_position_index(value=self._targets)
         tc.set_velocity_index(value=torch.zeros_like(self._targets))
@@ -630,8 +716,9 @@ class RobotPlant:
         if len(self.spring_ids):
             spring = data.joint_pos.torch[:, self.spring_ids] * self._spring_sign
         give = data.joint_pos.torch[:, self.give_ids] if len(self.give_ids) else None
+        tilt = data.joint_pos.torch[:, self.tilt_ids] if len(self.tilt_ids) else None
         return Truth(q, qd, data.root_link_pose_w.torch, data.root_com_vel_w.torch[:, :3],
-                     data.root_com_ang_vel_b.torch, self.core.feedback(*self.solver_state()), forces, spring, give)
+                     data.root_com_ang_vel_b.torch, self.core.feedback(*self.solver_state()), forces, spring, give, tilt)
 
     # -- reset ------------------------------------------------------------------------------------
 

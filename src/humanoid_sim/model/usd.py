@@ -169,7 +169,7 @@ def fixed_body_excludes(edges: list[tuple[str, str]]) -> list[tuple[str, str]]:
 
 
 def asset_key(desc, profile: dict, *, base_joints: bool = False, ankle_compliance: bool = False,
-              joint_give: tuple[str, ...] = ()) -> str:
+              joint_give: tuple[str, ...] = (), load_tilt: tuple[str, ...] = ()) -> str:
     record = {"schema": "humanoid-sim-native-usd/v6", "source": desc.usd_model.digest(),
               "description": desc.digest, "base_joints": base_joints,
               "actuators": hashlib.sha256(desc.actuators_path.read_bytes()).hexdigest(), "model": profile["model"],
@@ -178,18 +178,21 @@ def asset_key(desc, profile: dict, *, base_joints: bool = False, ankle_complianc
         record["ankle_compliance"] = COMPLIANCE_SCHEMA
     if joint_give:  # likewise
         record["joint_give"] = {"schema": GIVE_SCHEMA, "joints": sorted(joint_give)}
+    if load_tilt:  # likewise
+        record["load_tilt"] = {"schema": TILT_SCHEMA, "joints": sorted(load_tilt)}
     return hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints=False,
-                ankle_compliance=False, joint_give: tuple[str, ...] = ()) -> Path:
+                ankle_compliance=False, joint_give: tuple[str, ...] = (), load_tilt: tuple[str, ...] = ()) -> Path:
     """Compose the delivered articulation and author simulator choices in a separate layer.
 
     Retain native crank bodies and all loop-closing joints. Weld only uncommanded
     revolute joints outside the ankle mechanisms; never edit the source delivery.
     With ``ankle_compliance``, the variant whose crank shafts each carry a spring between the drive's output and
     the crank arm (:func:`_author_crank_springs`); without it nothing of that is authored. ``joint_give``: the same
-    for the named drive joints, between the drive's output and the link (:func:`_author_joint_give`).
+    for the named drive joints, between the drive's output and the link (:func:`_author_joint_give`); ``load_tilt``: a
+    stiff joint behind each named joint whose target the plant sets from the leg's load (:func:`_author_load_tilt`).
     """
     import shutil
 
@@ -202,7 +205,9 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     if not isinstance(prune, bool):
         raise ValueError("prune_contained_hulls must be a boolean")
     joint_give = _checked_give(desc, joint_give)
-    key = asset_key(desc, profile, base_joints=base_joints, ankle_compliance=ankle_compliance, joint_give=joint_give)
+    load_tilt = _checked_tilt(desc, profile, load_tilt)
+    key = asset_key(desc, profile, base_joints=base_joints, ankle_compliance=ankle_compliance, joint_give=joint_give,
+                    load_tilt=load_tilt)
     out = Path(out_root) / desc.robot / key
     meta_path = out / "asset.json"
     path = out / "robot.usda"
@@ -263,6 +268,7 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     universal = _author_universal_rods(desc, profile, source, stage, mapped)
     springs = _author_crank_springs(desc, source, stage, mapped) if ankle_compliance else None
     give = _author_joint_give(desc, source, stage, mapped, joint_give) if joint_give else None
+    tilt = _author_load_tilt(desc, source, stage, mapped, load_tilt) if load_tilt else None
 
     excluded = []
     fixed_pairs = []
@@ -272,7 +278,7 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
         fixed_pairs = fixed_body_excludes(fixed)
     contact_excludes = profile["model"].get("contact_excludes", [])
     # The pair a give's joint kept apart before the output body came between them.
-    given = [] if give is None else list(give["adjacent_bodies"].values())
+    given = [pair for meta in (give, tilt) if meta is not None for pair in meta["adjacent_bodies"].values()]
     for a, b in sorted({tuple(sorted(pair)) for pair in [*fixed_pairs, *contact_excludes, *given]}):
         if a not in source.bodies or b not in source.bodies:
             raise ValueError(f"unknown native collision-exclusion bodies: {a}, {b}")
@@ -324,6 +330,8 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
         meta["ankle_compliance"] = springs
     if give is not None:
         meta["joint_give"] = give
+    if tilt is not None:
+        meta["load_tilt"] = tilt
     meta_path.write_text(json.dumps(meta, indent=1))
     return path
 
@@ -447,42 +455,86 @@ def _author_joint_give(desc, source, stage, mapped, names: tuple[str, ...]) -> d
     zero give angle the assembly is the rigid one. The give's gains are joint gains set at spawn and by randomization
     (:mod:`humanoid_sim.transmissions.compliance`). The output body is the one body between the two that were adjacent,
     so that pair is returned to be excluded from contact as the joint did. Returns the asset metadata."""
-    from pxr import Gf, UsdGeom, UsdPhysics
-
     from humanoid_sim.transmissions.compliance import give_joint, output_body
 
     out = {"schema": GIVE_SCHEMA, "springs": {}, "outputs": {}, "adjacent_bodies": {}}
     for name in names:
-        joint = source.joints[name]
-        if not joint.GetPrim().IsA(UsdPhysics.RevoluteJoint):
-            raise ValueError(f"joint give: {name} is not a revolute joint")
-        parent, link = source.joint_bodies(name)
-        link_prim = source.bodies[link]
-        target = mapped(link_prim).GetParentPath().AppendChild(output_body(name))
-        if stage.GetPrimAtPath(target):
-            raise ValueError(f"joint give: {target} already exists")
-        body = UsdGeom.Xform.Define(stage, target)
-        body.AddTransformOp().Set(UsdGeom.Xformable(link_prim).GetLocalTransformation())
-        UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
-        mass = UsdPhysics.MassAPI.Apply(body.GetPrim())
-        mass.CreateMassAttr(OUTPUT_MASS_KG)
-        mass.CreateDiagonalInertiaAttr(Gf.Vec3f(OUTPUT_INERTIA_KG_M2))
-        mass.CreateCenterOfMassAttr(Gf.Vec3f(*joint.GetLocalPos1Attr().Get()))
-        mass.CreatePrincipalAxesAttr(Gf.Quatf(1))
-        drive = UsdPhysics.RevoluteJoint(stage.GetPrimAtPath(mapped(joint.GetPrim())))
-        drive.GetBody1Rel().SetTargets([target])
-        hinge = UsdPhysics.RevoluteJoint.Define(stage,
-                                                mapped(joint.GetPrim()).GetParentPath().AppendChild(give_joint(name)))
-        hinge.CreateBody0Rel().SetTargets([target])
-        hinge.CreateBody1Rel().SetTargets([mapped(link_prim)])
-        hinge.CreateAxisAttr(UsdPhysics.RevoluteJoint(joint.GetPrim()).GetAxisAttr().Get())
-        for create in (hinge.CreateLocalPos0Attr, hinge.CreateLocalPos1Attr):
-            create(joint.GetLocalPos1Attr().Get())
-        for create in (hinge.CreateLocalRot0Attr, hinge.CreateLocalRot1Attr):
-            create(joint.GetLocalRot1Attr().Get())
+        _split_joint(source, stage, mapped, name, upstream=name, body=output_body(name), hinge=give_joint(name),
+                     what="joint give")
         out["springs"][name] = give_joint(name)
         out["outputs"][name] = output_body(name)
-        out["adjacent_bodies"][name] = [parent, link]
+        out["adjacent_bodies"][name] = list(source.joint_bodies(name))
+    return out
+
+
+def _split_joint(source, stage, mapped, name: str, *, upstream: str, body: str, hinge: str, what: str) -> None:
+    """Put a new light body ``body`` and a coaxial revolute joint ``hinge`` between the joint ``upstream`` of joint
+    ``name``'s chain and ``name``'s link: ``upstream``'s second body becomes the new body (a sibling of the link, at its
+    pose, mass on the axis), and ``hinge`` joins that body to the link on ``name``'s axis and frames. ``upstream`` is
+    ``name`` itself, or a hinge already behind it (joint give, when the same joint also tilts)."""
+    from pxr import Gf, UsdGeom, UsdPhysics
+
+    joint = source.joints[name]
+    if not joint.GetPrim().IsA(UsdPhysics.RevoluteJoint):
+        raise ValueError(f"{what}: {name} is not a revolute joint")
+    _, link = source.joint_bodies(name)
+    link_prim = source.bodies[link]
+    target = mapped(link_prim).GetParentPath().AppendChild(body)
+    if stage.GetPrimAtPath(target):
+        raise ValueError(f"{what}: {target} already exists")
+    xform = UsdGeom.Xform.Define(stage, target)
+    xform.AddTransformOp().Set(UsdGeom.Xformable(link_prim).GetLocalTransformation())
+    UsdPhysics.RigidBodyAPI.Apply(xform.GetPrim())
+    mass = UsdPhysics.MassAPI.Apply(xform.GetPrim())
+    mass.CreateMassAttr(OUTPUT_MASS_KG)
+    mass.CreateDiagonalInertiaAttr(Gf.Vec3f(OUTPUT_INERTIA_KG_M2))
+    mass.CreateCenterOfMassAttr(Gf.Vec3f(*joint.GetLocalPos1Attr().Get()))
+    mass.CreatePrincipalAxesAttr(Gf.Quatf(1))
+    front = stage.GetPrimAtPath(mapped(joint.GetPrim()).GetParentPath().AppendChild(upstream)) \
+        if upstream != name else stage.GetPrimAtPath(mapped(joint.GetPrim()))
+    UsdPhysics.RevoluteJoint(front).GetBody1Rel().SetTargets([target])
+    new = UsdPhysics.RevoluteJoint.Define(stage, mapped(joint.GetPrim()).GetParentPath().AppendChild(hinge))
+    new.CreateBody0Rel().SetTargets([target])
+    new.CreateBody1Rel().SetTargets([mapped(link_prim)])
+    new.CreateAxisAttr(UsdPhysics.RevoluteJoint(joint.GetPrim()).GetAxisAttr().Get())
+    for create in (new.CreateLocalPos0Attr, new.CreateLocalPos1Attr):
+        create(joint.GetLocalPos1Attr().Get())
+    for create in (new.CreateLocalRot0Attr, new.CreateLocalRot1Attr):
+        create(joint.GetLocalRot1Attr().Get())
+
+
+TILT_SCHEMA = "load-tilt/v1"
+
+
+def _checked_tilt(desc, profile: dict, load_tilt) -> tuple[str, ...]:
+    """``load_tilt`` sorted, once checked: each name a 1:1 drive joint on a leg's chain."""
+    from humanoid_sim.transmissions.compliance import tilt_legs
+
+    names = tuple(sorted(set(load_tilt)))
+    if not names:
+        return names
+    legs = tilt_legs(desc, profile)
+    bad = [n for n in names if n not in legs]
+    if bad:
+        raise ValueError(f"load tilt: {bad} cannot carry it; joints a drive moves one to one on a leg's chain: "
+                         f"{list(legs)}")
+    return names
+
+
+def _author_load_tilt(desc, source, stage, mapped, names: tuple[str, ...]) -> dict:
+    """Behind each named drive joint, a body and a coaxial revolute joint ``<joint>_tilt`` to the link
+    (:func:`_split_joint`), after the joint's give if it has one. The tilt joint's PD and target are the plant's
+    (:mod:`humanoid_sim.transmissions.compliance`). Returns the asset metadata."""
+    from humanoid_sim.transmissions.compliance import give_joint, tilt_joint, tilt_output_body
+
+    out = {"schema": TILT_SCHEMA, "springs": {}, "outputs": {}, "adjacent_bodies": {}}
+    for name in names:
+        given = stage.GetPrimAtPath(mapped(source.joints[name].GetPrim()).GetParentPath().AppendChild(give_joint(name)))
+        _split_joint(source, stage, mapped, name, upstream=give_joint(name) if given else name,
+                     body=tilt_output_body(name), hinge=tilt_joint(name), what="load tilt")
+        out["springs"][name] = tilt_joint(name)
+        out["outputs"][name] = tilt_output_body(name)
+        out["adjacent_bodies"][name] = list(source.joint_bodies(name))
     return out
 
 

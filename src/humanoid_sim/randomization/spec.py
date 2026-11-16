@@ -37,8 +37,8 @@ AXES = ("x", "y", "z")
 @dataclass(frozen=True)
 class Param:
     kind: str  # "physics" | "device"
-    # "body" | "joint" | "drive" | "crank" (ankle crank drives) | "give" (joints built with give) | "env" |
-    # "axis" (the IMU's three axes)
+    # "body" | "joint" | "drive" | "crank" (ankle crank drives) | "give" (joints built with give) | "tilt" (joints built
+    # with load tilt) | "env" | "axis" (the IMU's three axes)
     target: str
     width: int = 1  # values per target (3 for a CoM offset)
     unit: str = ""
@@ -77,6 +77,14 @@ PARAMS: dict[str, Param] = {
     "joint_give_damping": Param("physics", "give", unit="N m s/rad",
                                 doc="joint give: damping of that spring, per joint; positive. Nominal: the profile's "
                                     "physics.joint_give, else the description's"),
+    "load_tilt_angle": Param("device", "tilt", unit="rad",
+                             doc="load tilt: the angle the link tilts past what the joint's encoder implies at and above "
+                                 "the saturation load, per joint (an asset built with load tilt), signed, in the joint's "
+                                 "own coordinates; 0 is no tilt. Nominal: the profile's physics.load_tilt.angle_rad"),
+    "load_tilt_saturation_load": Param("device", "tilt", unit="N",
+                                       doc="load tilt: the vertical load on the leg's sole at which the tilt saturates, "
+                                           "per joint; positive. Nominal: the profile's physics.load_tilt."
+                                           "saturation_load_n"),
     "drive_stiffness": Param("device", "drive", doc="drive's realized P gain over the demanded one"),
     "drive_damping": Param("device", "drive", doc="drive's realized D gain over the demanded one"),
     "torque_limit": Param("device", "drive", doc="scale of the torque-speed envelope and torque cap"),
@@ -90,7 +98,7 @@ PARAMS: dict[str, Param] = {
 }
 
 _SELECTORS = {"body": "bodies", "joint": "joints", "drive": "drives", "crank": "cranks", "give": "give_joints",
-              "shape": "shapes"}
+              "tilt": "tilt_joints", "shape": "shapes"}
 
 
 @dataclass(frozen=True)

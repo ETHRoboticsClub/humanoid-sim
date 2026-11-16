@@ -257,9 +257,28 @@ def give_gains(usd_path: Path, physics: dict, desc) -> dict[str, tuple[float, fl
             for joint in springs}
 
 
+def tilt_gains(usd_path: Path, physics: dict) -> dict[str, tuple[float, float]]:
+    """``{tilt joint: (stiffness N m/rad, damping N m s/rad)}`` of the asset's load tilt, the PD that holds the tilt
+    (``physics.load_tilt``: the same for every joint); empty for an asset without it."""
+    from humanoid_sim.model.asset import tilt_springs
+
+    springs = tilt_springs(usd_path)
+    if not springs:
+        return {}
+    block = physics.get("load_tilt") or {}
+    out = []
+    for key in ("stiffness_nm_per_rad", "damping_nm_s_per_rad"):
+        v = block.get(key)
+        if v is None or isinstance(v, bool) or not math.isfinite(float(v)) or float(v) <= 0:
+            raise ValueError(f"{usd_path} has load tilt: physics.load_tilt.{key} needs a positive value, not {v!r}")
+        out.append(float(v))
+    return {joint: tuple(out) for joint in springs.values()}
+
+
 def compliance_gains(usd_path: Path, physics: dict, desc) -> dict[str, tuple[float, float]]:
-    """Every spring of the asset, crank springs (:func:`spring_gains`) and joint give (:func:`give_gains`), by joint."""
-    return {**spring_gains(usd_path, physics), **give_gains(usd_path, physics, desc)}
+    """Every spring of the asset, crank springs (:func:`spring_gains`), joint give (:func:`give_gains`) and the PD of
+    load tilt (:func:`tilt_gains`), by joint."""
+    return {**spring_gains(usd_path, physics), **give_gains(usd_path, physics, desc), **tilt_gains(usd_path, physics)}
 
 
 def articulation_cfg(usd_path: Path, props: JointProperties, *, fixed_base: bool = False, base_joints: bool = False,
