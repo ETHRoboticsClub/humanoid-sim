@@ -10,7 +10,7 @@ This page is for someone writing a task. The drive model itself is in [drives.md
 
 - The robot starts in the home pose (the default of `robot_scene_cfg`, see [The initial pose](#the-initial-pose)), and the demands are taken from the articulation's `data.default_joint_pos`.
 - The ground is a heightfield of random bumps up to 25 mm (`heightfield_terrain_cfg` with one `HfRandomUniformTerrainCfg` tile type) laid out as one row of 2.5 m tiles, one tile per robot, without a curriculum. The tile mix is the example's own; a task takes its terrain from its generator in humanoid-learning. Isaac Lab puts every env assigned to a tile at that tile's origin, so envs that share a tile spawn on the same spot. `--flat` uses the flat ground instead.
-- Robot friction (0.4 to 1.0), a payload of 0 to 4.5 kg on `base_link` and one latency before the drives per env (10 to 20 ms, which the drives' own delay follows) are randomized. The terrain and the flat ground have friction 0 so the robot's value decides.
+- Robot friction (0.4 to 1.0), a payload of 0 to 4.5 kg on `base_link` and one latency before the drives per env (0 to 3 ms, which the drives' own delay follows) are randomized. The terrain and the flat ground have friction 0 so the robot's value decides.
 - A `ForcePush` pushes `base_link` with 40 to 120 N for 0.1 to 0.2 s, with 1.5 to 3 s between pushes. The loop steps it once per policy step.
 - With `--rrd`, a `SceneRecorder` records every robot to a Rerun file, and `plant.log` adds robot 0's left knee and base height to the same recording, every `--record-every` policy steps (default 2). See [Recording a scene](#recording-a-scene).
 
@@ -52,7 +52,7 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `reporting` | `True` | Quantize the measured drive feedback the way the drives report it |
 | `feedback_noise` | `True` | With `reporting`: add the drives' measured velocity dither and torque noise ([Reporting in training](sensors.md#reporting-in-training)) |
 | `feedback_sampling` | `True` | Hold the measured drive feedback between the drive's samples, 3.0 to 7.5 ms apart ([Feedback age](sensors.md#feedback-age)); needs the profile's `devices.feedback_sampling` |
-| `command_jitter_ns` | `0` | Move each demand's arrival at each drive by a uniform integer draw in +-this many ns (generator seeded `seed + 4`). Off: no measurement of the per-cycle jitter yet. Arrivals stay in order |
+| `command_jitter_ns` | `0` | Move each demand's arrival at each drive by a uniform integer draw in +-this many ns (generator seeded `seed + 4`). Off by default. On the V1, ±1.2 ms (1_200_000) matches the measured spread ([drives.md](drives.md#arrival-and-latency)). Arrivals stay in order |
 | `cuda_graph` | `False` | Capture drive feedback, target shaping and IMU delivery on CUDA |
 | `compile` | `False` | Fuse the captured drive and IMU math with `torch.compile`; requires `cuda_graph` |
 | `queue_capacity` | `8` | Demands in flight per env; needs at least (max latency + drive delay) / demand period + 1 |
@@ -196,7 +196,7 @@ def fallen(env):
 class Actions:
     drives = PlantActionCfg(class_type=PoseOffsets, action_dim=22, plant=TrainPlantCfg(randomization=[
         {"param": "friction", "dist": "uniform", "range": [0.4, 1.0], "op": "set"},
-        {"param": "latency", "dist": "uniform", "range": [0.010, 0.020], "op": "set", "per_target": False},
+        {"param": "latency", "dist": "uniform", "range": [0.0, 0.003], "op": "set", "per_target": False},
         {"param": "body_inertia", "dist": "uniform", "range": [0.8, 1.2], "op": "scale"},
     ]))
 
@@ -439,9 +439,7 @@ RANDOMIZATION = [
     {"param": "drive_stiffness", "dist": "uniform", "range": [0.9, 1.1], "op": "scale"},
     {"param": "drive_damping", "dist": "uniform", "range": [0.9, 1.1], "op": "scale"},
     {"param": "torque_limit", "dist": "uniform", "range": [0.85, 1.0], "op": "scale"},
-    {"param": "latency", "dist": "uniform", "range": [0.010, 0.020], "op": "set", "per_target": False},
-    {"param": "latency", "drives": ".*ANK.*", "dist": "uniform", "range": [0.010, 0.020], "op": "add",
-     "per_target": False},
+    {"param": "latency", "dist": "uniform", "range": [0.0, 0.003], "op": "set", "per_target": False},
     {"param": "encoder_offset", "dist": "uniform", "range": [-0.026, 0.026], "op": "add"},
     {"param": "encoder_offset", "drives": "maxonHEJ50._ANK.*", "dist": "uniform", "range": [-0.14, 0.14],
      "op": "add"},

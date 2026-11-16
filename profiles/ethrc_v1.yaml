@@ -50,10 +50,14 @@ devices:
     HEJ70-48-50: {counts_per_revolution: 16384}
     HEJ50-48-30: {counts_per_revolution: 16384}
   # Controls' command path, a frame's stamp to the drive's position demand starting to move, mean: the plant puts
-  # this less each drive's own delay (drive_delay_s) before the drive, as the nominal `latency`
-  # (Controls scripts/sim/command_delay.py over the 2026-10-28 excitation datasets, controls 462dac7d9: 6.6 ms
-  # mean, 3.6-10.0 ms p5-p95, 18 1:1 joints; the ankle cranks are unmeasured and go through the same callback).
-  command_path: {frame_to_drive_ns: 6600000}
+  # this less each drive's own delay (drive_delay_s) before the drive, as the nominal `latency`. Gantry PACE
+  # rosbags of 2026-11-16 (pace_LB_A..D, Controls 68e0c9d74, s3://ethrc-rc-humanoid-ckpts/mponced/pace/), the onset
+  # of Controls scripts/sim/command_delay.py (first 0x6062 change after a target step, 200 Hz feedback) over the
+  # 8 HEJ90 leg drives and the 4 ankle cranks: 127,182 steps, 5.3 ms mean (cranks 5.25, HEJ90 5.31), 3.3-8.2 ms
+  # p5-p95 with the feedback interval's censoring in it, 0.68 ms standard deviation with it removed. Frame stamp to
+  # the controller's APPLIED is 1.1 ms of it (0.3-1.8 ms, the wait for the next 1.5 ms cycle); APPLIED to the onset
+  # lies in 3.75-5.25 ms on every drive. Arm drives were not excited.
+  command_path: {frame_to_drive_ns: 5300000}
   # The IMU's path past its CAN receipt stamp to the controller's topic, mean: the training plant holds each sample
   # this long before delivery (passive /rt/imu subscriber on the idle V1, 2026-10-31, 24000 samples: 2.09 ms mean,
   # 1.25-5.12 ms p5-p95, Madgwick and the relay 0.6 ms of it). The MTi's own delay before the stamp is unmeasured
