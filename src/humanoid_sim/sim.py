@@ -80,7 +80,12 @@ class SimCore:
         self.profile = load_profile(robot, physics_overrides=physics_overrides)
         phys = self.profile["physics"]
         self.period_ns = int(period_ns or phys["period_ns"])
-        from humanoid_sim.physics.isaaclab import IsaacLabCfg, IsaacLabRobot, solver_settings, spring_gains
+        from humanoid_sim.physics.isaaclab import (
+            IsaacLabCfg,
+            IsaacLabRobot,
+            compliance_gains,
+            solver_settings,
+        )
 
         self.solver, settings = solver_settings(phys, solver)
         self.integrator = integrator or settings["integrator"]
@@ -110,7 +115,7 @@ class SimCore:
             imu=imu, extra_imus={n: s.frame for n, s in extra_imus.items()}, contacts=contacts, rerun=rerun,
             rerun_rrd=rerun_rrd, scene=scene, objects=objects, entities=entities,
             render_each_step=render_each_step, terrain=None if self.terrain is None else self.terrain.cfg,
-            springs=spring_gains(usd_path, phys) or None, gravity_m_s2=gravity_m_s2),
+            springs=compliance_gains(usd_path, phys, self.desc) or None, gravity_m_s2=gravity_m_s2),
             props=props)
         self.scene = scene
         self.ground = self.backend.ground
@@ -120,12 +125,15 @@ class SimCore:
         order = [self.backend.joint_names.index(n) for n in joints]
         self._to_plant = torch.tensor(order, device=self.plant.cfg.device)
         self._to_solver = torch.tensor([self.backend.joint_names.index(n) for n in physical], device=device)
-        # Crank springs (an asset built with ankle compliance), in the description's crank drive order: held at a
-        # zero target, written at zero with every state write.
-        from humanoid_sim.model.asset import compliance_springs
+        # Crank springs (an asset built with ankle compliance) in the description's crank drive order, and joint give
+        # (built with joint_give) in the description's joint order: held at a zero target, written at zero with every
+        # state write.
+        from humanoid_sim.model.asset import compliance_springs, give_springs
 
         self.springs = compliance_springs(usd_path)
-        self._springs = torch.tensor([self.backend.joint_names.index(n) for n in self.springs.values()],
+        self.gives = give_springs(usd_path)
+        self._springs = torch.tensor([self.backend.joint_names.index(n)
+                                      for n in [*self.springs.values(), *self.gives.values()]],
                                      device=device, dtype=torch.long)
         if self.native_state is not None:
             self.write_joint_state(*self.joint_state())

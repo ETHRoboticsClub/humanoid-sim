@@ -2,7 +2,8 @@
 
     humanoid-sim [--solver mjwarp|kamino] <command>  Newton solver for the commands that step physics
                                                    (default: the profile's)
-    humanoid-sim build-asset [--base-joints] [--ankle-compliance]  robot USD from the description (Isaac Lab image)
+    humanoid-sim build-asset [--base-joints] [--ankle-compliance] [--joint-give JOINT ...]
+                                                   robot USD from the description (Isaac Lab image)
     humanoid-sim replay <exc-dir> [--period-ms PERIOD] [--base yaw|orientation|fixed] [--terrain FILE]
                                                    drive-level replay, scored against the capture;
                                                    base following the capture's IMU yaw (default), or fixed
@@ -85,9 +86,12 @@ def _usd(args, *, base_joints: bool = False) -> Path:
 def cmd_build_asset(args) -> int:
     from humanoid_sim.model.asset import build_asset, load_profile
     from humanoid_sim.model.description import Description
+    from humanoid_sim.transmissions.compliance import resolve_give
 
-    usd = build_asset(Description.load(args.robot), load_profile(args.robot), Path(args.assets), force=args.force,
-                      base_joints=args.base_joints, ankle_compliance=args.ankle_compliance)
+    desc = Description.load(args.robot)
+    give = resolve_give(desc, args.joint_give) if args.joint_give else ()
+    usd = build_asset(desc, load_profile(args.robot), Path(args.assets), force=args.force,
+                      base_joints=args.base_joints, ankle_compliance=args.ankle_compliance, joint_give=give)
     print(usd)
     return 0
 
@@ -403,6 +407,10 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--ankle-compliance", action="store_true",
                    help="the variant with a spring between each ankle crank drive and its crank arm (physics."
                         "ankle_compliance gives its stiffness and damping)")
+    b.add_argument("--joint-give", nargs="+", metavar="JOINT",
+                   help="the variant with a spring between each named drive joint's encoder side and its link: joint "
+                        "names or regexes over them (physics.joint_give, else the description, gives the stiffness "
+                        "and damping)")
     b.set_defaults(func=cmd_build_asset)
 
     r = sub.add_parser("replay")

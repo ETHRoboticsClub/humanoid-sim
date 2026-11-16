@@ -54,7 +54,7 @@ class IsaacLabCfg:
     solver: str = "mjwarp"
     settings: dict | None = None  # the solver's block of the profile's physics
     integrator: str | None = None  # overrides the solver block's
-    springs: dict | None = None  # crank spring joint -> (stiffness, damping), :func:`spring_gains`
+    springs: dict | None = None  # spring joint -> (stiffness, damping), :func:`compliance_gains`
     gravity_m_s2: tuple[float, float, float] | None = None  # None: Isaac Lab's default, Earth's
     fixed_base: bool = False
     base_height_m: float = 1.0
@@ -229,13 +229,46 @@ def spring_gains(usd_path: Path, physics: dict) -> dict[str, tuple[float, float]
             for drive, joint in springs.items()}
 
 
+def give_gains(usd_path: Path, physics: dict, desc) -> dict[str, tuple[float, float]]:
+    """``{give joint: (stiffness N m/rad, damping N m s/rad)}`` of the asset's joint give, per joint from the profile's
+    ``physics.joint_give`` (a number for every joint or a mapping by joint name; a joint the mapping omits, or a
+    ``null``, falls back to the description's ``give_stiffness_nm_per_rad`` and ``give_damping_nm_s_per_rad`` of that
+    joint); empty for an asset without give. Raises when the asset has give and neither source gives a positive value
+    for a joint."""
+    from humanoid_sim.model.asset import give_springs
+    from humanoid_sim.transmissions.compliance import give_joint
+
+    springs = give_springs(usd_path)
+    if not springs:
+        return {}
+    knobs = physics.get("joint_give") or {}
+
+    def value(key, joint, described):
+        v = knobs.get(key)
+        v = v.get(joint) if isinstance(v, dict) else v
+        v = described if v is None else v
+        if v is None or not math.isfinite(float(v)) or float(v) <= 0:
+            raise ValueError(f"{usd_path} has joint give: physics.joint_give.{key} or the description needs a positive "
+                             f"value for {joint}, not {v!r}")
+        return float(v)
+
+    return {give_joint(joint): (value("stiffness_nm_per_rad", joint, desc.joints[joint].give_stiffness),
+                                value("damping_nm_s_per_rad", joint, desc.joints[joint].give_damping))
+            for joint in springs}
+
+
+def compliance_gains(usd_path: Path, physics: dict, desc) -> dict[str, tuple[float, float]]:
+    """Every spring of the asset, crank springs (:func:`spring_gains`) and joint give (:func:`give_gains`), by joint."""
+    return {**spring_gains(usd_path, physics), **give_gains(usd_path, physics, desc)}
+
+
 def articulation_cfg(usd_path: Path, props: JointProperties, *, fixed_base: bool = False, base_joints: bool = False,
                      self_collision: bool = True, base_height_m: float = 1.0, contact_sensors: bool = False,
                      joint_pos: list[float] | None = None, springs: dict[str, tuple[float, float]] | None = None):
     """The robot as an Isaac Lab articulation: constant solver PD ``k0, d0`` and the description's passive
     properties per joint, initially at ``joint_pos`` (``props.names`` order; default: the standing pose); base
-    joints (if the asset has them) on a stiff PD; crank springs (``springs``, :func:`spring_gains`) as a PD to zero
-    with their own gains, at zero."""
+    joints (if the asset has them) on a stiff PD; springs (``springs``, :func:`compliance_gains`: crank springs and
+    joint give) as a PD to zero with their own gains, at zero."""
     import isaaclab.sim as sim_utils
     from isaaclab.actuators import ImplicitActuatorCfg
     from isaaclab.assets import ArticulationCfg
@@ -258,7 +291,7 @@ def articulation_cfg(usd_path: Path, props: JointProperties, *, fixed_base: bool
         joint_pos |= {f"^{n}$": 0.0 for n in names}
     if springs:
         names = list(springs)
-        actuators["ankle_compliance"] = ImplicitActuatorCfg(
+        actuators["springs"] = ImplicitActuatorCfg(
             joint_names_expr=[f"^{n}$" for n in names],
             stiffness=_per_joint(names, [springs[n][0] for n in names]),
             damping=_per_joint(names, [springs[n][1] for n in names]),

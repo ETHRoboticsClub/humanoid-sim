@@ -83,6 +83,17 @@ physics:
   ankle_compliance:
     stiffness_nm_per_rad: null
     damping_nm_s_per_rad: null
+  # Joint give, for an asset built with `build-asset --joint-give JOINT...`: a torsional spring and damper between a
+  # drive joint's encoder side (the drive's output, what the measured position reports) and its link
+  # (transmissions/compliance.py). Per joint; a number for every joint or a mapping by joint name. A joint the block
+  # leaves null falls back to the description's give_stiffness_nm_per_rad and give_damping_nm_s_per_rad for that joint
+  # (on the joint, else its family); an asset with give refuses to spawn when neither gives a positive value. The values
+  # are the caller's (humanoid-learning fits them). An asset without give ignores this block. Kamino treats the PD
+  # implicitly; MJWarp (rk4, explicit) is stable while the local mode, the drive's armature against the link's inertia
+  # about the axis, stays under rk4's limit (docs/drives.md).
+  joint_give:
+    stiffness_nm_per_rad: null
+    damping_nm_s_per_rad: null
   # Kamino (beta in Newton 1.6): maximal coordinates, hard joint-limit and contact constraints, P-ADMM forward
   # dynamics, contacts from Newton's collision pipeline. Contact friction mixes by the larger coefficient, as
   # MJWarp does. Not yet checked against MJWarp or the captures (modeled).
