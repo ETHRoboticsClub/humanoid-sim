@@ -28,8 +28,8 @@ POLICY_PERIOD_NS = 20 * NS_PER_MS
 
 def randomization(desc, payload_body: str) -> list[dict]:
     """The workload's randomization for ``desc``: a payload of up to 4.5 kg on ``payload_body`` (the bench passes the
-    heaviest body: the V1's upper body, the G1's torso), and extra command latency and encoder error on the ankle
-    cranks of a robot that has them (the V1's; the larger offset on the left ankle's, whose zero is suspect)."""
+    heaviest body: the V1's upper body, the G1's torso), and extra encoder error on the left ankle's cranks of a robot
+    that has them (the V1's, whose zero is suspect)."""
     terms = [
         {"param": "body_mass", "dist": "uniform", "range": [0.9, 1.1], "op": "scale"},
         {"param": "body_mass", "bodies": f"^{payload_body}$", "dist": "uniform", "range": [0.0, 4.5], "op": "add"},
@@ -38,15 +38,11 @@ def randomization(desc, payload_body: str) -> list[dict]:
         {"param": "drive_stiffness", "dist": "uniform", "range": [0.9, 1.1], "op": "scale"},
         {"param": "drive_damping", "dist": "uniform", "range": [0.9, 1.1], "op": "scale"},
         {"param": "torque_limit", "dist": "uniform", "range": [0.85, 1.0], "op": "scale"},
-        {"param": "latency", "dist": "uniform", "range": [0.010, 0.020], "op": "set", "per_target": False},
+        {"param": "latency", "dist": "uniform", "range": [0.0, 0.003], "op": "set", "per_target": False},
         {"param": "encoder_offset", "dist": "uniform", "range": [-0.026, 0.026], "op": "add"},
         {"param": "imu_gyro_bias", "dist": "normal", "range": [0.0, 0.0015], "op": "add"},
     ]
-    cranks = [n for n, d in desc.drives.items() if d.crank is not None]
     left = [n for lk in desc.linkages if lk.side == "l" for n in (lk.upper, lk.lower)]
-    if cranks:
-        terms.insert(8, {"param": "latency", "drives": "^(" + "|".join(cranks) + ")$", "dist": "uniform",
-                         "range": [0.010, 0.020], "op": "add", "per_target": False})
     if left:
         terms.insert(-1, {"param": "encoder_offset", "drives": "^(" + "|".join(left) + ")$", "dist": "uniform",
                           "range": [-0.14, 0.14], "op": "add"})

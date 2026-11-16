@@ -69,7 +69,7 @@ def make_env(num_envs: int, device: str, *, flat: bool):
         drives = PlantActionCfg(class_type=ScriptedDrives, action_dim=22, plant=TrainPlantCfg(randomization=[
             {"param": "friction", "dist": "uniform", "range": [0.4, 1.0], "op": "set"},
             {"param": "body_mass", "bodies": "base_link", "dist": "uniform", "range": [0.0, 4.5], "op": "add"},
-            {"param": "latency", "dist": "uniform", "range": [0.010, 0.020], "op": "set", "per_target": False},
+            {"param": "latency", "dist": "uniform", "range": [0.0, 0.003], "op": "set", "per_target": False},
         ]))
 
     @configclass
