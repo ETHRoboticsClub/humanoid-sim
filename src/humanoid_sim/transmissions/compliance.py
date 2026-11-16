@@ -23,13 +23,27 @@ statics with ``k = k_a r²``, ``r`` the crank's moment arm about the shaft acros
 
 Nothing here is a robot value: the stiffness and damping are knobs (the profile's ``physics.ankle_compliance``, the
 plant's ``ankle_spring_stiffness`` and ``ankle_spring_damping``), fitted in humanoid-learning.
+
+Joint give is the same mechanism for any 1:1 drive joint (the V1's hips and knee first). An asset built with
+``joint_give`` (:func:`humanoid_sim.model.usd.build_asset`) splits each named joint in two: the joint itself, still
+named as the description names it and still the drive's, turns a light output body, and a coaxial revolute joint
+``<joint>_give`` joins that output to the link. Its joint PD, target zero, is the give: stiffness ``k`` (N m/rad) and
+damping ``c`` (N m s/rad) per joint, from the profile's ``physics.joint_give`` or the description (a joint's
+``give_stiffness_nm_per_rad`` and ``give_damping_nm_s_per_rad``, else its family's), randomizable per env
+(``joint_give_stiffness``, ``joint_give_damping``). The drive's encoder reads the output, so the measured joint position
+(drive feedback, :meth:`~humanoid_sim.train.plant.RobotPlant.measured`, ``Truth.joint_pos``) stays the drive side's,
+while the link sits ``θ`` further, ``Truth.joint_give_rad``, in the joint's own coordinates. Statics: a torque ``τ`` on
+the link about the joint's axis, held by the drive, deflects the link by ``τ / k`` (:func:`give_deflection`).
 """
 
 from __future__ import annotations
 
+import re
+
 import torch
 
 SPRING_SUFFIX = "_spring"
+GIVE_SUFFIX = "_give"
 OUTPUT_SUFFIX = "_output"
 
 
@@ -47,6 +61,38 @@ def spring_joints(desc) -> dict[str, str]:
 def output_body(crank_joint: str) -> str:
     """The name of the drive output body the asset adds behind ``crank_joint``."""
     return crank_joint + OUTPUT_SUFFIX
+
+
+def give_joint(joint: str) -> str:
+    """The name of the give joint the asset adds behind drive joint ``joint``."""
+    return joint + GIVE_SUFFIX
+
+
+def give_candidates(desc) -> list[str]:
+    """The joints that can carry give, in the description's order: those a drive moves one to one."""
+    return [n for n in desc.joints if any(d.crank is None and d.joints == (n,) for d in desc.drives.values())]
+
+
+def resolve_give(desc, patterns) -> tuple[str, ...]:
+    """The joint names ``patterns`` select (each a joint name or a regex over them, matched in full), in the
+    description's order. Raises for a pattern that selects nothing or a joint that cannot carry give (a joint no
+    drive moves one to one: the ankle hinges, whose compliance is the cranks')."""
+    if isinstance(patterns, str):
+        patterns = [patterns]
+    candidates = give_candidates(desc)
+    chosen = set()
+    for pattern in patterns:
+        found = [n for n in candidates if re.fullmatch(pattern, n)]
+        if not found:
+            raise ValueError(f"joint give: {pattern!r} selects no joint of {candidates}")
+        chosen.update(found)
+    return tuple(n for n in candidates if n in chosen)
+
+
+def give_deflection(load: torch.Tensor, stiffness: torch.Tensor) -> torch.Tensor:
+    """Static link deflection ``τ / k`` (rad) under torque ``τ`` (N m) on the link about the joint's axis, held by
+    the drive, for a give of stiffness ``k`` (N m/rad)."""
+    return load / stiffness
 
 
 def foot_compliance(jacobian: torch.Tensor, stiffness: torch.Tensor) -> torch.Tensor:

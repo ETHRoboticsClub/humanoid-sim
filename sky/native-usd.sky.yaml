@@ -22,12 +22,14 @@ run: |
   humanoid-sim build-asset
   humanoid-sim build-asset --base-joints
   humanoid-sim build-asset --ankle-compliance
+  humanoid-sim build-asset --joint-give 'hip_flexion_.*' 'hip_abduction_.*' 'knee_flexion_.*'
   mkdir -p outputs/native-usd
   # One pytest process per file: Isaac Lab keeps one simulation per process, and a test that fails while building one
   # would leave it to every later test of the same process.
   failed=0
   for f in test_native_usd test_native_integration test_description_delivery test_native_parameters test_native_physics \
-      test_ankle_compliance test_ankle_compliance_physics test_kamino_crank_stops_physics; do
+      test_ankle_compliance test_ankle_compliance_physics test_kamino_crank_stops_physics test_joint_give \
+      test_joint_give_physics; do
     pytest -v -s --junitxml="outputs/native-usd/$f.xml" "tests/$f.py" > "outputs/native-usd/$f.log" 2>&1 || failed=1
     echo "$f: $(tail -1 "outputs/native-usd/$f.log")"
   done

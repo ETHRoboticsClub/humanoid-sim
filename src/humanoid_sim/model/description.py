@@ -87,6 +87,10 @@ class Joint:
     effort_peak: float
     velocity: float
     dynamic_friction: float  # Coulomb friction while sliding, Nm (``dynamic_friction``, else ``friction``)
+    # Give between the drive's encoder and the link (``give_stiffness_nm_per_rad``, ``give_damping_nm_s_per_rad`` on
+    # the joint, else its family); None where the description records none.
+    give_stiffness: float | None = None
+    give_damping: float | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +187,12 @@ class Description:
                     raise ValueError(f"{name}: no {key!r} on the joint or its family")
                 return float(v)
 
+            def optional(key, j=j, family=family, name=name):
+                v = j.get(key, family.get(key))
+                if v is not None and not (math.isfinite(float(v)) and float(v) > 0):
+                    raise ValueError(f"{name}: {key} {v!r} must be finite and positive")
+                return None if v is None else float(v)
+
             friction = value("friction")
             # A family's dynamic friction goes with the family's static one, never with a joint's own.
             own = "friction" in j
@@ -195,6 +205,7 @@ class Description:
                 armature=float(j["armature_joint"]) if "armature_joint" in j else value("armature"),
                 damping=value("damping"), friction=friction,
                 effort_peak=value("effort"), velocity=float(j["velocity"]), dynamic_friction=dynamic,
+                give_stiffness=optional("give_stiffness_nm_per_rad"), give_damping=optional("give_damping_nm_s_per_rad"),
             )
         return out
 

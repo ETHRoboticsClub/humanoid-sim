@@ -92,7 +92,7 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
     from isaaclab.scene import InteractiveSceneCfg
     from isaaclab.utils import configclass
 
-    from humanoid_sim.physics.isaaclab import articulation_cfg, ground_cfg, spring_gains
+    from humanoid_sim.physics.isaaclab import articulation_cfg, compliance_gains, ground_cfg
 
     check_asset_robot(usd, robot)
     if scene is not None and terrain is not None:
@@ -110,7 +110,8 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
     class RobotSceneCfg(InteractiveSceneCfg):
         pass
 
-    springs = spring_gains(usd, profile["physics"])  # crank springs of an asset built with ankle compliance
+    # Crank springs and joint give of an asset built with them
+    springs = compliance_gains(usd, profile["physics"], Description.load(robot))
     cfg = RobotSceneCfg(num_envs=num_envs, env_spacing=env_spacing, replicate_physics=True)
     cfg.robot = articulation_cfg(
         usd, props, base_height_m=height + STANDING_CLEARANCE_M, contact_sensors=contacts,

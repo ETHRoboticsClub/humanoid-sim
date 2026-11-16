@@ -86,6 +86,9 @@ class Truth:
     # [E, C] each crank arm's angle past its drive's reading (drive frame), in RobotPlant.cranks order; None without
     # ankle compliance. The foot's own deflection is in joint_pos.
     ankle_spring_rad: torch.Tensor | None = None
+    # [E, G] each give joint's link angle past the joint's reading (the drive's side, ``joint_pos``), in the joint's own
+    # coordinates, in RobotPlant.give_joints order; None without joint give. The link's angle is the sum.
+    joint_give_rad: torch.Tensor | None = None
 
 
 def command_latency_ns(profile: dict, drive_delay_ns: torch.Tensor) -> torch.Tensor:
@@ -197,6 +200,13 @@ class RobotPlant:
                                         if d in self.springs], device=self.device, dtype=torch.long)
         self._spring_sign = torch.tensor([float(self.desc.drives[d].sign) for d in self.cranks if d in self.springs],
                                          device=self.device)
+        # Joint give: the asset's springs behind drive joints (transmissions/compliance.py), by joint.
+        from humanoid_sim.transmissions.compliance import give_joint
+
+        self.give_joints = [n for n in self.joints if give_joint(n) in robot.joint_names]
+        self.gives = {n: give_joint(n) for n in self.give_joints}
+        self.give_ids = torch.tensor([robot.joint_names.index(g) for g in self.gives.values()], device=self.device,
+                                     dtype=torch.long)
         self.drives = self.core.map.drive_names
         d = len(self.drives)
         self.t_ns = 0
@@ -267,11 +277,14 @@ class RobotPlant:
             raise ValueError("randomizing imu_drop_probability needs the IMU")
         if used & {"ankle_spring_stiffness", "ankle_spring_damping"} and not self.springs:
             raise ValueError("randomizing ankle_spring_* needs an asset built with ankle compliance")
+        if used & {"joint_give_stiffness", "joint_give_damping"} and not self.gives:
+            raise ValueError("randomizing joint_give_* needs an asset built with joint give")
         if {"friction", "shape_friction"} <= used:
             raise ValueError("choose per-env friction or per-shape friction, not both")
         self.randomizer = Randomizer(specs, {k: v for k, v in nominal.items() if k in used},
                                      {"body": list(robot.body_names), "joint": self.core.solver_map.joint_names,
                                       "drive": self.drives, "crank": [d for d in self.cranks if d in self.springs],
+                                      "give": self.give_joints,
                                       "shape": [f"shape_{i}" for i in range(nominal.get("shape_friction", torch.empty(e, 0)).shape[1])]},
                                      num_envs=e, device=self.device, seed=cfg.seed, level=cfg.level)
         from humanoid_sim.physics.crank_stops import StopSolref, check_crank_stops, kamino_crank_stops
@@ -339,6 +352,9 @@ class RobotPlant:
         if self.springs:  # the gains the scene spawned the springs with (the profile's physics.ankle_compliance)
             out["ankle_spring_stiffness"] = data.joint_stiffness.torch[:, self.spring_ids].clone()
             out["ankle_spring_damping"] = data.joint_damping.torch[:, self.spring_ids].clone()
+        if self.gives:  # likewise: the gains joint give spawned with (the profile's physics.joint_give, or the description)
+            out["joint_give_stiffness"] = data.joint_stiffness.torch[:, self.give_ids].clone()
+            out["joint_give_damping"] = data.joint_damping.torch[:, self.give_ids].clone()
         return out
 
     def _device_nominal(self) -> dict[str, torch.Tensor]:
@@ -400,6 +416,11 @@ class RobotPlant:
                 if not bool((v[name] > 0).all()):
                     raise ValueError(f"{name} must be positive")
                 getattr(r, f"write_joint_{gain}_to_sim_index")(**{gain: v[name].float()}, joint_ids=self.spring_ids)
+        for name, gain in (("joint_give_stiffness", "stiffness"), ("joint_give_damping", "damping")):
+            if name in v:
+                if not bool((v[name] > 0).all()):
+                    raise ValueError(f"{name} must be positive")
+                getattr(r, f"write_joint_{gain}_to_sim_index")(**{gain: v[name].float()}, joint_ids=self.give_ids)
         if "body_mass" in v:
             r.set_masses_index(masses=v["body_mass"])
         if "body_mass" in v or "body_inertia" in v:
@@ -522,9 +543,10 @@ class RobotPlant:
         self.robot.write_joint_state_to_sim_index(
             position=torch.stack([values[n] for n in names], -1).to(q.dtype),
             velocity=torch.stack([rates[n] for n in names], -1).to(qd.dtype), joint_ids=ids, env_ids=env_ids)
-        if len(self.spring_ids):  # crank springs relaxed: the linkage closes as the rigid one does
-            zero = torch.zeros(len(env_ids), len(self.spring_ids), device=self.device, dtype=q.dtype)
-            self.robot.write_joint_state_to_sim_index(position=zero, velocity=zero, joint_ids=self.spring_ids,
+        relaxed = torch.cat([self.spring_ids, self.give_ids])
+        if len(relaxed):  # crank springs and joint give relaxed: the linkage closes as the rigid one does
+            zero = torch.zeros(len(env_ids), len(relaxed), device=self.device, dtype=q.dtype)
+            self.robot.write_joint_state_to_sim_index(position=zero, velocity=zero, joint_ids=relaxed,
                                                       env_ids=env_ids)
 
     def _write_friction(self) -> None:
@@ -607,8 +629,9 @@ class RobotPlant:
         spring = None
         if len(self.spring_ids):
             spring = data.joint_pos.torch[:, self.spring_ids] * self._spring_sign
+        give = data.joint_pos.torch[:, self.give_ids] if len(self.give_ids) else None
         return Truth(q, qd, data.root_link_pose_w.torch, data.root_com_vel_w.torch[:, :3],
-                     data.root_com_ang_vel_b.torch, self.core.feedback(*self.solver_state()), forces, spring)
+                     data.root_com_ang_vel_b.torch, self.core.feedback(*self.solver_state()), forces, spring, give)
 
     # -- reset ------------------------------------------------------------------------------------
 
