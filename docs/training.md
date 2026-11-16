@@ -412,6 +412,8 @@ The full table is `PARAMS` in `src/humanoid_sim/randomization/spec.py`. E is the
 | `crank_stop_damping` | physics | `[E, 1]` | ratio | 1 | Damping of the same stops over the nominal (`damping_nm_s_per_rad` on Kamino) |
 | `joint_give_stiffness` | physics | `[E, G]` | N m/rad | the profile's, else the description's | Stiffness of the spring between a drive joint's encoder side and its link, per joint of an asset built with `--joint-give` (selector `give_joints`); positive ([drives.md](drives.md#joint-give)) |
 | `joint_give_damping` | physics | `[E, G]` | N m s/rad | the profile's, else the description's | Damping of that spring, per joint; positive |
+| `load_tilt_angle` | device | `[E, T]` | rad | the profile's `physics.load_tilt.angle_rad` (0: off) | The angle at which a leg joint's link tilts past what its encoder implies under load, per joint of an asset built with `--load-tilt` (selector `tilt_joints`), signed, in the joint's own coordinates ([drives.md](drives.md#load-tilt)) |
+| `load_tilt_saturation_load` | device | `[E, T]` | N | the profile's `physics.load_tilt.saturation_load_n` | The vertical load on the leg's sole at which that tilt saturates, per joint; positive |
 | `drive_stiffness` | device | `[E, 22]` | ratio | 1 | Realized P gain over the demanded one |
 | `drive_damping` | device | `[E, 22]` | ratio | 1 | Realized D gain over the demanded one |
 | `torque_limit` | device | `[E, 22]` | ratio | 1 | Scale on the torque-speed envelope and the torque cap |
