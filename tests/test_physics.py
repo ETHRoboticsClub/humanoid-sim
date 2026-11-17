@@ -14,7 +14,7 @@ from conftest import (
     urdf_mass_kg,
 )
 
-from humanoid_sim.model.asset import load_profile
+from humanoid_sim.model.asset import asset_meta, load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.timing import NS_PER_MS
 
@@ -81,7 +81,7 @@ def test_home_and_start_poses_have_no_self_contact(robot):
 
     desc, profile = Description.load(robot), load_profile(robot)
     joints = list(desc.joints)
-    kin = RobotKinematics(built_usd(robot), joints)
+    kin = RobotKinematics(built_usd(robot), joints, self_collision=True)
     body = {s: name for name, shapes in _body_shapes(kin.model).items() for s in shapes}
     pipeline = newton.CollisionPipeline(kin.model)
     contacts = pipeline.contacts()
@@ -99,11 +99,13 @@ def test_home_and_start_poses_have_no_self_contact(robot):
 
 
 @pytest.mark.physics
+@pytest.mark.parametrize("solver", ["mjwarp", "kamino"])
 @pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
-def test_newton_model_filters_what_the_profile_excludes(robot):
+def test_newton_model_filters_what_the_profile_excludes(robot, solver):
     """The Newton model of the scene filters, with the profile's ``physics.self_collision`` on, exactly the asset's
-    filtered pairs (``model.contact_excludes`` and the pairs the self-collision sets exclude) and each joint's parent
-    and child; with it off, every pair of the robot's bodies. Bodies of two sets the profile pairs collide."""
+    filtered pairs (a native asset: its ``self_collision_excludes`` and each joint's two bodies; a URDF one:
+    ``model.contact_excludes`` and the pairs the self-collision sets exclude, and each joint's parent and child);
+    with it off, every pair of the robot's bodies. Bodies of two sets the profile pairs collide."""
     pytest.importorskip("isaaclab_newton")
     from isaaclab_newton.physics import NewtonManager
 
@@ -111,7 +113,7 @@ def test_newton_model_filters_what_the_profile_excludes(robot):
     from humanoid_sim.sim import SimCore
 
     desc, profile = Description.load(robot), load_profile(robot)
-    sim = SimCore(built_usd(robot), device="cpu", robot=robot)
+    sim = SimCore(built_usd(robot), device="cpu", robot=robot, solver=solver)
     try:
         model = NewtonManager.get_model()
         shapes = _body_shapes(model)
@@ -121,6 +123,15 @@ def test_newton_model_filters_what_the_profile_excludes(robot):
     finally:
         sim.close()
 
+    if desc.usd_model is not None:
+        meta = asset_meta(built_usd(robot))
+        excluded = {frozenset(path.rsplit("/", 1)[-1] for path in pair) for pair in meta["self_collision_excludes"]}
+        excluded |= {frozenset(desc.usd_model.joint_bodies(name)) for name in desc.usd_model.joints}
+        if not profile["physics"]["self_collision"]:
+            excluded = set(filtered)
+        for pair, flags in filtered.items():
+            assert flags == {pair in excluded}, sorted(pair)
+        return
     prepared = PreparedUrdf(desc, profile).build()
     contact_excludes = {frozenset(pair) for pair in profile["model"].get("contact_excludes", [])}
     if profile["physics"]["self_collision"]:
