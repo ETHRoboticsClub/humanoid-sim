@@ -2,7 +2,7 @@
 
     humanoid-sim [--solver mjwarp|kamino] <command>  Newton solver for the commands that step physics
                                                    (default: the profile's)
-    humanoid-sim build-asset [--base-joints] [--ankle-compliance] [--joint-give JOINT ...]
+    humanoid-sim build-asset [--base-joints] [--ankle-compliance] [--joint-give JOINT ... | --no-joint-give]
                                                    robot USD from the description (Isaac Lab image)
     humanoid-sim replay <exc-dir|bag-dir> [--period-ms PERIOD] [--base yaw|orientation|fixed] [--terrain FILE]
                                                    drive-level replay, scored against the capture;
@@ -94,7 +94,9 @@ def cmd_build_asset(args) -> int:
     from humanoid_sim.transmissions.compliance import resolve_give
 
     desc = Description.load(args.robot)
-    give = resolve_give(desc, args.joint_give) if args.joint_give else None  # None: the profile's model.joint_give
+    if args.no_joint_give and args.joint_give:
+        raise SystemExit("build-asset: --no-joint-give and --joint-give exclude each other")
+    give = () if args.no_joint_give else resolve_give(desc, args.joint_give) if args.joint_give else None  # None: the profile's
     usd = build_asset(desc, load_profile(args.robot), Path(args.assets), force=args.force,
                       base_joints=args.base_joints, ankle_compliance=args.ankle_compliance, joint_give=give)
     print(usd)
@@ -439,6 +441,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="a spring between each named drive joint's encoder side and its link: joint names or regexes "
                         "over them, in place of the profile's model.joint_give (physics.joint_give, else the "
                         "description, gives the stiffness and damping)")
+    b.add_argument("--no-joint-give", action="store_true",
+                   help="the variant without joint give (build_asset(joint_give=())), for a plant without it")
     b.set_defaults(func=cmd_build_asset)
 
     r = sub.add_parser("replay")

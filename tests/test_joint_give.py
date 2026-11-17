@@ -243,3 +243,23 @@ def test_give_knobs_select_joints_and_draw_per_env():
         Randomizer([ParamSpec.from_dict({"param": "joint_give_damping", "give_joints": "elbow.*", "dist": "uniform",
                                          "range": [0.1, 1.0], "op": "set"})],
                    {"joint_give_damping": torch.ones(4, 3)}, {"give": joints}, num_envs=4)
+
+
+def test_build_asset_builds_without_give_on_request(monkeypatch, tmp_path):
+    """`build-asset --no-joint-give` asks for the asset without give (a plant without it levels its stance on it);
+    with --joint-give it is refused."""
+    import argparse
+
+    from humanoid_sim import cli
+    from humanoid_sim.model import asset
+
+    seen = {}
+    monkeypatch.setattr(asset, "build_asset", lambda *a, **k: seen.setdefault("give", k["joint_give"]) or tmp_path)
+    base = dict(robot="ethrc_v1", assets=str(tmp_path), force=False, base_joints=False, ankle_compliance=False)
+    cli.cmd_build_asset(argparse.Namespace(**base, joint_give=None, no_joint_give=True))
+    assert seen["give"] == ()
+    seen.clear()
+    cli.cmd_build_asset(argparse.Namespace(**base, joint_give=None, no_joint_give=False))
+    assert seen["give"] is None  # the profile's
+    with pytest.raises(SystemExit):
+        cli.cmd_build_asset(argparse.Namespace(**base, joint_give=["knee_flexion_l"], no_joint_give=True))
