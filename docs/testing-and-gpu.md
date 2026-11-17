@@ -4,47 +4,23 @@ The test suite has three tiers. Contract tests run natively on any machine. Phys
 
 ## Test layout
 
-Every test lives in `tests/`. The last column lists the markers in each file; files without one run natively.
+Every test lives in `tests/`, in files named `test_<area>*.py`. List the files for an area with `ls tests/test_<prefix>*`; markers are in the next section, and a file without one runs natively. The areas, by file-name prefix:
 
-| File | What it checks | Markers |
-|---|---|---|
-| `test_ankle_transmission.py` | The torch ankle transmission (cranks, Jacobian, inverse) against humanoid-urdf's ankle model | |
-| `test_arrival.py` | The arrival queue: a demand acts from its arrival time, time-weighted inside a step, in order, with overflow counted | |
-| `test_base_motion.py` | Base motion from an IMU trace: Euler angles and rates, burst sample times | |
-| `test_delay.py` | Demand-delay scan: drive regions, and a replay with each env's demands shifted by its own delay | 1 test `physics` and `data` |
-| `test_devices.py` | The drive bank: the PD law against Controls' plant, envelope clipping, freeze (the held position latched when the freeze demand arrives), a disabled drive, target shaping, arrival | |
-| `test_envelope.py` | Torque-speed envelope interpolation in all four quadrants | |
-| `test_exc_reader.py` | The capture reader: sampling helpers, captures that match the description, the bursty base-frame IMU stream | 2 tests `data` |
-| `test_imu_delivery.py` | IMU sampling on the sensor clock, burst delivery, bias, misalignment and noise, per-env reset | |
-| `test_mesh_terrain.py` | Stairs with vertical risers as the ground: `mesh_terrain_cfg` and mesh tiles in a terrain file, and the V1 and G1 standing on the stairs (platform, a ring, near an edge) and the V1 landing on them, as mesh terrain and as static boxes, on each solver; the V1 on MJWarp's mesh is `xfail` | the stairs tests `physics`, on CUDA |
-| `test_mirror.py` | The left/right mirror map against URDF forward kinematics | |
-| `test_model_build.py` | The prepared URDF: inventory, welds, limits, sole boxes, digest, body tree, collision meshes, self-collision sets, base joints | |
-| `test_objects.py` | Moving and free objects: path interpolation (linear and spline, one-shot and looping, batched over envs with per-env clocks, exact in nanoseconds), the specs and their file, the driver's frames, phase and offset; in the solver, on MJWarp and Kamino, a kinematic box that follows its path and shoves a standing V1, a free box that the robot pushes, and on CUDA the driver's update inside a CUDA graph under torch's sync debug mode | 3 tests `physics` |
-| `test_physics.py` | Every robot in `PHYSICS_ROBOTS` (the V1 and both G1s, `tests/conftest.py`): the built asset's mass and bodies against the URDF, the home pose (both soles level and at one height) and, with self-collision on, no interpenetrating self-contact in the home and start poses, with host kinematics; the Newton model filtering exactly the pairs the profile excludes (with self-collision off, all); on MJWarp, the pose held on a welded base sagging by gravity over the drives' stiffness, raw IMU samples at the profile's rate, CUDA-graph step against eager, the waist pushed into its stop sinking as MuJoCo's soft limit allows; the hold and the stop also on Kamino. The V1 alone: its standing pose's pitched soles, base joints following a prescribed yaw | `physics` but for 4 (see below) |
-| `test_plant_log.py` | `RobotPlant.log` writing signals at plant time | |
-| `test_randomization.py` | Randomization specs: parsing, selection (bodies, drives, an IMU axis), composition, scopes, levels, reproducibility | |
-| `test_feedback_sampling.py` | Feedback age: the spacing of the drive's samples (whole bus cycles, the measured distribution and mean), held values repeating exactly, reset, drives sampling together, the profile block | |
-| `test_reporting.py` | Drive reporting in encoder counts, velocity and torque, against values Controls' fake drive tests pin; the velocity dither and torque noise against their rates and standard deviations measured at rest | |
-| `test_room_rays.py` | Which of a scanned room's surfaces (boxes, scan mesh, splat) each RTX ray class sees, for walls and furniture, with and without a splat or a scan; refused inputs; the wall flags read from a boxes file | |
-| `test_rtx_room_rays.py` | In Kit: the lidar and the depth camera see the walls and the scan, not the furniture box, which still collides | `rtx` |
-| `test_runtime_abi.py` | The runtime segment: C header against the Python layout (needs a C compiler), identity checks, torn-record rejection, mailbox and demand records, concurrent reads | |
-| `test_runtime_host.py` | `humanoid-sim serve` end to end with the test as client, for every robot: round trip, prescribed pose, detach and next session, demand intake, joint disturbance, back-driven disabled drive; the G1's motor slots and soles | `physics` |
-| `test_runtime_view.py` | `view-runtime` recording frames from a segment that a stand-in host writes through the ABI, for every robot (no physics; needs Newton, Rerun and the built assets) | |
-| `test_solvers.py` | Solver selection from the profile and its overrides, and the errors for unknown or unconfigured solvers | |
-| `test_scan.py` | A scan's look: each face corner's position and the texel it shows, and the floor quad with its texture, against a MuJoCo world built as Controls builds its `hangar_scan`; the floor on the boxes' ground; the live detail's merged vertices and colours; the descriptor's digests; refused files | |
-| `test_static_boxes.py` | Static boxes: the file read and placed where Controls' MuJoCo hangar places them (corner by corner against MuJoCo's kinematics, which needs the `kinematics-check` extra), spawn clearance, refused files, the drawn mesh; in the solver, one shared set of box shapes at the same corners, robots in every env standing on a box, and the runtime host standing the robot among boxes | 3 tests `physics` |
-| `test_rtx_objects.py` | In Kit: a box slides in front of the G1, and the D435i's depth and the Mid-360's returns see it where its path has put it, and not before | `rtx` |
-| `test_stereo_depth.py` | Stereo depth errors on synthetic depth images: noise growing with the square of the range and on plain surfaces, spread over neighbouring pixels, disparity in steps, the occlusion band at a foreground edge and the image border, no depth on plain surfaces, the median filter, a camera model's stereo geometry and its refused figures | |
-| `test_supports.py` | Gantry programs, and rope tension and cable length on every robot | the rope tests `physics` |
-| `test_sysid.py` | The passive-fit search space and CMA-ES | |
-| `test_terrain_io.py` | Terrain files and the ground height: the height of a triangle mesh under a point, a robot's shapes rested on uneven ground (a bump under the middle of a sole, the heading, the terrain's edge), heights file reading and refusals, the V1's and the G1s' standing height on a plane | |
-| `test_terrain_runtime.py` | Terrain in replays and the runtime: the surface a `SimCore` builds from the tiles training passes, or from them as a spec file, equals the training scene's, a heights file is the terrain it holds, replay robots start above the tile origin, the runtime stands on the ground under its feet and names the terrain in the descriptor and the trajectory | `physics` |
-| `test_train_env.py` | The Train-Time API in a manager-based Isaac Lab environment with two robots, for every robot | `physics` |
-| `test_world.py` | For every robot: landing on a bumpy heightfield and staying on top, force pushes, and holding the home pose on flat ground, which stands only when the ankles are stiffer than the body's toppling stiffness (the V1 stands, the G1 tips over) | `physics` |
+| Prefix | Area |
+|---|---|
+| `test_ankle_*`, `test_crank_*`, `test_native_*` | The ankle transmission, crank stops and compliance, and the native closed-chain USD model |
+| `test_arrival`, `test_command_latency`, `test_devices`, `test_drive_*`, `test_envelope`, `test_winding`, `test_current_limit`, `test_backdrive_friction`, `test_reporting`, `test_feedback_sampling`, `test_actuator_inheritance` | The drive bank: demands, arrival queue, PD law, envelopes, current limits, reported feedback |
+| `test_imu_*`, `test_base_motion` | IMU delivery, latency, noise and drops |
+| `test_camera_*`, `test_sensor_*`, `test_stereo_depth`, `test_lights`, `test_scan`, `test_splat*`, `test_room_rays`, `test_rtx_*`, `test_unitree_lidar`, `test_hide_from_cameras`, `test_render_*` | Camera, lidar and depth models, sensor feeds and datasets, RTX rendering |
+| `test_runtime_*`, `test_trajectory` | The real-time host, its segment ABI and the Rerun viewer |
+| `test_replay_*`, `test_exc_*`, `test_bag_reader`, `test_capture_coordinates` | Replay, capture and bag readers, coordinate conversion |
+| `test_kamino_*` | The Kamino solver mechanisms and their fixtures |
+| `test_train_*`, `test_randomization`, `test_plant_log`, `test_reset_feedback`, `test_velocity_push`, `test_per_env_contacts`, `test_contact_capacity` | The Train-Time API: the plant, environments, randomization, resets |
+| `test_world`, `test_supports`, `test_gantry_*`, `test_trolley`, `test_static_boxes`, `test_objects`, `test_terrain_*`, `test_mesh_terrain` | Ground, terrain, objects, the gantry and supports |
+| `test_model_build`, `test_mirror`, `test_robots`, `test_description_delivery`, `test_collision_pruning`, `test_physics`, `test_angular_momentum`, `test_solvers`, `test_*_build_patch` | The robot description, the built model and solver checks |
+| `test_cli_warp` | The command line |
 
-A test skips when something it needs is missing: Isaac Lab (`isaaclab_newton`), Newton, the Rerun SDK, scipy, the built robot asset, the captures, CUDA or a C compiler. The skip reason names it, and pytest prints every reason at the end of the run (`-ra` is set in `pyproject.toml`). A physics run without the built assets therefore passes with most tests skipped; read the skip summary after a physics run.
-
-Five tests need the built plain assets but carry no marker, because they use host kinematics (Newton, with the `newton` extra) and step no physics: `test_kinematic_model_mass_and_bodies`, `test_home_pose_levels_both_soles_at_one_height`, `test_home_and_start_poses_have_no_self_contact` and `test_the_v1_standing_pose_pitches_its_soles` in `test_physics.py`, and `test_view_runtime_records_frames_from_a_segment` in `test_runtime_view.py`, which also needs the Rerun SDK (the `viz` extra). They run natively once the asset exists in `outputs/assets/`, and skip without it. None of them runs in CI: the `cpu-contracts` job has no asset, and the `isaaclab-image` job selects `-m physics`. All of them run under a plain `pytest` in the image and in the `e2e` task.
+`conftest.py` holds the shared fixtures and `PHYSICS_ROBOTS`; `rtx_*` and `kamino_*_fixture` files are helpers, not tests.
 
 ## Markers
 
@@ -185,11 +161,10 @@ The node's copy of the checkout is updated by `sky launch` and `sky exec`. Local
 | `sky/bench.sky.yaml` | L40S | `hsim-bench` | Builds both assets. Runs the physics benchmark at 1, 4096, 8192 and 16384 envs with self-collision and at 4096 and 16384 without, the training benchmark at 1, 4096 and 16384 envs, all at 500 steps, and one replay. | `outputs/bench/` |
 | `sky/replay.sky.yaml` | L40S | `hsim-bench` | Builds both assets. Replays three captures at 4 ms with `rk4`, 4 ms with `implicitfast` and 1 ms with `rk4`, one process per capture in parallel. | `outputs/replay-mjwarp/` |
 | `sky/integrators.sky.yaml` | L40S | `hsim-integrators` | Builds the plain assets. For each robot, measures the angular momentum drift and the step time of every MJWarp integrator and of Kamino at 4 ms (`spikes/integrator_drift/`), with one env by default (`ENV_COUNTS`). | `outputs/integrators/` |
-| `sky/sysid.sky.yaml` | L40S | `hsim-bench` | Builds the `--base-joints` asset. Runs `fit-passive` with 512 envs and 20 generations on the low-band capture and scores the fit on the two high-band ones, then fits on a high-band capture and scores on the low-band one. | `outputs/sysid/fit-on-low/`, `outputs/sysid/fit-on-high/` |
 | `sky/rtx.sky.yaml` | L40S, A10G or L4 | `hsim-rtx` | Builds the kitless image and the Isaac Sim image on top of it, with Controls' hangar mounted at `/data/hangar`. Runs `$CMD` in the Isaac Sim image. See [rtx-sensors.md](rtx-sensors.md#running-it). | `outputs/rtx/` |
 | `sky/e2e.sky.yaml` | A10G or L4, whichever has capacity | `hsim-e2e` | Builds the V1's two assets and both G1s'. Runs the whole test suite with the captures, the runtime benchmark for 2000 steps and the training benchmark at 4096 envs for the V1 and the G1, replays every capture, and runs the examples. See [The end-to-end check](#the-end-to-end-check-skye2eskyyaml). | `outputs/e2e/` (cleared at the start of each run) |
 
-Each task's `envs` block holds its settings, for example `STEPS`, `ENV_COUNTS` and `REPLAY` in the bench task, `RUNS` in the replay task, and `NUM_ENVS`, `GENERATIONS`, `DURATION` and `BOUND` in the sysid task. Override one at launch with `--env`, for example `--env STEPS=1000`. The bench task's `SPIKE=1` also runs the closed-chain ankle spike in `spikes/closed_chain/`.
+Each task's `envs` block holds its settings, for example `STEPS`, `ENV_COUNTS` and `REPLAY` in the bench task, `RUNS` in the replay task. Override one at launch with `--env`, for example `--env STEPS=1000`. The bench task's `SPIKE=1` also runs the closed-chain ankle spike in `spikes/closed_chain/`.
 
 The launch commands are in a comment at the top of each task file:
 
@@ -205,17 +180,13 @@ sky exec hsim-bench sky/bench.sky.yaml
 sky launch -y -c hsim-bench -i 10 sky/replay.sky.yaml
 rsync -avz hsim-bench:sky_workdir/outputs/replay-mjwarp/ outputs/replay-mjwarp/
 
-# passive-parameter fits
-sky launch -y -c hsim-bench -i 10 sky/sysid.sky.yaml
-rsync -avz hsim-bench:sky_workdir/outputs/sysid/ outputs/sysid/
-
 # end-to-end check, detached
 sky launch -y -d -c hsim-e2e -i 10 sky/e2e.sky.yaml
 sky logs hsim-e2e
 rsync -avz hsim-e2e:sky_workdir/outputs/e2e/ outputs/e2e-gpu/
 ```
 
-`-y` skips the confirmation prompt, `-c` names the cluster, `-i 10` sets autostop after 10 idle minutes and `-d` returns once the job is submitted. The bench, replay and sysid tasks share the `hsim-bench` cluster, so they reuse its Isaac Lab install, and a job launched while another runs waits in the cluster's queue.
+`-y` skips the confirmation prompt, `-c` names the cluster, `-i 10` sets autostop after 10 idle minutes and `-d` returns once the job is submitted. The bench and replay tasks share the `hsim-bench` cluster, so they reuse its Isaac Lab install, and a job launched while another runs waits in the cluster's queue.
 
 ### The end-to-end check: `sky/e2e.sky.yaml`
 

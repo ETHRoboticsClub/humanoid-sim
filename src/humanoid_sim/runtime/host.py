@@ -1,6 +1,6 @@
 """The real-time host: one robot stepped against the wall clock, serving the runtime segment.
 
-Every physics period (4 ms), in order:
+Every physics period (1 ms for the native V1, the profile's physics.period_ns), in order:
 
 1. handle a new mailbox command, if any, and acknowledge it;
 2. take every demand record the client appended since the last step into the drive bank, each sent at its own
@@ -97,12 +97,13 @@ FIDELITY_GAPS = [
     "drive current-loop dynamics and backlash absent; the output current limit and the winding I2t limit are "
     "modeled, unverified, and off unless the profile's devices.current enables them",
     "upper-body passive joint parameters (waist, shoulders, elbows) are description values, not identified",
-    "ankle as pitch and roll hinges driven through the crank transmission (no closed chain)",
     "IMU errors from the rig's model: white noise, turn-on bias, Gauss-Markov drift (SET_FIDELITY ideal turns them "
     "off); the turn-on bias is redrawn at every IMU reset, not only at power-on",
     "drive delay is each family's fixed figure (actuators.yaml drive_delay_s), without per-cycle jitter",
-    "drive feedback is the plant's state at every bus cycle, exactly: no sample age (the robot's PDO samples come "
-    "3.0-7.5 ms apart), torque noise or velocity dither (the training plant has them, devices.feedback_*)",
+    "drive feedback is the plant's exact drive-frame state after each physics step, with the applied and demanded "
+    "torque of that step: no position offset, encoder quantization, sample age (the robot's PDO samples come "
+    "3.0-7.5 ms apart), torque noise or velocity dither (the training plant has them, devices.encoders and "
+    "devices.feedback_*)",
 ]
 
 
@@ -248,7 +249,7 @@ def imu_samples(gyro: np.ndarray, accel: np.ndarray, ints: np.ndarray, h: int) -
 class RuntimeHost:
     def __init__(self, segment: str | Path, usd: Path, *, device: str = "cuda:0", robot: str = "ethrc_v1",
                  solver: str | None = None, support: str = "suspended", pose: str | None = None,
-                 bus_period_ns: int = 1_500_000,
+                 bus_period_ns: int | None = None,
                  client_timeout_ns: int = 500_000_000,
                  seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True,
                  scene: StaticBoxes | None = None, gantry: GantryRig | None = None,
@@ -284,7 +285,10 @@ class RuntimeHost:
         meta = asset_meta(usd)
         if pose is not None and pose not in POSES:
             raise ValueError(f"pose {pose!r}: one of {POSES}")
-        self.start_pose = pose or start_pose(load_profile(robot))
+        profile = load_profile(robot)
+        if bus_period_ns is None:  # the robot's bus cycle: the description's, else the profile's default
+            bus_period_ns = Description.load(robot).control_period_ns() or int(profile["runtime"]["bus_period_ns"])
+        self.start_pose = pose or start_pose(profile)
         # The named poses for RESET {"pose": ...}: joint positions (description order) and the upright base height
         # at which the soles touch the ground. Every session starts in start_pose.
         self._poses = {name: initial_pose(usd, robot, name) for name in POSES}
@@ -297,7 +301,7 @@ class RuntimeHost:
                            extra_rig=extra_rig, terrain=terrain,
                            queue_capacity=_queue_capacity(max(m.drive_delay_ns for m in models.values()),
                                                           bus_period_ns,
-                                                          int(load_profile(robot)["physics"]["period_ns"])))
+                                                          int(profile["physics"]["period_ns"])))
         self.device = torch.device(device)
         self.ground = self.sim.ground
         # Where sessions start: the origin of the terrain's first tile, else the world origin. A named pose is put

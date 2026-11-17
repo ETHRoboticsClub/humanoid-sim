@@ -15,7 +15,7 @@ The benchmarks need Isaac Lab, so they run in the Docker image or on a GPU node,
 | Option | Default | Applies to | Meaning |
 |---|---|---|---|
 | `--num-envs` | 1 | default, `--train` | Number of robots simulated in parallel |
-| `--steps` | 1000 | all | Physics steps timed after the warm-up; each step is 4 ms of simulated time |
+| `--steps` | 1000 | all | Physics steps timed after the warm-up; each step is the profile's physics period of simulated time (1 ms for the native V1, 4 ms for the G1) |
 | `--device` | `cuda:0` | all | `cuda:N`, or `cpu` for Warp's CPU device |
 | `--integrator` | the profile's | default, `--train` | Integrator of the selected solver |
 | `--period-ms` | the profile's | `--train` | Physics period; it must divide the 20 ms policy period. Compare runs at the same simulated time (`--steps` x period) |
@@ -53,7 +53,7 @@ Isaac Lab captures its solver step as a CUDA graph (a recorded sequence of GPU k
 | `physics` | `isaaclab/<solver>`: `isaaclab/mjwarp` or `isaaclab/kamino` |
 | `device` | The device the run used |
 | `num_envs` | Number of robots |
-| `period_ns` | Physics period: 4,000,000 ns |
+| `period_ns` | Physics period: 1,000,000 ns for the native V1, 4,000,000 ns for the G1 |
 | `steps` | Number of timed steps |
 | `wall_s` | Wall time of the timed steps, in seconds |
 | `rtf_per_env` | Simulated seconds per wall second for one robot: each robot's real-time factor |
@@ -81,7 +81,7 @@ The training workload builds the scene a training environment uses ([training.md
 | Encoder offsets | Between -0.026 and 0.026 rad on every drive, plus between -0.14 and 0.14 rad on the left ankle's crank drives (the V1's) |
 | IMU gyro bias | Standard deviation 0.0015 rad/s |
 
-The plant runs compiled and captured as CUDA graphs on CUDA, as training runs it. The robots start in the home pose (the scene's default) and hold it. The V1 stands; the G1 tips over within about 1.3 s of every reset ([training.md](training.md#the-initial-pose)), so its robots spend much of the run on the ground and `fraction_envs_up` stays low. Every 20 ms the benchmark reads `measured()` and `truth()`, resets about one in fifty robots as if their episodes had ended (`RobotPlant.reset` back to the default state: joints, base pose and velocity, drives off, sensors emptied, device parameters drawn again), and submits a demand for the home pose for every robot. Every 4 ms it runs the plant, writes the scene to the simulation, steps physics and updates the scene. As in the default workload, 50 warm-up steps are not timed.
+The plant runs compiled and captured as CUDA graphs on CUDA, as training runs it. The robots start in the home pose (the scene's default) and hold it. The V1 stands; the G1 tips over within about 1.3 s of every reset ([training.md](training.md#the-initial-pose)), so its robots spend much of the run on the ground and `fraction_envs_up` stays low. Every 20 ms the benchmark reads `measured()` and `truth()`, resets about one in fifty robots as if their episodes had ended (`RobotPlant.reset` back to the default state: joints, base pose and velocity, drives off, sensors emptied, device parameters drawn again), and submits a demand for the home pose for every robot. Every physics period it runs the plant, writes the scene to the simulation, steps physics and updates the scene. As in the default workload, 50 warm-up steps are not timed.
 
 | Field | Meaning |
 |---|---|
@@ -98,7 +98,7 @@ The plant runs compiled and captured as CUDA graphs on CUDA, as training runs it
 
 ## Runtime benchmark (`--runtime`)
 
-The runtime workload starts the real-time host ([runtime.md](runtime.md)) with its segment in a temporary directory and a free robot on the ground (`support="free"`), reset to the home pose. A client in the same process writes a new demand record before every step, holding that pose at the baseline gains. A new record every step is what the host sees when the client's bus cycle is shorter than the 4 ms physics period, as Controls' 1.5 ms cycle is. Each timed step covers the client's write and the host's whole step: mailbox commands, demand intake, the plant and physics, publishing feedback, and publishing the truth every fifth step.
+The runtime workload starts the real-time host ([runtime.md](runtime.md)) with its segment in a temporary directory and a free robot on the ground (`support="free"`), reset to the home pose. A client in the same process writes a new demand record before every step, holding that pose at the baseline gains. A new record every step is what the host sees when the client's bus cycle is shorter than the physics period, as Controls' 1.5 ms cycle is for a 4 ms period (at the native V1's 1 ms period a record arrives about every second step). Each timed step covers the client's write and the host's whole step: mailbox commands, demand intake, the plant and physics, publishing feedback, and publishing the truth every fifth step.
 
 The robot stands still (in a 60 s run its base stayed at 0.923 m), and `base_height_end_m` in the output confirms that a standing robot was timed.
 
@@ -111,7 +111,7 @@ The steps are not paced: they run back to back as fast as the host can go, so th
 | `ms_per_step` | Mean wall time of one step, in milliseconds |
 | `ms_p99` | 99th percentile of the per-step wall time: one step in a hundred took longer |
 | `ms_max` | Longest step |
-| `steps_over_period` | Number of steps that took longer than the 4 ms physics period |
+| `steps_over_period` | Number of steps that took longer than the physics period |
 | `real_time_factor` | Physics period divided by the mean step time; above 1.0 the host keeps up with real time |
 | `cuda_graph` | `true` when the host's step runs as CUDA graphs (on CUDA) |
 
@@ -121,7 +121,7 @@ When paced, the host sleeps until 0.1 ms before each deadline and then spins, an
 
 These are measurements to compare your own runs against. They depend on the GPU, the driver and the node's CPU, and they move when the description or the profile changes (contact buffers, self-collision sets, solver iterations). Compare runs on the same GPU type.
 
-The latest `e2e` run, on an NVIDIA L40S on 2026-10-20 (`sky launch --gpus L40S:1` with `sky/e2e.sky.yaml`), wrote these (`runtime*.json` and `train_4096*.json` in `outputs/e2e/` on the node), from the home pose on MJWarp, for the V1 and the G1 Controls runs (`g1_29dof_with_hand_rev_1_0`):
+These figures were measured at a 4 ms physics period on URDF_6, before the native V1 moved to 1 ms, and are not repeated since: a 1 ms period costs about four times the steps per simulated second, and the native closed-chain model has its own step time. The latest `e2e` run, on an NVIDIA L40S on 2026-10-20 (`sky launch --gpus L40S:1` with `sky/e2e.sky.yaml`), wrote these (`runtime*.json` and `train_4096*.json` in `outputs/e2e/` on the node), from the home pose on MJWarp, for the V1 and the G1 Controls runs (`g1_29dof_with_hand_rev_1_0`):
 
 | Runtime host, one robot, a new demand every step, 2000 steps | V1 | G1 |
 |---|---|---|
@@ -145,13 +145,13 @@ The latest `e2e` run, on an NVIDIA L40S on 2026-10-20 (`sky launch --gpus L40S:1
 
 What the runtime figures mean for a client:
 
-- A real-time factor of about 2.95 means the host can step about three times as fast as the wall clock, for either robot. Paced to real time, it spends about 1.4 ms of each 4 ms period stepping and the rest waiting for the next deadline.
-- The p99 of 2.3 to 2.5 ms and the longest steps, under 2.9 ms, are inside the 4 ms period, so no step ran late. A paced step that does end a little late does not count in `late_steps`: the next steps run back to back until the host is on schedule again, and only a step that starts more than a full period late is counted ([runtime.md](runtime.md#the-clock)). These figures leave a paced host on an L40S with margin.
+- A real-time factor of about 2.95 means the host can step about three times as fast as the wall clock, for either robot. Paced to real time, at the 4 ms period it spent about 1.4 ms of each period stepping and the rest waiting for the next deadline.
+- The p99 of 2.3 to 2.5 ms and the longest steps, under 2.9 ms, are inside the 4 ms period of that run, so no step ran late. A paced step that does end a little late does not count in `late_steps`: the next steps run back to back until the host is on schedule again, and only a step that starts more than a full period late is counted ([runtime.md](runtime.md#the-clock)). These figures leave a paced host on an L40S with margin.
 
 What the training figures mean for a training run:
 
 - 1,260 simulated seconds per wall second for the V1, over 4096 robots, is about 1,260 hours of robot experience per hour of wall time; each robot advances at about 0.3 times real time. The G1's 1,691 is a third more: no self-collision (its profile at the time; it now collides arms with legs), fewer contacts (four small spheres per foot) and a lighter model, against 7 more joints.
-- 315,005 physics steps of 4 ms per second across all V1 robots is about 63,000 policy steps per second at a 20 ms policy period; for the G1, about 85,000.
+- 315,005 physics steps of 4 ms per second (URDF_6 run) across all V1 robots is about 63,000 policy steps per second at a 20 ms policy period; for the G1, about 85,000.
 - No host syncs: the timed loop never made the CPU wait for the GPU (torch's sync debug mode was set to `error`), so Python round trips do not limit the rate.
 - 5% of the V1 robots were down at the end. The randomization includes encoder offsets of up to 0.14 rad on the left ankle cranks, so some robots hold their feet at the wrong angle and tip over; a fallen robot is reset only when its turn in the 1-in-50 resets comes. 37% of the G1s were down: they tip over within about 1.3 s of a reset ([training.md](training.md#the-initial-pose)), so the G1 figure times a mix of standing and fallen robots.
 

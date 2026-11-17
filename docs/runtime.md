@@ -26,7 +26,6 @@ humanoid-sim serve --segment /run/hsim/plant --support suspended
 | `--support suspended\|free` | `suspended` | How each session starts holding the robot (see [Supports](#supports)). |
 | `--pose home\|standing` | the profile's `poses.start` | The pose every session starts in (see [The start pose](#the-start-pose)). |
 | `--device` | `cuda:0` | `cuda:N`, or `cpu` for Warp's CPU device (below real time; see [Device and performance](#device-and-performance)). |
-| `--bus-period-us` | `1500` | The client's bus cycle, written to the header's `bus_period_ns`. Informational: the host does not use it. |
 | `--client-timeout-ms` | `500` | End the session when an attached client's latest demands are older than this. |
 | `--sensors RIG` | none | An extra rig (`rigs.EXTRAS`, e.g. `g1-cameras`) whose IMUs are simulated besides the body IMU, declared in the descriptor's `extra_imus` and, with `--trajectory`, recorded. `imu_bias` and `imu_spike` faults and the feedback region concern the body IMU only. |
 | `--truth-every N` | `5` | Publish the truth region every N physics steps (and after every accepted command). Use 1 for test oracles that track maxima. |
@@ -113,10 +112,10 @@ A session is tied to the segment file and outlives the client process that drove
 
 ## The clock
 
-The runtime runs in real time only. `RuntimeHost.run` paces each physics period, 4 ms (`physics.period_ns` in `profiles/ethrc_v1.yaml`), to `CLOCK_MONOTONIC`: it sleeps until 100 µs before the step's deadline and spins for the rest (`SPIN_NS`). Each period does, in order (`RuntimeHost.step`):
+The runtime runs in real time only. `RuntimeHost.run` paces each physics period, 1 ms for the native V1 (`physics.period_ns` in `profiles/ethrc_v1.yaml`), to `CLOCK_MONOTONIC`: it sleeps until 100 µs before the step's deadline and spins for the rest (`SPIN_NS`). Each period does, in order (`RuntimeHost.step`):
 
 1. Handle a new mailbox command, if there is one, and write its ack.
-2. Take every demand record the client appended since the last step into the drive bank, oldest first. Each is sent at its `sent_mono_ns` mapped to plant time (the latest feedback's mapping, below), and each drive applies it its [drive model](drives.md#drive-models)'s delay later (5 ms on the V1), so the 2 to 3 records a 1.5 ms bus writes during one 4 ms step each act from their own time within a step. If no new record arrives the last one stays in force. See [drives.md](drives.md#arrival-and-latency) for the arrival queue and the drive law.
+2. Take every demand record the client appended since the last step into the drive bank, oldest first. Each is sent at its `sent_mono_ns` mapped to plant time (the latest feedback's mapping, below), and each drive applies it its [drive model](drives.md#drive-models)'s delay later (5 ms on the V1), so the 1.5 ms bus's records, one about every step and a half at 1 ms (2 to 3 per step at a 4 ms period), each act from their own time within a step. If no new record arrives the last one stays in force. See [drives.md](drives.md#arrival-and-latency) for the arrival queue and the drive law.
 3. Step the physics with the active gantry, disturbances and prescribed pose, unless paused.
 4. Publish the feedback, the truth when due, and the heartbeat.
 
@@ -157,8 +156,8 @@ The header is written when the file is created; afterwards only `state` and `hea
 | `state` | u32 | 0 creating, 1 ready, 2 ended |
 | `num_drives`, `num_joints` | u32 | 22 and 22 for `ethrc_v1` |
 | `imu_samples` | u32 | 32, the slots of the feedback's IMU array |
-| `physics_period_ns` | u64 | 4,000,000 |
-| `bus_period_ns` | u64 | From `--bus-period-us` |
+| `physics_period_ns` | u64 | 1,000,000 for `ethrc_v1` (the profile's `physics.period_ns`) |
+| `bus_period_ns` | u64 | The description's `backend.control_period_s` (1,500,000 for `ethrc_v1`), else the profile's `runtime.bus_period_ns` |
 | `heartbeat_mono_ns` | u64 | The host's `CLOCK_MONOTONIC` at its last publish, every period |
 | `robot_id` | char[32] | `--robot`, for example `ethrc_v1` |
 | `description_digest` | char[64] | Hex SHA-256 of the robot description |
@@ -237,10 +236,9 @@ The fidelity gaps the runtime publishes:
 
 - drive current-loop dynamics and backlash absent; the output current limit and the winding I2t limit are modeled, unverified, and off unless the profile's devices.current enables them
 - upper-body passive joint parameters (waist, shoulders, elbows) are description values, not identified
-- ankle as pitch and roll hinges driven through the crank transmission (no closed chain)
 - IMU errors from the rig's model: white noise, turn-on bias, Gauss-Markov drift (SET_FIDELITY ideal turns them off); the turn-on bias is redrawn at every IMU reset, not only at power-on
 - drive delay is each family's fixed figure (actuators.yaml drive_delay_s), without per-cycle jitter
-- drive feedback is the plant's state at every bus cycle, exactly: no sample age (the robot's PDO samples come 3.0-7.5 ms apart), torque noise or velocity dither (the training plant has them, devices.feedback_*)
+- drive feedback is the plant's exact drive-frame state after each physics step, with the applied and demanded torque of that step: no position offset, encoder quantization, sample age (the robot's PDO samples come 3.0-7.5 ms apart), torque noise or velocity dither (the training plant has them, devices.encoders and devices.feedback_*)
 - for a robot whose description records no delay for some families (the G1's): drive delay unmeasured for those families, whose demands act when the bus delivers them
 
 ### Demands
@@ -343,7 +341,7 @@ Each sole entry describes the sole plate, the contact box fitted to the bottom o
 
 | Field | Type | Meaning |
 |---|---|---|
-| `position_m`, `quat_xyzw` | f64[3], f64[4] | Pose of the sole body (the body carrying the `foot_roll` joint) |
+| `position_m`, `quat_xyzw` | f64[3], f64[4] | Pose of the sole body (the body carrying the `ankle_inversion` joint) |
 | `lowest_z_m` | f64 | Height of the plate's lowest corner |
 | `normal_force_n` | f64 | Vertical contact force on the sole body |
 | `plate_normal_w` | f64[3] | The plate's face normal |
@@ -434,7 +432,7 @@ Name the joint with `"joint"`, or a 1:1 drive with `"drive"` (an ankle crank has
 |---|---|---|---|---|
 | `encoder_freeze` | required | any non-zero (default 1) | The drive's published position and velocity keep their values from the last feedback before the command. The drive's law and the physics keep using the true state. | 0 |
 | `imu_bias` | ignored | rad/s | Added to the gyro bias on all three axes | 0 |
-| `imu_spike` | ignored | m/s² | Added to the accelerometer bias on all three axes; lasts one period (4 ms) when `duration_s` is null | 0 |
+| `imu_spike` | ignored | m/s² | Added to the accelerometer bias on all three axes; lasts one period (1 ms for the V1) when `duration_s` is null | 0 |
 | `power_sag` | ignored | torque scale in [0, 1] | Scales every drive's torque-speed envelope and torque cap | 1 |
 
 `value` defaults to 1 and must be finite; for `power_sag` it must lie in [0, 1]. `duration_s` null lasts until cleared or the session ends. Injecting a fault again (on the same drive, for `encoder_freeze`) replaces it, and sending its no-fault value clears it. The value is checked before the active fault is touched, so a rejected command, such as `power_sag` 1.5, leaves the fault that was active in place. Acks: `<fault> active`, `cleared`. An unknown fault name is rejected with the list of known ones. Bus and protocol faults, and a drive whose encoder stops reporting, are Controls' fake bank's to inject. [drives.md](drives.md) has more on the faults.
@@ -442,7 +440,7 @@ Name the joint with `"joint"`, or a 1:1 drive with `"drive"` (an ankle crank has
 ### PRESCRIBE_POSE (7)
 
 ```json
-{"joint_pos": {"knee_l": -2.0}, "base_pose": [0.0, 0.0, 1.0, 0.0, 0.0871557, 0.0, 0.9961947], "floor_clearance_m": 0.002}
+{"joint_pos": {"knee_flexion_l": -2.0}, "base_pose": [0.0, 0.0, 1.0, 0.0, 0.0871557, 0.0, 0.9961947], "floor_clearance_m": 0.002}
 ```
 
 The pose is written, with zero velocities, before every physics step until it is released, a `RESET`, or the end of the session. Named joints must lie within their travel, as for `RESET`; the others keep their positions at the time of the command. `base_pose` is optional. `floor_clearance_m` needs a `base_pose` and moves the base vertically so that the lowest sole-plate corner sits that far above the floor. Ack: `prescribed`. `{"release": true}` releases the pose; ack: `released`. The IMU is not reset, so its samples run on.
@@ -633,7 +631,7 @@ humanoid-sim view-runtime /run/hsim/plant --save runtime.rrd   # writes a record
 | `--draw scan\|boxes` | the scan, when the host has one | How to draw the host's scene. Its files must be readable where the viewer runs, with the digests the descriptor gives; otherwise the scene is not drawn. |
 | `--detail full\|live` | `full` with `--save`, `live` otherwise | The scan's detail (see [world.md](world.md#the-scan-for-viewers)) |
 
-Each read logs the truth and feedback records that are new since the last read, at their `sim_time_ns` on Rerun's `time` timeline (plant time in seconds). The recording therefore samples the host about `--fps` times per second, not every 4 ms step, and the robot's pose moves only as often as the host publishes the truth (every `--truth-every` steps, 20 ms by default).
+Each read logs the truth and feedback records that are new since the last read, at their `sim_time_ns` on Rerun's `time` timeline (plant time in seconds). The recording therefore samples the host about `--fps` times per second, not every physics step, and the robot's pose moves only as often as the host publishes the truth (every `--truth-every` steps, 20 ms by default).
 
 When a session ends, the viewer follows the next session at the same path if it becomes ready within 10 s (`FOLLOW_S` in `view.py`), as with `serve --persist`, and logs the new session id under `/sim/0/host/session`. Plant time runs on across sessions, so the recording stays on one timeline. If no session follows, or after `--seconds`, or on Ctrl-C, it stops and prints how many robot frames it logged.
 

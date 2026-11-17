@@ -2,11 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from test_imu_delivery import _every_sample
 
 from humanoid_sim.randomization.spec import PARAMS, ParamSpec
 from humanoid_sim.sensors.imu import ImuDelivery
 from humanoid_sim.train.plant import RobotPlant
-from test_imu_delivery import _every_sample
 
 
 def _run(imu, n, e):

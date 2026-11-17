@@ -24,6 +24,12 @@ poses:
 # the present state at every physics step instead of the drive's last sample.
 devices: {}
 
+# The runtime host (humanoid-sim serve): the client's bus cycle, written to the segment header's bus_period_ns and
+# used to size each drive's demand queue. Only for a robot whose description records no backend.control_period_s
+# (the V1's is 1.5 ms, the G1's 2 ms).
+runtime:
+  bus_period_ns: 1500000
+
 physics:
   period_ns: 4000000          # 250 Hz
   # Newton solver stepping the robot: mjwarp or kamino. Each has its own block below.

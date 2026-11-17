@@ -193,32 +193,6 @@ def cmd_bench(args) -> int:
     return 0
 
 
-# Joints tied left/right for the passive fit: the upper body, the worst-replayed part of the robot.
-UPPER_BODY_GROUPS = {
-    "waist": ("torso_axial_rotation",),
-    "shoulder_flexion": ("shoulder_flexion_l", "shoulder_flexion_r"),
-    "shoulder_abduction": ("shoulder_abduction_l", "shoulder_abduction_r"),
-    "shoulder_rotation": ("shoulder_internal_rotation_l", "shoulder_internal_rotation_r"),
-    "elbow": ("elbow_flexion_l", "elbow_flexion_r"),
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _revision() -> str:
     import subprocess
 
@@ -300,7 +274,6 @@ def cmd_serve(args) -> int:
     host = retry_kernel_build(lambda: RuntimeHost(
         args.segment, usd, device=args.device, robot=args.robot, solver=args.solver,
         support=args.support, pose=args.pose, scene=scene, gantry=gantry, terrain=terrain, objects=objects,
-        bus_period_ns=int(args.bus_period_us * 1000),
         client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
         sim_revision=_revision(),
         truth_every=args.truth_every or (1 if args.trajectory else 5), trajectory=args.trajectory,
@@ -447,7 +420,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="base yaw or full orientation from the capture's IMU (asset built with --base-joints), "
                         "or a fixed base")
     r.add_argument("--demand-delay-ms", type=float, default=0.0,
-                   help="apply each recorded demand this much after its stamp (negative: before); see fit-delay")
+                   help="apply each recorded demand this much after its stamp (negative: before)")
     r.add_argument("--out", default="outputs/replay")
     from humanoid_sim.replay.effort import add_effort_args
     from humanoid_sim.replay.inertial import add_acceleration_args
@@ -562,7 +535,6 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--pose", choices=("home", "standing"), default=None,
                     help="the pose every session starts in (default: the profile's poses.start)")
     sv.add_argument("--device", default="cuda:0")
-    sv.add_argument("--bus-period-us", type=float, default=1500.0, help="the client's bus cycle (informational)")
     sv.add_argument("--client-timeout-ms", type=float, default=500.0,
                     help="end the session when an attached client's demands are this old")
     sv.add_argument("--truth-every", type=int, default=None, help="publish the truth every this many steps (and after "

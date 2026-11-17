@@ -136,7 +136,7 @@ src/humanoid_sim/
   world/           terrain, pushes, gantry
   train/           front end: Train-Time API (Isaac Lab scene and action term)
   runtime/         front end: real-time host, the segment ABI, view-runtime
-  replay/, sysid/  front end: captures, replays, fits
+  replay/          front end: captures, bags, replays
   signals/         Rerun logging
 third_party/       humanoid-urdf (robot facts), at the commit Controls pins
 profiles/          modeling choices that are not robot facts
