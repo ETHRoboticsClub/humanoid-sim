@@ -197,16 +197,19 @@ def cmd_bench(args) -> int:
     if args.runtime:
         from humanoid_sim.bench.runner import run_runtime_bench
 
-        print(json.dumps(run_runtime_bench(args, _usd(args), scene=_scene(args), objects=_objects(args)), indent=1))
+        print(json.dumps(run_runtime_bench(args, _usd(args), scene=_scene(args), objects=_objects(args),
+                                                         collision=_collision(args)), indent=1))
         return 0
     if args.train:
         from humanoid_sim.bench.train import run_train_bench
 
-        print(json.dumps(run_train_bench(args, _usd(args), scene=_scene(args), objects=_objects(args)), indent=1))
+        print(json.dumps(run_train_bench(args, _usd(args), scene=_scene(args), objects=_objects(args),
+                                                       collision=_collision(args)), indent=1))
         return 0
     from humanoid_sim.bench.runner import run_bench
 
-    print(json.dumps(run_bench(args, _usd(args), scene=_scene(args), objects=_objects(args)), indent=1))
+    print(json.dumps(run_bench(args, _usd(args), scene=_scene(args), objects=_objects(args),
+                                 collision=_collision(args)), indent=1))
     return 0
 
 
@@ -238,9 +241,22 @@ def _scene(args):
     return StaticBoxes.load(args.scene, args.spawn or (0.0, 0.0), scan=files)
 
 
+def _collision(args):
+    """The convex pieces of ``--collision`` with ``--spawn`` at the world origin, or None."""
+    if getattr(args, "collision", None) is None:
+        return None
+    if args.scene is None and args.spawn is None:
+        raise SystemExit("--collision is a room's: give its --spawn (and its --scene for rays and drawing)")
+    from humanoid_sim.world.hulls import StaticHulls
+
+    return StaticHulls.load(args.collision, args.spawn or (0.0, 0.0))
+
+
 def _add_scene_args(parser) -> None:
     parser.add_argument("--scene", default=None, help="static boxes (walls, furniture) around the robot: an .npz as "
                         "world/boxes.py describes, such as Controls' hangar_proxy.npz")
+    parser.add_argument("--collision", default=None, help="the room's collision as convex pieces fitted to its scan "
+                        "(an .npz as world/hulls.py describes); the --scene boxes then stay for rays and drawing only")
     parser.add_argument("--spawn", nargs=2, type=float, default=None, metavar=("X", "Y"),
                         help="the scene point (m) the robot starts at, placed at the world origin (default 0 0)")
 
@@ -291,6 +307,7 @@ def cmd_serve(args) -> int:
     host = retry_kernel_build(lambda: RuntimeHost(
         args.segment, usd, device=args.device, robot=args.robot, solver=args.solver,
         support=args.support, pose=args.pose, scene=scene, gantry=gantry, terrain=terrain, objects=objects,
+        collision=_collision(args),
         client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
         sim_revision=_revision(),
         truth_every=args.truth_every or (1 if args.trajectory else 5), trajectory=args.trajectory,

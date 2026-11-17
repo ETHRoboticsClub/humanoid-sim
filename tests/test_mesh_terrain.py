@@ -1,4 +1,5 @@
-"""Stairs with vertical risers as the ground: triangle-mesh terrain, and the same steps as static boxes.
+"""Stairs with vertical risers as the ground: triangle-mesh terrain, and the same steps as static boxes and as
+static convex pieces (world/hulls.py), the shapes a scanned room collides as.
 
 The construction tests need Isaac Lab and run in the image on the CPU. The physics tests stand a robot on the stairs
 on each solver (CUDA; Kamino needs it), and land it on them."""
@@ -100,7 +101,7 @@ def test_meshes_and_heightfields_go_to_their_own_builders(isaac_lab):
 class _Stairs:
     """A robot holding its home pose on a pyramid of stairs, three envs on the same stairs: on the platform, on the
     second ring from the edge, and with its soles over the platform's edge. ``world``: ``"mesh"`` (generated terrain)
-    or a ``StaticBoxes`` of the steps on the flat ground."""
+    or a ``StaticBoxes`` or ``StaticHulls`` of the steps on the flat ground."""
 
     def __init__(self, robot, solver, world):
         try:
@@ -119,7 +120,12 @@ class _Stairs:
         from humanoid_sim.train.scene import robot_build, robot_scene_cfg, robot_sim_cfg
 
         usd = built_usd(robot)
-        kw = {"terrain": _terrain(plane=world == "plane")} if world in ("mesh", "plane") else {"scene": world}
+        from humanoid_sim.world.hulls import StaticHulls
+
+        if world in ("mesh", "plane"):
+            kw = {"terrain": _terrain(plane=world == "plane")}
+        else:
+            kw = {"collision": world} if isinstance(world, StaticHulls) else {"scene": world}
         self.sim = sim_utils.SimulationContext(robot_sim_cfg(robot, device="cuda:0", solver=solver))
         with robot_build(robot, solver=solver):
             self.scene = instantiate(robot_scene_cfg(3, usd, robot=robot, **kw))
@@ -199,11 +205,22 @@ def _boxes_scene(tmp_path):
     return StaticBoxes.load(tmp_path / "stairs.npz")
 
 
+def _hulls_scene(tmp_path):
+    """The steps as convex pieces: each box's eight corners."""
+    from humanoid_sim.world.hulls import StaticHulls
+
+    corners = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], dtype=float) / 2
+    pieces = [np.asarray(c) + corners * np.asarray(size) for c, size in _stair_boxes()]
+    np.savez(tmp_path / "stairs_hulls.npz", points=np.concatenate(pieces), counts=np.full(len(pieces), 8))
+    return StaticHulls.load(tmp_path / "stairs_hulls.npz")
+
+
 def _stairs_run(robot, solver, world, tmp_path, request):
     pytest.importorskip("isaaclab_newton")
     if not torch.cuda.is_available():
         pytest.skip("the stairs tests run on CUDA (Kamino needs it)")
-    run = _Stairs(robot, solver, _boxes_scene(tmp_path) if world == "boxes" else world)
+    worlds = {"boxes": _boxes_scene, "hulls": _hulls_scene}
+    run = _Stairs(robot, solver, worlds[world](tmp_path) if world in worlds else world)
     request.addfinalizer(run.close)
     return run
 
@@ -218,6 +235,9 @@ CASES = [
         reason="MuJoCo refuses to compile a flat, open mesh: mesh volume is too small", strict=False)),
     pytest.param("ethrc_v1", "kamino", "boxes", id="v1-kamino-boxes"),
     pytest.param("ethrc_v1", "mjwarp", "boxes", id="v1-mjwarp-boxes"),
+    pytest.param("ethrc_v1", "kamino", "hulls", id="v1-kamino-hulls"),
+    pytest.param("ethrc_v1", "mjwarp", "hulls", id="v1-mjwarp-hulls"),
+    pytest.param("g1_29dof_with_hand_rev_1_0", "mjwarp", "hulls", id="g1-mjwarp-hulls"),
 ]
 
 
@@ -246,6 +266,8 @@ LANDINGS = [
     pytest.param("ethrc_v1", "kamino", "mesh", id="v1-kamino-mesh"),
     pytest.param("ethrc_v1", "mjwarp", "boxes", id="v1-mjwarp-boxes"),
     pytest.param("ethrc_v1", "mjwarp", "mesh", id="v1-mjwarp-mesh", marks=V1_MJWARP_MESH),
+    pytest.param("ethrc_v1", "kamino", "hulls", id="v1-kamino-hulls"),
+    pytest.param("ethrc_v1", "mjwarp", "hulls", id="v1-mjwarp-hulls"),
 ]
 
 
