@@ -18,7 +18,9 @@ otherwise from the copies in ``msgs/``. Keep them byte-identical to Controls
 ``ros2_ws/src/contracts/msg_ethrc/msg`` when its wire contract changes.
 
 A bag has no ``complete`` flag or gantry declaration, so the reader checks what it can: every drive streams and
-the gains hold still and are applied. ``sensor_msgs/Imu`` carries no sample counter, so a dropped IMU sample goes
+the gains hold still and are applied (judged over the replayed span, on the drives asked for with ``drives``).
+``window_s`` cuts the span to seconds after the bag's start (``metadata.yaml`` ``starting_time``), as the recording logs
+count them. ``sensor_msgs/Imu`` carries no sample counter, so a dropped IMU sample goes
 unseen. That the robot hung on the gantry is the caller's to know. ``rosbags`` is the ``bag`` extra.
 """
 
@@ -29,6 +31,7 @@ from functools import cached_property
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from humanoid_sim.replay.exc import CommandTrace, DriveGains, DriveTrace, ImuTrace
 
@@ -68,22 +71,38 @@ def _typestore(connections):
 class BagCapture:
     """One rosbag2 directory, read once on first use."""
 
-    def __init__(self, root: Path, *, drives: list[str] | None = None):
+    def __init__(self, root: Path, *, drives: list[str] | None = None, window_s: tuple[float, float] | None = None):
+        """``drives``: the drives the replay needs (the description's); the others (hands) may be absent, unpowered
+        or unapplied. ``window_s``: ``(start, end)`` in seconds after the bag's start, cutting :meth:`time_span_ns`."""
         self.root = Path(root)
         if not (self.root / "metadata.yaml").is_file():
             raise ValueError(f"{self.root}: not a rosbag2 directory (no metadata.yaml)")
+        if window_s is not None and not window_s[0] < window_s[1]:
+            raise ValueError(f"bag window {window_s}: start must precede end")
         self._drives = drives
+        self.window_s = None if window_s is None else (float(window_s[0]), float(window_s[1]))
 
     @cached_property
-    def dataset_id(self) -> str:
-        """``bag-`` and the first 16 hex digits of the sha256 over the bag's files (names and contents)."""
+    def sha256(self) -> str:
+        """The sha256 (hex) over the bag's files, by name: each file's name and the digest of its contents."""
         h = hashlib.sha256()
         for p in sorted(self.root.iterdir()):
             if p.is_file():
                 h.update(p.name.encode())
                 with p.open("rb") as f:
                     h.update(hashlib.file_digest(f, "sha256").digest())
-        return f"bag-{h.hexdigest()[:16]}"
+        return h.hexdigest()
+
+    @property
+    def dataset_id(self) -> str:
+        """``bag-`` and the first 16 hex digits of :attr:`sha256`."""
+        return f"bag-{self.sha256[:16]}"
+
+    @cached_property
+    def start_ns(self) -> int:
+        """The bag's start (``metadata.yaml`` ``starting_time``, the recorder's ROS time), the zero of ``window_s``."""
+        meta = yaml.safe_load((self.root / "metadata.yaml").read_text())["rosbag2_bagfile_information"]
+        return int(meta["starting_time"]["nanoseconds_since_epoch"])
 
     @property
     def name(self) -> str:
@@ -152,7 +171,10 @@ class BagCapture:
         if not states:
             raise ValueError(f"{self.root}: no {GAINS_TOPIC} message at or after the feedback starts")
         # Judged on the streaming drives only: `applied` and `failed` cover every listed drive, unpowered hands too.
-        streaming = {d for d, tr in self.pdo().items() if np.isfinite(tr["native_position_rad"]).any()}
+        if self._drives is not None:
+            streaming = set(self._drives)
+        else:
+            streaming = {d for d, tr in self.pdo().items() if np.isfinite(tr["native_position_rad"]).any()}
         ref = None
         for m in states:
             applied = dict(zip(m.motors, m.motor_applied, strict=True))
@@ -194,5 +216,15 @@ class BagCapture:
         return None
 
     def time_span_ns(self) -> tuple[int, int]:
-        traces = self.pdo().values()
-        return max(int(tr.t_ns[0]) for tr in traces), min(int(tr.t_ns[-1]) for tr in traces)
+        """From the latest first sample to the earliest last one of the drives (all of them, or those asked for),
+        cut to the window."""
+        pdo = self.pdo()
+        traces = [pdo[d] for d in self._drives] if self._drives is not None else pdo.values()
+        start, end = max(int(tr.t_ns[0]) for tr in traces), min(int(tr.t_ns[-1]) for tr in traces)
+        if self.window_s is not None:
+            lo, hi = self.start_ns + round(self.window_s[0] * 1e9), self.start_ns + round(self.window_s[1] * 1e9)
+            if start > lo or end < hi:
+                raise ValueError(f"{self.root}: window {self.window_s} s is not inside the drives' recorded span "
+                                 f"{(start - self.start_ns) / 1e9:.1f} to {(end - self.start_ns) / 1e9:.1f} s")
+            start, end = lo, hi
+        return start, end

@@ -4,9 +4,14 @@
                                                    (default: the profile's)
     humanoid-sim build-asset [--base-joints] [--ankle-compliance] [--joint-give JOINT ...]
                                                    robot USD from the description (Isaac Lab image)
-    humanoid-sim replay <exc-dir> [--period-ms PERIOD] [--base yaw|orientation|fixed] [--terrain FILE]
+    humanoid-sim replay <exc-dir|bag-dir> [--period-ms PERIOD] [--base yaw|orientation|fixed] [--terrain FILE]
                                                    drive-level replay, scored against the capture;
-                                                   base following the capture's IMU yaw (default), or fixed
+                                                   base following the capture's IMU yaw (default), or fixed;
+                                                   a rosbag2 directory is replayed from its COMMAND frames
+                                                   (--window A B), with the metrics of `regress`
+    humanoid-sim regress [--cases FILE] [--case ID ...] [--propose]
+                                                   every sim-vs-robot case of regression/cases.yaml, pass or fail
+                                                   per metric
     humanoid-sim view-replay <replay-dir> --save x.rrd   sim and real robot + every drive signal in Rerun
     humanoid-sim view-runtime <segment> [--save x.rrd]   watch a running `serve` in Rerun (read-only)
     humanoid-sim bench --num-envs N [--train]      real-time factor / throughput (Isaac Lab / Newton); --train runs
@@ -97,6 +102,12 @@ def cmd_build_asset(args) -> int:
 
 
 def cmd_replay(args) -> int:
+    from humanoid_sim.replay.regress_cli import is_bag, replay_bag
+
+    if is_bag(args.capture):
+        args.base = args.base or "orientation"
+        return replay_bag(args, _usd(args, base_joints=True))
+    args.base = args.base or "yaw"
     import numpy as np
 
     from humanoid_sim.model.asset import plant_identity
@@ -155,6 +166,12 @@ def cmd_replay(args) -> int:
         print(f"{d:22s} {summary['rms_position_rad'][d] * 1e3:7.2f} mrad  (real-demand "
               f"{summary['tracking_rms_rad'][d] * 1e3:6.2f})")
     return 0
+
+
+def cmd_regress(args) -> int:
+    from humanoid_sim.replay.regress_cli import regress
+
+    return regress(args, None if args.propose else _usd(args, base_joints=True))
 
 
 def cmd_view_runtime(args) -> int:
@@ -416,9 +433,14 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--integrator", default=None)
     r.add_argument("--device", default="cuda:0", help="cuda:N, or cpu (Warp's CPU device: slow)")
     r.add_argument("--duration", type=float, default=None)
-    r.add_argument("--base", choices=("yaw", "orientation", "fixed"), default="yaw",
+    r.add_argument("--base", choices=("yaw", "orientation", "fixed"), default=None,
                    help="base yaw or full orientation from the capture's IMU (asset built with --base-joints), "
-                        "or a fixed base")
+                        "or a fixed base (default: yaw; orientation for a bag)")
+    r.add_argument("--window", nargs=2, type=float, default=None, metavar=("START", "END"),
+                   help="a bag: the seconds after the bag's start to replay and score (default: from its first "
+                        "complete COMMAND frame to the end)")
+    r.add_argument("--warmup", type=float, default=2.0,
+                   help="a bag: seconds replayed before the window, so the start-up transient is not scored")
     r.add_argument("--demand-delay-ms", type=float, default=0.0,
                    help="apply each recorded demand this much after its stamp (negative: before)")
     r.add_argument("--out", default="outputs/replay")
@@ -430,6 +452,20 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--capture-coordinates")
     _add_terrain_arg(r)
     r.set_defaults(func=cmd_replay)
+
+    g = sub.add_parser("regress", help="every sim-vs-robot case on the recorded bags: pass or fail per metric")
+    g.add_argument("--cases", default="regression/cases.yaml")
+    g.add_argument("--case", nargs="+", default=None, help="only these case ids")
+    g.add_argument("--recordings", default=None,
+                   help="the directory the cases' bag paths are under (default: $HUMANOID_SIM_RECORDINGS, else "
+                        "../../data/recordings)")
+    g.add_argument("--propose", action="store_true",
+                   help="rewrite the cases' bands from the robot's values and the file's tolerances (no sim)")
+    g.add_argument("--period-ms", type=float, default=None, help="physics period (default: the profile's)")
+    g.add_argument("--integrator", default=None)
+    g.add_argument("--device", default="cuda:0")
+    g.add_argument("--out", default="outputs/regress")
+    g.set_defaults(func=cmd_regress)
 
     v = sub.add_parser("view-replay", help="Rerun recording of a replay: sim and real robot, all drive signals")
     v.add_argument("trace", help="replay output directory (trace.npz + summary.json)")
