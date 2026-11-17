@@ -176,6 +176,71 @@ Each RMS (root mean square: the square root of the mean squared difference over 
 
 Every time comes from the messages' own stamps, never from the bag's receipt times. Humble's sqlite3 bags carry no message definitions, so the reader uses the copies in `src/humanoid_sim/replay/msgs/`, kept byte-identical to Controls' `ros2_ws/src/contracts/msg_ethrc/msg`, unless the bag holds its own. A bag has no `complete` flag and no record of the gantry: that the robot hung on the gantry and ran an excitation is for whoever passes the bag to know. `sensor_msgs/Imu` has no sample counter, so a dropped IMU sample goes unnoticed. The capture id is `bag-` and 16 hex digits of the sha256 over the bag's files.
 
+## Robot regression
+
+`humanoid-sim regress` replays recorded robot bags on the plant and checks the sim against the robot, metric by metric, against pass bands that are versioned with the code. It is the check that the plant behaves like the robot on the signals that matter for control: a policy that passes every training eval can still shake on the robot, and this is where that should show first.
+
+```bash
+humanoid-sim build-asset --base-joints
+humanoid-sim regress --recordings ../../data/recordings                 # every case, exit 1 if any fails
+humanoid-sim regress --case c10-1.4hz-limit-cycle --out outputs/regress # one case
+humanoid-sim regress --propose --recordings ../../data/recordings       # reset the bands from the robot (no sim)
+humanoid-sim replay <bag-dir> --window 63 99                            # one bag window, the same metrics, no bands
+```
+
+`regress` needs the GPU image like `replay`; `--propose` and the tests need only the `bag` extra. `--recordings` (default `$HUMANOID_SIM_RECORDINGS`, else `../../data/recordings`) is the directory the cases' bag paths are under; each bag's sha256 is checked before it is read. The task `sky/regress.sky.yaml` runs it on an L40S, reading the bags from S3 through the `/ckpt` mount.
+
+### What a case holds
+
+`regression/cases.yaml` (format `humanoid-sim-regression/v1`) holds one entry per case:
+
+| Key | Meaning |
+|---|---|
+| `id`, `description` | Name and what the robot was doing |
+| `bag` | `s3`: where the bag lives (`s3://ethrc-rc-humanoid-ckpts/amoec/recordings/<path>`, the same path as under `data/recordings/`); `sha256`: the bag's contents (`BagCapture.sha256`); `path`: under the recordings directory |
+| `window_s` | Start and end in seconds after the bag's start (`metadata.yaml` `starting_time`, the zero the recording logs use) |
+| `warmup_s` | Seconds replayed before the window so the start-up transient is not scored (0 when the gains were applied only just before the window) |
+| `bands` | Per metric `{ref, lo, hi}`: `ref` is the robot's value when the band was set, `lo` and `hi` bound the sim's value |
+| `sources` | Where each family of bands comes from: the robot's mean over the case's windows, with the tolerance |
+| `tolerances` | The file-wide tolerances the bands were set with |
+
+A band applies to the mean over the case's 2 s windows of the sim's value. Phase bands are circular, in degrees. The bands are set from what the robot shows, with these tolerances: tracking error 25 % plus 0.5 mrad; the sim-minus-robot position error at most half the robot's own tracking error (plus 0.5 mrad), so the sim explains at least 75 % of its tracking-error power; response gain 30 %, response phase 20 degrees (the pitch fit found the sim's phase 80 to 90 degrees off, and timing errors of 20 to 27 degrees are what the alignment below removes); IMU sway 30 % plus 0.05 degrees; pitch-rate RMS 30 % plus 0.005 rad/s. The tolerances are provisional and say how far the sim may be from the robot's own window-to-window spread before it counts as a different plant; tighten them as the plant improves. `regress --propose` rewrites the bands from the bag and the tolerances, so a change to a tolerance, a window or a metric is one command and one reviewed diff. A robot value that no longer equals its `ref` (another bag, window or metric definition) makes the case report `stale` and fail rather than judge the sim against bands that describe something else. A metric the robot gives on fewer than three windows gets no band.
+
+The first cases are the three robot recordings of 2026-11-16 and 2026-11-17: `v11-11400-quiet-stand` (the v11 policy standing quietly, gantry walk rep-4), `v15-12900-growing-shake` (the v15 policy's 3 to 6 Hz shake growing until the drives stopped, rep-3 of the next day) and `c10-1.4hz-limit-cycle` (the c10 policy's steady 1.4 Hz sagittal limit cycle, rep-4 of the next day). Add a case by adding its bag, window and description and running `regress --propose`, and upload the bag to the S3 path it names.
+
+### How a bag is replayed
+
+`replay` of a rosbag2 directory (`BagCapture`) feeds each drive the bag's COMMAND frames from `/rt/body_control`, converted to drive-frame targets (the targets in semantic radians plus the standing offsets, through the ankle transmission for the cranks; they agree with the drives' own 0x6062 demand to 1 to 9 mrad RMS), each at its frame stamp and taking effect `devices.command_path.frame_to_drive_ns` later (5.3 ms for the V1, measured on the 2026-11-16 captures: the controller path plus the drive's own 5 ms). The robot's recorded drive demand is not used. The gains come from `/drive_gains/state`, judged over the replayed span on the description's drives. The base follows the IMU's orientation (`--base orientation`, the default for a bag) on the asset built with base joints. `--window` and `--warmup` choose the span; without a window the whole bag after its first complete frame is replayed.
+
+Signals are compared on one 200 Hz grid by their own source stamps (`replay/grid.py`). Drive position and torque and the IMU are linearly interpolated between their samples (the IMU on its receipt stamps, so up to a 15 ms burst late; the same for every bag), and a target is held from its frame's stamp, the instant the loop host sent it, until the next frame. Targets are never moved by the command latency: that belongs to the plant that answers them. The sim's step-end states are interpolated on the same grid and answer the same held target. Pairing each policy tick's new target with a gyro sample taken 7 ms before it skews phase by 20 to 27 degrees at 3 to 12 Hz, which is the size of the effect the suite is looking for.
+
+### The metrics
+
+Every metric is computed per 2 s window (every 1 s) and reported as mean, std, min and max over the windows, for the robot and the sim on the windows both have a value for (`summary.json`, `metrics`):
+
+| Metric | Meaning |
+|---|---|
+| `tracking_rms.<drive>` | RMS of the drive's position minus the target in force, with the window's mean removed, rad |
+| `tracking_offset.<drive>` | That mean, rad (information, no band) |
+| `sim_real_rms.<drive>` | RMS of sim minus robot position, mean removed, rad (sim only) |
+| `hip_q_over_target.<band>.gain`, `.phase_deg` | Symmetric hip flexion position over its target |
+| `hip_tau_over_target.<band>.gain`, `.phase_deg` | Symmetric hip flexion torque over its target, N m per rad |
+| `pitch_rate_over_hip_target.<band>`, `pitch_rate_over_hip_tau.<band>` | Torso pitch rate (IMU gyro y) over the symmetric hip flexion target and torque |
+| `imu.pitch_sway_deg`, `imu.roll_sway_deg` | Std of the IMU pitch and roll angle in the window |
+| `imu.pitch_rate_rms.<band>` | RMS of the pitch rate in the band, about its mean, rad/s |
+
+The response bands are 1 to 3, 3 to 6 and 6 to 12 Hz; the pitch-rate bands 0.5 to 3, 3 to 6 and 6 to 12 Hz. The symmetric hip flexion is the left joint minus the right one, over two (the joints are mirrored). A response is estimated in each window from Hann-windowed spectra pooled over the band, `H = sum(conj(U) Y) / sum(|U|^2)`, phase as the angle of output over input (negative when the output lags). A window whose input is below 0.2 mrad (0.05 N m for torque) in the band, or whose coherence is below 0.5, is left out, and a band's phase statistics are circular. The metrics are in `replay/metrics.py`.
+
+### What it can and cannot show yet
+
+The base is prescribed from the robot's IMU and does not translate, so the replay is open loop with the base held. What it can show: how each drive follows the robot's own targets (lag, gain, overshoot, the command path), and how the hip drive and the leg answer a target with the torso given. What it cannot show:
+
+- The torso's own motion. With the base prescribed the sim's pitch rate is the robot's, so the IMU and pitch-rate families have only the robot's value; they are listed in the cases (the bands are what a free-base run is held to) and reported `SKIP`, not `PASS`. The hip-command-to-pitch-rate response that failed on the robot on 2026-11-17 needs a free base or the closed loop, which are later slices.
+- Weight on the legs. The sim robot hangs from its base, so a standing robot's static deflections (tens of mrad at the hips and ankles, 20 N m of hip abduction torque) are not reproduced; the tracking error is therefore the dynamic part, and `tracking_offset` reports the difference. Hip position and torque responses of a loaded, rocking robot differ from a hanging one for that reason as well as for the plant's; a failure there is not by itself a plant verdict.
+- Foot contact, the policy's observations and what a changed plant does to a policy. Nothing here runs the policy.
+
+The same cases are meant to be replayed on the Controls MuJoCo plant so that both plants are judged on the same data; that is not wired yet.
+
 ## Fitting
 
 Fitting the demand delay, passive joint parameters and PACE's actuator model, and the capture checks that go with them, live in humanoid-learning (`python -m humanoid_learning.sysid --help`). humanoid-sim has no fitting commands, no `sysid` package and no fitting SkyPilot tasks; it supplies the plant, the replay and the capture and bag readers the fitters use.
