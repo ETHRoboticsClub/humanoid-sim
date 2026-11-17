@@ -282,6 +282,12 @@ Positions are in the [drive frame](glossary.md#drive-frame). For a 1:1 drive tha
 
 The [baseline gains](glossary.md#baseline-gains) (`plant.core.drive_stiffness`, `plant.core.drive_damping`, from humanoid-urdf) are also the solver gains. Target shaping is guaranteed stable for demanded gains up to twice the baseline; `plant.core.gain_warnings` (`[E, 22]` bool, cleared at reset) marks drives that received an enabled demand above that.
 
+## Scoring a closed-loop run
+
+humanoid-sim has no policy loop: the policy side (observations, joint targets, the IMU filter) is Controls' policy core, which humanoid-learning models on this plant. What has to be the same wherever a policy runs is how a stand or walk run is scored, so that part lives here, in `src/humanoid_sim/chatter_gate.py` (NumPy only): the chatter gate. It scores a run's leg joint targets (the 12 hip, knee and ankle joints) over a window: the RMS above 3 Hz and its share of the power, the share of ticks on which an ankle target was clipped or projected, the mean tilt and the base's drift, with the per-run test and the checkpoint verdict validated against the robot on 2026-11-17 (v11 11400 passes, v15 12900 fails and shook). It also reports the pitch sway and pitch-rate RMS, their content in 0.5 to 3 Hz and the dominant pitch frequency, which show a steady low-frequency limit cycle the above-3 Hz measure does not; those do not gate yet.
+
+The scenarios are `chatter_gate.SCENARIOS`: stand for 66 s (scored over 6 to 66 s) and walk at 0.2 m/s for 40 s (scored over 10 to 40 s), seeds 0 to 2, a realistic and a clean IMU, command latency 10 to 20 ms. `score_run` takes the run's arrays, `score_csv` reads the Controls MuJoCo runner's log, and `verdict` gives pass or fail with the reasons. `tests/test_chatter_gate.py` pins the scoring to the numbers humanoid-learning's Controls gate gave.
+
 ## Reading the plant
 
 ### `measured()`
