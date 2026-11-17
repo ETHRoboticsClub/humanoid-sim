@@ -121,7 +121,53 @@ When paced, the host sleeps until 0.1 ms before each deadline and then spins, an
 
 These are measurements to compare your own runs against. They depend on the GPU, the driver and the node's CPU, and they move when the description or the profile changes (contact buffers, self-collision sets, solver iterations). Compare runs on the same GPU type.
 
-These figures were measured at a 4 ms physics period on URDF_6, before the native V1 moved to 1 ms, and are not repeated since: a 1 ms period costs about four times the steps per simulated second, and the native closed-chain model has its own step time. The latest `e2e` run, on an NVIDIA L40S on 2026-10-20 (`sky launch --gpus L40S:1` with `sky/e2e.sky.yaml`), wrote these (`runtime*.json` and `train_4096*.json` in `outputs/e2e/` on the node), from the home pose on MJWarp, for the V1 and the G1 Controls runs (`g1_29dof_with_hand_rev_1_0`):
+### Native V1 at 1 ms, 2026-11-17
+
+`humanoid-sim serve` on the native V1 (MJWarp, `rk4`, the profile's defaults) does not keep up at the 1 ms physics period: one step costs 2.3 to 2.4 ms on an L40S, so the plant runs at about 0.4 times real time and every paced step is late. The figures below are from an NVIDIA L40S (AWS g6e.2xlarge, driver 580, torch 2.11 with CUDA 13) with Isaac Lab at the pinned commit, `master` at f9245f4 against the change that added `tests/test_runtime_keeping_up.py`.
+
+| Native V1, 1 ms, one robot, 2000 steps | master | this change |
+|---|---|---|
+| `serve`'s step, suspended, a demand every bus cycle (1.5 ms): mean (`ms_per_step`) | 2.81 ms | 2.28 ms |
+| the same, p99 | 3.01 ms | 2.62 ms |
+| the same, real-time factor | 0.36 | 0.44 |
+| `bench --runtime` (free robot, a demand every step), two runs: `ms_per_step` | 2.55, 2.50 ms | 2.14, 2.37 ms |
+| `bench --runtime`: `real_time_factor` | 0.39, 0.40 | 0.47, 0.42 |
+| paced `serve` seen by a client (25 s): plant time over wall time | 0.35 (the #142 probe) | 0.41 |
+
+Where one `serve` step goes (suspended; wall time on the host thread, in ms; the GPU runs asynchronously, so the wait for it lands in the publish row):
+
+| Part of the step | master | this change |
+|---|---|---|
+| intake of the client's demands (`_take_demands`) | 0.12 | 0.12 |
+| plant graph before the solver (`graphs.pre`) | 0.14 | 0.15 |
+| eager joint-target assembly and write into the solver's buffers | about 0.50 | inside that graph |
+| gantry rope forces (`gantry.apply`) | 0.28 | 0.22 |
+| Isaac Lab `write_data_to_sim`, solver launch, `scene.update` | 0.51 | 0.52 |
+| plant graph after the solver (`graphs.post`, with the joint-state gather) | 0.03 | 0.01 |
+| feedback packing (`_feedback_flat`) | 0.16 | 0.04 |
+| waiting for the GPU (one blocking event), copies, writes into the segment | 0.84 | about 1.1 including the GPU's remaining work |
+| truth, every fifth step (0.57 ms each) | 0.11 | 0.11 |
+| total | 2.81 | 2.28 |
+
+What limits it. The solver's own CUDA graph (Isaac Lab's captured `NewtonManager` step: Newton's collision pipeline, MJWarp's `rk4` with its four forward-dynamics evaluations, constraints and the solve) takes 1.35 ms of GPU time by itself, measured replaying it back to back. It is about 850 kernels of 1 to 20 microseconds each (the tree-depth loops of `crb`, `cfrc` and `subtree_com`, the loop-closure `equality_connect`, one 130 us narrow-phase kernel), so it is latency-bound, not bandwidth-bound. Alone it caps the host at 0.74 times real time. The host's own work (the plant and drive bank, the Isaac scene's per-step Python and kernel launches, the feedback and the truth) is about 0.9 ms of launch time on the host thread that cannot start the solver graph before it has finished the launches ahead of it, and the host then waits for the whole GPU chain before it publishes.
+
+Solver settings that would change the step cost, measured as the solver graph alone (a free robot that tips over, 2000 steps) and, for `implicitfast`, in the whole host (changing any of them changes the physics, so none is applied):
+
+| MJWarp setting | solver graph | whole `serve` step (this change) | Accuracy cost |
+|---|---|---|---|
+| `integrator: rk4` (the profile's) | 1.35 ms | 2.28 ms (0.44x) | reference |
+| `integrator: implicitfast` | 0.52 ms | 1.60 ms (0.62x) | first-order: at 4 ms on the V1 the angular momentum drift of a free-falling robot is 5.4 % against 0.017 % for `rk4` (`profiles/defaults.yaml`; not re-measured at 1 ms); it also treats the explicit actuator and compliance springs differently |
+| `integrator: euler` | 0.51 ms | not run | as `implicitfast`, and explicit in the damping |
+| `iterations` 100 to 30, or 10 with `ls_iterations` 10 | 1.35 ms, 1.36 ms | not run | none seen (the cost did not move, the trajectories were not compared) |
+| `ls_iterations` 50 to 20 | 1.35 ms | not run | none seen at this load |
+
+Even with `implicitfast` the host sits at 1.60 ms, because its own launch chain, not the GPU, is then the limit (on master it is 2.10 ms). Reaching 1.0 times real time needs both a cheaper solver step and a much shorter host chain. What would shorten the host chain, none of it measured here: capturing Isaac Lab's `write_data_to_sim` and `scene.update` kernels in the step graph (they are launched eagerly from Python today, about 0.4 ms), batching the gantry's per-point wrench calls into one, and publishing a step's feedback after the next step's launches (the copy is already queued; this adds up to one launch chain of latency to the published feedback, so it would be used only while the host is behind). The truth and the IMU's data cannot simply be captured: Isaac Lab derives their views lazily on read, and a captured read returned stale values (a truth graph and a captured gantry rope read both changed results and were dropped).
+
+The run that produced these numbers checked the physics against `master` with the same demands and the same schedule over 1500 steps (`humanoid-sim` host, suspended): the drive feedback and the truth differ from `master` by no more than two `master` runs differ from each other (truth at most 1e-6, the drive columns' mean difference 4.7e-5 for both; one nondeterministic demanded-torque spike of 0.96 N m appears in both comparisons).
+
+`tests/test_runtime_keeping_up.py` runs the host unpaced on an L40S and fails when the step's mean or p99 cost goes over its budget (2.6 and 3.2 ms); a second test asserts the step is under the period and is expected to fail (`xfail`, strict) until the solver and the host chain shrink. The host reports the step cost and `overrun_steps` (steps that cost more than the period) in its status line, and `late_steps` and `keeping_up` in every feedback record ([runtime.md](runtime.md#the-clock)).
+
+The 4 ms figures below were measured on URDF_6 before the native V1 moved to 1 ms and are kept for the G1. The latest `e2e` run, on an NVIDIA L40S on 2026-10-20 (`sky launch --gpus L40S:1` with `sky/e2e.sky.yaml`), wrote these (`runtime*.json` and `train_4096*.json` in `outputs/e2e/` on the node), from the home pose on MJWarp, for the V1 and the G1 Controls runs (`g1_29dof_with_hand_rev_1_0`):
 
 | Runtime host, one robot, a new demand every step, 2000 steps | V1 | G1 |
 |---|---|---|
