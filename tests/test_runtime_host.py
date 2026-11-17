@@ -193,7 +193,8 @@ def test_prescribed_pose_with_floor_clearance_and_sole_truth(tmp_path, robot):
         assert host._reset({"pose": "home"}) is not None  # both soles level, on the ground
         host._publish_truth()
         _, truth = host.seg.regions["truth"].read()
-        assert (truth["sole"]["plate_face_height_span_m"] < 0.002).all()
+        # the native V1's home pose is the CAD zero: upright, its soles tilt 8 mm across the plate (2026-11-17)
+        assert (truth["sole"]["plate_face_height_span_m"] < 0.01).all()
         assert truth["sole"]["lowest_z_m"] == pytest.approx([0.001, 0.001], abs=0.001)
     finally:
         host.close()

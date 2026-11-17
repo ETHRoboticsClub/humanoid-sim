@@ -22,6 +22,7 @@ from humanoid_sim.model.asset import load_profile
 from humanoid_sim.model.description import Description
 from humanoid_sim.timing.clock import NS_PER_MS, NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.hulls import StaticHulls
 from humanoid_sim.world.objects import ObjectsDriver, WorldObjects
 
 POLICY_PERIOD_NS = 20 * NS_PER_MS
@@ -63,7 +64,8 @@ def physics_overrides(args) -> dict:
     return overrides
 
 
-def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None, objects: WorldObjects | None = None) -> dict:
+def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None, objects: WorldObjects | None = None,
+                    collision: StaticHulls | None = None) -> dict:
     import isaaclab.sim as sim_utils
     from isaaclab.utils import instantiate
 
@@ -78,7 +80,7 @@ def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None, objects: 
     with robot_build(args.robot, solver=args.solver, physics_overrides=overrides):
         scene = instantiate(robot_scene_cfg(n, usd, robot=args.robot, ground_friction=0.0, pose="home",
                                             self_collision=False if args.no_self_collision else None, scene=boxes,
-                                            objects=objects))
+                                            objects=objects, collision=collision))
         sim.reset()
     robot = scene["robot"]
     driver = ObjectsDriver(scene, objects) if objects else None
@@ -158,4 +160,5 @@ def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None, objects: 
             "checksum_finite": bool(torch.isfinite(sink).item()), "fraction_envs_up": up,
             "peak_body_ang_vel_rad_s": peak_spin.item(),
             "scene": None if boxes is None else boxes.describe(),
+            "collision": None if collision is None else collision.describe(),
             "objects": None if not objects else objects.describe()}

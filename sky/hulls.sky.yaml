@@ -1,0 +1,57 @@
+# A room's convex collision pieces (world/hulls.py) on one L4: the physics tests of static pieces, boxes and stairs on
+# MJWarp and Kamino (TESTS=1), then the hangar's physics step time with no room, its boxes and its pieces, at each env
+# count, one configuration per process.
+#   sky launch -y -d -c hsim-hulls -i 10 --down sky/hulls.sky.yaml   (autostop tears the cluster down after 10 idle min)
+#   sky logs hsim-hulls
+# The hangar files are mounted from ~/data/hangar: Controls' hangar_proxy.npz and a pieces file written by
+# spikes/hangar_collision/decompose.py. HANGAR points elsewhere for files copied onto a running cluster
+# (sky exec --env HANGAR=...).
+name: humanoid-sim-hulls
+workdir: .
+
+resources:
+  accelerators: L4:1
+  cpus: 8+
+  memory: 64+   # 470 boxes at 4096 envs took 27 GB of host memory
+  disk_size: 150
+
+file_mounts:
+  /data/hangar/hangar_proxy.npz: ~/data/hangar/hangar_proxy.npz
+  /data/hangar/hangar_hulls.npz: ~/data/hangar/hangar_hulls_fixed.npz
+
+envs:
+  ISAACLAB_COMMIT: 32712682b69edd488eea26689da6905c48d31037
+  UV_VERSION: 0.13.1
+  HANGAR: /data/hangar
+  SPAWN: "-4.42 3.48"    # HANGAR_SPAWN, open floor
+  ENV_COUNTS: "1024"     # 4096 envs in the hangar do not fit an L4's 24 GB, with the boxes alone either
+  TESTS: "0"
+
+setup: |
+  bash sky/setup.sh
+  "$HOME/.local/bin/uv" pip install --python "$HOME/il-venv/bin/python" "pytest>=9,<10"
+
+run: |
+  set -uo pipefail
+  export PATH="$HOME/.local/bin:$HOME/il-venv/bin:$PATH"
+  python -c 'import torch; assert torch.cuda.is_available(), "CUDA is required"' || exit 1
+  humanoid-sim build-asset | tail -1
+  out=outputs/hulls; mkdir -p $out
+  failed=0
+  if [ "$TESTS" = "1" ]; then
+    humanoid-sim --robot g1_29dof_with_hand_rev_1_0 build-asset | tail -1
+    # One pytest process per file: Isaac Lab keeps one simulation per process.
+    for f in test_static_hulls test_static_boxes test_mesh_terrain; do
+      pytest -v -s --junitxml="$out/$f.xml" "tests/$f.py" > "$out/$f.log" 2>&1 || failed=1
+      echo "$f: $(tail -1 "$out/$f.log")"
+    done
+  fi
+  H=$HANGAR
+  for n in $ENV_COUNTS; do
+    for cfg in "- -" "$H/hangar_proxy.npz -" "$H/hangar_proxy.npz $H/hangar_hulls.npz"; do
+      python spikes/hangar_collision/step_time.py $n $cfg --spawn $SPAWN 2> $out/step_time.err | grep '^{' \
+        || { echo "step_time $n $cfg failed: $(tail -1 $out/step_time.err)"; failed=1; }
+      echo "host memory used: $(free -g | awk '/Mem/{print $3}') GB"
+    done
+  done
+  exit $failed

@@ -19,6 +19,7 @@ from humanoid_sim.devices.demand import DriveDemand
 PUSH_RAD = 1.0  # how far past a stop the pushed crank's target lies: 22 N m with the baseline spring
 STEPS = 2500  # 2.5 s at the V1's 1 ms: the cranks' soft hold settles in half of it
 SIDES = 8  # one env per stop: four cranks, lower and upper
+SETTLE_STEPS = 250  # the window a run's rest speed is judged over: its last quarter second
 HINGE_FRICTION = 1e-6  # next to nothing (Kamino keeps a joint's friction structure from its build)
 
 
@@ -42,7 +43,10 @@ def _run(*, compliance=False, soft=None, scales=None, specs=(), push=PUSH_RAD, s
     """Hang the robot, hold its cranks, push crank ``env // 2`` of each env past its lower (even env) or upper (odd
     env) stop and step. ``soft``: the profile's ``crank_stops.soft`` (``None``: left to the profile); ``scales``:
     ``(stiffness, damping)`` ratios per env for the plant's knobs; ``shake``: ``(hinge torque N m, Hz)``. Returns the
-    settled state; the simulation is closed (one per process)."""
+    settled state; the simulation is closed (one per process). ``rest_speed`` is the median over the last ``SETTLE_STEPS`` steps
+    of the fastest joint's speed: Kamino's PADMM solve is not bit-reproducible on the GPU, and a contact now and then kicks
+    one step of a settled run (a hard limit's chatter, up to 0.06 rad/s on one step in a run that sits at 2e-4 rad/s), so
+    the speed at the final step alone is not a measure of rest; a hold that fails keeps the median high."""
     from humanoid_sim.model.usd import crank_joints
     from humanoid_sim.randomization import ParamSpec
     from humanoid_sim.sim import SimCore
@@ -93,6 +97,7 @@ def _run(*, compliance=False, soft=None, scales=None, specs=(), push=PUSH_RAD, s
         drive_cols = torch.tensor(drive_ids, device="cuda:0")
         deepest = torch.full((envs,), -1.0, device="cuda:0")
         worst_rate = torch.zeros((), device="cuda:0")
+        speed = torch.zeros(steps, device="cuda:0")  # every step's fastest joint, read back once after the loop
         for step in range(steps):
             if shake is not None:
                 load, hz = shake
@@ -104,10 +109,12 @@ def _run(*, compliance=False, soft=None, scales=None, specs=(), push=PUSH_RAD, s
             at = feedback.position_rad[row, drive_cols[pushed]]
             deepest = torch.maximum(deepest, torch.where(upper, at - limits[pushed, 1], limits[pushed, 0] - at))
             worst_rate = torch.maximum(worst_rate, sim.solver_state()[1].abs().max())
+            speed[step] = sim.joint_state()[1].abs().max()
         q, qd = (t.clone() for t in sim.joint_state())
         position = feedback.position_rad[:, drive_ids].clone()
         out = {"position": position, "torque": feedback.applied_torque_nm[:, drive_ids].clone(), "q": q, "qd": qd, "cranks": cranks,
                "pushed": pushed, "upper": upper, "limits": limits, "peak": peak, "worst_rate": worst_rate,
+               "rest_speed": float(speed[-SETTLE_STEPS:].median()),
                "overshoot": torch.where(upper, position[row, pushed] - limits[pushed, 1],
                                         limits[pushed, 0] - position[row, pushed]),
                "drive_torque": feedback.applied_torque_nm[row, drive_cols[pushed]].abs().clone(), "deepest": deepest,
@@ -147,7 +154,7 @@ def test_a_static_push_rests_past_the_stop_by_torque_over_stiffness(compliance):
     state = _run(compliance=compliance, scales=(ratios, torch.ones(SIDES)))
     k = state["stiffness"][:, 0]
     torch.testing.assert_close(k, ratios.to("cuda:0") * _nominal("stiffness_nm_per_rad"))
-    assert state["qd"].abs().max() < (0.03 if compliance else 2e-3), "not settled"
+    assert state["rest_speed"] < (0.03 if compliance else 2e-3), "not settled"
     torque = state["drive_torque"]
     assert torque.min() > 0.8 * 22.1 * (PUSH_RAD - 0.15) and torque.max() < 30.01  # about the baseline spring's push
     predicted = torque / k
@@ -176,7 +183,7 @@ def test_without_a_push_there_is_no_overshoot_and_no_stop_torque(compliance):
     _cuda()
     # A crank held at its stop (target on the bound) and one held inside the window: neither presses on a stop.
     state = _run(compliance=compliance, soft=True, push=0.0, scales=(torch.ones(SIDES), torch.ones(SIDES)))
-    assert state["qd"].abs().max() < (0.03 if compliance else 2e-3), "not settled"
+    assert state["rest_speed"] < (0.03 if compliance else 2e-3), "not settled"
     print(f"[no push compliance={compliance}] overshoot {state['overshoot'].tolist()}; drive torque {state['drive_torque'].tolist()}; "
           f"peak stop torque {float(state['peak'].max()):.4f} N m")
     assert state["overshoot"].abs().max() < 3e-4
@@ -193,10 +200,19 @@ def test_a_stiff_stop_reproduces_the_hard_stop(compliance):
     stiff_ratio, stiff_damping = 3.0, 0.5  # 6000 N m/rad and 1 N m s/rad: the stiffest the 1 ms step carries
     stiff = _run(compliance=compliance, scales=(torch.full((SIDES,), stiff_ratio), torch.full((SIDES,), stiff_damping)))
     nominal = _run(compliance=compliance, soft=True)  # the profile's nominal through SimCore alone
-    settled = 0.03 if compliance else 2e-3  # the compliance springs ring down slowly
-    assert max(float(r["qd"].abs().max()) for r in (hard, stiff, nominal)) < settled, "not settled"
-    # The hard stop holds the crank at its bound; the stiff one lets it past by torque over stiffness.
-    assert hard["overshoot"].abs().max() < (4e-3 if compliance else 1e-3)  # the springs keep ringing down slowly
+    # The soft runs rest at 1.3 to 2.4e-4 rad/s (20 runs), 8x under the bound. Kamino's hard limit never rests
+    # that quietly: its contact keeps jittering at 0.7 to 5.2 mrad/s (median over the last quarter second, rigid case;
+    # 6 to 9.5 mrad/s with the ankle springs), different from run to run on the GPU, so it gets its own bound: well above
+    # that jitter and far under a run that is still ringing down (0.04 rad/s after 0.25 s).
+    soft_bound, hard_bound = 2e-3, (0.03 if compliance else 1e-2)
+    print(f"[stiff stop compliance={compliance}] rest speeds hard/stiff/nominal: "
+          f"{[round(r['rest_speed'], 5) for r in (hard, stiff, nominal)]} rad/s")
+    assert hard["rest_speed"] < hard_bound and max(stiff["rest_speed"], nominal["rest_speed"]) < soft_bound, "not settled"
+    # The hard stop holds the crank at its bound; the stiff one lets it past by torque over stiffness. The hard contact's
+    # jitter shows in the angle too (1.2 and 1.4 mrad on the same crank in 2 of 10 runs,
+    # 0.3 mrad or less on the others); a stop that gives way
+    # by torque over stiffness is 10 mrad at the nominal 2000 N m/rad, well above this bound.
+    assert hard["overshoot"].abs().max() < (4e-3 if compliance else 3e-3)  # the springs keep ringing down slowly
     k_stiff = stiff_ratio * _nominal("stiffness_nm_per_rad")
     torch.testing.assert_close(stiff["overshoot"], hard["overshoot"], rtol=0, atol=5e-3)
     assert (stiff["overshoot"] - hard["overshoot"]).abs().max() <= 1.2 * float(hard["drive_torque"].max()) / k_stiff + 3e-4
@@ -227,7 +243,7 @@ def test_damping_reaches_the_solver_and_takes_the_energy_out_of_an_impact():
     second = _run(scales=(ones, high), push=2.0)
     torch.testing.assert_close(first["damping"][:, 0], low.to("cuda:0") * _nominal("damping_nm_s_per_rad"))
     torch.testing.assert_close(second["damping"][:, 0], high.to("cuda:0") * _nominal("damping_nm_s_per_rad"))
-    assert first["qd"].abs().max() < 2e-3 and second["qd"].abs().max() < 2e-3, "not settled"
+    assert first["rest_speed"] < 2e-3 and second["rest_speed"] < 2e-3, "not settled"
     # The settled overshoot is the same (it is torque over stiffness); the impact's deepest reach is not.
     torch.testing.assert_close(first["overshoot"], second["overshoot"], rtol=0.03, atol=3e-4)
     print(f"[damping] impact reach beyond the settled overshoot: damping x0.1 {(first['deepest'] - first['overshoot']).mean() * 1e3:.2f} mrad, "

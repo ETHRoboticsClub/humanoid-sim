@@ -42,3 +42,26 @@ def contact_capacity_guard(physics: dict, num_envs: int, device):
 
     flag = kamino_overflow_flag(NewtonManager._solver)
     return None if flag is None else ContactCapacityGuard(flag)
+
+
+# Kamino's dense Delassus operator (and its factor) is one float32 array over every world, each world's block sized by
+# its largest possible constraint count, indexed with int32 offsets in every dense kernel (Newton 1.6.1, and Newton 1.8,
+# which raises on it): worlds x rows^2 must stay below 2^31.
+KAMINO_DENSE_LIMIT = 2**31 - 1
+
+
+def kamino_constraint_rows(solver) -> dict[str, int]:
+    """The largest world's constraint rows of a built SolverKamino, by kind: ``bilateral`` (joints, with each implicit
+    joint dynamics row), ``bounded`` (bounded implicit-PD effort rows), ``limits``, ``contacts`` (three per contact of
+    the per-world capacity), their ``total``, and ``max_worlds``: the most worlds the dense operator holds at it."""
+    impl = solver._solver_kamino
+    info = impl._model.info
+    bilateral = max(info.num_joint_bilateral_cts.numpy().tolist())
+    bounded = max(info.num_joint_bounded_cts.numpy().tolist())
+    limits = impl._limits
+    nl = max(limits.world_max_limits_host) if limits is not None and limits.model_max_limits_host > 0 else 0
+    contacts = getattr(solver, "_contacts_kamino", None)
+    nc = max(contacts.world_max_contacts_host) if contacts is not None and contacts.model_max_contacts_host > 0 else 0
+    total = int(bilateral + bounded + nl + 3 * nc)
+    return {"bilateral": int(bilateral), "bounded": int(bounded), "limits": int(nl), "contacts": int(3 * nc),
+            "total": total, "max_worlds": KAMINO_DENSE_LIMIT // total**2}
