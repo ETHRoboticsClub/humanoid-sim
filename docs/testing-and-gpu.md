@@ -19,6 +19,7 @@ Every test lives in `tests/`, in files named `test_<area>*.py`. List the files f
 | `test_world`, `test_supports`, `test_gantry_*`, `test_trolley`, `test_static_boxes`, `test_objects`, `test_terrain_*`, `test_mesh_terrain` | Ground, terrain, objects, the gantry and supports |
 | `test_model_build`, `test_mirror`, `test_robots`, `test_description_delivery`, `test_collision_pruning`, `test_physics`, `test_angular_momentum`, `test_solvers`, `test_*_build_patch` | The robot description, the built model and solver checks |
 | `test_cli_warp` | The command line |
+| `test_chatter_gate` | The chatter gate's scoring of closed-loop stand and walk runs, pinned to the Controls MuJoCo gate's numbers (no physics) |
 
 `conftest.py` holds the shared fixtures and `PHYSICS_ROBOTS`; `rtx_*` and `kamino_*_fixture` files are helpers, not tests.
 
