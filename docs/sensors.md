@@ -321,7 +321,7 @@ The runtime host writes the truth region every `truth_every` steps (default 5, s
 | `mass_kg` | kg | Total robot mass |
 | `sole[2]` | | The two sole plates, left then right |
 
-The sole plates are the [sole boxes](glossary.md#sole-box), the box contact primitives fitted under each foot (on the body carrying each foot_roll joint; see [robot-model.md](robot-model.md#the-prepared-urdf)). Per plate:
+The sole plates are the [sole boxes](glossary.md#sole-box), the box contact primitives fitted under each foot (on the body carrying each ankle_inversion joint; see [robot-model.md](robot-model.md#the-prepared-urdf)). Per plate:
 
 | Field | Unit | Meaning |
 |---|---|---|

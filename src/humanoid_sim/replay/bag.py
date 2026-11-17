@@ -9,8 +9,8 @@ and :class:`BagCapture` serves it through the same interface as :class:`~humanoi
 * ``/rt/imu`` (``sensor_msgs/msg/Imu``): orientation and angular velocity in ``base_link``, stamped on receipt;
 * ``/rt/body_control`` (``msg_ethrc/msg/BodyControlFrame``, 50 Hz while commanding): the
   COMMAND frames to the Joint Host, every drive's joint reference in semantic radians, stamped by the loop
-  host when it sent them. No topic carries the per-drive targets the driver writes to the bus; the replay rebuilds
-  them from these frames as the master does (:func:`humanoid_sim.replay.replay.drive_targets`).
+  host when it sent them. No topic carries the per-drive targets the driver writes to the bus; a client that needs them
+  rebuilds them from these frames as the master does.
 
 Times are the messages' own stamps (``source_stamp_ns``, ``header.stamp``: ROS time, integer ns), never the bag's
 receipt times. Message definitions come from the bag when it carries them (MCAP, and sqlite3 from ROS Iron on);

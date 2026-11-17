@@ -7,9 +7,9 @@ pytestmark = pytest.mark.physics
 @pytest.mark.parametrize('mode', ['public_mutated_D', 'private_negative_P', 'private_body_overflow', 'private_detached_D'])
 def test_sparse_diagnostics_preserve_generic_dense_contract(mode):
     import warp as wp
-    from newton._src.solvers.kamino.config import PADMMSolverConfig
-    from newton._src.solvers.kamino._src.solvers.padmm.solver import PADMMSolver
     from kamino_reduced_fixture import make
+    from newton._src.solvers.kamino._src.solvers.padmm.solver import PADMMSolver
+    from newton._src.solvers.kamino.config import PADMMSolverConfig
     def fixture(candidate):
         model, problem = make()
         cfg = PADMMSolverConfig(

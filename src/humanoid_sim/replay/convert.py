@@ -16,7 +16,7 @@ other's:
   transmissions' conventions are: the new transmission is only the inverse of the one the replay rebuilds the crank
   targets with. Where it cannot reach a crank pair the conversion stops with the residual;
 * ``ankles="hold"`` holds both ankles at the first converted frame for the whole capture instead, so the simulated
-  feet stay still. The fit must then leave the ankle drives out (``fit-pace --skip-drives`` and ``--fix``).
+  feet stay still. A fit must then leave the ankle drives out.
 
 :func:`convert_capture` checks the result: the drive targets this description's plant rebuilds from the converted
 commands against the old description's, per drive, and writes

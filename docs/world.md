@@ -483,7 +483,7 @@ class PushedPoseOffsets(PoseOffsets):  # PoseOffsets from training.md, "A minima
         self.push.reset(torch.as_tensor(env_ids, device=self.device, dtype=torch.long), self.plant.t_ns)
 ```
 
-`Component171_1` is the upper body, the body above the waist yaw joint. Body names are the merged URDF link names described in [robot-model.md](robot-model.md). They come from the CAD export and can mislead: the right foot is `bottom_universal_joint_l_1` (it hangs from `foot_roll_r`).
+`hej90_hip_abduction_1` is the upper body's lower part, the body below the torso lateral bending joint. Body names are the merged URDF link names described in [robot-model.md](robot-model.md). They come from the CAD export and can mislead: the right foot is `bottom_universal_joint_l_1` (it hangs from `ankle_inversion_r`).
 
 ### Joint torques in training
 

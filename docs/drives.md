@@ -8,10 +8,10 @@ The robot has 22 drives. Eighteen are 1:1 drives: the drive output turns one joi
 
 | Family | Drives | Joints | Peak torque | No-load speed | Encoder |
 |---|---|---|---|---|---|
-| HEJ90-48-140 | `maxonHEJ90M1`, `M2`, `L1` to `L4`, `R1` to `R4` (10) | hip_central_rotation, waist_upperbody_yaw, leg_flexion, leg_abduction, hip_yaw, knee | 140 Nm | 10.4 rad/s | 4096 counts/rev |
+| HEJ90-48-140 | `maxonHEJ90M1`, `M2`, `L1` to `L4`, `R1` to `R4` (10) | torso_lateral_bending, torso_axial_rotation, hip_flexion, hip_abduction, hip_internal_rotation, knee_flexion | 140 Nm | 10.4 rad/s | 4096 counts/rev |
 | HEJ70-48-50 | `maxonHEJ70AL1`, `AR1`, `AL2`, `AR2` (4) | shoulder_flexion, shoulder_abduction | 50 Nm | 22 rad/s | 16384 counts/rev |
-| HEJ50-48-30 | `maxonHEJ50AL3`, `AR3`, `AL4`, `AR4` (4) | shoulder_rotation, elbow_flexion | 30 Nm | 21 rad/s | 16384 counts/rev |
-| HEJ50-48-30 | `maxonHEJ50L_ANK1`, `L_ANK2`, `R_ANK1`, `R_ANK2` (4) | foot_pitch and foot_roll, through the cranks | 30 Nm | 21 rad/s | 16384 counts/rev |
+| HEJ50-48-30 | `maxonHEJ50AL3`, `AR3`, `AL4`, `AR4` (4) | shoulder_internal_rotation, elbow_flexion | 30 Nm | 21 rad/s | 16384 counts/rev |
+| HEJ50-48-30 | `maxonHEJ50L_ANK1`, `L_ANK2`, `R_ANK1`, `R_ANK2` (4) | ankle_dorsiflexion and ankle_inversion, through the cranks | 30 Nm | 21 rad/s | 16384 counts/rev |
 
 Drive facts (family, sign, gains, torque-speed curves, ankle geometry) come from `third_party/humanoid-urdf/ethrc_v1/actuators.yaml` through `Description` in `src/humanoid_sim/model/description.py`. Encoder resolution is in `profiles/ethrc_v1.yaml` under `devices.encoders`. Every `[E, D]` tensor (envs by drives) uses the description's drive order, the 18 1:1 drives in joint order and then the four cranks; `PlantCore.map.drive_names` lists it.
 
@@ -31,7 +31,7 @@ The native V1 physics period is 1 ms (`physics.period_ns` in `profiles/ethrc_v1.
 
 The public plant API separates semantic joint coordinates from drive coordinates. The native solver additionally contains crank and rod coordinates; callers do not append those to semantic observations or commands.
 
-URDF joint coordinates are what the solver and the URDF use: one angle per joint, with the ankle as two hinges, foot_pitch and foot_roll. URDF zero is the [calibration pose](glossary.md#calibration-pose). A joint's [standing offset](glossary.md#standing-offset) (`standing_offset_rad` in actuators.yaml) is its URDF angle in the robot's reference standing pose. Controls works in standing-relative angles, `q_URDF - standing_offset_rad`; none of the plant's interfaces use them. [robot-model.md](robot-model.md#joint-coordinates) covers joint travel and the base frame.
+URDF joint coordinates are what the solver and the URDF use: one angle per joint, with the ankle as two hinges, ankle_dorsiflexion and ankle_inversion. URDF zero is the [calibration pose](glossary.md#calibration-pose). A joint's [standing offset](glossary.md#standing-offset) (`standing_offset_rad` in actuators.yaml) is its URDF angle in the robot's reference standing pose. Controls works in standing-relative angles, `q_URDF - standing_offset_rad`; none of the plant's interfaces use them. [robot-model.md](robot-model.md#joint-coordinates) covers joint travel and the base frame.
 
 The physical [drive-output frame](glossary.md#drive-frame) is what a drive measures and what its demand is written in:
 
@@ -44,10 +44,10 @@ The physical [drive-output frame](glossary.md#drive-frame) is what a drive measu
 
 | Drive | Joint(s) | sign | URDF angle at home (rad) | Drive reading (rad) |
 |---|---|---|---|---|
-| `maxonHEJ90L4` | knee_l | -1 | 0.0 | 0.0 |
-| `maxonHEJ90R4` | knee_r | +1 | 0.0 | 0.0 |
-| `maxonHEJ50L_ANK1` | foot_pitch_l, foot_roll_l | crank | 0.0, 0.0 | -0.3317 |
-| `maxonHEJ50L_ANK2` | foot_pitch_l, foot_roll_l | crank | 0.0, 0.0 | 0.3310 |
+| `maxonHEJ90L4` | knee_flexion_l | -1 | 0.0 | 0.0 |
+| `maxonHEJ90R4` | knee_flexion_r | +1 | 0.0 | 0.0 |
+| `maxonHEJ50L_ANK1` | ankle_dorsiflexion_l, ankle_inversion_l | crank | 0.0, 0.0 | -0.3317 |
+| `maxonHEJ50L_ANK2` | ankle_dorsiflexion_l, ankle_inversion_l | crank | 0.0, 0.0 | 0.3310 |
 
 To compute them (CPU, no physics backend needed):
 
@@ -132,7 +132,7 @@ Each drive is a product, and `src/humanoid_sim/devices/models.py` has one class 
 | `drive_delay_ns` | The family's `drive_delay_s` in integer ns: from the controller staging a demand (its APPLIED acknowledgement) to the drive acting on it, which is the bus master's staging, the bus and the drive's interpolation. 0 when the description records none |
 | `delay_measured` | Whether the description records the delay; the runtime lists the families that do not in its fidelity gaps |
 
-On the current V1 description every family has 5.0 ms, one whole-robot figure, until a per-family fit replaces it ([replay-and-sysid.md](replay-and-sysid.md#fitting-paces-actuator-model)). Gantry captures of 2026-11-16 put the delay from APPLIED to the drive's position demand starting to move at 3.75 to 5.25 ms on the HEJ90 leg drives and the ankle cranks alike. The 200 Hz feedback lands on a 1.5 ms grid relative to APPLIED, so the captures cannot resolve it more finely; 5.0 ms lies inside that window. The G1's families record no delay.
+On the current V1 description every family has 5.0 ms, one whole-robot figure, until a per-family fit replaces it (fitting lives in humanoid-learning, [replay-and-sysid.md](replay-and-sysid.md#fitting)). Gantry captures of 2026-11-16 put the delay from APPLIED to the drive's position demand starting to move at 3.75 to 5.25 ms on the HEJ90 leg drives and the ankle cranks alike. The 200 Hz feedback lands on a 1.5 ms grid relative to APPLIED, so the captures cannot resolve it more finely; 5.0 ms lies inside that window. The G1's families record no delay.
 
 ## Arrival and latency
 
@@ -298,7 +298,7 @@ Rotor armature is attached to each native crank shaft. The linkage supplies its 
 
 ### Linkage compliance
 
-The real linkage gives under load: the foot moves away from the pose its crank readings imply, and the crank encoders do not see it. The asset variant built with `humanoid-sim build-asset --ankle-compliance` models that as a torsional spring and damper at each crank shaft. The crank's USD joint keeps its name, frames, axis and stops and is still the drive's joint, but it now turns a light output body (`<crank joint>_output`, 10 g on the shaft axis). A coaxial revolute joint, `<crank joint>_spring`, joins that output to the crank arm. The spring is a joint PD to a zero target, so both solvers carry it the way they carry any joint gain. Kamino treats it implicitly at any stiffness. MJWarp's `rk4` integrates it explicitly. On the V1 at 1 ms it held from 300 to 4000 N m/rad per crank with damping up to 0.3 N m s/rad; 1.0 N m s/rad diverged with springs of 1000 N m/rad or softer once the hinges' friction was removed. The damping acts on the light crank arm next to the spring, which bounds `rk4`'s step.
+The real linkage gives under load: the foot moves away from the pose its crank readings imply, and the crank encoders do not see it. The asset variant built with `humanoid-sim build-asset --ankle-compliance` models that as a torsional spring and damper at each crank shaft. The crank's USD joint keeps its name, frames, axis and stops and is still the drive's joint, but it now turns a light output body (`<crank joint>_output`, 10 g on the shaft axis). A coaxial revolute joint, `<crank joint>_spring`, joins that output to the crank arm. The spring is a joint PD to a zero target, so both solvers carry it the way they carry any joint gain. Kamino treats it implicitly at any stiffness. MJWarp's `rk4` integrates it explicitly. On the V1 at 1 ms it held from 100 to 4000 N m/rad per crank with damping up to 0.3 N m s/rad; 1.0 N m s/rad diverged with springs of 1000 N m/rad or softer once the hinges' friction was removed. The damping acts on the light crank arm next to the spring, which bounds `rk4`'s step.
 
 The drive's encoder reads the output, so the drive feedback, and with it `RobotPlant.measured()`, is the crank reading a rigid linkage would give. The hinges, which `truth()` reports, are the deflected foot, and `Truth.ankle_spring_rad` is each crank arm's angle past its drive's reading. A rigid asset is unchanged: it keeps its key and bytes, and the defaults leave the knobs empty.
 
@@ -360,7 +360,7 @@ The description states no dynamic friction yet, so the relief is zero by default
 
 ## Disabled drives: back-drive friction
 
-A disabled drive is back-driven through its gearbox, the same way in training, replay and the runtime. `PlantCore` (`src/humanoid_sim/core.py`) keeps which 1:1 drives are off from the latest demand submitted or reset (a reset without a demand, like the bank's, turns every drive off), and `PlantCore.joint_friction` gives their joints the family's `backdrive_torque` as Coulomb friction in place of the enabled-drive friction (a family without one keeps the joint's friction). The switch happens when the demand is submitted, not when it arrives. `SimCore` (replays, sysid, the runtime) and `RobotPlant` (training) write that friction to the solver before a step that follows a submit or a reset; the runtime host, whose demands reach the plant through a CUDA graph, flags it when the on/off pattern of the latest demand record changes. Before a client attaches every drive is disabled.
+A disabled drive is back-driven through its gearbox, the same way in training, replay and the runtime. `PlantCore` (`src/humanoid_sim/core.py`) keeps which 1:1 drives are off from the latest demand submitted or reset (a reset without a demand, like the bank's, turns every drive off), and `PlantCore.joint_friction` gives their joints the family's `backdrive_torque` as Coulomb friction in place of the enabled-drive friction (a family without one keeps the joint's friction). The switch happens when the demand is submitted, not when it arrives. `SimCore` (replays, the runtime) and `RobotPlant` (training) write that friction to the solver before a step that follows a submit or a reset; the runtime host, whose demands reach the plant through a CUDA graph, flags it when the on/off pattern of the latest demand record changes. Before a client attaches every drive is disabled.
 
 | Family | `backdrive_torque` | Datasheet figure |
 |---|---|---|
@@ -368,7 +368,7 @@ A disabled drive is back-driven through its gearbox, the same way in training, r
 | HEJ70-48-50 | 0.5 Nm | approximate |
 | HEJ50-48-30 | 0.8 Nm | upper bound |
 
-The ankle hinges keep their friction, since a crank's figure has no joint-space equivalent. A randomized `joint_friction` or a fitted friction (`fit-pace`, `fit-passive`) is the enabled-drive friction; the back-drive torque itself is not randomized.
+The ankle hinges keep their friction, since a crank's figure has no joint-space equivalent. A randomized `joint_friction` or a friction fitted in humanoid-learning is the enabled-drive friction; the back-drive torque itself is not randomized.
 
 ## Physical faults
 
@@ -402,7 +402,7 @@ The runtime publishes its known gaps in the segment descriptor (`fidelity_gaps` 
 - The native USD ankle includes its closed chain. Stop stiffness, joint friction and compliance are modeled rather than verified against hardware traces.
 - IMU errors are the rig's model's: white noise, a turn-on bias and a slow drift (`SET_FIDELITY` ideal turns them off). See [sensors.md](sensors.md#sampling-and-errors).
 - Each drive's delay is its family's fixed figure, with no per-cycle jitter in the runtime. The training plant has an off-by-default knob for it (`TrainPlantCfg.command_jitter_ns`; ±1.2 ms matches the V1's measured spread, [Arrival and latency](#arrival-and-latency)). A family whose description records no delay (the G1's) has none, and the gap names it.
-- The runtime's drive feedback is the plant's state at every bus cycle, exactly. The robot's samples come 3.0 to 7.5 ms apart, with torque noise (0.05 to 0.46 Nm) and a dithering velocity reading; the training plant models these ([Reporting in training](sensors.md#reporting-in-training)), the runtime leaves them to Controls' fake bank.
+- The runtime's drive feedback is the plant's exact drive-frame state after each physics step, with no position offset or encoder quantization. The robot's samples come 3.0 to 7.5 ms apart, with torque noise (0.05 to 0.46 Nm) and a dithering velocity reading; the training plant models these ([Reporting in training](sensors.md#reporting-in-training)), the runtime leaves them to Controls' fake bank.
 - The backend's `mode_ramp_s` (the ramp when a drive's mode is enabled or disabled) and its control period's jitter are not modeled: the ramp is the controller's behavior and neither has been measured.
 - Angular momentum is not conserved under fast joint motion at the 4 ms MJWarp step. A hung robot whose waist and hips move fast picks up a spin about the vertical; the gantry's spreader bar turns it back and damps it ([world.md](world.md#suspended-the-lab-gantry)).
 
