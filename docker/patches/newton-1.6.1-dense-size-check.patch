@@ -1,0 +1,41 @@
+diff --git a/_src/solvers/kamino/_src/dynamics/delassus.py b/_src/solvers/kamino/_src/dynamics/delassus.py
+index 55e468e..1a2a274 100644
+--- a/_src/solvers/kamino/_src/dynamics/delassus.py
++++ b/_src/solvers/kamino/_src/dynamics/delassus.py
+@@ -1166,6 +1166,16 @@ class DelassusOperator:
+         self._model_maxsize = sum(self._world_maxsize)
+         self._max_of_max_total_D_size = max(self._world_maxsize) if self._world_maxsize else 0
+ 
++        # Newton 1.8's check: the dense operator and its factor are indexed with int32 offsets in every kernel
++        if self._model_maxsize > np.iinfo(np.int32).max:
++            raise ValueError(
++                f"Kamino dense Delassus buffer requires {self._model_maxsize} elements across "
++                f"{self._num_worlds} worlds (largest world {max(self._world_maxdims)} constraint rows), exceeding the "
++                f"int32 indexing limit of {np.iinfo(np.int32).max}. Reduce the number of worlds or "
++                "max_contacts_per_world, or use sparse_dynamics=True and sparse_jacobian=True with an iterative "
++                "linear solver."
++            )
++
+         # Use the model's device
+         self._device = model.device
+ 
+diff --git a/_src/solvers/kamino/_src/kinematics/constraints.py b/_src/solvers/kamino/_src/kinematics/constraints.py
+index 6c5f1fc..6c12fda 100644
+--- a/_src/solvers/kamino/_src/kinematics/constraints.py
++++ b/_src/solvers/kamino/_src/kinematics/constraints.py
+@@ -74,11 +74,12 @@ def get_max_constraints_per_world(
+ 
+     # Compute the maximum number of constraints per world
+     nw = model.info.num_worlds
+-    njc = model.info.num_joint_bilateral_cts.numpy()
++    # tolist(): Python ints, so the sums and squared sizes built from these cannot wrap at int32 (Newton 1.8)
++    njc = model.info.num_joint_bilateral_cts.numpy().tolist()
+     maxnl = limits.world_max_limits_host if limits and limits.model_max_limits_host > 0 else [0] * nw
+     maxnc = contacts.world_max_contacts_host if contacts and contacts.model_max_contacts_host > 0 else [0] * nw
+-    nbc = model.info.num_joint_bounded_cts.numpy()
+-    maxncts = [njc[i] + nbc[i] + maxnl[i] + 3 * maxnc[i] for i in range(nw)]
++    nbc = model.info.num_joint_bounded_cts.numpy().tolist()
++    maxncts = [int(njc[i] + nbc[i] + maxnl[i] + 3 * maxnc[i]) for i in range(nw)]
+     return maxncts
+ 
+ 
