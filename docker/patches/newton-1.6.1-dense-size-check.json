@@ -1,0 +1,10 @@
+{
+  "_src/solvers/kamino/_src/kinematics/constraints.py": {
+    "before": "b376bfe66e7102e40bbaf31e25d7a4c86de3bcb5bf904f85d2d5ea1d2c1b38d4",
+    "after": "f1b2df3ba0db7a133fb8299c3e57f7f537acbae62c3e922951f045ee5aa35053"
+  },
+  "_src/solvers/kamino/_src/dynamics/delassus.py": {
+    "before": "ad253c54af9104a15a03a82921abc61c47f99973314d6e83743fd0abfaf53281",
+    "after": "30afb82c29f799ffab92d507b7a13b5548129621e449fd5f04b709353b2247ce"
+  }
+}

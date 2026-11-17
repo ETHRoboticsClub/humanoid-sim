@@ -54,6 +54,7 @@ class SessionCfg:
     robot: str = "g1_29dof_with_hand_rev_1_0"
     sensors: str | None = None  # an extra rig (rigs.EXTRAS) whose sensors join the robot's
     scene: str | None = None  # static boxes (.npz)
+    collision: str | None = None  # the room's convex collision pieces (.npz, world/hulls.py): collided, never seen
     spawn_m: tuple[float, float] = (0.0, 0.0)
     objects: str | None = None  # moving and free bodies (JSON, world/objects.py): drawn by the cameras, seen by the lidar
     splat: str | None = None  # the room's splat as USD
@@ -95,6 +96,7 @@ class SensorSession:
         from humanoid_sim.sensors.lights import ambient_level, as_lighting, dome_nits, lighting_prims
         from humanoid_sim.sim import SimCore
         from humanoid_sim.world.boxes import StaticBoxes
+        from humanoid_sim.world.hulls import StaticHulls
         from humanoid_sim.world.objects import WorldObjects
 
         self.cfg = cfg
@@ -141,13 +143,21 @@ class SensorSession:
         if cfg.splat:
             entities["splat"] = rtx.splat_entity(cfg.splat)
         self.boxes = StaticBoxes.load(cfg.scene, cfg.spawn_m) if cfg.scene else None
+        self.collision = StaticHulls.load(cfg.collision, cfg.spawn_m) if cfg.collision else None
         pose, height = initial_pose(self.usd, cfg.robot, "home")
         self.sim = SimCore(self.usd, device=cfg.device, robot=cfg.robot, fixed_base=cfg.fixed_base and cfg.physics,
-                           base_height_m=height + STANDING_CLEARANCE_M, scene=self.boxes, entities=entities,
+                           base_height_m=height + STANDING_CLEARANCE_M, scene=self.boxes,
+                           collision=self.collision, entities=entities,
                            objects=WorldObjects.load(cfg.objects) if cfg.objects else None, render_each_step=False)
         self.scan_mesh = cfg.scan_mesh if cfg.scan_mesh and lidars else None  # the lidar's surfaces, when loaded
         # SimCore built the physics model above: what follows changes what rays see, never what collides.
         self.room_rays = self._apply_room_rays(bool(cameras), bool(lidars))
+        if self.collision is not None:  # collision geometry: the scan and the splat are what the sensors see
+            import isaaclab.sim as sim_utils
+
+            from humanoid_sim.world.hulls import STATIC_HULLS_PRIM
+
+            rtx.hide_from_all_rays(sim_utils.get_current_stage(), STATIC_HULLS_PRIM)
         if cfg.splat and cfg.splat_intensity != 1.0:
             import isaaclab.sim as sim_utils
 

@@ -83,11 +83,12 @@ def test_rigid_asset_is_untouched_and_the_variant_adds_one_spring_per_crank(desc
     from humanoid_sim.model.usd import crank_joints
 
     profile = load_profile(desc.robot)
-    rigid = build_asset(desc, profile, tmp_path)
-    assert rigid.parent == asset_dir(desc, profile, tmp_path)
-    assert asset_dir(desc, profile, tmp_path, ankle_compliance=False) == rigid.parent
-    variant = build_asset(desc, profile, tmp_path, ankle_compliance=True)
-    assert variant.parent == asset_dir(desc, profile, tmp_path, ankle_compliance=True) != rigid.parent
+    # Without the profile's joint give (test_joint_give.py), so only the crank springs differ.
+    rigid = build_asset(desc, profile, tmp_path, joint_give=())
+    assert rigid.parent == asset_dir(desc, profile, tmp_path, joint_give=())
+    assert asset_dir(desc, profile, tmp_path, ankle_compliance=False, joint_give=()) == rigid.parent
+    variant = build_asset(desc, profile, tmp_path, ankle_compliance=True, joint_give=())
+    assert variant.parent == asset_dir(desc, profile, tmp_path, ankle_compliance=True, joint_give=()) != rigid.parent
 
     rigid_stage = Usd.Stage.Open(str(rigid))
     assert not [p for p in rigid_stage.Traverse()

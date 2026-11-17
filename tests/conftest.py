@@ -45,10 +45,19 @@ PARTS = {
 
 
 def built_usd(robot: str, *, base_joints: bool = False, ankle_compliance: bool = False,
-              joint_give: tuple[str, ...] = ()) -> Path:
-    """The built asset's USD for ``robot``; skips the test when it is not built."""
-    out = asset_dir(Description.load(robot), load_profile(robot), ASSETS, base_joints=base_joints,
-                    ankle_compliance=ankle_compliance, joint_give=joint_give)
+              joint_give: tuple[str, ...] | None = None) -> Path:
+    """The built asset's USD for ``robot`` (``joint_give`` None: the profile's joint give, as `build-asset` builds it;
+    an empty tuple: none, built here when missing, as the CLI does not build it); skips the test when it is not
+    built."""
+    desc, profile = Description.load(robot), load_profile(robot)
+    out = asset_dir(desc, profile, ASSETS, base_joints=base_joints, ankle_compliance=ankle_compliance,
+                    joint_give=joint_give)
+    if not (out / "asset.json").exists() and joint_give == () and asset_dir(
+            desc, profile, ASSETS, base_joints=base_joints, ankle_compliance=ankle_compliance).joinpath(
+            "asset.json").exists():
+        from humanoid_sim.model.asset import build_asset
+
+        build_asset(desc, profile, ASSETS, base_joints=base_joints, ankle_compliance=ankle_compliance, joint_give=())
     if not (out / "asset.json").exists():
         flag = (" --base-joints" if base_joints else " --ankle-compliance" if ankle_compliance
                 else f" --joint-give {' '.join(joint_give)}" if joint_give else "")

@@ -98,12 +98,44 @@ def test_home_and_start_poses_have_no_self_contact(robot):
         assert not touching, (pose, touching)
 
 
+def _native_joint_pairs(usd_path, profile) -> set:
+    """The body pairs a native asset filters by its joints: each joint's two bodies (the rods' loop-closing joints
+    too) and, with ``model.exclude_fixed_cluster_contacts``, every pair inside a rigid assembly of fixed joints."""
+    from pxr import UsdPhysics
+
+    from humanoid_sim.model.usd import UsdDescription
+
+    usd = UsdDescription(usd_path)
+    pairs, parent = set(), {}
+
+    def root(b):
+        while parent.get(b, b) != b:
+            b = parent[b]
+        return b
+
+    for name, joint in usd.joints.items():
+        try:
+            a, b = usd.joint_bodies(name)
+        except ValueError:  # a joint to the world
+            continue
+        pairs.add(frozenset((a, b)))
+        if joint.GetPrim().IsA(UsdPhysics.FixedJoint):
+            parent[root(a)] = root(b)
+    if profile["model"].get("exclude_fixed_cluster_contacts"):
+        clusters = {}
+        for body in usd.bodies:
+            clusters.setdefault(root(body), []).append(body)
+        for members in clusters.values():
+            pairs |= {frozenset((x, y)) for i, x in enumerate(members) for y in members[i + 1:]}
+    return pairs
+
+
 @pytest.mark.physics
 @pytest.mark.parametrize("robot", PHYSICS_ROBOTS)
 def test_newton_model_filters_what_the_profile_excludes(robot):
     """The Newton model of the scene filters, with the profile's ``physics.self_collision`` on, exactly the asset's
     filtered pairs (``model.contact_excludes`` and the pairs the self-collision sets exclude) and each joint's parent
-    and child; with it off, every pair of the robot's bodies. Bodies of two sets the profile pairs collide."""
+    and child (on a native asset every USD joint's two bodies, the loop-closing rod joints included); with it off, every pair of the robot's bodies. Bodies of two sets the profile pairs collide."""
     pytest.importorskip("isaaclab_newton")
     from isaaclab_newton.physics import NewtonManager
 
@@ -126,6 +158,8 @@ def test_newton_model_filters_what_the_profile_excludes(robot):
     if profile["physics"]["self_collision"]:
         excluded = contact_excludes | {frozenset(pair) for pair in prepared.self_collision_excludes()}
         excluded |= {frozenset((b, parent)) for b, (_, parent) in prepared.body_tree().items() if parent}
+        if desc.usd_path is not None:
+            excluded |= _native_joint_pairs(built_usd(robot), profile)
     else:
         excluded = set(filtered)
     for pair, flags in filtered.items():
@@ -202,9 +236,10 @@ def test_base_joints_follow_prescribed_yaw(request):
     yaw = names.index(BASE_JOINTS[0][0])
     rate = 0.5  # rad/s
     sim.set_base(torch.zeros(1, 3), torch.tensor([[rate, 0.0, 0.0]]), write_state=True)
-    for k in range(100):
+    period_s = sim.period_ns / 1e9  # the profile's physics period (1 ms on the V1; this test assumed 4 ms)
+    for k in range(round(0.4 / period_s)):
         # Targets at the step start: with the velocity target the base lands on the step-end angle.
-        sim.set_base(torch.tensor([[rate * k * 0.004, 0.0, 0.0]]), torch.tensor([[rate, 0.0, 0.0]]))
+        sim.set_base(torch.tensor([[rate * k * period_s, 0.0, 0.0]]), torch.tensor([[rate, 0.0, 0.0]]))
         sim.step()
     bq, _ = sim.backend.joint_state()
     assert bq[0, yaw].item() == pytest.approx(rate * 0.4, abs=2e-4)
@@ -265,7 +300,10 @@ def test_cuda_graph_step_matches_eager(robot):
 
     eager, _ = run(False)
     graphed, _ = run(True)
-    assert torch.allclose(eager, graphed, atol=1e-5)
+    # Kamino's solves accumulate with atomics, so two eager runs of the V1 already differ (3e-4 N m on an L4,
+    # 2026-11-17); the graph must stay within that run-to-run floor, MJWarp's within 1e-5.
+    floor = (eager - run(False)[0]).abs().max().item()
+    assert (eager - graphed).abs().max().item() <= max(1e-5, 4.0 * floor)
     compiled, _ = run(True, compile=True)
     # Fused kernels reorder float operations; the difference feeds back through the physics.
     assert torch.allclose(eager, compiled, rtol=1e-3, atol=1e-3)

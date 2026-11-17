@@ -43,7 +43,8 @@ from humanoid_sim.model.description import Description
 from humanoid_sim.physics.crank_stops import scaled_solref
 from humanoid_sim.randomization import PARAMS, ParamSpec, Randomizer, parse_specs
 from humanoid_sim.sensors import rigs
-from humanoid_sim.sensors.imu import ImuDelivery, ImuSamples, pending_slots
+from humanoid_sim.sensors.imu import ImuDelivery, ImuSamples, mount_misalignment_rad, pending_slots
+from humanoid_sim.timing.arrival import command_arrival_ns, command_jitter_ns
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.harness import resolve_harness
 from humanoid_sim.world.supports import Gantry
@@ -59,7 +60,6 @@ class TrainPlantCfg:
     reporting: bool = True  # measured drive feedback quantized as the drive reports it
     feedback_noise: bool = True  # with reporting: velocity dither and torque noise (profile devices.feedback_noise)
     feedback_sampling: bool = True  # hold the drive's last sample between samples (profile devices.feedback_sampling)
-    command_jitter_ns: int = 0  # each demand's arrival is moved by a uniform draw in ±this (no measurement: off)
     cuda_graph: bool = False  # capture drive math and IMU delivery; CUDA only
     compile: bool = False  # fuse drive and IMU math before capture; requires cuda_graph
     queue_capacity: int = 8  # demands in flight per env: ≥ (max latency + drive delay) / demand period + 1
@@ -105,20 +105,6 @@ def command_latency_ns(profile: dict, drive_delay_ns: torch.Tensor) -> torch.Ten
         raise ValueError(f"devices.command_path.frame_to_drive_ns {total} is shorter than a drive's own delay "
                          f"({int(drive_delay_ns.max())} ns)")
     return out
-
-
-def command_arrival_ns(sent_ns: torch.Tensor, latency_ns: torch.Tensor, drive_delay_ns: torch.Tensor,
-                       jitter_ns: int = 0, generator: torch.Generator | None = None) -> torch.Tensor:
-    """When a demand sent at ``sent_ns`` ``[E]`` reaches each drive ``[E, D]``: after the latency before the drive and
-    the drive's own delay, moved by a uniform integer draw in ±``jitter_ns`` per demand and drive (never before it was
-    sent). The arrival queue keeps arrivals in order, so a jittered demand never overtakes an earlier one."""
-    arrival = sent_ns.to(torch.int64).unsqueeze(1) + latency_ns + drive_delay_ns
-    if jitter_ns == 0:
-        return arrival
-    if jitter_ns < 0:
-        raise ValueError(f"command jitter {jitter_ns} ns is negative")
-    draw = torch.randint(-jitter_ns, jitter_ns + 1, arrival.shape, generator=generator, device=arrival.device)
-    return torch.maximum(arrival + draw, sent_ns.to(torch.int64).unsqueeze(1))
 
 
 def imu_latency_ns(profile: dict) -> int:
@@ -241,11 +227,11 @@ class RobotPlant:
 
             self.sampler = FeedbackSampler.for_robot(self.desc, self.profile, e, d, device=self.device,
                                                      seed=cfg.seed + 3)
-        if cfg.command_jitter_ns < 0:
-            raise ValueError(f"command_jitter_ns {cfg.command_jitter_ns} is negative")
+        self.command_jitter_ns = command_jitter_ns(self.profile)  # the profile's measured spread of a demand's arrival
         self._jitter_generator = torch.Generator(device=self.device).manual_seed(cfg.seed + 4)
         specs = parse_specs(cfg.randomization)
         self.imu_latency_ns = imu_latency_ns(self.profile)  # nominal
+        self.imu_mount_rad = mount_misalignment_rad(self.profile)  # nominal rotation of the sensor in its mount
         self.imu = None
         if imu is not None:
             lo, hi = imu_latency_bounds(specs, self.imu_latency_ns)
@@ -257,6 +243,7 @@ class RobotPlant:
             self.imu = ImuDelivery(replace(delivery, pending=pending), e, device=self.device, seed=cfg.seed + 1)
             self.imu.reset(torch.arange(e, device=self.device), 0)
             self.imu.latency_ns.fill_(self.imu_latency_ns)
+            self.imu.misalignment.copy_(torch.tensor(self.imu_mount_rad, device=self.device))  # the profile's mount
             if sensor.output_lsb is not None:  # the host decodes counts; the runtime's client does this itself
                 gyro_lsb, accel_lsb = sensor.output_lsb
                 self.imu.lsb.copy_(torch.tensor([gyro_lsb] * 3 + [accel_lsb] * 3, device=self.device))
@@ -361,6 +348,7 @@ class RobotPlant:
         e, d = self.num_envs, len(self.drives)
         ones = torch.ones(e, d, device=self.device)
         zeros3 = torch.zeros(e, 3, device=self.device)
+        mount = torch.tensor(self.imu_mount_rad, device=self.device)
         static = self._nominal_physics["joint_friction"][0]
         dynamic = torch.tensor([self.desc.joints[n].dynamic_friction if n in self.desc.joints else 0.0
                                 for n in self.core.solver_map.joint_names], device=self.device)
@@ -369,7 +357,8 @@ class RobotPlant:
                 "latency": (self.command_latency_ns / NS_PER_S).to(ones.dtype).expand(e, -1).clone(),
                 "encoder_offset": torch.zeros_like(ones),
                 "joint_friction_ratio": ratio.expand(e, -1).clone(),
-                "imu_gyro_bias": zeros3, "imu_accel_bias": zeros3.clone(), "imu_misalignment": zeros3.clone(),
+                "imu_gyro_bias": zeros3, "imu_accel_bias": zeros3.clone(),
+                "imu_misalignment": mount.expand(e, -1).clone(),
                 "imu_latency": torch.full((e, 1), self.imu_latency_ns / NS_PER_S, device=self.device),
                 "imu_drop_probability": torch.full(
                     (e, 1), self.imu.cfg.drop_probability if self.imu is not None else 0.0, device=self.device)}
@@ -517,7 +506,7 @@ class RobotPlant:
     def submit(self, demand: DriveDemand, sent_ns: torch.Tensor, env_mask: torch.Tensor | None = None) -> None:
         """Demands ``[E, D]`` sent at ``sent_ns`` ``[E]``; each drive applies them after the latency before it and its
         own delay."""
-        arrival = command_arrival_ns(sent_ns, self.latency_ns, self.drive_delay_ns, self.cfg.command_jitter_ns,
+        arrival = command_arrival_ns(sent_ns, self.latency_ns, self.drive_delay_ns, self.command_jitter_ns,
                                      self._jitter_generator)
         self.core.submit(demand, arrival, env_mask)
 

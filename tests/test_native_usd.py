@@ -251,8 +251,11 @@ def test_native_host_publishes_feedback_before_the_first_step(desc, tmp_path):
         assert record is not None
         physical, velocity = host.sim.solver_state()
         expected, _, _ = host.sim.plant.solver_map.drive_state(physical, velocity)
+        # The master reads whole encoder counts: the state to within half a count of each drive's encoder.
+        half_count = (np.pi / host._measured.reporting.cpr).cpu().numpy()
         np.testing.assert_allclose(
-            record[1]["drive"]["position_rad"][:len(host.drives)], expected[0].cpu().numpy())
+            record[1]["drive"]["position_rad"][:len(host.drives)], expected[0].cpu().numpy(), rtol=0,
+            atol=float(half_count.max()) * 1.01)
     finally:
         host.close()
 

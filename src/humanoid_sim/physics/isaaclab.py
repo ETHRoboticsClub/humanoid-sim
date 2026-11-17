@@ -28,6 +28,7 @@ from humanoid_sim.physics.crank_stops import check_crank_stops
 from humanoid_sim.physics.joint_properties import JointProperties
 from humanoid_sim.physics.model_build import model_build
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.hulls import StaticHulls, add_room
 from humanoid_sim.world.objects import WorldObjects
 
 # Base-joint PD. Each joint carries the whole robot (a few kg m² about yaw, ~10 about pitch and roll at the
@@ -66,6 +67,9 @@ class IsaacLabCfg:
     extra_imus: dict | None = None  # more IMU sensors, scene name -> the URDF link each sits at
     contacts: bool = False  # a contact sensor on every body
     scene: StaticBoxes | None = None  # static boxes around the robot (every env's robot then starts at the origin)
+    # A room's convex collision pieces (world/hulls.py). With them the scene's boxes are drawn and traced by rays but
+    # do not collide; every env's robot starts at the origin as with boxes.
+    collision: StaticHulls | None = None
     # A heightfield terrain in place of the flat ground (an Isaac Lab TerrainImporterCfg, as training's
     # ``heightfield_terrain_cfg`` builds it): each env's robot starts at its tile's origin, ``base_height_m`` above it.
     terrain: object | None = None
@@ -202,8 +206,11 @@ def _per_joint(names, values):
     return {f"^{n}$": float(v) for n, v in zip(names, values, strict=True)}
 
 
-# The crank springs' solver effort limit: none in effect (a crank drive peaks at tens of N m).
-SPRING_EFFORT_LIMIT_NM = 1e4
+# The springs' (crank springs and joint give) solver effort limit: none. Kamino treats a limit at or above its sentinel
+# (newton kamino JOINT_TAUMAX, 1e6, Newton's default) as unbounded and carries the spring's PD in the joint's implicit
+# dynamics row; a finite one below it adds a bounded effort row per spring, which counts against the bilateral_reduced
+# path's capacity of non-bilateral rows (and 1e4 never bound: a crank drive peaks at tens of N m).
+SPRING_EFFORT_LIMIT_NM = 1e6
 
 
 def spring_gains(usd_path: Path, physics: dict) -> dict[str, tuple[float, float]]:
@@ -466,19 +473,18 @@ class IsaacLabRobot:
         class SceneCfg(InteractiveSceneCfg):
             pass
 
-        # The boxes are one set of shapes every env's world collides with, at the same coordinates.
-        spacing = 0.0 if cfg.scene is not None else cfg.env_spacing_m
+        # The boxes (or the convex pieces) are one set of shapes every env's world collides with, at the same
+        # coordinates.
+        room = cfg.scene is not None or cfg.collision is not None
+        spacing = 0.0 if room else cfg.env_spacing_m
         scene_cfg = SceneCfg(num_envs=cfg.num_envs, env_spacing=spacing, replicate_physics=True)
-        if cfg.terrain is not None and cfg.scene is not None:
+        if cfg.terrain is not None and room:
             raise ValueError("a scene's boxes stand on the flat ground: no terrain with them")
         if cfg.terrain is not None:
             scene_cfg.terrain = cfg.terrain
         else:
             scene_cfg.ground = ground_cfg(cfg.ground_friction)
-        if cfg.scene is not None:
-            from humanoid_sim.world.boxes import static_boxes_cfg
-
-            scene_cfg.static_boxes = static_boxes_cfg(cfg.scene.file, cfg.scene.spawn_m, friction=cfg.ground_friction)
+        add_room(scene_cfg, cfg.scene, cfg.collision, friction=cfg.ground_friction)
         from humanoid_sim.world.objects import add_objects
 
         add_objects(scene_cfg, cfg.objects)
@@ -570,6 +576,12 @@ class IsaacLabRobot:
         tc.set_position_index(value=target)
         tc.set_velocity_index(value=torch.zeros_like(target) if velocity is None else velocity)
         tc.set_effort_index(value=torch.zeros_like(target) if effort is None else effort)
+
+    def command_buffers(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """The solver's joint position, velocity and effort command buffers (the memory :meth:`set_targets` writes,
+        the same every step), so a captured graph can write the commands itself."""
+        tc = self.robot.actuators.target_command
+        return tc.position.torch, tc.velocity.torch, tc.effort.torch
 
     def apply_base_acceleration(self, acceleration_w: torch.Tensor) -> None:
         """Add -m*a at physical bodies' CoMs. Input is prevalidated [envs, 3].

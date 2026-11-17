@@ -10,7 +10,7 @@ This page is for someone writing a task. The drive model itself is in [drives.md
 
 - The robot starts in the home pose (the default of `robot_scene_cfg`, see [The initial pose](#the-initial-pose)), and the demands are taken from the articulation's `data.default_joint_pos`.
 - The ground is a heightfield of random bumps up to 25 mm (`heightfield_terrain_cfg` with one `HfRandomUniformTerrainCfg` tile type) laid out as one row of 2.5 m tiles, one tile per robot, without a curriculum. The tile mix is the example's own; a task takes its terrain from its generator in humanoid-learning. Isaac Lab puts every env assigned to a tile at that tile's origin, so envs that share a tile spawn on the same spot. `--flat` uses the flat ground instead.
-- Robot friction (0.4 to 1.0), a payload of 0 to 4.5 kg on `base_link` and one latency before the drives per env (10 to 20 ms, which the drives' own delay follows) are randomized. The terrain and the flat ground have friction 0 so the robot's value decides.
+- Robot friction (0.4 to 1.0), a payload of 0 to 4.5 kg on `base_link` and one latency before the drives per env (0 to 3 ms, which the drives' own delay follows) are randomized. The terrain and the flat ground have friction 0 so the robot's value decides.
 - A `ForcePush` pushes `base_link` with 40 to 120 N for 0.1 to 0.2 s, with 1.5 to 3 s between pushes. The loop steps it once per policy step.
 - With `--rrd`, a `SceneRecorder` records every robot to a Rerun file, and `plant.log` adds robot 0's left knee and base height to the same recording, every `--record-every` policy steps (default 2). See [Recording a scene](#recording-a-scene).
 
@@ -47,12 +47,11 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `robot` | `"ethrc_v1"` | Profile (`profiles/ethrc_v1.yaml`) and description to load |
 | `randomization` | `[]` | Randomization specs, as dicts or `ParamSpec`; see [Randomization](#randomization) |
 | `level` | `1.0` | Initial randomization level |
-| `seed` | `0` | Seed of the randomizer; the IMU model uses `seed + 1`, the encoder jitter and feedback noise `seed + 2`, the feedback sampler `seed + 3` |
+| `seed` | `0` | Seed of the randomizer; the IMU model uses `seed + 1`, the encoder jitter and feedback noise `seed + 2`, the feedback sampler `seed + 3`, the command jitter `seed + 4` |
 | `feedback_history` | `16` | Physics steps of drive feedback kept in `Measured.history` |
 | `reporting` | `True` | Quantize the measured drive feedback the way the drives report it |
 | `feedback_noise` | `True` | With `reporting`: add the drives' measured velocity dither and torque noise ([Reporting in training](sensors.md#reporting-in-training)) |
-| `feedback_sampling` | `True` | Hold the measured drive feedback between the drive's samples, 3.0 to 7.5 ms apart ([Feedback age](sensors.md#feedback-age)); needs the profile's `devices.feedback_sampling` |
-| `command_jitter_ns` | `0` | Move each demand's arrival at each drive by a uniform integer draw in +-this many ns (generator seeded `seed + 4`). Off: no measurement of the per-cycle jitter yet. Arrivals stay in order |
+| `feedback_sampling` | `True` | Hold the measured drive feedback between the drive's samples, 3.0 to 7.5 ms apart, each visible after the profile's publish delay (2.24 ms) ([Feedback age](sensors.md#feedback-age)); needs the profile's `devices.feedback_sampling` |
 | `cuda_graph` | `False` | Capture drive feedback, target shaping and IMU delivery on CUDA |
 | `compile` | `False` | Fuse the captured drive and IMU math with `torch.compile`; requires `cuda_graph` |
 | `queue_capacity` | `8` | Demands in flight per env; needs at least (max latency + drive delay) / demand period + 1 |
@@ -94,7 +93,7 @@ The solver's PD gains are constant per joint and written once at spawn. The driv
 humanoid-sim build-asset
 ```
 
-The asset goes to `outputs/assets/ethrc_v1/<key>/`, where the key is a digest of the description and the profile; changing either needs a rebuild. In code, `build_asset` (`src/humanoid_sim/model/asset.py`) returns the USD path of an asset that is already built, and builds it otherwise (which needs the image):
+The asset goes to `outputs/assets/ethrc_v1/<key>/`, where the key is a digest of the description and the profile; changing either needs a rebuild. The V1's asset carries its hips' and knees' measured joint give (the profile's `model.joint_give`, [drives.md](drives.md#joint-give)); `build_asset(..., joint_give=())` builds one without it. In code, `build_asset` (`src/humanoid_sim/model/asset.py`) returns the USD path of an asset that is already built, and builds it otherwise (which needs the image):
 
 ```python
 from pathlib import Path
@@ -196,7 +195,7 @@ def fallen(env):
 class Actions:
     drives = PlantActionCfg(class_type=PoseOffsets, action_dim=22, plant=TrainPlantCfg(randomization=[
         {"param": "friction", "dist": "uniform", "range": [0.4, 1.0], "op": "set"},
-        {"param": "latency", "dist": "uniform", "range": [0.010, 0.020], "op": "set", "per_target": False},
+        {"param": "latency", "dist": "uniform", "range": [0.0, 0.003], "op": "set", "per_target": False},
         {"param": "body_inertia", "dist": "uniform", "range": [0.8, 1.2], "op": "scale"},
     ]))
 
@@ -278,9 +277,15 @@ Under the PD law a drive applies `kp (target - q) + kd (v_target - v) + ff`, cli
 
 Positions are in the [drive frame](glossary.md#drive-frame). For a 1:1 drive that is the joint angle times a sign; for an ankle drive it is the crank angle, which is neither the foot pitch nor the foot roll. `plant.core.map.drive_state(q, qd)` maps joint positions in description order to drive positions through the ankle transmission, which is how `PoseOffsets` turns the default pose into drive targets. A policy that acts in foot pitch and roll converts them the same way inside `demands()`.
 
-`sent_ns` is an `[E]` int64 tensor: when the demand leaves the EtherCAT master, in nanoseconds on the plant clock. `self.plant.t_ns` is now, the start of the first physics step of this env step. Drive `d` of env `e` applies the demand from `sent_ns[e] + latency[e, d]`, where `latency` comes from randomization and is zero when it isn't randomized. A demand that arrives inside a physics step is in force for the part of the step it covers. Demands never overtake each other on a drive: an arrival earlier than the last queued one is moved to it. When a queue is full, its oldest pending demand is dropped, so size `queue_capacity` for your submit rate and maximum latency.
+`sent_ns` is an `[E]` int64 tensor: when the demand leaves the EtherCAT master, in nanoseconds on the plant clock. `self.plant.t_ns` is now, the start of the first physics step of this env step. Drive `d` of env `e` applies the demand from `sent_ns[e] + latency[e, d]`, where `latency` is the nominal figure when it isn't randomized: the profile's `devices.command_path.frame_to_drive_ns` less the drive's own delay (0.3 ms on the V1, 5.3 ms less 5.0 ms), zero for a profile without a `command_path`; randomization draws replace it. The profile's `command_path.jitter_ns` (±1.2 ms on the V1) then moves each arrival by a uniform draw, per demand and drive, always on. A demand that arrives inside a physics step is in force for the part of the step it covers. Demands never overtake each other on a drive: an arrival earlier than the last queued one is moved to it. When a queue is full, its oldest pending demand is dropped, so size `queue_capacity` for your submit rate and maximum latency.
 
 The [baseline gains](glossary.md#baseline-gains) (`plant.core.drive_stiffness`, `plant.core.drive_damping`, from humanoid-urdf) are also the solver gains. Target shaping is guaranteed stable for demanded gains up to twice the baseline; `plant.core.gain_warnings` (`[E, 22]` bool, cleared at reset) marks drives that received an enabled demand above that.
+
+## Scoring a closed-loop run
+
+humanoid-sim has no policy loop: the policy side (observations, joint targets, the IMU filter) is Controls' policy core, which humanoid-learning models on this plant. What has to be the same wherever a policy runs is how a stand or walk run is scored, so that part lives here, in `src/humanoid_sim/chatter_gate.py` (NumPy only): the chatter gate. It scores a run's leg joint targets (the 12 hip, knee and ankle joints) over a window: the RMS above 3 Hz and its share of the power, the share of ticks on which an ankle target was clipped or projected, the mean tilt and the base's drift, with the per-run test and the checkpoint verdict validated against the robot on 2026-11-17 (v11 11400 passes, v15 12900 fails and shook). It also reports the pitch sway and pitch-rate RMS, their content in 0.5 to 3 Hz and the dominant pitch frequency, which show a steady low-frequency limit cycle the above-3 Hz measure does not; those do not gate yet.
+
+The scenarios are `chatter_gate.SCENARIOS`: stand for 66 s (scored over 6 to 66 s) and walk at 0.2 m/s for 40 s (scored over 10 to 40 s), seeds 0 to 2, a realistic and a clean IMU, command latency 10 to 20 ms. `score_run` takes the run's arrays, `score_csv` reads the Controls MuJoCo runner's log, and `verdict` gives pass or fail with the reasons. `tests/test_chatter_gate.py` pins the scoring to the numbers humanoid-learning's Controls gate gave.
 
 ## Reading the plant
 
@@ -316,7 +321,7 @@ The velocity steps are coarse; this is what the real drives report.
 | `seq` | `[E, 16]` | Sequence number, from 1 after a reset; 0 for an empty slot |
 | `count` | `[E]` | Samples delivered since the last reset |
 
-The sensor frame is the chip frame at the description's IMU mount (`imu_joint` on `base_link`); nothing rotates it into the base frame. Sampling and delivery are the rig's: on the V1 the sensor samples every 2.5 ms (400 Hz) and the host receives each sample over CAN as it is taken; on the G1 every 2 ms sample is delivered as it is taken (modeled). Each sample carries the errors of the rig's IMU model (for the MTi-610: white noise, a turn-on bias drawn at every reset and a slow bias drift), plus any bias and misalignment the randomization drew. Details are in [sensors.md](sensors.md).
+The sensor frame is the chip frame at the description's IMU mount (`imu_joint` on `base_link`); nothing rotates it into the base frame. Sampling and delivery are the rig's: on the V1 the sensor samples every 2.5 ms (400 Hz) and the host receives each sample over CAN as it is taken; on the G1 every 2 ms sample is delivered as it is taken (modeled). Each sample carries the errors of the rig's IMU model (for the MTi-610: white noise, a turn-on bias drawn at every reset and a slow bias drift), the chip's measured mount rotation, plus any bias and misalignment the randomization drew. Details are in [sensors.md](sensors.md).
 
 Actor observations come from `measured()` only. That is the information a deployed policy has on the robot; `truth()` and `params()` are for critics, rewards, terminations and diagnostics. The plant hands out raw drive feedback and raw IMU samples. What Controls computes from them before a policy sees them (an orientation estimate, the standing-frame joint offsets, the observation layout of its policy contract) is Controls behaviour and is not modeled here; a task that trains for Controls reproduces it from measured signals ([controls-integration.md](controls-integration.md)).
 
@@ -415,11 +420,11 @@ The full table is `PARAMS` in `src/humanoid_sim/randomization/spec.py`. E is the
 | `drive_stiffness` | device | `[E, 22]` | ratio | 1 | Realized P gain over the demanded one |
 | `drive_damping` | device | `[E, 22]` | ratio | 1 | Realized D gain over the demanded one |
 | `torque_limit` | device | `[E, 22]` | ratio | 1 | Scale on the torque-speed envelope and the torque cap |
-| `latency` | device | `[E, 22]` | s | 0 | Latency before the drive, from the demand sent to the controller staging it. The drive's own delay ([drive model](drives.md#drive-models) `drive_delay_ns`, 5 ms on the V1) always follows it |
+| `latency` | device | `[E, 22]` | s | the profile's `devices.command_path.frame_to_drive_ns` less each drive's own delay (0.3 ms on the V1), else 0 | Latency before the drive, from the demand sent to the controller staging it. The drive's own delay ([drive model](drives.md#drive-models) `drive_delay_ns`, 5 ms on the V1) always follows it |
 | `encoder_offset` | device | `[E, 22]` | rad | 0 | The drive's position reading minus the true position |
 | `imu_gyro_bias` | device | `[E, 3]` | rad/s | 0 | Gyro bias, sensor frame |
 | `imu_accel_bias` | device | `[E, 3]` | m/s² | 0 | Accelerometer bias, sensor frame |
-| `imu_misalignment` | device | `[E, 3]` | rad | 0 | Rotation of the sensor in its mount, as a rotation vector |
+| `imu_misalignment` | device | `[E, 3]` | rad | the profile's `devices.imu_mount` (1.0° pitch, 0.5° roll on the V1), else 0 | Rotation of the sensor in its mount, as a rotation vector in chip axes |
 | `imu_latency` | device | `[E, 1]` | s | the profile's `devices.imu_path` (2.1 ms on the V1), else 0 | From an IMU sample's measurement to its earliest delivery. A scale needs `imu_path`; the draw must be bounded (not `normal`), and the plant sizes the IMU's pending buffer for its largest value |
 | `imu_drop_probability` | device | `[E, 1]` | probability | the sensor model's `drop_probability` (0 on the V1) | The chance that each IMU sample is lost, read every step. A draw outside [0, 1] raises when it is written, so use a bounded distribution or `set`; `drop_mode` stays the model's. Needs the IMU |
 
@@ -439,9 +444,7 @@ RANDOMIZATION = [
     {"param": "drive_stiffness", "dist": "uniform", "range": [0.9, 1.1], "op": "scale"},
     {"param": "drive_damping", "dist": "uniform", "range": [0.9, 1.1], "op": "scale"},
     {"param": "torque_limit", "dist": "uniform", "range": [0.85, 1.0], "op": "scale"},
-    {"param": "latency", "dist": "uniform", "range": [0.010, 0.020], "op": "set", "per_target": False},
-    {"param": "latency", "drives": ".*ANK.*", "dist": "uniform", "range": [0.010, 0.020], "op": "add",
-     "per_target": False},
+    {"param": "latency", "dist": "uniform", "range": [0.0, 0.003], "op": "set", "per_target": False},
     {"param": "encoder_offset", "dist": "uniform", "range": [-0.026, 0.026], "op": "add"},
     {"param": "encoder_offset", "drives": "maxonHEJ50._ANK.*", "dist": "uniform", "range": [-0.14, 0.14],
      "op": "add"},

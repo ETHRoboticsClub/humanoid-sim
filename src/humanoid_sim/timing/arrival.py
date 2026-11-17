@@ -137,3 +137,29 @@ class ArrivalQueue:
             idx = src.reshape(src.shape + (1,) * (v.dim() - 2)).expand_as(v)
             v.copy_(v.gather(1, idx))
         self.count.copy_((self.count - n).clamp(min=0))
+
+
+def command_arrival_ns(sent_ns: torch.Tensor, latency_ns: torch.Tensor, drive_delay_ns: torch.Tensor,
+                       jitter_ns: int = 0, generator: torch.Generator | None = None) -> torch.Tensor:
+    """When a demand sent at ``sent_ns`` ``[E]`` reaches each drive ``[E, D]``: after the latency before the drive and
+    the drive's own delay, moved by a uniform integer draw in ±``jitter_ns`` per demand and drive (never before it was
+    sent). The arrival queue keeps arrivals in order, so a jittered demand never overtakes an earlier one."""
+    arrival = sent_ns.to(torch.int64).unsqueeze(1) + latency_ns + drive_delay_ns
+    if jitter_ns == 0:
+        return arrival
+    if jitter_ns < 0:
+        raise ValueError(f"command jitter {jitter_ns} ns is negative")
+    draw = torch.randint(-jitter_ns, jitter_ns + 1, arrival.shape, generator=generator, device=arrival.device)
+    return torch.maximum(arrival + draw, sent_ns.to(torch.int64).unsqueeze(1))
+
+
+def command_jitter_ns(profile: dict) -> int:
+    """The spread of a demand's arrival (int ns, a uniform draw in ± this): the profile's measured
+    ``devices.command_path`` ``jitter_ns``; zero without one (every demand arrives after exactly its delay)."""
+    path = profile["devices"].get("command_path")
+    if path is None or "jitter_ns" not in path:
+        return 0
+    jitter = path["jitter_ns"]
+    if not isinstance(jitter, int) or isinstance(jitter, bool) or jitter < 0:
+        raise ValueError(f"devices.command_path.jitter_ns {jitter!r}: expected a non-negative integer of ns")
+    return jitter

@@ -5,6 +5,7 @@ import torch
 from conftest import PHYSICS_ROBOTS, built_usd, imu_samples_per_s
 
 from humanoid_sim.model.description import Description
+from humanoid_sim.sensors.imu import rotvec_matrix
 
 pytestmark = pytest.mark.physics
 
@@ -166,10 +167,13 @@ def test_manager_based_env_steps_the_plant(robot):
         rest = env.scene["imu"].data.ang_vel_b.torch.norm(dim=1) < 0.05
         assert rest.any()
         assert torch.allclose(sensor[rest], up_chip[rest], atol=0.3)
-        # The plant delivers what the sensor measured: noise and the MTi-610's accelerometer drift (0.15 mm/s²),
-        # no randomized bias or misalignment.
+        # The plant delivers what the sensor measured, rotated in its mount as the profile says (none for a robot
+        # without one): noise and the MTi-610's accelerometer drift (0.15 mm/s²), no randomized bias or misalignment.
         latest = plant.measured().imu.specific_force[:, 0]
-        assert torch.allclose(latest[rest], sensor[rest], atol=0.05)
+        mount = rotvec_matrix(torch.tensor(plant.imu_mount_rad, device=sensor.device))
+        assert torch.allclose(latest[rest], torch.einsum("ij,nj->ni", mount, sensor[rest]), atol=0.05)
+        if any(plant.imu_mount_rad):  # the V1's measured tilt is the tenth of an m/s² or so that it adds
+            assert (latest[rest] - sensor[rest]).abs().max() > 0.05
         lat = plant.params()["latency"]
         assert ((lat >= 0.010) & (lat <= 0.020)).all()
         scale = plant.params()["body_inertia"]

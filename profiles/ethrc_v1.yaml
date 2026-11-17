@@ -35,6 +35,9 @@ model:
     # Hip flexion + abduction housings.
     - [hej90_hip_abduction_1, hej90_leg_abduction_l_1]
     - [hej90_hip_abduction_1, hej90_leg_abduction_r_1]
+  # The hips and knees give between the drive's encoder and the link (shank phone push tests, 2026-11-16,
+  # humanoid-learning #90), in every V1 asset: physics.joint_give below gives the values.
+  joint_give: ["hip_flexion_.*", "knee_flexion_.*", "hip_abduction_.*"]
   sole:
     joints: {l: ankle_inversion_l, r: ankle_inversion_r}
     box_thickness_m: 0.005
@@ -50,10 +53,15 @@ devices:
     HEJ70-48-50: {counts_per_revolution: 16384}
     HEJ50-48-30: {counts_per_revolution: 16384}
   # Controls' command path, a frame's stamp to the drive's position demand starting to move, mean: the plant puts
-  # this less each drive's own delay (drive_delay_s) before the drive, as the nominal `latency`
-  # (Controls scripts/sim/command_delay.py over the 2026-10-28 excitation datasets, controls 462dac7d9: 6.6 ms
-  # mean, 3.6-10.0 ms p5-p95, 18 1:1 joints; the ankle cranks are unmeasured and go through the same callback).
-  command_path: {frame_to_drive_ns: 6600000}
+  # this less each drive's own delay (drive_delay_s) before the drive, as the nominal `latency`. Gantry PACE
+  # rosbags of 2026-11-16 (pace_LB_A..D, Controls 68e0c9d74, s3://ethrc-rc-humanoid-ckpts/mponced/pace/), the onset
+  # of Controls scripts/sim/command_delay.py (first 0x6062 change after a target step, 200 Hz feedback) over the
+  # 8 HEJ90 leg drives and the 4 ankle cranks: 127,182 steps, 5.3 ms mean (cranks 5.25, HEJ90 5.31), 3.3-8.2 ms
+  # p5-p95 with the feedback interval's censoring in it, 0.68 ms standard deviation with it removed. Frame stamp to
+  # the controller's APPLIED is 1.1 ms of it (0.3-1.8 ms, the wait for the next 1.5 ms cycle); APPLIED to the onset
+  # lies in 3.75-5.25 ms on every drive. Arm drives were not excited. jitter_ns: each demand's arrival is moved by a
+  # uniform draw in +-this, 1.2 ms (standard deviation 0.69 ms, the measured 0.68 ms), in training and in the runtime.
+  command_path: {frame_to_drive_ns: 5300000, jitter_ns: 1200000}
   # The IMU's path past its CAN receipt stamp to the controller's topic, mean: the training plant holds each sample
   # this long before delivery (passive /rt/imu subscriber on the idle V1, 2026-10-31, 24000 samples: 2.09 ms mean,
   # 1.25-5.12 ms p5-p95, Madgwick and the relay 0.6 ms of it). The MTi's own delay before the stamp is unmeasured
@@ -65,11 +73,21 @@ devices:
   # of drive HEJ90L1 (all drives of a frame agree to 17 us): 35,814 spacings, 5.08 ms mean, 3.0-7.5 ms p5-p95, every
   # one a whole number of cycles to 0.1 ms. The counts are the cycle numbers 1 to 10 (10: ten or more) of the two
   # captures pooled (the two differ by 0.01 in each probability). Lag-1 autocorrelation -0.40 is not modeled (the
-  # sampler draws independently). The held value is the master's feedback age; the publish delay past a sample,
-  # 2.24 ms median, 1.58-2.94 ms p5-p95 (t_publish - t_source), is not modeled here.
+  # sampler draws independently). The held value is the master's feedback age. publish_delay_ns: the publish delay
+  # past a sample, 2.24 ms median, 1.58-2.94 ms p5-p95 (t_publish - t_source, the same captures): a sample is visible
+  # to the reader this long after it was taken (its median; the spread is not modeled).
   feedback_sampling:
+    publish_delay_ns: 2240000
     cycles: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     probability: [804, 4716, 15063, 11853, 2482, 500, 259, 89, 28, 20]  # counts of 35,814, normalized on load
+  # The body IMU's mount: the chip's rotation from the description's imu_joint, a rotation vector in chip axes (the
+  # sensor's rotation in its mount, ImuDelivery.misalignment: a sample is R(this) times the ideal one). From the V1's
+  # accelerometer at rest on the gantry's bars (2026-11-05, docs/sensors.md): the chip reads the torso 1.94 deg
+  # pitched forward and 0.10 deg low on the right, a phone on the shoulders 0.94 deg and 0.57 deg, so the chip sits
+  # 1.0 deg in pitch (about chip y) and 0.5 deg in roll (about chip z) off the URDF's mount; gravity does not show yaw
+  # (0). Unconfirmed until Controls' IMU mount calibration measures it. Applied in training and in the runtime,
+  # under any randomized imu_misalignment.
+  imu_mount: {misalignment_deg: [0.0, 1.0, -0.5]}
   # What a drive's feedback carries that the quantization (above) does not: Gaussian velocity dither (sigma in counts
   # per 400 us controller sample, added before the rounding) and torque noise (Nm, before the rounding to mNm). The
   # same captures, windows of 100 PDO samples (0.5 s) in which a drive's position stayed within 2 counts: 65 windows
@@ -88,6 +106,16 @@ physics:
   # Resolve the light native rods and their closed-loop constraints at 1 kHz.
   # Policy/control periods are configured independently by the caller.
   period_ns: 1000000
+  # The joint give of model.joint_give. Stiffness from the shank phone push tests of 2026-11-16 (humanoid-learning
+  # #90, held out one repetition at a time): hip flexion 548 to 655 N m/rad (folds 494 to 743), knee 599 to 678 (579
+  # to 694), hip abduction 755 to 1246 (736 to 1391; the left one's roll weak). Damping is not measured: 2.3 N m s/rad,
+  # the geometric middle of humanoid-learning's give-2026-11-18 range (1.5 to 3.5, around the floor fit's 2.5). On the floor this give brings the V1's pitch response to its hip flexion targets in the
+  # 2026-11-16 gantry walks (rope slack, v11 11400 in closed loop, the measured command path) from 43 to 55 deg RMS phase
+  # error at 3 to 12.5 Hz down to 25 (the robot scores 15 against itself); twice as stiff, 36; half, the robot falls.
+  joint_give:
+    stiffness_nm_per_rad: {hip_flexion_l: 600.0, hip_flexion_r: 600.0, knee_flexion_l: 600.0, knee_flexion_r: 600.0,
+                           hip_abduction_l: 950.0, hip_abduction_r: 950.0}
+    damping_nm_s_per_rad: 2.3
   mjwarp:
     # Contact can spin a rod about its long axis. RK4 resolves that rotational
     # motion without the energy growth of the single-step integrators.
@@ -106,9 +134,14 @@ physics:
     # that state through tree FK rather than re-solving it with regularized FK.
     use_fk_solver: false
     collapse_fixed_joints: true
-    # Keep the direct operator within int32 indexing at 4096 worlds. The plant
-    # checks actual contacts on device and stops rather than silently dropping any.
-    max_contacts_per_world: 144
+    # Kamino's dense operator holds every world's block of (its largest constraint count)^2 floats with int32
+    # offsets: worlds x rows^2 < 2^31 (4096 worlds: 724 rows). Contacts take 3 rows each of the budget, most of a
+    # world's rows (144 contacts: 432 of the rigid V1's 694; the hips' and knees' give adds 36 rows and failed at
+    # 4096). Kept contacts per world measured on 1024 worlds, 3000 to 4000 steps (runs/2026-11-17-kamino-diagnosis):
+    # standing and stepping 8 to 13, drives limp (gains x0.02) 19, limp and toppled at 4 rad/s 20. 96 is about 5x
+    # that: 550 rows rigid, 586 with the measured give, 658 with give on every candidate joint (4959 worlds). The
+    # plant checks kept contacts on device and stops rather than silently dropping any.
+    max_contacts_per_world: 96
     sparse_jacobian: true
     sparse_dynamics: false
     dynamics_solver: padmm
@@ -124,7 +157,11 @@ physics:
     padmm:
       rho_0: 0.05
       algorithm: bilateral_reduced
-      reduced_capacity: 96
+      # Non-bilateral rows the reduced path takes per world (bounded effort rows, limits, 3 per contact). A world
+      # past it sends the whole batch to the full PADMM: at 96 (the V1's 44 bounded rows leave room for 17 contacts)
+      # toppled robots fell back on 89 of 300 sampled steps, 405 s per 3000 steps on 1024 worlds; at 128, none,
+      # 96 s. Standing 4096 worlds cost 75.4 / 75.9 s per 1000 steps at 96, 84.9 at 128 (runs/2026-11-17-kamino-diagnosis).
+      reduced_capacity: 128
       reduced_ordering: rcm
       reduced_dynamic_pattern: true
       reduced_sparse_diagnostics: true

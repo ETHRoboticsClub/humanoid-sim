@@ -104,13 +104,13 @@ The root body `base_link` carries the base frame. With the base upright, z point
 
 ### Joints, drives and families
 
-The description has 22 joints and 22 EtherCAT drives. 18 joints have a one-to-one drive, named by the joint's `device:` field. The four ankle joints (`foot_pitch_l/r`, `foot_roll_l/r`) have `device: null`: each foot is moved by two HEJ 50 drives stacked on the back of the shin, the `upper` and `lower` *crank*. Each crank drive turns a short arm that pushes a rod down to the foot, so the two together set both pitch and roll. The cranks are listed under `drives:` with both joints they move. The linkage geometry (`ankle_model`) feeds the transmission described in [drives.md](drives.md).
+The description has 22 joints and 22 EtherCAT drives. 18 joints have a one-to-one drive, named by the joint's `device:` field. The four ankle joints (`ankle_dorsiflexion_l/r`, `ankle_inversion_l/r`) have `device: null`: each foot is moved by two HEJ 50 drives stacked on the back of the shin, the `upper` and `lower` *crank*. Each crank drive turns a short arm that pushes a rod down to the foot, so the two together set both pitch and roll. The cranks are listed under `drives:` with both joints they move. The linkage geometry (`ankle_model`) feeds the transmission described in [drives.md](drives.md).
 
 `Description.joints` holds, per joint: `region`, `device`, `sign`, `standing_offset_rad`, `armature` (for the ankle hinges, `armature_joint`, the crank inertia reflected into joint space), passive viscous `damping` (Nm s/rad), Coulomb `friction` (Nm, the static friction) and `dynamic_friction` (Nm while sliding: the joint's or its family's optional `dynamic_friction`, else `friction`; it must lie in [0, `friction`]), peak `effort` and `velocity`. `Description.drives` holds every drive: the 18 one-to-one drives in joint order, then the four cranks. Each drive carries its family, peak and nominal effort, no-load velocity, and its baseline position gains from `baseline_position_gains` (the stiffness and damping the drive's own position loop runs with; see [drives.md](drives.md)).
 
 | Family | Drives | Used for |
 |---|---|---|
-| `HEJ90-48-140` | 10 | hip central rotation, waist yaw, and per leg: flexion, abduction, hip yaw, knee |
+| `HEJ90-48-140` | 10 | torso lateral bending, torso axial rotation, and per leg: hip flexion, hip abduction, hip internal rotation, knee flexion |
 | `HEJ70-48-50` | 4 | shoulder flexion and shoulder abduction |
 | `HEJ50-48-30` | 8 | shoulder rotation, elbow flexion, and the four ankle cranks |
 
@@ -172,7 +172,7 @@ Each prints the path of the USD. `--force` rebuilds an existing asset in place. 
 
 1. With `model.weld_unlisted_joints: true`, every movable joint without an entry in `actuators.yaml` becomes a fixed joint at its URDF zero. `URDF_6.urdf` already has its 34 hand joints fixed, so nothing is welded; on `URDF_6_orca_hands.urdf` those 34 would be, the same as Controls' `--fixed-orca-hands`. A listed joint missing from the URDF raises.
 2. Each of the 22 joints becomes `revolute` (14 of them are `continuous` in the URDF) with the calibration travel as its range, the drive's peak `effort` and its `velocity`.
-3. Each foot gets a sole box. On the body carrying each `foot_roll` joint (profile `model.sole.joints`), the collision mesh with the lowest point, including meshes of links welded to that body, is the foot plate. `fit_sole_plate` fits a thin box to the plate's bottom face: it takes the vertices within 1.5 mm of the lowest point, fits the face normal by SVD, refits with the vertices within `face_depth_m` of the face (at most five rounds, until the set stops changing), and sizes the box from the face's extent along its principal in-plane axis and the axis across it. The box is `box_thickness_m` thick, its bottom face on the plate's bottom face, its x axis along the principal in-plane axis (the sole's long axis, heel to toe) and its z axis pointing up into the plate. The plate mesh's collision is removed and the box (`sole_box_l`, `sole_box_r`) is added. On the current description both boxes are about 250 x 90 x 5 mm. The algorithm is Controls' `build_mjcf.py` `sole_plate`, ported unchanged. A profile with `model.sole.fit: bounds` (the G1's) instead takes the box bounding the collision shapes of the foot body and its welded links, along the body's axes, and leaves the collision geometry as it is: the G1's box bounds its four 5 mm contact spheres, 180 x 70 x 10 mm.
+3. Each foot gets a sole box. On the body carrying each `ankle_inversion` joint (profile `model.sole.joints`), the collision mesh with the lowest point, including meshes of links welded to that body, is the foot plate. `fit_sole_plate` fits a thin box to the plate's bottom face: it takes the vertices within 1.5 mm of the lowest point, fits the face normal by SVD, refits with the vertices within `face_depth_m` of the face (at most five rounds, until the set stops changing), and sizes the box from the face's extent along its principal in-plane axis and the axis across it. The box is `box_thickness_m` thick, its bottom face on the plate's bottom face, its x axis along the principal in-plane axis (the sole's long axis, heel to toe) and its z axis pointing up into the plate. The plate mesh's collision is removed and the box (`sole_box_l`, `sole_box_r`) is added. On the current description both boxes are about 250 x 90 x 5 mm. The algorithm is Controls' `build_mjcf.py` `sole_plate`, ported unchanged. A profile with `model.sole.fit: bounds` (the G1's) instead takes the box bounding the collision shapes of the foot body and its welded links, along the body's axes, and leaves the collision geometry as it is: the G1's box bounds its four 5 mm contact spheres, 180 x 70 x 10 mm.
 4. The physics collides convex shapes, and the URDF converter turns each collision mesh into its convex hull (the smallest convex shape enclosing it). With `model.collision_hulls: per_body`, `merge_body_collisions` first combines every remaining collision mesh of a body and of the links welded to it into one mesh in the body frame, written as `collision/<body>.stl`, so each body gets one hull: 23 hulls plus the two sole boxes. With `per_mesh` each of the 118 remaining meshes becomes its own hull. Against the ground the hull of the union reaches exactly as far as the separate hulls did; between bodies it fills the gaps between parts. Primitive colliders (the sole boxes) are left alone.
 5. With `--base-joints` only, three base joints are added above the root; see [Base joints](#base-joints).
 6. `package://` mesh URIs are resolved to absolute paths for the converter. A mesh from any other package raises.
@@ -182,20 +182,20 @@ A *body* is a link that no fixed joint merges into a parent: the root and the ch
 | Body | Joint above it | Self-collision set |
 |---|---|---|
 | `base_link` (carries the IMU) | none, it is the root | `trunk` |
-| `hej90_hip_abduction_1` | `hip_central_rotation` | `trunk` |
-| `Component171_1` (torso) | `waist_upperbody_yaw` | `trunk` |
-| `leg_flexion_abduction_connector_l_1`, `..._r_1` | `leg_flexion_l`, `leg_flexion_r` | `leg_l`, `leg_r` |
-| `hej90_leg_abduction_l_1`, `..._r_1` | `leg_abduction_l`, `leg_abduction_r` | `leg_l`, `leg_r` |
-| `new_lower_leg_Mirror__1`, `new_lower_leg_1` | `hip_yaw_l`, `hip_yaw_r` | `leg_l`, `leg_r` |
-| `new_upperl_leg_Mirror__1`, `new_upperl_leg_1` | `knee_l`, `knee_r` | `leg_l`, `leg_r` |
-| `universal_joint_cross_l_Mirror__1`, `universal_joint_cross_l_1` | `foot_pitch_l`, `foot_pitch_r` | `leg_l`, `leg_r` |
-| `bottom_universal_joint_l_Mirror__1`, `bottom_universal_joint_l_1` (feet, with the sole boxes) | `foot_roll_l`, `foot_roll_r` | `leg_l`, `leg_r` |
+| `hip_rotation_1` | `torso_axial_rotation` | `trunk` |
+| `hej90_hip_abduction_1` | `torso_lateral_bending` | `trunk` |
+| `leg_flexion_abduction_connector_l_1`, `..._r_1` | `hip_flexion_l`, `hip_flexion_r` | `leg_l`, `leg_r` |
+| `hej90_leg_abduction_l_1`, `..._r_1` | `hip_abduction_l`, `hip_abduction_r` | `leg_l`, `leg_r` |
+| `hej90_knee_l_1`, `hej90_knee_l_Mirror_1` | `hip_internal_rotation_l`, `hip_internal_rotation_r` | `leg_l`, `leg_r` |
+| `universal_joint_connector_l_Mirror_1`, `universal_joint_connector_l_1` | `knee_flexion_l`, `knee_flexion_r` | `leg_l`, `leg_r` |
+| `universal_joint_cross_l_Mirror_1`, `universal_joint_cross_l_1` | `ankle_dorsiflexion_l`, `ankle_dorsiflexion_r` | `leg_l`, `leg_r` |
+| `WB71803_Kugelzapfen_WB71802_C16_ST_1`, `bottom_universal_joint_l_1` (feet, with the sole boxes) | `ankle_inversion_l`, `ankle_inversion_r` | `leg_l`, `leg_r` |
 | `shoulder_connector_l_1`, `..._r_1` | `shoulder_flexion_l`, `shoulder_flexion_r` | `arm_l`, `arm_r` |
 | `shoulder_arm_connector_l_1`, `..._r_1` | `shoulder_abduction_l`, `shoulder_abduction_r` | `arm_l`, `arm_r` |
-| `hej50_arm_rotation_l_1`, `..._r_1` | `shoulder_rotation_l`, `shoulder_rotation_r` | `arm_l`, `arm_r` |
+| `hej50_arm_rotation_l_1`, `..._r_1` | `shoulder_internal_rotation_l`, `shoulder_internal_rotation_r` | `arm_l`, `arm_r` |
 | `connector_elbow_forearm_l_1`, `..._r_1` (forearm and welded hand) | `elbow_flexion_l`, `elbow_flexion_r` | `arm_l`, `arm_r` |
 
-`PreparedUrdf.body_tree()` returns this table for any build.
+(The native V1 asset also holds the ankle crank and rod bodies; this table is the URDF body tree.) `PreparedUrdf.body_tree()` returns this table for any build.
 
 ### Conversion, self-collision and contact excludes
 
@@ -339,9 +339,9 @@ The training scene places the base 1 mm (`STANDING_CLEARANCE_M`) above the pose'
 
 | Joint (pair) | Joint sign |
 |---|---|
-| `hip_central_rotation`, `waist_upperbody_yaw` (map to themselves) | -1 |
-| `leg_flexion`, `hip_yaw` | -1 |
-| `leg_abduction`, `knee`, shoulders, elbows, `foot_pitch`, `foot_roll` | +1 |
+| `torso_lateral_bending`, `torso_axial_rotation` (map to themselves) | -1 |
+| `hip_flexion`, `hip_internal_rotation`, `ankle_inversion` | -1 |
+| `hip_abduction`, `knee_flexion`, shoulders, `elbow_flexion`, `ankle_dorsiflexion` | +1 |
 
 With the current description every drive sign is -1.
 
@@ -355,8 +355,8 @@ from humanoid_sim.model.mirror import mirror_map
 
 m = mirror_map(Description.load())
 q = np.array(m.center)                       # standing pose, description joint order
-q[m.joint_names.index("knee_l")] += 0.1
-q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, everything else at standing
+q[m.joint_names.index("knee_flexion_l")] += 0.1
+q_mirror = m.mirror_joints(q)                # knee_flexion_r 0.1 rad off standing, everything else at standing
 ```
 
 `mirror_joints`, `mirror_joint_rates` and `mirror_drives` take numpy arrays or torch tensors with the joint or drive axis last. Nothing inside humanoid-sim calls the map; `tests/test_mirror.py` checks it against forward kinematics.
@@ -393,7 +393,7 @@ q_mirror = m.mirror_joints(q)                # knee_r 0.1 rad off standing, ever
 | `physics.mjwarp.heightfield_base_m` | `apply_heightfield_base` | Depth of the solid base under a heightfield's lowest point, 1.0 m (see [world.md](world.md#the-heightfields-base)). |
 | `physics.kamino.integrator` | `solver_cfg` | `euler`, the only one allowed: `moreau` needs Kamino's own collision detector, which is not used here. |
 | `physics.kamino.dynamics_solver`, `.iterations` | `solver_cfg` | `padmm` (default) or `dvi`, and its outer iteration limit. |
-| `physics.kamino.max_contacts_per_world` | `solver_cfg`, `ContactCapacityGuard` | Contact buffer per world (144 for native V1). Training and runtime assert on Kamino's own overflow flag on device after each step and stop if a world dropped a contact. The flag counts only the contacts Kamino keeps: it culls speculative ones (still apart) before it reserves capacity. |
+| `physics.kamino.max_contacts_per_world` | `solver_cfg`, `ContactCapacityGuard` | Contact buffer per world (96 for native V1: about 5x the most a fallen V1 keeps, 20; each contact is 3 rows of Kamino's dense operator, which holds worlds x rows^2 under 2^31). Training and runtime assert on Kamino's own overflow flag on device after each step and stop if a world dropped a contact. The flag counts only the contacts Kamino keeps: it culls speculative ones (still apart) before it reserves capacity. |
 | `physics.mjwarp.loop_closure_solref`, `.loop_closure_solimp` | `apply_loop_closure` | Numerical response time/damping and impedance of joint-synthesized native loop constraints; actuator gains are independent. |
 | `physics.kamino.use_fk_solver` | `solver_cfg` | Native V1 uses `false`: resets supply all crank and ball coordinates, so tree FK preserves that closed state without a regularized kinematics solve. |
 | `physics.kamino.sparse_jacobian`, `.sparse_dynamics` | `solver_cfg` | Sparse storage for the constraint Jacobian and dynamics operator. Native V1 uses a sparse Jacobian and a direct dense operator after fixed-joint collapse, sized for 4096 environments. |

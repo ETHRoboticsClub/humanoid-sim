@@ -8,7 +8,8 @@ With ``base_joints`` (the asset variant built with them), :meth:`SimCore.set_bas
 orientation as yaw, pitch and roll (``R = Rz Ry Rx``) and their rates, held through the next steps.
 
 ``scene`` (:class:`~humanoid_sim.world.boxes.StaticBoxes`) puts static boxes around the robot, which starts at
-the world origin (the scene's spawn point).
+the world origin (the scene's spawn point). ``collision`` (:class:`~humanoid_sim.world.hulls.StaticHulls`) gives the
+room's collision as convex pieces fitted to its scan instead; the boxes then stay on the stage for rays and drawing.
 
 ``terrain`` (a :class:`~humanoid_sim.world.terrain_io.Terrain`, or the Isaac Lab ``TerrainImporterCfg`` that
 ``heightfield_terrain_cfg`` gives training) puts a heightfield in place of the flat ground, built the way training
@@ -23,7 +24,8 @@ can push. Each step first puts the moving bodies where their paths are at the pl
 ``fixed_base`` suspends it (the base welded to the world).
 
 With ``imu``, :attr:`SimCore.imu` produces the raw IMU samples as the robot's host receives them
-(:class:`~humanoid_sim.sensors.imu.ImuDelivery`, sampled at every step start); with ``contacts``, the scene has a
+(:class:`~humanoid_sim.sensors.imu.ImuDelivery`, sampled at every step start, the chip rotated in its mount as the
+profile's ``devices.imu_mount`` measured it); with ``contacts``, the scene has a
 contact sensor on every body (``backend.contacts``). With ``imu`` and ``extra_rig`` (a name of
 ``sensors.rigs.EXTRAS``), :attr:`SimCore.extra_imus` holds the same for each further IMU of that rig, by name.
 
@@ -50,6 +52,7 @@ from humanoid_sim.model.urdf import BASE_JOINTS
 from humanoid_sim.physics.joint_properties import joint_properties
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.hulls import StaticHulls
 from humanoid_sim.world.objects import WorldObjects
 from humanoid_sim.world.terrain_io import Terrain, as_terrain
 
@@ -63,7 +66,8 @@ class SimCore:
                  imu_history: int | None = None, extra_rig: str | None = None, scene: StaticBoxes | None = None,
                  objects: WorldObjects | None = None, entities: dict | None = None, render_each_step: bool = True,
                  queue_capacity: int | None = None, terrain: Terrain | object | None = None,
-                 physics_overrides: dict | None = None, gravity_m_s2: tuple[float, float, float] | None = None):
+                 physics_overrides: dict | None = None, gravity_m_s2: tuple[float, float, float] | None = None,
+                 collision: StaticHulls | None = None):
         check_asset_robot(usd_path, robot)
         self.terrain = as_terrain(terrain)
         self.desc = Description.load(robot)
@@ -113,11 +117,12 @@ class SimCore:
             self_collision=phys["self_collision"] if self_collision is None else self_collision,
             base_joints=base_joints, ground_friction=self.profile["model"]["ground_friction"],
             imu=imu, extra_imus={n: s.frame for n, s in extra_imus.items()}, contacts=contacts, rerun=rerun,
-            rerun_rrd=rerun_rrd, scene=scene, objects=objects, entities=entities,
+            rerun_rrd=rerun_rrd, scene=scene, collision=collision, objects=objects, entities=entities,
             render_each_step=render_each_step, terrain=None if self.terrain is None else self.terrain.cfg,
             springs=compliance_gains(usd_path, phys, self.desc) or None, gravity_m_s2=gravity_m_s2),
             props=props)
         self.scene = scene
+        self.collision = collision
         self.ground = self.backend.ground
         self.env_origins = self.backend.env_origins
         self.objects = objects
@@ -163,13 +168,14 @@ class SimCore:
         self.imu = None
         if imu:
             from humanoid_sim.sensors import rigs
-            from humanoid_sim.sensors.imu import ImuDelivery
+            from humanoid_sim.sensors.imu import ImuDelivery, mount_misalignment_rad
 
             cfg = rigs.imu(self.desc).delivery_cfg()
             if imu_history is not None:
                 cfg = dataclasses.replace(cfg, history=imu_history)
             self.imu = ImuDelivery(cfg, num_envs, device=device, seed=seed)
             self.imu.reset(torch.arange(num_envs, device=device), 0)
+            self.imu.misalignment.copy_(torch.tensor(mount_misalignment_rad(self.profile), device=device))
         self.extra_imus = {}
         for i, (name, sensor) in enumerate(extra_imus.items(), 1):
             from humanoid_sim.sensors.imu import ImuDelivery
@@ -275,9 +281,12 @@ class SimCore:
         self._base_acceleration = acceleration_w
 
     def step(self) -> DriveFeedback:
-        q, qd = self.solver_state()
         if self._graphs is not None:
-            target = self._graphs.pre(q, qd, refresh=self._state_written)
+            # The state was written outside a step: convert it again first. The targets reach the solver's buffers
+            # inside the graph; only a prescribed base motion (replays) writes them from here.
+            target = self._graphs.pre(refresh=self._state_written)
+            if self._base_target is not None:
+                self._write_targets(target)
         else:
             if self.imu is not None:
                 data = self.backend.imu.data
@@ -285,21 +294,9 @@ class SimCore:
             for name, delivery in self.extra_imus.items():
                 data = self.backend.extra_imus[name].data
                 delivery.step(self.t_ns, data.ang_vel_b.torch, data.lin_acc_b.torch)
+            q, qd = self.solver_state()
             state = None if self._state_written else self.plant.post_state
-            target = self.plant.pre_physics(self.t_ns, q, qd, state)
-        bt, _ = self.backend.joint_state()
-        bt = bt.clone()
-        bt[:, self._to_solver] = target.to(bt.dtype)
-        bt[:, self._springs] = 0.0
-        effort = torch.zeros_like(bt)
-        effort[:, self._to_solver] = self.plant.passive_effort.to(effort.dtype)
-        if self._base_target is not None:
-            bv = torch.zeros_like(bt)
-            bt[:, self._base] = self._base_target[0].to(bt.dtype)
-            bv[:, self._base] = self._base_target[1].to(bt.dtype)
-            self.backend.set_targets(bt, bv, effort=effort)
-        else:
-            self.backend.set_targets(bt, effort=effort)
+            self._write_targets(self.plant.pre_physics(self.t_ns, q, qd, state))
         self.write_friction()
         self.gantry.apply(self.t_ns)
         stops = self.crank_stops or getattr(self.backend.robot, "_kamino_crank_stops", None)
@@ -311,23 +308,52 @@ class SimCore:
             self.backend.objects.update(self.t_ns - self._objects_epoch_ns)
         self.backend.step()
         self.t_ns += self.period_ns
-        q, qd = self.solver_state()
-        self._feedback = self._graphs.post(q, qd) if self._graphs is not None else self.plant.feedback(q, qd)
+        if self._graphs is not None:
+            self._feedback = self._graphs.post()
+        else:
+            q, qd = self.solver_state()
+            self._feedback = self.plant.feedback(q, qd)
         self._state_written = False
         return self.feedback
+
+    def _target_buffers(self, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """The solver's joint targets (solver joint order) and efforts for the step: the plant's shaped targets on
+        the plant's joints, the current position elsewhere, the springs' at zero, and the plant's passive efforts."""
+        bt, _ = self.backend.joint_state()
+        bt = bt.clone()
+        bt[:, self._to_solver] = target.to(bt.dtype)
+        if len(self._springs):
+            bt[:, self._springs] = 0.0
+        effort = torch.zeros_like(bt)
+        effort[:, self._to_solver] = self.plant.passive_effort.to(effort.dtype)
+        return bt, effort
+
+    def _write_targets(self, target: torch.Tensor) -> None:
+        bt, effort = self._target_buffers(target)
+        if self._base_target is not None:
+            bv = torch.zeros_like(bt)
+            bt[:, self._base] = self._base_target[0].to(bt.dtype)
+            bv[:, self._base] = self._base_target[1].to(bt.dtype)
+            self.backend.set_targets(bt, bv, effort=effort)
+        else:
+            self.backend.set_targets(bt, effort=effort)
 
 
 class _StepGraphs:
     """The plant's per-step work as two CUDA graphs over static buffers: ``pre`` (IMU sampling at the step start,
-    drive bank, target shaping) and ``post`` (drive feedback and the drive-frame state ``pre`` reuses). State lives
-    in the plant's tensors, updated in place; the step time is a device scalar; the IMUs' generators (noise and
-    sample dropout) are registered with the graph so each replay draws new noise, burst times and drops."""
+    drive bank, target shaping, the joint targets and efforts written into the solver's command buffers) and
+    ``post`` (the joint state in the plant's joint order, drive feedback and the drive-frame state ``pre`` reuses).
+    State lives in the plant's tensors, updated in place; the step time is a device scalar; the IMUs' generators
+    (noise and sample dropout) are registered with the graph so each replay draws new noise, burst times and drops.
+    The solver's joint state and command buffers are the same memory every step, which is what lets the graphs read
+    and write them; the IMUs' outputs are not (their data is re-viewed on every read), so ``pre`` copies them in."""
 
     def __init__(self, sim: SimCore, warmup: int = 3, compile: bool = False):
         self.sim = sim
+        self._post_core, self._pre_core = sim.plant.feedback, self._pre_math
         if compile:
-            self._post = torch.compile(self._post, dynamic=False)
-            self._pre = torch.compile(self._pre, dynamic=False)
+            self._post_core = torch.compile(self._post_core, dynamic=False)
+            self._pre_core = torch.compile(self._pre_core, dynamic=False)
         p = sim.plant
         q, qd = sim.solver_state()
         self.q, self.qd = q.clone(), qd.clone()
@@ -337,6 +363,8 @@ class _StepGraphs:
         self.acc = torch.zeros(e, 3, device=q.device)
         self.extra = {name: (torch.zeros(e, 3, device=q.device), torch.zeros(e, 3, device=q.device))
                       for name in sim.extra_imus}
+        self.command = sim.backend.command_buffers()
+        self._ptrs = self._pointers()
         p.feedback(self.q, self.qd)  # a post-step state for pre to start from
         side = torch.cuda.Stream()
         side.wait_stream(torch.cuda.current_stream())
@@ -355,10 +383,22 @@ class _StepGraphs:
         with torch.cuda.graph(self.g_pre):
             self.target = self._pre()
 
-    def _post(self) -> DriveFeedback:
-        return self.sim.plant.feedback(self.q, self.qd)
+    def _pointers(self) -> list[int]:
+        """The addresses of every solver-side buffer the graphs read or write; they must not move after capture."""
+        sim = self.sim
+        return [t.data_ptr() for t in (*sim.backend.joint_state(), *self.command)]
 
-    def _pre(self) -> torch.Tensor:
+    def stable(self) -> bool:
+        """Whether those buffers are still where the graphs captured them."""
+        return self._pointers() == self._ptrs
+
+    def _post(self) -> DriveFeedback:
+        q, qd = self.sim.solver_state()
+        self.q.copy_(q)
+        self.qd.copy_(qd)
+        return self._post_core(self.q, self.qd)
+
+    def _pre_math(self) -> torch.Tensor:
         sim = self.sim
         if sim.imu is not None:
             sim.imu.step(self.t, self.gyro, self.acc, period_ns=sim.period_ns)
@@ -366,11 +406,19 @@ class _StepGraphs:
             delivery.step(self.t, *self.extra[name], period_ns=sim.period_ns)
         return sim.plant.pre_physics(self.t, self.q, self.qd, sim.plant.post_state)
 
-    def pre(self, q: torch.Tensor, qd: torch.Tensor, *, refresh: bool) -> torch.Tensor:
+    def _pre(self) -> torch.Tensor:
+        sim = self.sim
+        target = self._pre_core()
+        bt, effort = sim._target_buffers(target)
+        position, velocity, force = self.command
+        position.copy_(bt)
+        velocity.zero_()
+        force.copy_(effort)
+        return target
+
+    def pre(self, *, refresh: bool) -> torch.Tensor:
         sim = self.sim
         if refresh:  # the joint state was written: convert it again before the step
-            self.q.copy_(q)
-            self.qd.copy_(qd)
             self.g_post.replay()
         if sim.imu is not None:
             data = sim.backend.imu.data
@@ -384,8 +432,6 @@ class _StepGraphs:
         self.g_pre.replay()
         return self.target
 
-    def post(self, q: torch.Tensor, qd: torch.Tensor) -> DriveFeedback:
-        self.q.copy_(q)
-        self.qd.copy_(qd)
+    def post(self) -> DriveFeedback:
         self.g_post.replay()
         return self.feedback
