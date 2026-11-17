@@ -571,6 +571,12 @@ class IsaacLabRobot:
         tc.set_velocity_index(value=torch.zeros_like(target) if velocity is None else velocity)
         tc.set_effort_index(value=torch.zeros_like(target) if effort is None else effort)
 
+    def command_buffers(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """The solver's joint position, velocity and effort command buffers (the memory :meth:`set_targets` writes,
+        the same every step), so a captured graph can write the commands itself."""
+        tc = self.robot.actuators.target_command
+        return tc.position.torch, tc.velocity.torch, tc.effort.torch
+
     def apply_base_acceleration(self, acceleration_w: torch.Tensor) -> None:
         """Add -m*a at physical bodies' CoMs. Input is prevalidated [envs, 3].
 

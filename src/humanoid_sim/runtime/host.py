@@ -265,6 +265,58 @@ class _MeasuredFeedback:
         return self._out
 
 
+class _FeedbackPacket:
+    """The whole feedback transfer, packed on the device: the master's reading of the drives (:class:`_MeasuredFeedback`
+    on the plant's drive-frame state), the IMUs' latest samples and their integer fields (and the extra IMUs being
+    recorded) as one float64 vector, the integers travelling bit-for-bit. On CUDA the reading and the packing run as
+    one captured graph over the plant's and the IMUs' buffers, which persist across steps (updated in place), with
+    the reading's generators registered, so the step costs a launch."""
+
+    def __init__(self, sim, measured: _MeasuredFeedback, *, cuda_graph: bool, extra_imus: list[str] = ()):
+        self.sim, self.measured, self.extra_imus = sim, measured, list(extra_imus)
+        self._t = torch.zeros((), dtype=torch.int64, device=sim.plant.cfg.device)
+        self.graph = None
+        if not cuda_graph:
+            return
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(3):
+                self._pack(self._t)
+        torch.cuda.current_stream().wait_stream(side)
+        self.graph = torch.cuda.CUDAGraph()
+        for gen in measured._generators():
+            self.graph.register_generator_state(gen)
+        with torch.cuda.graph(self.graph):
+            self._out = self._pack(self._t)
+        measured.reset()
+
+    def _pack(self, t_ns) -> torch.Tensor:
+        sim = self.sim
+        fb = self.measured._apply(t_ns, sim.feedback)
+        imu = sim.imu.samples
+        ints = torch.cat([imu.seq[0], imu.sample_ns[0], imu.stamp_ns[0], imu.count[:1]]).view(torch.float64)
+        flat = torch.cat([fb.position_rad[0], fb.velocity_rad_s[0], fb.applied_torque_nm[0],
+                          fb.demanded_torque_nm[0], imu.gyro[0].reshape(-1), imu.specific_force[0].reshape(-1),
+                          ]).to(torch.float64)
+        extra = []
+        for name in self.extra_imus:
+            s = sim.extra_imus[name].samples
+            extra_ints = torch.cat([s.seq[0], s.sample_ns[0], s.stamp_ns[0], s.count[:1]]).view(torch.float64)
+            extra += [torch.cat([s.gyro[0].reshape(-1), s.specific_force[0].reshape(-1)]).to(torch.float64), extra_ints]
+        return torch.cat([flat, ints, *extra])
+
+    def __call__(self, t_ns: int) -> torch.Tensor:
+        """What the master reads at plant time ``t_ns``, packed (the vector is the same buffer every call on CUDA: copy
+        it out before the next one)."""
+        self._t.fill_(t_ns)
+        if self.graph is None:
+            return self._pack(self._t)
+        self.sim.feedback  # after a state write without a step, converts the new state into the buffers the graph reads
+        self.graph.replay()
+        return self._out
+
+
 @dataclass
 class _Disturbance:
     body_id: int
@@ -397,7 +449,9 @@ class RuntimeHost:
         self._intake = _DemandIntake(self.sim.plant, len(self.sim.plant.map.drive_names), self.device,
                                      cuda_graph=cuda, compile=compile and cuda)
         self._measured = _MeasuredFeedback(self.sim.desc, self.sim.plant.map.drive_names, self.sim.profile,
-                                           self.device, self.sim.plant.cfg.dtype, seed=seed, cuda_graph=cuda)
+                                           self.device, self.sim.plant.cfg.dtype, seed=seed, cuda_graph=False)
+        self._packet = _FeedbackPacket(self.sim, self._measured, cuda_graph=cuda,
+                                       extra_imus=list(self.sim.extra_imus) if trajectory is not None else [])
         self.desc = self.sim.desc
         self.robot = self.sim.backend.robot
         self.period_ns = self.sim.period_ns
@@ -466,6 +520,7 @@ class RuntimeHost:
         self.step_count = 0
         self.late_steps = 0
         self._last_late_ns = -KEEPING_UP_WINDOW_NS
+        self._paced_steps = self._cost_ns_total = self._cost_ns_max = self.overrun_steps = 0
         self.paused = False
         self.attached = False
         self.detached = False
@@ -541,6 +596,9 @@ class RuntimeHost:
             "description": self.desc.identity(),
             "physics": {"engine": f"isaaclab/{self.sim.solver}", "period_ns": self.period_ns,
                         "integrator": self.sim.integrator},
+            "timing": {"late_after_ns": self.period_ns, "keeping_up_window_ns": KEEPING_UP_WINDOW_NS,
+                       "late": "a step that starts more than late_after_ns after its deadline; the feedback's "
+                               "late_steps counts them and keeping_up is 1 while none was late in the window"},
             "units": {"drive": "physical drive-output frame (crank angle for ankle cranks), SI",
                       "joint": "URDF joint coordinates", "imu": "sensor frame, rad/s and m/s^2 (specific force)",
                       "time": "sim_time_ns and IMU stamps are plant time; *_mono_ns is CLOCK_MONOTONIC"},
@@ -1106,16 +1164,16 @@ class RuntimeHost:
         self._publish()
 
     def _publish(self) -> None:
-        """Feedback every step; truth every ``truth_every`` steps (its ``sim_time_ns`` says when). A step that
-        publishes both brings them to the host in one transfer."""
-        feedback = self._feedback_flat()
-        if self.step_count % self.truth_every == 0 or self._truth_due:
-            host = self._to_host("publish", torch.cat([feedback, self._truth_flat()]))
-            self._write_feedback(host[:feedback.numel()])
-            self._write_truth(host[feedback.numel():])
+        """Feedback every step; truth every ``truth_every`` steps (its ``sim_time_ns`` says when). Both come to the
+        host in transfers queued behind the step, waited for once."""
+        truth_due = self.step_count % self.truth_every == 0 or self._truth_due
+        feedback = self._to_host("feedback", self._feedback_flat(), wait=False)
+        truth = self._to_host("truth", self._truth_flat(), wait=False) if truth_due else None
+        self._wait_copies()
+        self._write_feedback(feedback)
+        if truth_due:
+            self._write_truth(truth)
             self._truth_due = False
-        else:
-            self._write_feedback(self._to_host("feedback", feedback))
         self.seg.heartbeat()
 
     def _publish_feedback(self) -> None:
@@ -1124,39 +1182,27 @@ class RuntimeHost:
     def _publish_truth(self) -> None:
         self._write_truth(self._to_host("truth", self._truth_flat()))
 
-    def _to_host(self, name: str, value: torch.Tensor) -> np.ndarray:
-        """``value`` on the host, as NumPy (a pinned buffer per ``name``, reused: copy out before the next call)."""
+    def _to_host(self, name: str, value: torch.Tensor, *, wait: bool = True) -> np.ndarray:
+        """``value`` on the host, as NumPy (a pinned buffer per ``name``, reused: copy out before the next call). With
+        ``wait=False`` the copy is only queued: call :meth:`_wait_copies` before reading it."""
         if self._copied is None:
             return value.numpy()
         buf = self._pinned.get(name)
         if buf is None or buf.shape != value.shape or buf.dtype != value.dtype:
             buf = self._pinned[name] = torch.empty(value.shape, dtype=value.dtype, pin_memory=True)
         buf.copy_(value, non_blocking=True)
-        self._copied.record()
-        self._copied.synchronize()
+        if wait:
+            self._wait_copies()
         return buf.numpy()
+
+    def _wait_copies(self) -> None:
+        if self._copied is not None:
+            self._copied.record()
+            self._copied.synchronize()
 
     def _feedback_flat(self) -> torch.Tensor:
         """The feedback's fields as one float64 vector on the device; the integer fields travel bit-for-bit."""
-        sim = self.sim
-        fb = self._measured(sim.t_ns, sim.feedback)
-        imu = sim.imu.samples
-        ints = torch.cat([imu.seq[0], imu.sample_ns[0], imu.stamp_ns[0], imu.count[:1]]).view(torch.float64)
-        flat = torch.cat([fb.position_rad[0], fb.velocity_rad_s[0], fb.applied_torque_nm[0],
-                          fb.demanded_torque_nm[0], imu.gyro[0].reshape(-1), imu.specific_force[0].reshape(-1),
-                          ]).to(torch.float64)
-        return torch.cat([flat, ints, *self._extra_imu_flat()])
-
-    def _extra_imu_flat(self) -> list[torch.Tensor]:
-        """The extra IMUs being recorded, each as gyro, specific force and the integer fields (as the body IMU's),
-        to travel in the feedback's single transfer; none when nothing is recorded."""
-        out = []
-        for name in self.extra_imu_logs:
-            s = self.sim.extra_imus[name].samples
-            ints = torch.cat([s.seq[0], s.sample_ns[0], s.stamp_ns[0], s.count[:1]]).view(torch.float64)
-            out.append(torch.cat([s.gyro[0].reshape(-1), s.specific_force[0].reshape(-1)]).to(torch.float64))
-            out.append(ints)
-        return out
+        return self._packet(self.sim.t_ns)
 
     def _write_feedback(self, host: np.ndarray) -> None:
         sim, n = self.sim, len(self.drives)
@@ -1291,7 +1337,13 @@ class RuntimeHost:
                     self._last_late_ns = now
                     deadline = now
                 self._deadline_ns = deadline
+                began = abi.mono_ns()
                 self.step()
+                cost = abi.mono_ns() - began
+                self._paced_steps += 1
+                self._cost_ns_total += cost
+                self._cost_ns_max = max(self._cost_ns_max, cost)
+                self.overrun_steps += cost > self.period_ns
                 periods += 1
                 if self.detached:
                     code = EXIT_DETACHED
@@ -1315,5 +1367,11 @@ class RuntimeHost:
         self.sim.close()
 
     def status(self) -> dict:
+        """The session's counters. ``step_ms_mean`` and ``step_ms_max`` are the wall cost of the paced steps (the
+        step's own work, not the wait for its deadline) and ``overrun_steps`` those that cost more than the period:
+        a host whose mean step costs more than the period cannot keep up, however its late steps are counted."""
+        paced = max(self._paced_steps, 1)
         return {"session_id": self.session_id, "steps": self.step_count, "late_steps": self.late_steps,
-                "sim_time_s": self.sim.t_ns / NS_PER_S, "attached": self.attached}
+                "overrun_steps": self.overrun_steps, "step_ms_mean": round(self._cost_ns_total / paced / 1e6, 4),
+                "step_ms_max": round(self._cost_ns_max / 1e6, 4), "sim_time_s": self.sim.t_ns / NS_PER_S,
+                "attached": self.attached}

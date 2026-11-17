@@ -44,15 +44,17 @@ Four options of the top-level parser go before `serve`: `--solver` (`mjwarp` or 
 
 ```json
 {"segment": "/run/hsim/plant", "session_id": 9134770520263281019, "ready": true}
-{"session_id": 9134770520263281019, "steps": 15233, "late_steps": 0, "sim_time_s": 60.944, "attached": true, "exit": 4}
+{"session_id": 9134770520263281019, "steps": 15233, "late_steps": 0, "overrun_steps": 0, "step_ms_mean": 0.8, "step_ms_max": 0.95, "sim_time_s": 60.944, "attached": true, "exit": 4}
 ```
+
+`step_ms_mean` and `step_ms_max` are the wall cost of the paced steps (the step's own work, not the wait for its deadline) and `overrun_steps` counts the steps that cost more than the physics period. A host whose mean step costs more than the period cannot keep up, whatever `late_steps` says: that counts a step only once it starts a full period behind its deadline.
 
 ### Startup
 
 `RuntimeHost.__init__` builds everything before a client can see the segment:
 
 1. It loads the description and the asset, picks the start pose (`--pose`, else the profile's `poses.start`), and computes the named poses `home` and `standing` (`initial_pose` in `src/humanoid_sim/model/poses.py`) with their base heights: the height of an upright base at which the pose's lowest sole corner is 1 mm above the floor (`STANDING_CLEARANCE_M`).
-2. It builds the scene (`SimCore`, with the IMU keeping its 32 latest delivered samples and a contact sensor on every body). On CUDA it captures the plant's work before and after the solver step as two CUDA graphs (a recorded sequence of GPU kernels that replays with one launch) and fuses their kernels with `torch.compile`, and it does the same for the demand intake (`_DemandIntake`). The command line always uses graphs and compilation on CUDA and neither on the CPU.
+2. It builds the scene (`SimCore`, with the IMU keeping its 32 latest delivered samples and a contact sensor on every body). On CUDA it captures the plant's work before and after the solver step as two CUDA graphs (a recorded sequence of GPU kernels that replays with one launch) and fuses their kernels with `torch.compile`: the one before the solver step also writes the joint targets and efforts into the solver's command buffers, the one after reads the joint state. It does the same for the demand intake (`_DemandIntake`), and for the packing of the feedback transfer (the drive feedback as the master reads it and the IMU samples). The command line always uses graphs and compilation on CUDA and neither on the CPU.
 3. It steps the physics three times and puts the state back (`_warm_up`), so that the first steps' kernel compilation does not happen while a client watches the heartbeat.
 4. It opens the first session (`_open_session`): it creates the segment in state creating, writes the start pose, publishes the first feedback and truth records, and then marks the segment ready.
 
@@ -231,6 +233,7 @@ The descriptor region holds one JSON object (sorted keys, at most 16,384 bytes) 
 | `harness` | `{"body", "shoulders": [l, r]}`, the body a suspended robot hangs by and the two bodies whose midpoint is the hook (the profile's `support.harness`), or null. When the description has gantry attachment links it is `{"body", "attachment_links": [name, ...]}` instead: the body that carries them and the links, in rope order, whose midpoint is the hook. ABI 3.3 added it. |
 | `description` | `robot`, `description_digest` and `description_revision` (the humanoid-urdf checkout's git `HEAD`, or null) |
 | `physics` | `engine` (`isaaclab/mjwarp` or `isaaclab/kamino`), `period_ns`, `integrator` |
+| `timing` | `late_after_ns` (the physics period: a step that starts later than this after its deadline is late), `keeping_up_window_ns` and a sentence on how the feedback's `late_steps` and `keeping_up` count |
 | `units` | One sentence each for `drive`, `joint`, `imu` and `time` |
 | `imu` | `parent`: the link the URDF's `imu_joint` mounts the IMU on. The rig's IMU ([sensors.md](sensors.md#sensor-models-and-the-rig)): `model` (its model name in `src/humanoid_sim/sensors/models.py`, `mti-610` on the V1), `product`, `frame` (the link it sits at), `sample_period_ns`, `burst_period_ns` and `in_burst_spacing_ns`, and `noise`: `kind` is `ideal` when the model has no errors (the G1's body IMU: Unitree publishes no figures), else `modeled` or `measured` by how the figures are known, with the figures (`gyro_noise_density_rad_s_sqrt_hz`, `accel_noise_density_m_s2_sqrt_hz`, the turn-on biases, the bias instabilities and `bias_correlation_time_ns`); `SET_FIDELITY` `ideal` turns the errors off whatever `kind` says. The bias is a first-order Gauss-Markov process (`bias_model`: `gauss_markov`): its stationary sigma is the bias instability and its correlation time `bias_correlation_time_ns`; there is no random-walk term. ABI 3.1 added all but `parent` and `noise`. |
 | `extra_imus` | With `serve --sensors RIG`, the IMUs of that extra rig besides the body IMU, by rig name (the `g1-cameras` rig's `zed_imu`): each with the `imu` block's fields and a `mount`: the `body` the physics keeps its frame on and the frame's pose in it (`translation_m`, `rotation`), a rigid mount read from the description. They are simulated and recorded, not read from the feedback region. |
