@@ -15,7 +15,7 @@ Every test lives in `tests/`, in files named `test_<area>*.py`. List the files f
 | `test_runtime_*`, `test_trajectory` | The real-time host, its segment ABI and the Rerun viewer |
 | `test_replay_*`, `test_exc_*`, `test_bag_reader`, `test_capture_coordinates` | Replay, capture and bag readers, coordinate conversion |
 | `test_kamino_*` | The Kamino solver mechanisms and their fixtures |
-| `test_train_*`, `test_randomization`, `test_plant_log`, `test_reset_feedback`, `test_velocity_push`, `test_per_env_contacts`, `test_contact_capacity` | The Train-Time API: the plant, environments, randomization, resets |
+| `test_train_*`, `test_randomization`, `test_plant_log`, `test_reset_feedback`, `test_velocity_push`, `test_joint_torque_perturbation*`, `test_per_env_contacts`, `test_contact_capacity` | The Train-Time API: the plant, environments, randomization, resets |
 | `test_world`, `test_supports`, `test_gantry_*`, `test_trolley`, `test_static_boxes`, `test_static_hulls`, `test_objects`, `test_terrain_*`, `test_mesh_terrain` | Ground, terrain, objects, the gantry and supports |
 | `test_model_build`, `test_mirror`, `test_robots`, `test_description_delivery`, `test_collision_pruning`, `test_physics`, `test_angular_momentum`, `test_solvers`, `test_*_build_patch` | The robot description, the built model and solver checks |
 | `test_cli_warp` | The command line |
