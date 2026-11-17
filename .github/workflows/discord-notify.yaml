@@ -1,0 +1,71 @@
+# Posts issue and PR activity to a Discord channel through the webhook in secret DISCORD_WEBHOOK_URL.
+# Review requests and assignments are only posted when they target amoec; actions by amoec are not posted.
+# No code is checked out, so pull_request_target is safe here. Without the secret the job does nothing.
+name: Discord notify
+
+on:
+  issues:
+    types: [opened, closed, reopened, assigned]
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, reopened, ready_for_review, review_requested]
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: >-
+      github.actor != 'amoec' &&
+      (github.event.action != 'review_requested' || github.event.requested_reviewer.login == 'amoec') &&
+      (github.event.action != 'assigned' || github.event.assignee.login == 'amoec')
+    steps:
+      - name: Post to Discord
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then echo "DISCORD_WEBHOOK_URL is not set, nothing to do"; exit 0; fi
+          payload=$(jq -c --arg ev "$GITHUB_EVENT_NAME" --arg repo "${GITHUB_REPOSITORY#*/}" '
+            def cut($n): if . == null then "" elif length > $n then .[:$n] + "..." else . end;
+            (.pull_request // .issue) as $it
+            | (if (.pull_request // .issue.pull_request) then "PR" else "Issue" end) as $kind
+            | "#\($it.number) \($it.title)" as $ref
+            | .action as $a
+            | (if $ev == "issues" then
+                 if $a == "closed" then ["Issue closed (\($it.state_reason // "completed"))", 9807270]
+                 elif $a == "assigned" then ["Issue assigned to you", 15105570]
+                 else ["Issue \($a)", 5763719] end
+               elif $ev == "pull_request_target" then
+                 if $a == "review_requested" then ["Review requested from you", 15105570]
+                 elif $a == "closed" and $it.merged then ["PR merged", 10181046]
+                 elif $a == "closed" then ["PR closed", 9807270]
+                 else ["PR \($a | gsub("_"; " "))", 3447003] end
+               elif $ev == "issue_comment" then ["Comment on \($kind)", 3447003]
+               elif $ev == "pull_request_review" then
+                 if .review.state == "approved" then ["PR approved", 5763719]
+                 elif .review.state == "changes_requested" then ["Changes requested", 15548997]
+                 elif (.review.body // "") == "" then null
+                 else ["PR review", 3447003] end
+               elif $ev == "pull_request_review_comment" then ["Review comment on PR", 3447003]
+               else null end) as $hdr
+            | if $hdr == null then empty else
+              {
+                username: "GitHub",
+                allowed_mentions: {parse: []},
+                embeds: [{
+                  title: ("[\($repo)] \($hdr[0]): \($ref)" | cut(250)),
+                  url: (.comment.html_url // .review.html_url // $it.html_url),
+                  description: ((.comment.body // .review.body // (if $a == "opened" then $it.body else null end)) | cut(800)),
+                  color: $hdr[1],
+                  author: {name: .sender.login, icon_url: .sender.avatar_url, url: .sender.html_url}
+                }]
+              } end
+          ' "$GITHUB_EVENT_PATH")
+          if [ -z "$payload" ]; then echo "Nothing to post for this event"; exit 0; fi
+          curl -fsS -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK"
