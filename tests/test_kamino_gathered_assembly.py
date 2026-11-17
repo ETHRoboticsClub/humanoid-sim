@@ -2,7 +2,6 @@
 
 import numpy as np
 import pytest
-
 from test_kamino_body_assembly import _dense_delassus
 from test_kamino_tracked_clear import _fixture
 
@@ -11,7 +10,6 @@ pytestmark = pytest.mark.physics
 
 def _random_blocks(rng, model, data, jacobians, active, body_counts):
     """Rows with one to three blocks on distinct bodies, shuffled, inactive capacity filled with junk."""
-    import warp as wp
 
     blocks = jacobians._J_cts.bsm
     starts = blocks.nzb_start.numpy()
