@@ -28,6 +28,7 @@ from humanoid_sim.physics.crank_stops import check_crank_stops
 from humanoid_sim.physics.joint_properties import JointProperties
 from humanoid_sim.physics.model_build import model_build
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.hulls import StaticHulls, add_room
 from humanoid_sim.world.objects import WorldObjects
 
 # Base-joint PD. Each joint carries the whole robot (a few kg m² about yaw, ~10 about pitch and roll at the
@@ -66,6 +67,9 @@ class IsaacLabCfg:
     extra_imus: dict | None = None  # more IMU sensors, scene name -> the URDF link each sits at
     contacts: bool = False  # a contact sensor on every body
     scene: StaticBoxes | None = None  # static boxes around the robot (every env's robot then starts at the origin)
+    # A room's convex collision pieces (world/hulls.py). With them the scene's boxes are drawn and traced by rays but
+    # do not collide; every env's robot starts at the origin as with boxes.
+    collision: StaticHulls | None = None
     # A heightfield terrain in place of the flat ground (an Isaac Lab TerrainImporterCfg, as training's
     # ``heightfield_terrain_cfg`` builds it): each env's robot starts at its tile's origin, ``base_height_m`` above it.
     terrain: object | None = None
@@ -466,19 +470,18 @@ class IsaacLabRobot:
         class SceneCfg(InteractiveSceneCfg):
             pass
 
-        # The boxes are one set of shapes every env's world collides with, at the same coordinates.
-        spacing = 0.0 if cfg.scene is not None else cfg.env_spacing_m
+        # The boxes (or the convex pieces) are one set of shapes every env's world collides with, at the same
+        # coordinates.
+        room = cfg.scene is not None or cfg.collision is not None
+        spacing = 0.0 if room else cfg.env_spacing_m
         scene_cfg = SceneCfg(num_envs=cfg.num_envs, env_spacing=spacing, replicate_physics=True)
-        if cfg.terrain is not None and cfg.scene is not None:
+        if cfg.terrain is not None and room:
             raise ValueError("a scene's boxes stand on the flat ground: no terrain with them")
         if cfg.terrain is not None:
             scene_cfg.terrain = cfg.terrain
         else:
             scene_cfg.ground = ground_cfg(cfg.ground_friction)
-        if cfg.scene is not None:
-            from humanoid_sim.world.boxes import static_boxes_cfg
-
-            scene_cfg.static_boxes = static_boxes_cfg(cfg.scene.file, cfg.scene.spawn_m, friction=cfg.ground_friction)
+        add_room(scene_cfg, cfg.scene, cfg.collision, friction=cfg.ground_friction)
         from humanoid_sim.world.objects import add_objects
 
         add_objects(scene_cfg, cfg.objects)

@@ -8,7 +8,8 @@ With ``base_joints`` (the asset variant built with them), :meth:`SimCore.set_bas
 orientation as yaw, pitch and roll (``R = Rz Ry Rx``) and their rates, held through the next steps.
 
 ``scene`` (:class:`~humanoid_sim.world.boxes.StaticBoxes`) puts static boxes around the robot, which starts at
-the world origin (the scene's spawn point).
+the world origin (the scene's spawn point). ``collision`` (:class:`~humanoid_sim.world.hulls.StaticHulls`) gives the
+room's collision as convex pieces fitted to its scan instead; the boxes then stay on the stage for rays and drawing.
 
 ``terrain`` (a :class:`~humanoid_sim.world.terrain_io.Terrain`, or the Isaac Lab ``TerrainImporterCfg`` that
 ``heightfield_terrain_cfg`` gives training) puts a heightfield in place of the flat ground, built the way training
@@ -51,6 +52,7 @@ from humanoid_sim.model.urdf import BASE_JOINTS
 from humanoid_sim.physics.joint_properties import joint_properties
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.hulls import StaticHulls
 from humanoid_sim.world.objects import WorldObjects
 from humanoid_sim.world.terrain_io import Terrain, as_terrain
 
@@ -64,7 +66,8 @@ class SimCore:
                  imu_history: int | None = None, extra_rig: str | None = None, scene: StaticBoxes | None = None,
                  objects: WorldObjects | None = None, entities: dict | None = None, render_each_step: bool = True,
                  queue_capacity: int | None = None, terrain: Terrain | object | None = None,
-                 physics_overrides: dict | None = None, gravity_m_s2: tuple[float, float, float] | None = None):
+                 physics_overrides: dict | None = None, gravity_m_s2: tuple[float, float, float] | None = None,
+                 collision: StaticHulls | None = None):
         check_asset_robot(usd_path, robot)
         self.terrain = as_terrain(terrain)
         self.desc = Description.load(robot)
@@ -114,11 +117,12 @@ class SimCore:
             self_collision=phys["self_collision"] if self_collision is None else self_collision,
             base_joints=base_joints, ground_friction=self.profile["model"]["ground_friction"],
             imu=imu, extra_imus={n: s.frame for n, s in extra_imus.items()}, contacts=contacts, rerun=rerun,
-            rerun_rrd=rerun_rrd, scene=scene, objects=objects, entities=entities,
+            rerun_rrd=rerun_rrd, scene=scene, collision=collision, objects=objects, entities=entities,
             render_each_step=render_each_step, terrain=None if self.terrain is None else self.terrain.cfg,
             springs=compliance_gains(usd_path, phys, self.desc) or None, gravity_m_s2=gravity_m_s2),
             props=props)
         self.scene = scene
+        self.collision = collision
         self.ground = self.backend.ground
         self.env_origins = self.backend.env_origins
         self.objects = objects

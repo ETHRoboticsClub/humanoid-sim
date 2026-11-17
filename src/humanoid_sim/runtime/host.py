@@ -40,8 +40,10 @@ figure). The friction is written when a drive turns on or off, not every step.
 
 With ``scene`` (:class:`~humanoid_sim.world.boxes.StaticBoxes`) the robot stands among static boxes, a room's walls
 and furniture, starting at the scene's spawn point (the world origin); the descriptor's ``scene`` names the file,
-its digest and the spawn point, so the client can map the truth's world frame to the scene's. A spawn point inside
-a box is refused.
+its digest and the spawn point, so the client can map the truth's world frame to the scene's. With ``collision``
+(:class:`~humanoid_sim.world.hulls.StaticHulls`) the robot collides with the room's convex pieces instead, and the
+boxes stay for rays and drawing; the descriptor's ``collision`` names that file. A spawn point inside a collision
+shape is refused.
 
 With ``terrain`` (a :class:`~humanoid_sim.world.terrain_io.Terrain`, or the Isaac Lab ``TerrainImporterCfg`` that
 training builds with ``heightfield_terrain_cfg``) the ground is that heightfield instead of the flat plane, built the
@@ -89,6 +91,7 @@ from humanoid_sim.timing.arrival import command_arrival_ns, command_jitter_ns
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
 from humanoid_sim.world.harness import resolve_harness
+from humanoid_sim.world.hulls import StaticHulls
 from humanoid_sim.world.objects import WorldObjects
 from humanoid_sim.world.supports import GRAVITY_M_S2, NONE, _quat_rotate, level_under
 from humanoid_sim.world.terrain_io import Terrain, as_terrain, rest_base_height
@@ -337,7 +340,7 @@ class RuntimeHost:
                  seed: int = 0, sim_revision: str = "unknown", truth_every: int = 5, compile: bool = True,
                  scene: StaticBoxes | None = None, gantry: GantryRig | None = None,
                  objects: WorldObjects | None = None, trajectory: str | Path | None = None, extra_rig: str | None = None,
-                 terrain: Terrain | object | None = None):
+                 terrain: Terrain | object | None = None, collision: StaticHulls | None = None):
         from humanoid_sim.devices.models import drive_models
         from humanoid_sim.model.asset import asset_meta, load_profile
         from humanoid_sim.model.description import Description
@@ -355,13 +358,18 @@ class RuntimeHost:
         if self._harness is not None and self._harness.num_points > abi.MAX_STRAPS:
             raise ValueError(f"{robot}: {self._harness.num_points} gantry attachment points, but the plant ABI "
                              f"carries {abi.MAX_STRAPS} straps")
-        if scene is not None and scene.clearance_m() == 0.0:
-            raise ValueError(f"spawn point {scene.spawn_m} is inside a box of {scene.file}: the robot starts there")
+        # What the robot collides with: the convex pieces when given, else the boxes.
+        colliders = collision if collision is not None else scene
+        if colliders is not None and colliders.clearance_m() == 0.0:
+            shape = "box" if collision is None else "convex piece"
+            raise ValueError(f"spawn point {colliders.spawn_m} is inside a {shape} of {colliders.file}: the robot "
+                             "starts there")
         terrain = as_terrain(terrain)
-        if terrain is not None and (scene is not None or gantry is not None):
+        if terrain is not None and (scene is not None or collision is not None or gantry is not None):
             raise ValueError("a terrain replaces the flat ground that a scene's boxes and a gantry crane stand on: "
-                             "no scene or gantry with it")
+                             "no scene, collision or gantry with it")
         self.scene = scene
+        self.collision = collision
         self.terrain = terrain
         self.objects = objects
         self.support = support
@@ -381,7 +389,8 @@ class RuntimeHost:
         models = drive_models(Description.load(robot))
         self.sim = SimCore(usd, device=device, robot=robot, solver=solver,
                            base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
-                           compile=compile and cuda, imu_history=abi.IMU_SAMPLES, scene=scene, objects=objects,
+                           compile=compile and cuda, imu_history=abi.IMU_SAMPLES, scene=scene, collision=collision,
+                           objects=objects,
                            extra_rig=extra_rig, terrain=terrain,
                            queue_capacity=_queue_capacity(max(m.drive_delay_ns for m in models.values()) + self._jitter_ns,
                                                           bus_period_ns,
@@ -551,6 +560,7 @@ class RuntimeHost:
             "drive_models": self._drive_model_table(),
             "fidelity_gaps": fidelity_gaps(self.drive_models),
             "scene": None if self.scene is None else self.scene.describe(),
+            "collision": None if self.collision is None else self.collision.describe(),
             "terrain": self._terrain_descriptor(),
             "objects": None if not self.objects else self.objects.describe(),
             "gantry": None if self.rig is None else self.rig.describe(),
