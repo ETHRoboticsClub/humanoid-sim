@@ -3,8 +3,9 @@ import math
 import pytest
 import torch
 
-from humanoid_sim.timing import ArrivalQueue
-from humanoid_sim.train.plant import command_arrival_ns, command_latency_ns
+from humanoid_sim.model.asset import load_profile
+from humanoid_sim.timing import ArrivalQueue, command_arrival_ns, command_jitter_ns
+from humanoid_sim.train.plant import TrainPlantCfg, command_latency_ns
 
 DELAYS = torch.tensor([5_000_000, 2_000_000, 0])
 
@@ -25,7 +26,7 @@ def test_a_path_shorter_than_a_drive_or_not_whole_ns_is_refused(total):
         command_latency_ns({"devices": {"command_path": {"frame_to_drive_ns": total}}}, DELAYS)
 
 
-# -- jitter on a demand's arrival (off unless asked for) ------------------------------------------------------------
+# -- jitter on a demand's arrival (the profile's measured spread) ------------------------------------------------------------
 
 LATENCY = torch.tensor([[1_600_000, 4_600_000, 6_600_000]])
 
@@ -66,3 +67,38 @@ def test_jittered_demands_still_arrive_in_the_order_they_were_sent():
     arrival = queue.arrival[:, :6]
     assert (arrival[:, 1:] >= arrival[:, :-1]).all()
     assert (arrival[:, 1:] == arrival[:, :-1]).any()  # some were held back behind an earlier one
+
+
+# -- the profile's measured spread is the default, in training and in the runtime -----------------------------------
+
+def test_the_v1_profile_carries_the_measured_jitter():
+    profile = load_profile("ethrc_v1")
+    jitter = command_jitter_ns(profile)
+    assert jitter == 1_200_000
+    assert jitter / math.sqrt(3) / 1e6 == pytest.approx(0.68, abs=0.02)  # uniform in ±1.2 ms: the measured 0.68 ms std
+    assert jitter / 1e6 == pytest.approx(1.2)
+
+
+def test_a_robot_without_a_measured_spread_has_none():
+    assert command_jitter_ns({"devices": {}}) == 0
+    assert command_jitter_ns({"devices": {"command_path": {"frame_to_drive_ns": 5_300_000}}}) == 0
+    assert command_jitter_ns(load_profile("g1_29dof_rev_1_0")) == 0
+
+
+@pytest.mark.parametrize("jitter", [-1, 1.2e6, True, "1200000"])
+def test_a_jitter_that_is_not_whole_non_negative_ns_is_refused(jitter):
+    with pytest.raises(ValueError, match="jitter_ns"):
+        command_jitter_ns({"devices": {"command_path": {"frame_to_drive_ns": 5_300_000, "jitter_ns": jitter}}})
+
+
+def test_the_training_plant_has_no_jitter_knob_to_turn_on():
+    assert "command_jitter_ns" not in TrainPlantCfg.__dataclass_fields__
+
+
+def test_the_profile_jitter_gives_the_measured_arrival_spread():
+    gen = torch.Generator().manual_seed(2)
+    jitter = command_jitter_ns(load_profile("ethrc_v1"))
+    sent = torch.zeros(40_000, dtype=torch.int64)
+    out = command_arrival_ns(sent, LATENCY.expand(len(sent), -1), DELAYS, jitter, gen)
+    delta = (out - (sent.unsqueeze(1) + LATENCY + DELAYS)).double()
+    assert delta.abs().max() <= 1_200_000 and abs(delta.std().item() / 1e6 - 0.68) < 0.02

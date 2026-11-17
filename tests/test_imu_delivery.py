@@ -5,7 +5,14 @@ import math
 import pytest
 import torch
 
-from humanoid_sim.sensors.imu import ImuDelivery, ImuDeliveryCfg, pending_slots, rotvec_matrix
+from humanoid_sim.model.asset import load_profile
+from humanoid_sim.sensors.imu import (
+    ImuDelivery,
+    ImuDeliveryCfg,
+    mount_misalignment_rad,
+    pending_slots,
+    rotvec_matrix,
+)
 
 STEP = 4_000_000
 CFG = ImuDeliveryCfg(sample_period_ns=2_740_000, burst_period_ns=(13_900_000, 17_600_000), in_burst_spacing_ns=13_000,
@@ -133,6 +140,47 @@ def test_turn_on_bias_is_drawn_per_env_at_reset():
     z = torch.zeros(e, 3, dtype=torch.float64)
     _run(imu, 10, lambda t: (z, z))
     assert torch.allclose(imu.samples.gyro[:, 0], imu.turn_on[:, :3], atol=1e-12)
+
+
+def test_the_model_bias_survives_a_reset_that_keeps_it_and_changes_at_power_on():
+    e = 64
+    cfg = ImuDeliveryCfg(**{**CFG.__dict__, "gyro_turn_on_bias": 1.5e-3, "accel_turn_on_bias": 0.02,
+                            "gyro_bias_instability": 1e-3, "accel_bias_instability": 1e-3})
+    imu = ImuDelivery(cfg, e, dtype=torch.float64, seed=5)
+    everyone = torch.arange(e)
+    imu.reset(everyone, 0, keep_seq=True)  # power-on: drawn
+    turn_on, drift = imu.turn_on.clone(), imu.drift.clone()
+    assert turn_on.abs().max() > 0 and drift.abs().max() > 0
+    z = torch.zeros(e, 3, dtype=torch.float64)
+    _run(imu, 20, lambda t: (z, z))
+    held = imu.turn_on.clone()
+    _run(imu, 5, lambda t: (z, z), t0=20 * STEP)
+    imu.reset(everyone, 25 * STEP, keep_seq=True, redraw_bias=False)  # the runtime's RESET
+    assert torch.equal(imu.turn_on, held) and torch.equal(imu.turn_on, turn_on)
+    assert (imu.samples.count == 0).all() and (imu.samples.stamp_ns == -1).all()  # the buffers still restart
+    _run(imu, 10, lambda t: (z, z), t0=25 * STEP)
+    assert torch.allclose(imu.samples.gyro[:, 0], imu.turn_on[:, :3] + imu.drift[:, :3], atol=1e-4)  # still read
+    imu.reset(everyone, 35 * STEP, keep_seq=True)  # a new power-on: drawn again, for every env
+    assert not (imu.turn_on == turn_on).any(dim=1).any()
+
+
+def test_the_v1_profile_carries_the_measured_mount_tilt():
+    x, y, z = mount_misalignment_rad(load_profile("ethrc_v1"))
+    assert (x, y, z) == (0.0, math.radians(1.0), math.radians(-0.5))  # about 1 degree in pitch, 0.5 in roll (#35)
+    assert mount_misalignment_rad({"devices": {}}) == (0.0, 0.0, 0.0)
+    assert mount_misalignment_rad(load_profile("g1_29dof_rev_1_0")) == (0.0, 0.0, 0.0)
+
+
+def test_the_mount_tilt_turns_a_level_chip_reading_into_the_robots_at_rest():
+    # The V1 on the gantry's bars (docs/sensors.md): the chip, -x up when level, read (-9.7821, -0.0177, 0.3312) m/s2
+    # with the torso, by a phone on its shoulders, 0.94 deg forward and 0.57 deg low on the right. imu_joint's
+    # axes: chip -x is base up, chip -y is base left, chip -z is base forward.
+    g = 9.7875
+    pitch, roll = math.radians(0.94), math.radians(0.57)
+    up_chip = torch.tensor([-math.cos(pitch) * math.cos(roll), -math.sin(roll), math.sin(pitch)], dtype=torch.float64)
+    m = torch.tensor(mount_misalignment_rad(load_profile("ethrc_v1")), dtype=torch.float64)
+    read = (rotvec_matrix(m) @ up_chip) * g
+    assert read.tolist() == pytest.approx([-9.7821, -0.0177, 0.3312], abs=0.03)
 
 
 def test_bias_drift_is_stationary_and_decorrelates():

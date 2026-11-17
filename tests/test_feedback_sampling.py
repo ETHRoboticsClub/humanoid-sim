@@ -156,3 +156,87 @@ def test_a_robot_without_measured_sampling_has_none():
 def test_malformed_distributions_are_refused(kw):
     with pytest.raises(ValueError):
         FeedbackSampler(1, 1, cycle_ns=CYCLE, **kw)
+
+
+# -- the publish delay ----------------------------------------------------------------------------------------------
+
+DELAY = 2_240_000
+
+
+def test_the_profile_carries_the_measured_publish_delay():
+    profile = load_profile("ethrc_v1")
+    assert profile["devices"]["feedback_sampling"]["publish_delay_ns"] == DELAY
+    s = FeedbackSampler.for_robot(Description.load(), profile, 2, 5)
+    assert s.publish_delay_ns == DELAY
+    assert FeedbackSampler.for_robot(Description.load(), profile, 2, 5, publish_delay_ns=0).publish_delay_ns == 0
+
+
+def test_a_sample_is_visible_a_publish_delay_after_it_was_taken():
+    e, tick, n = 6, 100_000, 4000
+    now, late = _sampler(e, 2, seed=8), _sampler(e, 2, seed=8, publish_delay_ns=DELAY)
+    taken, held = [], []
+    for i in range(n):
+        t = i * tick
+        a, b = now.step(t, _ramp(t, e, 2)), late.step(t, _ramp(t, e, 2))
+        taken.append(a.position_rad[:, 0].clone())
+        held.append(b.position_rad[:, 0].clone())
+        assert (b.position_rad[:, 0] == late.sample_ns[:, 0] / NS_PER_MS).all()  # a reading of its own sample's time
+        if t >= DELAY:  # the first sample after a reset is the only one visible at once
+            assert (t - late.sample_ns[:, 0] >= DELAY).all()
+    # What the delayed reading holds at t is what the undelayed one held when the delay before t began.
+    lag = -(-DELAY // tick)
+    assert torch.equal(torch.stack(held)[lag:], torch.stack(taken)[:n - lag])
+
+
+def test_the_reading_age_is_the_held_age_plus_the_delay():
+    e, tick = 300, 250_000
+    now, late = _sampler(e, 1, seed=9), _sampler(e, 1, seed=9, publish_delay_ns=DELAY)
+    age_now, age_late = [], []
+    for i in range(3000):
+        t = i * tick
+        now.step(t, _ramp(t, e, 1)), late.step(t, _ramp(t, e, 1))
+        if t > 20 * NS_PER_MS:
+            age_now.append((t - now.sample_ns[:, 0]).double().mean())
+            age_late.append((t - late.sample_ns[:, 0]).double().mean())
+    extra = (torch.stack(age_late).mean() - torch.stack(age_now).mean()).item() / NS_PER_MS
+    assert DELAY / NS_PER_MS <= extra <= DELAY / NS_PER_MS + tick / NS_PER_MS  # rounded up to the step grid
+
+
+def test_a_reset_shows_the_new_state_at_once_not_the_old_one_for_a_delay():
+    s = _sampler(3, 2, seed=10, publish_delay_ns=DELAY)
+    for i in range(60):
+        t = i * NS_PER_MS
+        s.step(t, _ramp(t, 3, 2))
+    s.reset(torch.tensor([1]))
+    t = 60 * NS_PER_MS
+    out = s.step(t, _ramp(t, 3, 2))
+    assert out.position_rad[1, 0].item() == t / NS_PER_MS and s.sample_ns[1, 0].item() == t
+    assert out.position_rad[0, 0].item() == s.sample_ns[0, 0].item() / NS_PER_MS  # the others keep their own
+    for i in range(61, 90):  # and keeps it until the next sample has crossed the delay
+        t = i * NS_PER_MS
+        out = s.step(t, _ramp(t, 3, 2))
+        assert out.position_rad[1, 0].item() == s.sample_ns[1, 0].item() / NS_PER_MS
+        assert s.sample_ns[1, 0].item() <= t
+
+
+def test_a_second_call_with_a_delay_changes_nothing():
+    s = _sampler(20, 3, seed=11, publish_delay_ns=DELAY)
+    for i in range(80):
+        t = i * NS_PER_MS
+        first = s.step(t, _ramp(t, 20, 3))
+        again = s.step(t, DriveFeedback(*(torch.full((20, 3), 99.0, dtype=torch.float64) for _ in range(4))))
+        assert torch.equal(first.position_rad, again.position_rad)
+
+
+def test_the_time_may_be_a_device_tensor_with_a_delay():
+    a, b = _sampler(20, 3, seed=12, publish_delay_ns=DELAY), _sampler(20, 3, seed=12, publish_delay_ns=DELAY)
+    for i in range(80):
+        t = i * NS_PER_MS
+        assert torch.equal(a.step(t, _ramp(t, 20, 3)).position_rad,
+                           b.step(torch.tensor(t), _ramp(t, 20, 3)).position_rad)
+
+
+def test_a_negative_or_fractional_delay_is_refused():
+    for bad in (-1, 2.2e6, True):
+        with pytest.raises(ValueError, match="publish_delay_ns"):
+            FeedbackSampler(1, 1, cycle_ns=CYCLE, cycles=[1], probability=[1.0], publish_delay_ns=bad)
