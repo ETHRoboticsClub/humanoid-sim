@@ -93,7 +93,7 @@ The solver's PD gains are constant per joint and written once at spawn. The driv
 humanoid-sim build-asset
 ```
 
-The asset goes to `outputs/assets/ethrc_v1/<key>/`, where the key is a digest of the description and the profile; changing either needs a rebuild. In code, `build_asset` (`src/humanoid_sim/model/asset.py`) returns the USD path of an asset that is already built, and builds it otherwise (which needs the image):
+The asset goes to `outputs/assets/ethrc_v1/<key>/`, where the key is a digest of the description and the profile; changing either needs a rebuild. The V1's asset carries its hips' and knees' measured joint give (the profile's `model.joint_give`, [drives.md](drives.md#joint-give)); `build_asset(..., joint_give=())` builds one without it. In code, `build_asset` (`src/humanoid_sim/model/asset.py`) returns the USD path of an asset that is already built, and builds it otherwise (which needs the image):
 
 ```python
 from pathlib import Path
