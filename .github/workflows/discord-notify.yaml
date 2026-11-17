@@ -1,6 +1,7 @@
-# Posts issue and PR activity to a Discord channel through the webhook in secret DISCORD_WEBHOOK_URL.
+# Sends issue and PR activity as Discord DMs from the bot in secret DISCORD_BOT_TOKEN to the user in secret DISCORD_USER_ID.
+# The bot must share a server with that user.
 # Review requests and assignments are only posted when they target amoec; actions by amoec are not posted.
-# No code is checked out, so pull_request_target is safe here. Without the secret the job does nothing.
+# No code is checked out, so pull_request_target is safe here. Without the secrets the job does nothing.
 name: Discord notify
 
 on:
@@ -26,11 +27,12 @@ jobs:
       (github.event.action != 'review_requested' || github.event.requested_reviewer.login == 'amoec') &&
       (github.event.action != 'assigned' || github.event.assignee.login == 'amoec')
     steps:
-      - name: Post to Discord
+      - name: DM on Discord
         env:
-          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          USER_ID: ${{ secrets.DISCORD_USER_ID }}
         run: |
-          if [ -z "$WEBHOOK" ]; then echo "DISCORD_WEBHOOK_URL is not set, nothing to do"; exit 0; fi
+          if [ -z "$TOKEN" ] || [ -z "$USER_ID" ]; then echo "DISCORD_BOT_TOKEN or DISCORD_USER_ID is not set, nothing to do"; exit 0; fi
           payload=$(jq -c --arg ev "$GITHUB_EVENT_NAME" --arg repo "${GITHUB_REPOSITORY#*/}" '
             def cut($n): if . == null then "" elif length > $n then .[:$n] + "..." else . end;
             (.pull_request // .issue) as $it
@@ -56,7 +58,6 @@ jobs:
                else null end) as $hdr
             | if $hdr == null then empty else
               {
-                username: "GitHub",
                 allowed_mentions: {parse: []},
                 embeds: [{
                   title: ("[\($repo)] \($hdr[0]): \($ref)" | cut(250)),
@@ -68,4 +69,7 @@ jobs:
               } end
           ' "$GITHUB_EVENT_PATH")
           if [ -z "$payload" ]; then echo "Nothing to post for this event"; exit 0; fi
-          curl -fsS -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK"
+          api=https://discord.com/api/v10
+          auth="Authorization: Bot $TOKEN"
+          dm=$(jq -nc --arg id "$USER_ID" '{recipient_id: $id}' | curl -fsS -H "$auth" -H 'Content-Type: application/json' -d @- "$api/users/@me/channels" | jq -r .id)
+          curl -fsS -o /dev/null -H "$auth" -H 'Content-Type: application/json' -d "$payload" "$api/channels/$dm/messages"
