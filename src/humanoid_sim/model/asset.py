@@ -63,25 +63,27 @@ def asset_key(desc: Description, profile: dict, prepared: PreparedUrdf) -> str:
 
 
 def asset_dir(desc: Description, profile: dict, out_root: Path, *, base_joints: bool = False,
-              ankle_compliance: bool = False, joint_give: tuple[str, ...] = ()) -> Path:
+              ankle_compliance: bool = False, joint_give: tuple[str, ...] = (),
+              load_tilt: tuple[str, ...] = ()) -> Path:
     """Directory of the asset for this description and profile (exists only once built). ``ankle_compliance``: the
     native USD variant with crank springs; ``joint_give``: with a give behind each named drive joint
-    (:mod:`humanoid_sim.transmissions.compliance`)."""
+    (:mod:`humanoid_sim.transmissions.compliance`); ``load_tilt``: with a load-driven tilt behind each."""
     if profile["model"].get("usd"):
-        from humanoid_sim.model.usd import _checked_give
+        from humanoid_sim.model.usd import _checked_give, _checked_tilt
         from humanoid_sim.model.usd import asset_key as usd_key
 
         return Path(out_root) / desc.robot / usd_key(desc, profile, base_joints=base_joints,
                                                      ankle_compliance=ankle_compliance,
-                                                     joint_give=_checked_give(desc, joint_give))
-    _no_compliance(ankle_compliance, joint_give)
+                                                     joint_give=_checked_give(desc, joint_give),
+                                                     load_tilt=_checked_tilt(desc, profile, load_tilt))
+    _no_compliance(ankle_compliance, joint_give, load_tilt)
     prepared = PreparedUrdf(desc, profile).build(base_joints=base_joints)
     return Path(out_root) / desc.robot / asset_key(desc, profile, prepared)
 
 
-def _no_compliance(ankle_compliance: bool, joint_give=()) -> None:
-    if ankle_compliance or joint_give:
-        raise ValueError("ankle compliance and joint give need the native USD (a profile with model.usd)")
+def _no_compliance(ankle_compliance: bool, joint_give=(), load_tilt=()) -> None:
+    if ankle_compliance or joint_give or load_tilt:
+        raise ValueError("ankle compliance, joint give and load tilt need the native USD (a profile with model.usd)")
 
 
 def compliance_springs(usd_path: Path) -> dict[str, str]:
@@ -102,6 +104,16 @@ def give_springs(usd_path: Path) -> dict[str, str]:
     except FileNotFoundError:
         return {}
     return dict((meta.get("joint_give") or {}).get("springs", {}))
+
+
+def tilt_springs(usd_path: Path) -> dict[str, str]:
+    """``{joint: tilt joint}`` of the built asset at ``usd_path`` (:mod:`humanoid_sim.transmissions.compliance`); empty
+    for an asset without load tilt or a USD outside a built asset."""
+    try:
+        meta = asset_meta(usd_path)
+    except FileNotFoundError:
+        return {}
+    return dict((meta.get("load_tilt") or {}).get("springs", {}))
 
 
 def _body_prims(stage):
@@ -172,14 +184,14 @@ def check_asset_robot(usd_path: Path, robot: str) -> None:
 
 def build_asset(desc: Description, profile: dict, out_root: Path, *, force: bool = False,
                 base_joints: bool = False, ankle_compliance: bool = False,
-                joint_give: tuple[str, ...] = ()) -> Path:
+                joint_give: tuple[str, ...] = (), load_tilt: tuple[str, ...] = ()) -> Path:
     """Build (or reuse) the robot USD; returns its path. Writes ``asset.json`` with the provenance."""
     if profile["model"].get("usd"):
         from humanoid_sim.model.usd import build_asset as build_usd
 
         return build_usd(desc, profile, out_root, force=force, base_joints=base_joints,
-                         ankle_compliance=ankle_compliance, joint_give=joint_give)
-    _no_compliance(ankle_compliance, joint_give)
+                         ankle_compliance=ankle_compliance, joint_give=joint_give, load_tilt=load_tilt)
+    _no_compliance(ankle_compliance, joint_give, load_tilt)
     prepared = PreparedUrdf(desc, profile).build(base_joints=base_joints)
     key = asset_key(desc, profile, prepared)
     out = Path(out_root) / desc.robot / key

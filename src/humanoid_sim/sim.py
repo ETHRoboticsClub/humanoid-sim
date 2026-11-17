@@ -80,6 +80,7 @@ class SimCore:
         self.profile = load_profile(robot, physics_overrides=physics_overrides)
         phys = self.profile["physics"]
         self.period_ns = int(period_ns or phys["period_ns"])
+        from humanoid_sim.model.asset import tilt_springs
         from humanoid_sim.physics.isaaclab import (
             IsaacLabCfg,
             IsaacLabRobot,
@@ -87,6 +88,9 @@ class SimCore:
             solver_settings,
         )
 
+        if tilt_springs(usd_path):  # its target comes from the leg's load, which only the Train-Time API's plant sets
+            raise ValueError(f"{usd_path} has load tilt: replays and the runtime step the plant's drives only, so the "
+                             "tilt would stay at zero; use the Train-Time API (RobotPlant) or the asset without it")
         self.solver, settings = solver_settings(phys, solver)
         self.integrator = integrator or settings["integrator"]
         joints = list(self.desc.joints)

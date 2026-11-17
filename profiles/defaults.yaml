@@ -94,6 +94,19 @@ physics:
   joint_give:
     stiffness_nm_per_rad: null
     damping_nm_s_per_rad: null
+  # Load tilt, for an asset built with `build-asset --load-tilt JOINT...`: behind each named leg joint (the V1's knee for
+  # a shank tilt) a stiff joint to the link that the plant drives to theta_max min(1, F / F_sat), F the vertical contact
+  # force on the leg's sole (transmissions/compliance.py). angle_rad is the nominal theta_max, signed, in the joint's own
+  # coordinates (0: no tilt, the default); saturation_load_n the nominal F_sat, which the caller gives (null refuses to
+  # spawn an asset with tilt); a number for every joint or a mapping by joint name. The plant's load_tilt_angle and
+  # load_tilt_saturation_load knobs draw per env around them. stiffness_nm_per_rad and damping_nm_s_per_rad are the
+  # PD that holds the tilt: a drive torque through the joint moves the tilt by torque over stiffness, so they are stiff
+  # (not robot values). An asset without tilt ignores this block.
+  load_tilt:
+    angle_rad: 0.0
+    saturation_load_n: null
+    stiffness_nm_per_rad: 10000.0
+    damping_nm_s_per_rad: 20.0
   # Kamino (beta in Newton 1.6): maximal coordinates, hard joint-limit and contact constraints, P-ADMM forward
   # dynamics, contacts from Newton's collision pipeline. Contact friction mixes by the larger coefficient, as
   # MJWarp does. Not yet checked against MJWarp or the captures (modeled).

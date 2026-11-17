@@ -49,6 +49,15 @@ def randomization(desc, payload_body: str) -> list[dict]:
     return terms
 
 
+def tilt_randomization(angle_rad: float, saturation_n: float) -> list[dict]:
+    """The load tilt's knobs, drawn per env and joint around the nominals the bench gives (an asset with tilt): the
+    angle uniform in plus and minus the nominal's magnitude, the saturation load log-uniform over 0.5 to 2 times its
+    nominal."""
+    return [{"param": "load_tilt_angle", "dist": "uniform", "range": [-abs(angle_rad), abs(angle_rad)], "op": "set"},
+            {"param": "load_tilt_saturation_load", "dist": "log_uniform",
+             "range": [0.5 * saturation_n, 2.0 * saturation_n], "op": "set"}]
+
+
 def physics_overrides(args) -> dict:
     """The profile overrides of ``--period-ms`` and ``--integrator``, for comparing physics settings."""
     overrides = {}
@@ -60,6 +69,8 @@ def physics_overrides(args) -> dict:
     if args.integrator is not None:
         solver = args.solver or load_profile(args.robot)["physics"]["solver"]
         overrides[solver] = {"integrator": args.integrator}
+    if getattr(args, "tilt", None) is not None:
+        overrides["load_tilt"] = {"angle_rad": args.tilt[0], "saturation_load_n": args.tilt[1]}
     return overrides
 
 
@@ -84,7 +95,14 @@ def run_train_bench(args, usd: Path, scene: StaticBoxes | None = None, objects: 
     driver = ObjectsDriver(scene, objects) if objects else None
     on_cuda = str(args.device).startswith("cuda")  # the plant as training runs it
     heaviest = robot.body_names[int(robot.data.body_mass.torch[0].argmax())]
-    plant = RobotPlant(robot, TrainPlantCfg(robot=args.robot, randomization=randomization(Description.load(args.robot), heaviest),
+    from humanoid_sim.model.asset import tilt_springs
+
+    terms = randomization(Description.load(args.robot), heaviest)
+    if tilt_springs(usd):
+        if args.tilt is None:
+            raise ValueError("an asset with load tilt needs --tilt ANGLE_RAD SATURATION_N")
+        terms += tilt_randomization(*args.tilt)
+    plant = RobotPlant(robot, TrainPlantCfg(robot=args.robot, randomization=terms,
                                             physics_overrides=overrides, cuda_graph=on_cuda, compile=on_cuda),
                        imu=scene["imu"], contacts=scene["contacts"], physics_manager=sim.physics_manager)
     q, qd = plant.joint_state()  # the scene's default pose: home
