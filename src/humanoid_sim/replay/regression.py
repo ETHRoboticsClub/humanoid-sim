@@ -39,6 +39,7 @@ from humanoid_sim.replay.metrics import (
 from humanoid_sim.replay.replay import DriveCommands
 
 FORMAT = "humanoid-sim-regression/v1"
+SCORING = ("open_loop", "closed_loop")
 DEFAULT_WARMUP_S = 2.0
 MIN_BAND_WINDOWS = 3  # a metric the robot gives on fewer windows than this gets no band
 STALE_TOLERANCE = 1e-6  # a robot value this far from its pinned ref means the bands are stale
@@ -62,6 +63,8 @@ class Case:
     sources: dict[str, str]  # family -> where its bands come from
     bands: dict[str, dict]  # metric -> {ref, lo, hi}
     robot_windows: int = 0
+    support: str = "gantry hang"  # how the robot was carried: "floor, rope slack", "gantry hang", ...
+    scoring: str = "open_loop"  # open_loop: a held or hung base represents the recording; closed_loop: it does not
 
 
 @dataclass
@@ -88,9 +91,14 @@ def load_cases(path: Path) -> Cases:
         a, b = c["window_s"]
         if not 0 <= a < b:
             raise ValueError(f"{path}: case {c['id']} window {c['window_s']} must be 0 <= start < end")
+        if c.get("scoring", "open_loop") not in SCORING:
+            raise ValueError(f"{path}: case {c['id']} scoring {c.get('scoring')!r} must be one of {SCORING}")
+        if not c.get("support"):
+            raise ValueError(f"{path}: case {c['id']} lacks its support state (floor, gantry hang, ...)")
         cases.append(Case(c["id"], c["description"], dict(c["bag"]), (float(a), float(b)),
                           float(c.get("warmup_s", DEFAULT_WARMUP_S)), dict(c.get("sources", {})),
-                          {k: dict(v) for k, v in c.get("bands", {}).items()}, int(c.get("robot_windows", 0))))
+                          {k: dict(v) for k, v in c.get("bands", {}).items()}, int(c.get("robot_windows", 0)),
+                          str(c["support"]), c.get("scoring", "open_loop")))
     return Cases(int(raw["version"]), {**DEFAULT_TOLERANCES, **raw.get("tolerances", {})}, cases)
 
 
@@ -241,21 +249,30 @@ def _within(metric: str, value: float, band: dict) -> bool:
 
 
 def judge(run: CaseRun, *, base_prescribed: bool = True) -> list[Verdict]:
-    """A verdict for every metric the case has a band for, and ``info`` for the rest."""
+    """A verdict for every metric the case has a band for, and ``info`` for the rest. A closed-loop case (the robot
+    stood on the floor) is not scored while the base is prescribed: its bands are the robot's values that a closed-loop
+    run is held to."""
     out = []
+    closed = run.case.scoring == "closed_loop" and base_prescribed
     for metric, band in run.case.bands.items():
         r = run.results.get(metric)
+        if closed:
+            out.append(Verdict(metric, "skip", f"{run.case.support}: scored in closed loop only; a prescribed base "
+                                                "misrepresents it", r, band))
+            continue
         if needs_free_base(metric) and base_prescribed:
             out.append(Verdict(metric, "skip", "needs the sim's own torso motion; the base is prescribed", r, band))
             continue
-        if r is None or r.robot is None:
+        if r is None or (r.robot is None and family(metric) != "sim_real_rms"):
             out.append(Verdict(metric, "missing", "the robot has no value on any window", r, band))
             continue
-        drift = float(wrap_deg(r.robot.mean - band["ref"])) if is_phase(metric) else r.robot.mean - band["ref"]
-        if abs(drift) > STALE_TOLERANCE * max(1.0, abs(band["ref"])):
-            out.append(Verdict(metric, "stale", f"robot value {r.robot.mean:.6g} is not the pinned ref "
-                                                f"{band['ref']:.6g}: bag, window or metric changed", r, band))
-            continue
+        pinned = r.robot_all or r.robot  # the robot over all its windows, as the band was set
+        if pinned is not None:
+            drift = float(wrap_deg(pinned.mean - band["ref"])) if is_phase(metric) else pinned.mean - band["ref"]
+            if abs(drift) > STALE_TOLERANCE * max(1.0, abs(band["ref"])):
+                out.append(Verdict(metric, "stale", f"robot value {pinned.mean:.6g} is not the pinned ref "
+                                                    f"{band['ref']:.6g}: bag, window or metric changed", r, band))
+                continue
         if r.sim is None:
             out.append(Verdict(metric, "missing", "the sim has no value on the robot's windows", r, band))
             continue
@@ -279,6 +296,13 @@ def counts(verdicts: list[Verdict]) -> dict[str, int]:
 def case_passed(verdicts: list[Verdict]) -> bool:
     c = counts(verdicts)
     return not (c.get("fail") or c.get("stale") or c.get("missing"))
+
+
+def case_state(case: Case, verdicts: list[Verdict]) -> str:
+    """PASS, FAIL, or NOT SCORED (nothing the sim was judged on: a closed-loop case on a prescribed base)."""
+    if not case_passed(verdicts):
+        return "FAIL"
+    return "PASS" if counts(verdicts).get("pass") else "NOT SCORED"
 
 
 def propose_bands(run: CaseRun, tolerances: dict) -> tuple[dict[str, dict], dict[str, str]]:
@@ -307,7 +331,7 @@ def propose_bands(run: CaseRun, tolerances: dict) -> tuple[dict[str, dict], dict
         else:
             continue
         bands[metric] = {"ref": float(ref), "lo": float(lo), "hi": float(hi)}
-    for metric in tracking:  # sim minus robot: a fraction of the robot's own tracking error
+    for metric in tracking if run.case.scoring == "open_loop" else ():  # sim minus robot: a fraction of tracking
         drive = metric.split(".", 1)[1]
         s = t["sim_real_rms"]
         bands[f"sim_real_rms.{drive}"] = {"ref": 0.0, "lo": 0.0,
@@ -334,7 +358,7 @@ def propose_bands(run: CaseRun, tolerances: dict) -> tuple[dict[str, dict], dict
 def report_lines(case: Case, verdicts: list[Verdict]) -> list[str]:
     c = counts(verdicts)
     head = ", ".join(f"{n} {k}" for k, n in sorted(c.items()))
-    lines = [f"== {case.id}: {'PASS' if case_passed(verdicts) else 'FAIL'} ({head})"]
+    lines = [f"== {case.id} [{case.support}; {case.scoring}]: {case_state(case, verdicts)} ({head})"]
     for v in verdicts:
         if v.status in ("info",):
             continue
@@ -346,7 +370,7 @@ def report_lines(case: Case, verdicts: list[Verdict]) -> list[str]:
 
 
 __all__ = ["Case", "Cases", "CaseRun", "Verdict", "load_cases", "resolve_bag", "run_case", "robot_only",
-           "judge", "propose_bands", "report_lines", "case_passed", "counts"]
+           "judge", "propose_bands", "report_lines", "case_passed", "case_state", "counts"]
 
 
 HEADER = """\
@@ -354,6 +378,9 @@ HEADER = """\
 #
 # Written by `humanoid-sim regress --propose`: it keeps each case's id, description, bag, window and warm-up, and
 # rewrites `bands`, `sources` and `robot_windows` from the robot's values in the bag and the tolerances below.
+# `support` is how the robot was carried; `scoring` is open_loop where a held or hung base represents the recording
+# (gantry hang, excitations) and closed_loop where it does not (standing on the floor, rope slack): those cases are not
+# scored by a replay with a prescribed base, and their bands are what a closed-loop run is held to.
 # A band is {ref, lo, hi}: ref is the robot's value over the case's 2 s windows (mean over them), lo and hi bound the
 # sim's value (same windows, mean over them). Phase bands are in degrees, circular around ref.
 # Bags live on S3 (`s3`); `path` is where they sit under the recordings directory; `sha256` pins their contents.
@@ -378,8 +405,8 @@ def dump_cases(cases: Cases) -> str:
         "version": cases.version,
         "tolerances": {k: _Flow(v) for k, v in cases.tolerances.items()},
         "cases": [{
-            "id": c.id, "description": c.description, "bag": dict(c.bag), "window_s": list(c.window_s),
-            "warmup_s": c.warmup_s, "robot_windows": c.robot_windows, "sources": c.sources,
+            "id": c.id, "description": c.description, "support": c.support, "scoring": c.scoring,
+            "bag": dict(c.bag), "window_s": list(c.window_s), "warmup_s": c.warmup_s, "robot_windows": c.robot_windows, "sources": c.sources,
             "bands": {m: _Flow({k: round(float(v), 9) for k, v in b.items()}) for m, b in sorted(c.bands.items())},
         } for c in cases.cases],
     }
@@ -393,5 +420,6 @@ def propose_file(cases: Cases, recordings: Path, desc, drives: list[str]) -> Cas
         run = robot_only(case, resolve_bag(case, recordings), desc, drives)
         bands, sources = propose_bands(run, cases.tolerances)
         windows = int(sources.pop("windows"))
-        out.append(Case(case.id, case.description, case.bag, case.window_s, case.warmup_s, sources, bands, windows))
+        out.append(Case(case.id, case.description, case.bag, case.window_s, case.warmup_s, sources, bands, windows,
+                        case.support, case.scoring))
     return Cases(cases.version, cases.tolerances, out)

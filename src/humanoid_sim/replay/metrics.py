@@ -223,9 +223,11 @@ class MetricResult:
     robot: Stat | None
     sim: Stat | None  # None: no sim value (needs the sim's own torso motion, or no common windows)
     windows: int  # windows both sides had a value on (the robot's, for robot-only metrics)
+    robot_all: Stat | None = None  # the robot over every window it has a value on (what bands are set from)
 
     def as_dict(self) -> dict:
         return {"robot": None if self.robot is None else self.robot.as_dict(),
+                "robot_all_windows": None if self.robot_all is None else self.robot_all.as_dict(),
                 "sim": None if self.sim is None else self.sim.as_dict(), "windows": self.windows}
 
 
@@ -242,7 +244,7 @@ def compare(robot: Signals, sim: Signals | None, hip: HipPair) -> dict[str, Metr
             continue
         common = np.isfinite(r) & np.isfinite(s)
         out[metric] = MetricResult(metric, stat(r[common], phase=phase), stat(s[common], phase=phase),
-                                   int(common.sum()))
+                                   int(common.sum()), stat(r, phase=phase))
     if sim is not None:  # sim minus robot position, on the windows both are defined on
         sl = window_slices(len(robot.t_ns))
         for d, name in enumerate(robot.drives):

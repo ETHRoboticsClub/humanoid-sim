@@ -67,7 +67,8 @@ def replay_bag(args, usd: Path) -> int:
         commands = R.drive_commands(bag, sim.desc, drives)
         first = max(bag.time_span_ns()[0], int(commands.t_ns[0]))
         window = ((first - bag.start_ns) / 1e9 + args.warmup, (bag.time_span_ns()[1] - bag.start_ns) / 1e9 - 0.1)
-    case = R.Case(Path(args.capture).name, "", {"s3": "", "sha256": bag.sha256, "path": ""}, window, args.warmup, {}, {})
+    case = R.Case(Path(args.capture).name, "", {"s3": "", "sha256": bag.sha256, "path": ""}, window, args.warmup, {}, {},
+                  support="unknown", scoring="open_loop")
     t = time.time()
     run = R.run_case(case, Path(args.capture), sim, base=args.base)
     wall = time.time() - t
@@ -123,15 +124,16 @@ def regress(args, usd: Path | None) -> int:
         verdicts = R.judge(run)
         ok = R.case_passed(verdicts)
         failed |= not ok
+        state = R.case_state(case, verdicts)
         print("\n".join(R.report_lines(case, verdicts)), flush=True)
         d = out / case.id
         d.mkdir(parents=True, exist_ok=True)
         _write_trace(d, run)
-        entry = {"case": case.id, "passed": ok, "counts": R.counts(verdicts), "window_s": list(case.window_s),
+        entry = {"case": case.id, "state": state, "passed": ok, "support": case.support, "scoring": case.scoring, "counts": R.counts(verdicts), "window_s": list(case.window_s),
                  "wall_s": time.time() - t, "device": args.device, **run.meta,
                  "metrics": {v.metric: v.as_dict() for v in verdicts}}
         (d / "summary.json").write_text(json.dumps(entry, indent=1, default=_json_default))
-        table[case.id] = {"passed": ok, "counts": entry["counts"]}
+        table[case.id] = {"state": state, "counts": entry["counts"]}
     (out / "regress.json").write_text(json.dumps(table, indent=1))
-    print("\n" + "\n".join(f"{k}: {'PASS' if v['passed'] else 'FAIL'}  {v['counts']}" for k, v in table.items()))
+    print("\n" + "\n".join(f"{k}: {v['state']}  {v['counts']}" for k, v in table.items()))
     return 1 if failed else 0

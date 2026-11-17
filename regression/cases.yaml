@@ -2,6 +2,9 @@
 #
 # Written by `humanoid-sim regress --propose`: it keeps each case's id, description, bag, window and warm-up, and
 # rewrites `bands`, `sources` and `robot_windows` from the robot's values in the bag and the tolerances below.
+# `support` is how the robot was carried; `scoring` is open_loop where a held or hung base represents the recording
+# (gantry hang, excitations) and closed_loop where it does not (standing on the floor, rope slack): those cases are not
+# scored by a replay with a prescribed base, and their bands are what a closed-loop run is held to.
 # A band is {ref, lo, hi}: ref is the robot's value over the case's 2 s windows (mean over them), lo and hi bound the
 # sim's value (same windows, mean over them). Phase bands are in degrees, circular around ref.
 # Bags live on S3 (`s3`); `path` is where they sit under the recordings directory; `sha256` pins their contents.
@@ -16,8 +19,10 @@ tolerances:
   pitch_rate_rms: {rel: 0.3, abs: 0.005}
 cases:
 - id: v11-11400-quiet-stand
-  description: v11 11400 policy standing quietly on the gantry, 2026-11-16 gantry walk rep-4, policy running from
-    about 40 s (stand command 0)
+  description: v11 11400 policy standing quietly on the floor, gantry rope slack, 2026-11-16 gantry walk rep-4,
+    policy running from about 40 s (stand command 0)
+  support: floor, rope slack
+  scoring: closed_loop
   bag:
     s3: s3://ethrc-rc-humanoid-ckpts/amoec/recordings/2026-11-16/gantry-walk/rep-4/part-1/bag/rec-6cabdd9287da471c8ff2f1eeeefd48af
     sha256: c8373d0a7eefb8df331088ddf3cb52f5b502991d53577b60afa7a408525392fd
@@ -64,28 +69,6 @@ cases:
     pitch_rate_over_hip_tau.3-6Hz.phase_deg: {ref: -93.333019148, lo: -113.333019148, hi: -73.333019148}
     pitch_rate_over_hip_tau.6-12Hz.gain: {ref: 0.015038689, lo: 0.010527082, hi: 0.019550295}
     pitch_rate_over_hip_tau.6-12Hz.phase_deg: {ref: -98.651314976, lo: -118.651314976, hi: -78.651314976}
-    sim_real_rms.maxonHEJ50AL3: {ref: 0.0, lo: 0.0, hi: 0.001639879}
-    sim_real_rms.maxonHEJ50AL4: {ref: 0.0, lo: 0.0, hi: 0.002306401}
-    sim_real_rms.maxonHEJ50AR3: {ref: 0.0, lo: 0.0, hi: 0.002341576}
-    sim_real_rms.maxonHEJ50AR4: {ref: 0.0, lo: 0.0, hi: 0.002486448}
-    sim_real_rms.maxonHEJ50L_ANK1: {ref: 0.0, lo: 0.0, hi: 0.009082698}
-    sim_real_rms.maxonHEJ50L_ANK2: {ref: 0.0, lo: 0.0, hi: 0.011225939}
-    sim_real_rms.maxonHEJ50R_ANK1: {ref: 0.0, lo: 0.0, hi: 0.008136934}
-    sim_real_rms.maxonHEJ50R_ANK2: {ref: 0.0, lo: 0.0, hi: 0.010710484}
-    sim_real_rms.maxonHEJ70AL1: {ref: 0.0, lo: 0.0, hi: 0.00187374}
-    sim_real_rms.maxonHEJ70AL2: {ref: 0.0, lo: 0.0, hi: 0.001753922}
-    sim_real_rms.maxonHEJ70AR1: {ref: 0.0, lo: 0.0, hi: 0.001733416}
-    sim_real_rms.maxonHEJ70AR2: {ref: 0.0, lo: 0.0, hi: 0.001679818}
-    sim_real_rms.maxonHEJ90L1: {ref: 0.0, lo: 0.0, hi: 0.006864826}
-    sim_real_rms.maxonHEJ90L2: {ref: 0.0, lo: 0.0, hi: 0.002035185}
-    sim_real_rms.maxonHEJ90L3: {ref: 0.0, lo: 0.0, hi: 0.006102569}
-    sim_real_rms.maxonHEJ90L4: {ref: 0.0, lo: 0.0, hi: 0.005898462}
-    sim_real_rms.maxonHEJ90M1: {ref: 0.0, lo: 0.0, hi: 0.001668763}
-    sim_real_rms.maxonHEJ90M2: {ref: 0.0, lo: 0.0, hi: 0.001325872}
-    sim_real_rms.maxonHEJ90R1: {ref: 0.0, lo: 0.0, hi: 0.006283735}
-    sim_real_rms.maxonHEJ90R2: {ref: 0.0, lo: 0.0, hi: 0.003091982}
-    sim_real_rms.maxonHEJ90R3: {ref: 0.0, lo: 0.0, hi: 0.006380773}
-    sim_real_rms.maxonHEJ90R4: {ref: 0.0, lo: 0.0, hi: 0.006111259}
     tracking_rms.maxonHEJ50AL3: {ref: 0.002279758, lo: 0.001209819, hi: 0.003349698}
     tracking_rms.maxonHEJ50AL4: {ref: 0.003612801, lo: 0.002209601, hi: 0.005016002}
     tracking_rms.maxonHEJ50AR3: {ref: 0.003683151, lo: 0.002262364, hi: 0.005103939}
@@ -109,8 +92,10 @@ cases:
     tracking_rms.maxonHEJ90R3: {ref: 0.011761545, lo: 0.008321159, hi: 0.015201931}
     tracking_rms.maxonHEJ90R4: {ref: 0.011222518, lo: 0.007916889, hi: 0.014528148}
 - id: v15-12900-growing-shake
-  description: v15 12900 policy standing, a 3 to 6 Hz shake growing until the drives stopped at 55.5 s, 2026-11-17
-    gantry walk rep-3
+  description: v15 12900 policy standing on the floor (rope slack), a 3 to 6 Hz shake growing until the drives stopped
+    at 55.5 s, 2026-11-17 gantry walk rep-3
+  support: floor, rope slack
+  scoring: closed_loop
   bag:
     s3: s3://ethrc-rc-humanoid-ckpts/amoec/recordings/2026-11-17/gantry-walk/rep-3/part-1/bag/rec-4f6b6539e1854009ac7f09c15de1a6f5
     sha256: 48bde76583ef67e7bd1cd49dbbecdf5741e34a0e4f13751ac7c4718a956e8205
@@ -155,28 +140,6 @@ cases:
     pitch_rate_over_hip_tau.3-6Hz.phase_deg: {ref: -89.076115549, lo: -109.076115549, hi: -69.076115549}
     pitch_rate_over_hip_tau.6-12Hz.gain: {ref: 0.021481501, lo: 0.015037051, hi: 0.027925952}
     pitch_rate_over_hip_tau.6-12Hz.phase_deg: {ref: -89.889481882, lo: -109.889481882, hi: -69.889481882}
-    sim_real_rms.maxonHEJ50AL3: {ref: 0.0, lo: 0.0, hi: 0.007199812}
-    sim_real_rms.maxonHEJ50AL4: {ref: 0.0, lo: 0.0, hi: 0.008237183}
-    sim_real_rms.maxonHEJ50AR3: {ref: 0.0, lo: 0.0, hi: 0.00584143}
-    sim_real_rms.maxonHEJ50AR4: {ref: 0.0, lo: 0.0, hi: 0.009025991}
-    sim_real_rms.maxonHEJ50L_ANK1: {ref: 0.0, lo: 0.0, hi: 0.021384155}
-    sim_real_rms.maxonHEJ50L_ANK2: {ref: 0.0, lo: 0.0, hi: 0.019174776}
-    sim_real_rms.maxonHEJ50R_ANK1: {ref: 0.0, lo: 0.0, hi: 0.019454201}
-    sim_real_rms.maxonHEJ50R_ANK2: {ref: 0.0, lo: 0.0, hi: 0.026669736}
-    sim_real_rms.maxonHEJ70AL1: {ref: 0.0, lo: 0.0, hi: 0.005949744}
-    sim_real_rms.maxonHEJ70AL2: {ref: 0.0, lo: 0.0, hi: 0.006848446}
-    sim_real_rms.maxonHEJ70AR1: {ref: 0.0, lo: 0.0, hi: 0.006206003}
-    sim_real_rms.maxonHEJ70AR2: {ref: 0.0, lo: 0.0, hi: 0.00436341}
-    sim_real_rms.maxonHEJ90L1: {ref: 0.0, lo: 0.0, hi: 0.016494622}
-    sim_real_rms.maxonHEJ90L2: {ref: 0.0, lo: 0.0, hi: 0.014168281}
-    sim_real_rms.maxonHEJ90L3: {ref: 0.0, lo: 0.0, hi: 0.010497129}
-    sim_real_rms.maxonHEJ90L4: {ref: 0.0, lo: 0.0, hi: 0.016077021}
-    sim_real_rms.maxonHEJ90M1: {ref: 0.0, lo: 0.0, hi: 0.006215082}
-    sim_real_rms.maxonHEJ90M2: {ref: 0.0, lo: 0.0, hi: 0.003499187}
-    sim_real_rms.maxonHEJ90R1: {ref: 0.0, lo: 0.0, hi: 0.020120268}
-    sim_real_rms.maxonHEJ90R2: {ref: 0.0, lo: 0.0, hi: 0.032940921}
-    sim_real_rms.maxonHEJ90R3: {ref: 0.0, lo: 0.0, hi: 0.011852859}
-    sim_real_rms.maxonHEJ90R4: {ref: 0.0, lo: 0.0, hi: 0.020388336}
     tracking_rms.maxonHEJ50AL3: {ref: 0.013399625, lo: 0.009549719, hi: 0.017249531}
     tracking_rms.maxonHEJ50AL4: {ref: 0.015474367, lo: 0.011105775, hi: 0.019842958}
     tracking_rms.maxonHEJ50AR3: {ref: 0.01068286, lo: 0.007512145, hi: 0.013853575}
@@ -200,8 +163,10 @@ cases:
     tracking_rms.maxonHEJ90R3: {ref: 0.022705718, lo: 0.016529288, hi: 0.028882147}
     tracking_rms.maxonHEJ90R4: {ref: 0.039776672, lo: 0.029332504, hi: 0.05022084}
 - id: c10-1.4hz-limit-cycle
-  description: c10 model_35500 policy standing with a steady 1.4 Hz sagittal limit cycle, 2026-11-17 gantry walk
-    rep-4, until the walk command at 98.7 s
+  description: c10 model_35500 policy standing on the floor (rope slack) with a steady 1.4 Hz sagittal limit cycle,
+    2026-11-17 gantry walk rep-4, until the walk command at 98.7 s
+  support: floor, rope slack
+  scoring: closed_loop
   bag:
     s3: s3://ethrc-rc-humanoid-ckpts/amoec/recordings/2026-11-17/gantry-walk/rep-4/part-1/bag/rec-a5c84455f066487380fc720840efa167
     sha256: 3d20dd234dfc302a8923588cab2610e28b9e27a33616590b8393c6b095b1f944
@@ -250,28 +215,6 @@ cases:
     pitch_rate_over_hip_tau.3-6Hz.phase_deg: {ref: -117.531468052, lo: -137.531468052, hi: -97.531468052}
     pitch_rate_over_hip_tau.6-12Hz.gain: {ref: 0.015929247, lo: 0.011150473, hi: 0.020708021}
     pitch_rate_over_hip_tau.6-12Hz.phase_deg: {ref: -110.733443383, lo: -130.733443383, hi: -90.733443383}
-    sim_real_rms.maxonHEJ50AL3: {ref: 0.0, lo: 0.0, hi: 0.007521373}
-    sim_real_rms.maxonHEJ50AL4: {ref: 0.0, lo: 0.0, hi: 0.005776445}
-    sim_real_rms.maxonHEJ50AR3: {ref: 0.0, lo: 0.0, hi: 0.007794146}
-    sim_real_rms.maxonHEJ50AR4: {ref: 0.0, lo: 0.0, hi: 0.004905527}
-    sim_real_rms.maxonHEJ50L_ANK1: {ref: 0.0, lo: 0.0, hi: 0.020998976}
-    sim_real_rms.maxonHEJ50L_ANK2: {ref: 0.0, lo: 0.0, hi: 0.017801659}
-    sim_real_rms.maxonHEJ50R_ANK1: {ref: 0.0, lo: 0.0, hi: 0.02229337}
-    sim_real_rms.maxonHEJ50R_ANK2: {ref: 0.0, lo: 0.0, hi: 0.019871167}
-    sim_real_rms.maxonHEJ70AL1: {ref: 0.0, lo: 0.0, hi: 0.006423134}
-    sim_real_rms.maxonHEJ70AL2: {ref: 0.0, lo: 0.0, hi: 0.007017165}
-    sim_real_rms.maxonHEJ70AR1: {ref: 0.0, lo: 0.0, hi: 0.013601655}
-    sim_real_rms.maxonHEJ70AR2: {ref: 0.0, lo: 0.0, hi: 0.007087717}
-    sim_real_rms.maxonHEJ90L1: {ref: 0.0, lo: 0.0, hi: 0.004605439}
-    sim_real_rms.maxonHEJ90L2: {ref: 0.0, lo: 0.0, hi: 0.005277521}
-    sim_real_rms.maxonHEJ90L3: {ref: 0.0, lo: 0.0, hi: 0.00613579}
-    sim_real_rms.maxonHEJ90L4: {ref: 0.0, lo: 0.0, hi: 0.021377833}
-    sim_real_rms.maxonHEJ90M1: {ref: 0.0, lo: 0.0, hi: 0.001164256}
-    sim_real_rms.maxonHEJ90M2: {ref: 0.0, lo: 0.0, hi: 0.002319056}
-    sim_real_rms.maxonHEJ90R1: {ref: 0.0, lo: 0.0, hi: 0.009971612}
-    sim_real_rms.maxonHEJ90R2: {ref: 0.0, lo: 0.0, hi: 0.006469794}
-    sim_real_rms.maxonHEJ90R3: {ref: 0.0, lo: 0.0, hi: 0.006053476}
-    sim_real_rms.maxonHEJ90R4: {ref: 0.0, lo: 0.0, hi: 0.022239985}
     tracking_rms.maxonHEJ50AL3: {ref: 0.014042746, lo: 0.01003206, hi: 0.018053433}
     tracking_rms.maxonHEJ50AL4: {ref: 0.01055289, lo: 0.007414667, hi: 0.013691112}
     tracking_rms.maxonHEJ50AR3: {ref: 0.014588291, lo: 0.010441219, hi: 0.018735364}

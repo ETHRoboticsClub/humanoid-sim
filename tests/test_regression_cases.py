@@ -22,7 +22,8 @@ def _stat(mean, n=5):
 
 
 def _case(bands):
-    return R.Case("c", "d", {"s3": "s3://x/y", "sha256": "0" * 64, "path": "y"}, (10.0, 20.0), 2.0, {}, bands)
+    return R.Case("c", "d", {"s3": "s3://x/y", "sha256": "0" * 64, "path": "y"}, (10.0, 20.0), 2.0, {}, bands,
+                  support="gantry hang", scoring="open_loop")
 
 
 def _run(case, results):
@@ -36,6 +37,8 @@ def test_the_cases_file_loads_with_its_pins_and_consistent_bands():
     for c in cases.cases:
         assert c.bag["s3"].startswith("s3://") and c.bag["s3"].endswith(c.bag["path"])
         assert len(c.bag["sha256"]) == 64 and c.bands and c.sources and c.robot_windows >= 3
+        assert c.support == "floor, rope slack" and c.scoring == "closed_loop"  # all three stood on the floor
+        assert not any(m.startswith("sim_real_rms.") for m in c.bands)
         for metric, b in c.bands.items():
             assert b["lo"] <= b["ref"] <= b["hi"] or metric.startswith("sim_real_rms"), (c.id, metric, b)
             if metric.startswith("sim_real_rms"):
@@ -83,6 +86,32 @@ def test_judge_passes_inside_the_band_and_fails_outside_with_circular_phase():
     assert v == {"tracking_rms.d": "fail", "hip_q_over_target.3-6Hz.phase_deg": "pass",
                  "hip_q_over_target.3-6Hz.gain": "pass", "tracking_offset.d": "info"}
     assert not R.case_passed(R.judge(run)) and R.counts(R.judge(run))["pass"] == 2
+
+
+def test_a_floor_case_is_not_scored_on_a_prescribed_base_and_a_free_base_would_score_it():
+    case = _case({"tracking_rms.a": {"ref": 0.010, "lo": 0.0075, "hi": 0.0125}})
+    case.support, case.scoring = "floor, rope slack", "closed_loop"
+    run = _run(case, {"tracking_rms.a": (_stat(0.010), _stat(0.050))})
+    verdicts = R.judge(run)
+    assert [v.status for v in verdicts] == ["skip"] and "closed loop" in verdicts[0].reason
+    assert R.case_state(case, verdicts) == "NOT SCORED" and R.case_passed(verdicts)
+    assert [v.status for v in R.judge(run, base_prescribed=False)] == ["fail"]
+    assert R.case_state(_case({}), []) == "NOT SCORED"
+    ok = _run(_case({"tracking_rms.a": {"ref": 0.010, "lo": 0.0075, "hi": 0.0125}}), {"tracking_rms.a": (_stat(0.010), _stat(0.010))})
+    assert R.case_state(ok.case, R.judge(ok)) == "PASS"
+
+
+def test_a_case_needs_its_support_state_and_a_known_scoring(tmp_path):
+    doc = yaml.safe_load(CASES.read_text())
+    doc["cases"][0].pop("support")
+    path = tmp_path / "cases.yaml"
+    path.write_text(yaml.safe_dump(doc))
+    with pytest.raises(ValueError, match="support"):
+        R.load_cases(path)
+    doc["cases"][0]["support"], doc["cases"][0]["scoring"] = "floor", "free"
+    path.write_text(yaml.safe_dump(doc))
+    with pytest.raises(ValueError, match="scoring"):
+        R.load_cases(path)
 
 
 def test_judge_skips_what_needs_the_sims_torso_stale_bands_and_missing_values():
@@ -194,3 +223,12 @@ def test_pinned_bags_match_their_sha256_and_the_robots_pinned_values():
         assert set(bands) == set(case.bands)
     if not seen:
         pytest.skip("none of the cases' bags is under the recordings directory")
+
+
+def test_stale_is_judged_on_all_the_robots_windows_and_sim_minus_robot_needs_no_robot_value():
+    bands = {"tracking_rms.a": {"ref": 0.010, "lo": 0.0075, "hi": 0.0125},
+             "sim_real_rms.a": {"ref": 0.0, "lo": 0.0, "hi": 0.006}}
+    run = _run(_case(bands), {"tracking_rms.a": (_stat(0.0105), _stat(0.010)),  # fewer common windows: another mean
+                              "sim_real_rms.a": (None, _stat(0.004))})
+    run.results["tracking_rms.a"].robot_all = _stat(0.010)
+    assert {v.metric: v.status for v in R.judge(run)} == {"tracking_rms.a": "pass", "sim_real_rms.a": "pass"}
