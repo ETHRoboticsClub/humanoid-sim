@@ -1,0 +1,57 @@
+diff --git a/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py b/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py
+index 68d068d..b0fb88b 100644
+--- a/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py
+@@ -68,9 +68,13 @@ class ReducedRuntime:
+         self.device = model.device
+         self.sigma = float(np.float32(np.float32(cfg.eta) + np.float32(cfg.rho_0)))
+         self.lazy_preconditioning = cfg.reduced_lazy_preconditioning
+-        self.diagnostics = make_bounded(128, "warp")
+-        self.lazy_diagnostics = make_lazy_bounded(128, "warp") if self.lazy_preconditioning else None
+-        self.use_sparse_diagnostics = cfg.reduced_sparse_diagnostics
++        # The original-equation diagnostics fill original_residuals, which nothing in the solver reads: off in
++        # training, on for the tests that compare them.
++        self.original_diagnostics = cfg.reduced_original_diagnostics
++        if self.original_diagnostics:
++            self.diagnostics = make_bounded(128, "warp")
++            self.lazy_diagnostics = make_lazy_bounded(128, "warp") if self.lazy_preconditioning else None
++        self.use_sparse_diagnostics = cfg.reduced_sparse_diagnostics and self.original_diagnostics
+         if self.use_sparse_diagnostics:
+             dofs = model.info.num_body_dofs
+             diagnostic_bodies = (
+@@ -465,6 +469,8 @@ class ReducedRuntime:
+             ],
+         )
+         s.done.zero_()
++        if not self.original_diagnostics:
++            return
+         self.original_residuals.zero_()
+         diagnostic_args = [
+                 p.D,
+diff --git a/_src/solvers/kamino/config.py b/_src/solvers/kamino/config.py
+index 694b756..c3bc460 100644
+--- a/_src/solvers/kamino/config.py
++++ b/_src/solvers/kamino/config.py
+@@ -504,6 +504,13 @@ class PADMMSolverConfig:
+     diagnostic arithmetic, tolerance, or per-solve cadence.
+     """
+ 
++    reduced_original_diagnostics: bool = False
++    """Compute the original-equation diagnostics of the reduced solve (`original_residuals`).
++
++    Nothing in the solver reads them; they exist for tests and offline comparison, and cost a
++    about 12% of a physics step's GPU time at 4096 worlds. Off by default.
++    """
++
+     reduced_dynamic_pattern: bool = False
+     """Rebuild topology-only per-world RCM factor block fill on device each solve."""
+ 
+@@ -796,6 +803,8 @@ class PADMMSolverConfig:
+             or not self.reduced_dynamic_pattern
+         ):
+             raise ValueError("reduced_lazy_preconditioning requires bilateral_reduced dynamic RCM")
++        if type(self.reduced_original_diagnostics) is not bool:
++            raise ValueError("reduced_original_diagnostics must be bool")
+         if self.reduced_ordering not in ("natural", "rcm"):
+             raise ValueError("reduced_ordering must be natural or rcm")
+ 
