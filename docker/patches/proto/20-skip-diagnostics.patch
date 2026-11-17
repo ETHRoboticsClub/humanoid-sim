@@ -1,0 +1,12 @@
+--- a/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py	2026-11-17 16:18:01
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py	2026-11-17 17:52:30
+@@ -466,6 +466,9 @@
+         )
+         s.done.zero_()
+         self.original_residuals.zero_()
++        if __import__("os").environ.get("KAMINO_SKIP_DIAGNOSTICS", "0") == "1":
++            # The original-equation diagnostics below only fill original_residuals, which nothing in the solver reads.
++            return
+         diagnostic_args = [
+                 p.D,
+                 *representation,

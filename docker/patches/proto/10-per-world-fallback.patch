@@ -1,0 +1,92 @@
+--- a/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py	2026-11-17 16:18:01
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py	2026-11-17 16:18:38
+@@ -6,6 +6,7 @@
+ """
+ 
+ import dataclasses
++import os
+ 
+ import numpy as np
+ import warp as wp
+@@ -28,8 +29,11 @@
+ from .reduced_pattern import collect_body_tile_bits, make_symbolic_fill
+ from ...kinematics.jacobians import SparseSystemJacobians
+ from .reduced_rcm_factor import make_runtime_rcm_factor, pack_runtime_permuted_q, restore_runtime_free_order
++from ...linalg import factorize as _factorize
+ from .reduced_runtime_kernels import (
+     bridge,
++    freeze_good_worlds,
++    mask_dim,
+     check_factor,
+     check_output,
+     classify,
+@@ -170,6 +174,10 @@
+                     self.pattern_invalid = z(self.count, wp.int32)
+                     self.inverse_permutation = wp.array(np.argsort(permutation).astype(np.int32), dtype=wp.int32)
+                     self.occupied = z((self.count, self.pattern_tiles), wp.uint32)
++        # Fallback for the worlds that need it only (KAMINO_PER_WORLD_FALLBACK=1), not for the whole batch.
++        self.per_world_fallback = os.environ.get("KAMINO_PER_WORLD_FALLBACK", "0") == "1"
++        if self.per_world_fallback:
++            self.masked_dim = wp.zeros(self.count, dtype=wp.int32, device=self.device)
+         self.factor = make_runtime_direct_factor(16)
+         if self.reduced_ordering == "rcm":
+             self.factor = make_runtime_rcm_factor(16, True)
+@@ -195,8 +203,30 @@
+     def _full_fallback(self, problem):
+         # Source D has already received its original proximal diagonal. Keep
+         # untouched original warmstart states and run the exact full loop.
++        if self.per_world_fallback:
++            self._per_world_fallback(problem)
++            return
+         problem._delassus.compute(reset_to_zero=True)
+         self.owner._run_iterations(problem)
++
++    def _per_world_fallback(self, problem):
++        """The same full PADMM, run for the worlds the reduced solve rejected only: the others are marked converged (every
++        full-PADMM kernel skips a converged world), the Delassus factorization skips them (dimension zero) and the loop's
++        active-world counter starts at the rejected count. merge_* keeps the reduced results of the others, as before."""
++        owner = self.owner
++        delassus = problem._delassus
++        if delassus._logical_owner is not None:
++            delassus._logical_owner.materialize_internal()
++        solver = delassus._solver
++        info = delassus._operator.info
++        self.launch(mask_dim, self.count, [self.bad, info.dim, self.masked_dim])
++        _factorize.llt_blocked_factorize(
++            kernel=solver._factorize_kernel, num_blocks=info.num_blocks, block_dim=solver._factorize_block_dim,
++            dim=self.masked_dim, mio=info.mio, A=delassus._operator.mat, L=solver._L,
++        )
++        solver._has_factors = True
++        self.launch(freeze_good_worlds, self.count, [self.bad, owner.data.status, self.bad_count, owner.data.state.done])
++        owner._run_iterations(problem)
+ 
+     def _prepare_factor_pattern(self, problem, *, fresh_sparse_build):
+         # A current Jacobian does not certify the support of an arbitrary D.
+--- a/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime_kernels.py	2026-11-17 16:18:01
++++ b/_src/solvers/kamino/_src/solvers/padmm/reduced_runtime_kernels.py	2026-11-17 16:18:38
+@@ -386,3 +386,25 @@
+     wp.atomic_max(result, w, 1, wp.abs(pv * (yv - pr)))
+     wp.atomic_max(result, w, 2, wp.abs(yv - natural))
+     wp.atomic_max(result, w, 3, comp)
++
++
++@wp.kernel(enable_backward=False)
++def mask_dim(bad: wp.array[bool], dim: wp.array[int], masked: wp.array[int]):
++    w = wp.tid()
++    masked[w] = wp.where(bad[w], dim[w], 0)
++
++
++@wp.kernel(enable_backward=False)
++def freeze_good_worlds(
++    bad: wp.array[bool],
++    status: wp.array[PADMMStatus],
++    bad_count: wp.array[int],
++    done: wp.array[int],
++):
++    w = wp.tid()
++    if not bad[w]:
++        s = status[w]
++        s.converged = 1
++        status[w] = s
++    if w == 0:
++        done[0] = bad_count[0]
