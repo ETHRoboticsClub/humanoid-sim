@@ -447,6 +447,7 @@ class RuntimeHost:
                                    for name, block in descriptor["extra_imus"].items()}
         self.seg = None
         self._deadline_ns: int | None = None  # the step's scheduled start while run() paces it
+        self._reading = np.zeros((2, len(self.drives)))  # the last published drive position and velocity
         self._faults: dict[tuple[str, int | None], tuple[int | None, object]] = {}
         self._disturbances: list[_Disturbance] = []
         self._joint_torques: dict[int, tuple[float, float, int | None]] = {}  # joint -> (Nm, Hz, end ns)
@@ -964,8 +965,7 @@ class RuntimeHost:
         if value == (1.0 if fault == "power_sag" else 0.0):  # the value that means no fault
             return "cleared"
         if fault == "encoder_freeze":
-            fb = self.sim.feedback
-            held = (fb.position_rad[0, d].item(), fb.velocity_rad_s[0, d].item())
+            held = (float(self._reading[0, d]), float(self._reading[1, d]))  # it sticks at the last reading it gave
             self._faults[key] = (end, held)
         elif fault == "imu_bias":
             self.sim.imu.gyro_bias += value
@@ -1011,7 +1011,7 @@ class RuntimeHost:
 
     def _take_demands(self) -> None:
         """Every ring record not taken yet, oldest first, each sent at its plant time (the client's send time through
-        the last feedback's clock mapping)."""
+        the clock mapping: the step's deadline when paced, else the last feedback's)."""
         try:
             got = self.seg.regions["demands"].read()
         except abi.StaleRead:  # the client is mid-write: take it next step
@@ -1032,12 +1032,12 @@ class RuntimeHost:
         first = max(self._demands_taken, count - abi.DEMAND_RING)
         self._demand_overruns += first - self._demands_taken
         n = len(self.drives)
-        for k in range(first, count):
-            record = rec["ring"][k % abi.DEMAND_RING]
-            sent_ns = int(record["sent_mono_ns"]) - self._mono_minus_plant_ns
-            arrival = command_arrival_ns(torch.tensor([sent_ns]), self._no_latency, self._arrival_delays,
-                                         self._jitter_ns, self._jitter_generator)
-            self._intake(record["drive"][:n], arrival[0].numpy())
+        records = [rec["ring"][k % abi.DEMAND_RING] for k in range(first, count)]
+        sent_ns = torch.tensor([int(r["sent_mono_ns"]) - self._mono_minus_plant_ns for r in records])
+        arrivals = command_arrival_ns(sent_ns, self._no_latency.expand(len(records), -1), self._arrival_delays,
+                                      self._jitter_ns, self._jitter_generator).numpy()  # one draw per record and drive
+        for record, arrival in zip(records, arrivals, strict=True):
+            self._intake(record["drive"][:n], arrival)
         self._demands_taken = count
         running = rec["ring"][(count - 1) % abi.DEMAND_RING]["drive"][:n]["law"] != abi.LAW_DISABLED
         self._set_drives_off(~running)
@@ -1091,6 +1091,8 @@ class RuntimeHost:
 
     def step(self) -> None:
         """One period: command, demands, physics, publish (no pacing)."""
+        if self._deadline_ns is not None:  # paced: the plant time this step starts at is its deadline
+            self._mono_minus_plant_ns = self._deadline_ns - self.sim.t_ns
         self._handle_command()
         self._take_demands()
         if not self.paused:
@@ -1160,6 +1162,7 @@ class RuntimeHost:
         sim, n = self.sim, len(self.drives)
         h = sim.imu.samples.gyro.shape[1]
         drive = host[: 4 * n].reshape(4, n)
+        self._reading = drive[:2].copy()  # what the master read (position, velocity), before a frozen encoder
         for (position, velocity), d in self._frozen_encoders():
             drive[0, d], drive[1, d] = position, velocity
         gyro = host[4 * n: 4 * n + 3 * h].reshape(h, 3)

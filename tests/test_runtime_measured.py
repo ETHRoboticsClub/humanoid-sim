@@ -106,8 +106,8 @@ def test_the_demand_queue_holds_every_record_in_flight(tmp_path):
         bus = host._segment_args["bus_period_ns"]
         assert bus == host.desc.control_period_ns()
         longest = int(host._drive_delays_ns.max()) + host._jitter_ns
-        in_flight = math.ceil(longest / bus) + 1
-        assert host.sim.plant.bank.queue.capacity >= in_flight + math.ceil(2 * host.period_ns / bus)
+        in_flight = math.ceil(longest / bus) + 1  # records sent but not yet arrived at the slowest drive
+        assert host.sim.plant.bank.queue.capacity >= in_flight
     finally:
         host.close()
 
