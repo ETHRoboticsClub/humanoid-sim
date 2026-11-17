@@ -47,6 +47,8 @@ def _scene(num_envs, usd, overrides):
 
 def _variant(name):
     if name == "rigid":
+        return built_usd("ethrc_v1", joint_give=()), {}
+    if name == "default":  # the profile's asset: the hips' and knees' give
         return built_usd("ethrc_v1"), {}
     if name == "ankle_compliance":
         return built_usd("ethrc_v1", ankle_compliance=True), {"ankle_compliance": COMPLIANCE_GAINS}
@@ -63,7 +65,7 @@ def _variant(name):
     raise ValueError(name)
 
 
-@pytest.mark.parametrize("variant", ["rigid", "ankle_compliance", "give_measured", "give_all"])
+@pytest.mark.parametrize("variant", ["rigid", "default", "ankle_compliance", "give_measured", "give_all"])
 def test_every_v1_variant_fits_the_dense_operator_at_training_scale(variant):
     _cuda()
     import isaaclab.sim as sim_utils

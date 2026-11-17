@@ -221,7 +221,7 @@ def test_the_v1_gives_its_hips_and_knees_by_default_at_the_measured_values(tmp_p
     (tmp_path / "asset.json").write_text(json.dumps({"usd": "robot.usda", "joint_give": {
         "springs": {n: compliance.give_joint(n) for n in given}}}))
     gains = give_gains(usd, profile["physics"], desc)
-    assert {k for k, _ in gains.values()} == {600.0, 950.0} and all(c == 1.2 for _, c in gains.values())
+    assert {k for k, _ in gains.values()} == {600.0, 950.0} and all(c == 2.3 for _, c in gains.values())
     # A robot whose profile names none gives none.
     assert load_profile("g1_29dof_rev_1_0")["model"]["joint_give"] == []
 
