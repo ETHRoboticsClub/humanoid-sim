@@ -59,7 +59,7 @@ class TrainPlantCfg:
     reporting: bool = True  # measured drive feedback quantized as the drive reports it
     feedback_noise: bool = True  # with reporting: velocity dither and torque noise (profile devices.feedback_noise)
     feedback_sampling: bool = True  # hold the drive's last sample between samples (profile devices.feedback_sampling)
-    command_jitter_ns: int = 0  # each demand's arrival is moved by a uniform draw in ±this (no measurement: off)
+    command_jitter_ns: int = 0  # each demand's arrival is moved by a uniform draw in ±this (off; V1: ±1.2 ms)
     cuda_graph: bool = False  # capture drive math and IMU delivery; CUDA only
     compile: bool = False  # fuse drive and IMU math before capture; requires cuda_graph
     queue_capacity: int = 8  # demands in flight per env: ≥ (max latency + drive delay) / demand period + 1
