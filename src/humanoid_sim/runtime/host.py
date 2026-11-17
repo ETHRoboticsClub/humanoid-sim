@@ -6,12 +6,15 @@ Every physics period (1 ms for the native V1, the profile's physics.period_ns), 
 2. take every demand record the client appended since the last step into the drive bank, each sent at its own
    time (its ``sent_mono_ns`` in plant time);
 3. step the physics (unless paused), with the active gantry, disturbances and prescribed pose;
-4. publish feedback (physical drive feedback, the latest raw IMU samples, lateness); every ``truth_every`` steps
-   (and after a command) the truth; heartbeat.
+4. publish feedback (the drive feedback as the master holds it, the latest raw IMU samples, lateness); every
+   ``truth_every`` steps (and after a command) the truth; heartbeat.
 
 Pacing is to ``CLOCK_MONOTONIC``: the host sleeps until each step's deadline. A step that starts more than a
 period late counts as late and the schedule restarts from now (plant time never jumps). ``keeping_up`` is
-true while no step in the last second was late.
+true while no step in the last second was late. Plant time maps to ``CLOCK_MONOTONIC`` through the schedule, not
+through the moment a record happens to be written: a step's feedback is stamped with its end's deadline, so the
+host's own compute jitter reaches neither the arrival times of the client's demands nor the IMU stamps the client
+derives from the record.
 
 Session: the client attaches by writing demands that carry the segment's ``session_id``. A DETACH command ends
 the session (:meth:`RuntimeHost.run` returns :data:`EXIT_DETACHED`), as do demands older than
@@ -58,6 +61,12 @@ and the truth reports where it is. The descriptor's ``gantry`` gives its geometr
 
 IMU sample times (``sample_ns``, ``stamp_ns``) are plant time; the feedback region's ``sim_time_ns`` and
 ``written_mono_ns`` map them to the host clock.
+
+The feedback is what the robot's master reads, not the plant's exact state: each drive's reading is reported as
+the drive reports it (whole encoder counts, velocity dither and torque noise), held between the master's samples
+(3.0 to 7.5 ms apart) and published 2.24 ms after a sample, as in training (:class:`_MeasuredFeedback`). Each
+demand's arrival is moved by the profile's measured command jitter. A RESET keeps the IMU's bias; a session's start
+draws it.
 """
 
 from __future__ import annotations
@@ -73,8 +82,10 @@ import numpy as np
 import torch
 
 from humanoid_sim.devices.demand import LAW_FREEZE, DriveDemand
+from humanoid_sim.devices.feedback import DriveFeedback
 from humanoid_sim.runtime.abi import plant_abi as abi
 from humanoid_sim.runtime.trajectory import IMU_RECORD, ImuWriter, TrajectoryWriter
+from humanoid_sim.timing.arrival import command_arrival_ns, command_jitter_ns
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.boxes import StaticBoxes
 from humanoid_sim.world.harness import resolve_harness
@@ -97,13 +108,16 @@ FIDELITY_GAPS = [
     "drive current-loop dynamics and backlash absent; the output current limit and the winding I2t limit are "
     "modeled, unverified, and off unless the profile's devices.current enables them",
     "upper-body passive joint parameters (waist, shoulders, elbows) are description values, not identified",
-    "IMU errors from the rig's model: white noise, turn-on bias, Gauss-Markov drift (SET_FIDELITY ideal turns them "
-    "off); the turn-on bias is redrawn at every IMU reset, not only at power-on",
-    "drive delay is each family's fixed figure (actuators.yaml drive_delay_s), without per-cycle jitter",
-    "drive feedback is the plant's exact drive-frame state after each physics step, with the applied and demanded "
-    "torque of that step: no position offset, encoder quantization, sample age (the robot's PDO samples come "
-    "3.0-7.5 ms apart), torque noise or velocity dither (the training plant has them, devices.encoders and "
-    "devices.feedback_*)",
+    "IMU errors from the rig's model: white noise, turn-on bias (drawn at a session's start and kept through RESET), "
+    "Gauss-Markov drift (SET_FIDELITY ideal turns them off) and, where the profile has one, the chip's rotation in "
+    "its mount (devices.imu_mount; modeled from one at-rest capture, unconfirmed)",
+    "drive delay is each family's fixed figure (actuators.yaml drive_delay_s) and, where the profile has one, the "
+    "command path's uniform jitter (devices.command_path.jitter_ns); not measured per family",
+    "drive feedback is the plant's drive-frame state after each physics step with the applied and demanded torque of "
+    "that step; where the profile has the measurements (devices.encoders, devices.feedback_*; the V1 has them, the "
+    "G1 does not) it is reported in whole encoder counts with velocity dither and torque noise, held between "
+    "samples (3.0-7.5 ms apart, drawn independently: no lag-1 correlation) and published 2.24 ms after a sample "
+    "(its median, no spread). No position offset; the position's one-count jitter is left to Controls' fake drive",
 ]
 
 
@@ -178,8 +192,77 @@ class _DemandIntake:
 
 def _queue_capacity(max_delay_ns: int, bus_period_ns: int, period_ns: int) -> int:
     """Pending demand records per drive bank: every bus cycle's record stays queued until it has arrived on every
-    drive, up to the longest delay after a send that can fall a step late."""
+    drive, up to the longest delay (with its jitter) after a send that can fall a step late."""
     return math.ceil((max_delay_ns + 2 * period_ns) / bus_period_ns) + 1
+
+
+class _MeasuredFeedback:
+    """The drive feedback as the master reads it, from the plant's exact drive-frame state: reported by the drive
+    (:class:`~humanoid_sim.devices.reporting.DriveReporting`: whole encoder counts, the measured velocity dither and
+    torque noise) and held between the master's samples, each visible after the publish delay
+    (:class:`~humanoid_sim.devices.sampling.FeedbackSampler`). They are the training plant's models on the same
+    profile measurements; the position's one-count jitter stays with Controls' fake drive, which adds its own to
+    what it is given (counts it receives are whole counts, which it rounds to themselves). A robot whose profile has
+    no ``devices.encoders`` or ``devices.feedback_sampling`` gets the plant's exact state for that part. On CUDA both
+    run as one captured graph with their generators registered, so the step costs a launch."""
+
+    def __init__(self, desc, drives: list[str], profile: dict, device: torch.device, dtype: torch.dtype, *,
+                 seed: int, cuda_graph: bool):
+        from humanoid_sim.devices.reporting import DriveReporting
+        from humanoid_sim.devices.sampling import FeedbackSampler
+
+        self.reporting = None
+        if profile["devices"].get("encoders"):
+            self.reporting = DriveReporting.for_drives(desc, drives, profile, device=device, dtype=dtype, seed=seed + 2,
+                                                       jitter=False)
+        self.sampler = FeedbackSampler.for_robot(desc, profile, 1, len(drives), device=device, dtype=dtype,
+                                                 seed=seed + 3)
+        self.active = self.reporting is not None or self.sampler is not None
+        self._env = torch.zeros(1, dtype=torch.long, device=device)
+        self.graph = None
+        if not (self.active and cuda_graph):
+            return
+        z = torch.zeros(1, len(drives), dtype=dtype, device=device)
+        self._in = DriveFeedback(z.clone(), z.clone(), z.clone(), z.clone())
+        self._t = torch.zeros((), dtype=torch.int64, device=device)
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(3):
+                self._apply(self._t, self._in)
+        torch.cuda.current_stream().wait_stream(side)
+        self.graph = torch.cuda.CUDAGraph()
+        for gen in self._generators():
+            self.graph.register_generator_state(gen)
+        with torch.cuda.graph(self.graph):
+            self._out = self._apply(self._t, self._in)
+        self.reset()
+
+    def _generators(self) -> list[torch.Generator]:
+        return [m.generator for m in (self.reporting, self.sampler) if m is not None]
+
+    def _apply(self, t_ns, fb: DriveFeedback) -> DriveFeedback:
+        if self.reporting is not None:
+            fb = self.reporting.report(fb)
+        return fb if self.sampler is None else self.sampler.step(t_ns, fb)
+
+    def reset(self) -> None:
+        """Forget the held samples: the next reading takes a fresh one."""
+        if self.sampler is not None:
+            self.sampler.reset(self._env)
+
+    def __call__(self, t_ns: int, fb: DriveFeedback) -> DriveFeedback:
+        """What the master reads at plant time ``t_ns`` of the plant's ``fb`` ``[1, D]`` (a repeated call at the same
+        time returns the same sample, with its dither and noise drawn again)."""
+        if not self.active:
+            return fb
+        if self.graph is None:
+            return self._apply(t_ns, fb)
+        for name in ("position_rad", "velocity_rad_s", "applied_torque_nm", "demanded_torque_nm"):
+            getattr(self._in, name).copy_(getattr(fb, name))
+        self._t.fill_(t_ns)
+        self.graph.replay()
+        return self._out
 
 
 @dataclass
@@ -288,6 +371,7 @@ class RuntimeHost:
         profile = load_profile(robot)
         if bus_period_ns is None:  # the robot's bus cycle: the description's, else the profile's default
             bus_period_ns = Description.load(robot).control_period_ns() or int(profile["runtime"]["bus_period_ns"])
+        self._jitter_ns = command_jitter_ns(profile)  # each demand's arrival is moved by a uniform draw in ±this
         self.start_pose = pose or start_pose(profile)
         # The named poses for RESET {"pose": ...}: joint positions (description order) and the upright base height
         # at which the soles touch the ground. Every session starts in start_pose.
@@ -299,7 +383,7 @@ class RuntimeHost:
                            base_height_m=height, imu=True, contacts=True, seed=seed, cuda_graph=cuda,
                            compile=compile and cuda, imu_history=abi.IMU_SAMPLES, scene=scene, objects=objects,
                            extra_rig=extra_rig, terrain=terrain,
-                           queue_capacity=_queue_capacity(max(m.drive_delay_ns for m in models.values()),
+                           queue_capacity=_queue_capacity(max(m.drive_delay_ns for m in models.values()) + self._jitter_ns,
                                                           bus_period_ns,
                                                           int(profile["physics"]["period_ns"])))
         self.device = torch.device(device)
@@ -312,6 +396,8 @@ class RuntimeHost:
         self.trolley = None if gantry is None else self.sim.gantry.mount(gantry)
         self._intake = _DemandIntake(self.sim.plant, len(self.sim.plant.map.drive_names), self.device,
                                      cuda_graph=cuda, compile=compile and cuda)
+        self._measured = _MeasuredFeedback(self.sim.desc, self.sim.plant.map.drive_names, self.sim.profile,
+                                           self.device, self.sim.plant.cfg.dtype, seed=seed, cuda_graph=cuda)
         self.desc = self.sim.desc
         self.robot = self.sim.backend.robot
         self.period_ns = self.sim.period_ns
@@ -319,6 +405,9 @@ class RuntimeHost:
         self.drive_models = {name: models[name] for name in self.drives}
         # Each drive applies a bus cycle's demand its model's delay after the bus delivered it.
         self._drive_delays_ns = np.array([m.drive_delay_ns for m in self.drive_models.values()], dtype=np.int64)
+        self._arrival_delays = torch.from_numpy(self._drive_delays_ns)
+        self._no_latency = torch.zeros(1, len(self.drives), dtype=torch.int64)  # the client's own path is Controls'
+        self._jitter_generator = torch.Generator().manual_seed(seed + 4)
         self.joints = list(self.desc.joints)
         self.client_timeout_ns = client_timeout_ns
         if trajectory is not None and truth_every != 1:
@@ -357,6 +446,7 @@ class RuntimeHost:
             self.extra_imu_logs = {name: ImuWriter(f"{trajectory}.{name}.imu", self.trajectory.header, block)
                                    for name, block in descriptor["extra_imus"].items()}
         self.seg = None
+        self._deadline_ns: int | None = None  # the step's scheduled start while run() paces it
         self._faults: dict[tuple[str, int | None], tuple[int | None, object]] = {}
         self._disturbances: list[_Disturbance] = []
         self._joint_torques: dict[int, tuple[float, float, int | None]] = {}  # joint -> (Nm, Hz, end ns)
@@ -407,7 +497,7 @@ class RuntimeHost:
             self.trolley.place(torch.tensor([0], device=self.device), torch.tensor(self.rig.home_m))
         for imu in self._imus():
             imu.set_noise(True)
-        self._reset({"pose": self.start_pose})
+        self._reset({"pose": self.start_pose}, power_on=True)  # a new session: the IMU's power is cycled
         self._open_session()
 
     def _imus(self) -> list:
@@ -435,8 +525,9 @@ class RuntimeHost:
         env = torch.tensor([0], device=self.device)
         self.sim.plant.reset(env)  # plant time keeps running: the IMU's sample clock depends on it
         self._drive_off = None  # every drive off until the next demand
+        self._measured.reset()
         for imu in self._imus():
-            imu.reset(env, self.sim.t_ns, keep_seq=True)
+            imu.reset(env, self.sim.t_ns, keep_seq=True)  # the host's start powers the IMU on: its bias is drawn
 
     # -- descriptor and geometry ------------------------------------------------------------------
 
@@ -662,7 +753,9 @@ class RuntimeHost:
         self._rope_due = None
         self._harness_hung = False
 
-    def _reset(self, args: dict) -> str:
+    def _reset(self, args: dict, *, power_on: bool = False) -> str:
+        """RESET: the robot back to a pose, the drive bank and the sensors' buffers emptied. The IMU keeps its bias
+        (its turn-on bias and drift) unless ``power_on``, a new session."""
         if "joint_pos" in args:
             q, base = self._joint_vector(args["joint_pos"]), None
             if args.get("base_pose") is not None:
@@ -688,8 +781,9 @@ class RuntimeHost:
             self._release_rope()
         self.sim.plant.reset(env)
         self._drive_off = None
+        self._measured.reset()
         for imu in self._imus():
-            imu.reset(env, self.sim.t_ns, keep_seq=True)
+            imu.reset(env, self.sim.t_ns, keep_seq=True, redraw_bias=power_on)
         self._prescribed = None
         self._disturbances.clear()
         self._joint_torques.clear()  # the plant's reset zeroed the external torque
@@ -941,7 +1035,9 @@ class RuntimeHost:
         for k in range(first, count):
             record = rec["ring"][k % abi.DEMAND_RING]
             sent_ns = int(record["sent_mono_ns"]) - self._mono_minus_plant_ns
-            self._intake(record["drive"][:n], sent_ns + self._drive_delays_ns)
+            arrival = command_arrival_ns(torch.tensor([sent_ns]), self._no_latency, self._arrival_delays,
+                                         self._jitter_ns, self._jitter_generator)
+            self._intake(record["drive"][:n], arrival[0].numpy())
         self._demands_taken = count
         running = rec["ring"][(count - 1) % abi.DEMAND_RING]["drive"][:n]["law"] != abi.LAW_DISABLED
         self._set_drives_off(~running)
@@ -1041,7 +1137,7 @@ class RuntimeHost:
     def _feedback_flat(self) -> torch.Tensor:
         """The feedback's fields as one float64 vector on the device; the integer fields travel bit-for-bit."""
         sim = self.sim
-        fb = sim.feedback
+        fb = self._measured(sim.t_ns, sim.feedback)
         imu = sim.imu.samples
         ints = torch.cat([imu.seq[0], imu.sample_ns[0], imu.stamp_ns[0], imu.count[:1]]).view(torch.float64)
         flat = torch.cat([fb.position_rad[0], fb.velocity_rad_s[0], fb.applied_torque_nm[0],
@@ -1072,13 +1168,17 @@ class RuntimeHost:
         seqs, sample_ns, stamp_ns, total = ints[:h], ints[h:2 * h], ints[2 * h:3 * h], int(ints[3 * h])
 
         now = abi.mono_ns()
+        # The record's plant time on the host's clock is the schedule's: the deadline of the step's end, not the
+        # moment this code ran, so the host's compute jitter does not reach a client's mapping of its IMU stamps (or
+        # this host's of the client's demands). Without pacing (step() called directly) it is the moment of writing.
+        at_ns = now if self._deadline_ns is None else self._deadline_ns + self.period_ns
         rec = np.zeros((), abi.FEEDBACK)
-        rec["step"], rec["sim_time_ns"], rec["written_mono_ns"] = self.step_count, sim.t_ns, now
+        rec["step"], rec["sim_time_ns"], rec["written_mono_ns"] = self.step_count, sim.t_ns, at_ns
         rec["late_steps"], rec["paused"], rec["num_drives"] = self.late_steps, self.paused, n
         rec["keeping_up"] = self._keeping_up(now)
         rec["imu_total"] = total
         rec["demand_records"], rec["demand_overruns"] = self._demands_taken, self._demand_overruns
-        self._mono_minus_plant_ns = now - sim.t_ns
+        self._mono_minus_plant_ns = at_ns - sim.t_ns
         valid = min(total, h, abi.IMU_SAMPLES)
         rec["imu_count"] = valid
         for k, name in enumerate(abi.DRIVE_FEEDBACK.names):
@@ -1187,6 +1287,7 @@ class RuntimeHost:
                     self.late_steps += 1
                     self._last_late_ns = now
                     deadline = now
+                self._deadline_ns = deadline
                 self.step()
                 periods += 1
                 if self.detached:
@@ -1197,6 +1298,7 @@ class RuntimeHost:
                     break
                 deadline += self.period_ns
         finally:
+            self._deadline_ns = None
             self.seg.end()
         return code
 

@@ -47,12 +47,11 @@ It prints how many robots still have their base above 0.6 m at the end. A rigid 
 | `robot` | `"ethrc_v1"` | Profile (`profiles/ethrc_v1.yaml`) and description to load |
 | `randomization` | `[]` | Randomization specs, as dicts or `ParamSpec`; see [Randomization](#randomization) |
 | `level` | `1.0` | Initial randomization level |
-| `seed` | `0` | Seed of the randomizer; the IMU model uses `seed + 1`, the encoder jitter and feedback noise `seed + 2`, the feedback sampler `seed + 3` |
+| `seed` | `0` | Seed of the randomizer; the IMU model uses `seed + 1`, the encoder jitter and feedback noise `seed + 2`, the feedback sampler `seed + 3`, the command jitter `seed + 4` |
 | `feedback_history` | `16` | Physics steps of drive feedback kept in `Measured.history` |
 | `reporting` | `True` | Quantize the measured drive feedback the way the drives report it |
 | `feedback_noise` | `True` | With `reporting`: add the drives' measured velocity dither and torque noise ([Reporting in training](sensors.md#reporting-in-training)) |
-| `feedback_sampling` | `True` | Hold the measured drive feedback between the drive's samples, 3.0 to 7.5 ms apart ([Feedback age](sensors.md#feedback-age)); needs the profile's `devices.feedback_sampling` |
-| `command_jitter_ns` | `0` | Move each demand's arrival at each drive by a uniform integer draw in +-this many ns (generator seeded `seed + 4`). Off by default. On the V1, ±1.2 ms (1_200_000) matches the measured spread ([drives.md](drives.md#arrival-and-latency)). Arrivals stay in order |
+| `feedback_sampling` | `True` | Hold the measured drive feedback between the drive's samples, 3.0 to 7.5 ms apart, each visible after the profile's publish delay (2.24 ms) ([Feedback age](sensors.md#feedback-age)); needs the profile's `devices.feedback_sampling` |
 | `cuda_graph` | `False` | Capture drive feedback, target shaping and IMU delivery on CUDA |
 | `compile` | `False` | Fuse the captured drive and IMU math with `torch.compile`; requires `cuda_graph` |
 | `queue_capacity` | `8` | Demands in flight per env; needs at least (max latency + drive delay) / demand period + 1 |
@@ -278,7 +277,7 @@ Under the PD law a drive applies `kp (target - q) + kd (v_target - v) + ff`, cli
 
 Positions are in the [drive frame](glossary.md#drive-frame). For a 1:1 drive that is the joint angle times a sign; for an ankle drive it is the crank angle, which is neither the foot pitch nor the foot roll. `plant.core.map.drive_state(q, qd)` maps joint positions in description order to drive positions through the ankle transmission, which is how `PoseOffsets` turns the default pose into drive targets. A policy that acts in foot pitch and roll converts them the same way inside `demands()`.
 
-`sent_ns` is an `[E]` int64 tensor: when the demand leaves the EtherCAT master, in nanoseconds on the plant clock. `self.plant.t_ns` is now, the start of the first physics step of this env step. Drive `d` of env `e` applies the demand from `sent_ns[e] + latency[e, d]`, where `latency` is the nominal figure when it isn't randomized: the profile's `devices.command_path.frame_to_drive_ns` less the drive's own delay (0.3 ms on the V1, 5.3 ms less 5.0 ms), zero for a profile without a `command_path`; randomization draws replace it. A demand that arrives inside a physics step is in force for the part of the step it covers. Demands never overtake each other on a drive: an arrival earlier than the last queued one is moved to it. When a queue is full, its oldest pending demand is dropped, so size `queue_capacity` for your submit rate and maximum latency.
+`sent_ns` is an `[E]` int64 tensor: when the demand leaves the EtherCAT master, in nanoseconds on the plant clock. `self.plant.t_ns` is now, the start of the first physics step of this env step. Drive `d` of env `e` applies the demand from `sent_ns[e] + latency[e, d]`, where `latency` is the nominal figure when it isn't randomized: the profile's `devices.command_path.frame_to_drive_ns` less the drive's own delay (0.3 ms on the V1, 5.3 ms less 5.0 ms), zero for a profile without a `command_path`; randomization draws replace it. The profile's `command_path.jitter_ns` (±1.2 ms on the V1) then moves each arrival by a uniform draw, per demand and drive, always on. A demand that arrives inside a physics step is in force for the part of the step it covers. Demands never overtake each other on a drive: an arrival earlier than the last queued one is moved to it. When a queue is full, its oldest pending demand is dropped, so size `queue_capacity` for your submit rate and maximum latency.
 
 The [baseline gains](glossary.md#baseline-gains) (`plant.core.drive_stiffness`, `plant.core.drive_damping`, from humanoid-urdf) are also the solver gains. Target shaping is guaranteed stable for demanded gains up to twice the baseline; `plant.core.gain_warnings` (`[E, 22]` bool, cleared at reset) marks drives that received an enabled demand above that.
 
@@ -316,7 +315,7 @@ The velocity steps are coarse; this is what the real drives report.
 | `seq` | `[E, 16]` | Sequence number, from 1 after a reset; 0 for an empty slot |
 | `count` | `[E]` | Samples delivered since the last reset |
 
-The sensor frame is the chip frame at the description's IMU mount (`imu_joint` on `base_link`); nothing rotates it into the base frame. Sampling and delivery are the rig's: on the V1 the sensor samples every 2.5 ms (400 Hz) and the host receives each sample over CAN as it is taken; on the G1 every 2 ms sample is delivered as it is taken (modeled). Each sample carries the errors of the rig's IMU model (for the MTi-610: white noise, a turn-on bias drawn at every reset and a slow bias drift), plus any bias and misalignment the randomization drew. Details are in [sensors.md](sensors.md).
+The sensor frame is the chip frame at the description's IMU mount (`imu_joint` on `base_link`); nothing rotates it into the base frame. Sampling and delivery are the rig's: on the V1 the sensor samples every 2.5 ms (400 Hz) and the host receives each sample over CAN as it is taken; on the G1 every 2 ms sample is delivered as it is taken (modeled). Each sample carries the errors of the rig's IMU model (for the MTi-610: white noise, a turn-on bias drawn at every reset and a slow bias drift), the chip's measured mount rotation, plus any bias and misalignment the randomization drew. Details are in [sensors.md](sensors.md).
 
 Actor observations come from `measured()` only. That is the information a deployed policy has on the robot; `truth()` and `params()` are for critics, rewards, terminations and diagnostics. The plant hands out raw drive feedback and raw IMU samples. What Controls computes from them before a policy sees them (an orientation estimate, the standing-frame joint offsets, the observation layout of its policy contract) is Controls behaviour and is not modeled here; a task that trains for Controls reproduces it from measured signals ([controls-integration.md](controls-integration.md)).
 
@@ -419,7 +418,7 @@ The full table is `PARAMS` in `src/humanoid_sim/randomization/spec.py`. E is the
 | `encoder_offset` | device | `[E, 22]` | rad | 0 | The drive's position reading minus the true position |
 | `imu_gyro_bias` | device | `[E, 3]` | rad/s | 0 | Gyro bias, sensor frame |
 | `imu_accel_bias` | device | `[E, 3]` | m/s² | 0 | Accelerometer bias, sensor frame |
-| `imu_misalignment` | device | `[E, 3]` | rad | 0 | Rotation of the sensor in its mount, as a rotation vector |
+| `imu_misalignment` | device | `[E, 3]` | rad | the profile's `devices.imu_mount` (1.0° pitch, 0.5° roll on the V1), else 0 | Rotation of the sensor in its mount, as a rotation vector in chip axes |
 | `imu_latency` | device | `[E, 1]` | s | the profile's `devices.imu_path` (2.1 ms on the V1), else 0 | From an IMU sample's measurement to its earliest delivery. A scale needs `imu_path`; the draw must be bounded (not `normal`), and the plant sizes the IMU's pending buffer for its largest value |
 | `imu_drop_probability` | device | `[E, 1]` | probability | the sensor model's `drop_probability` (0 on the V1) | The chance that each IMU sample is lost, read every step. A draw outside [0, 1] raises when it is written, so use a bounded distribution or `set`; `drop_mode` stays the model's. Needs the IMU |
 

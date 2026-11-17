@@ -45,7 +45,12 @@ def test_paused_reset_replaces_cached_drive_feedback(tmp_path, robot, device):
         _, after = host.seg.regions["feedback"].read()
         assert after["paused"] == 1
         assert host.sim.t_ns == paused_time_ns
-        np.testing.assert_allclose(after["drive"]["position_rad"][:n], expected, atol=1e-6)
-        np.testing.assert_allclose(after["drive"]["velocity_rad_s"][:n], 0, atol=1e-8)
+        # The master's reading of a drive is in whole encoder counts and its velocity dithers by a count or two per
+        # controller sample (the host's measured feedback), so the pose is the start pose to within a count.
+        reporting = host._measured.reporting
+        count = (2 * np.pi / reporting.cpr).cpu().numpy()
+        np.testing.assert_array_less(np.abs(after["drive"]["position_rad"][:n] - expected), 1.01 * count)
+        dither = 4 * count / reporting.sample_s.cpu().numpy()
+        np.testing.assert_array_less(np.abs(after["drive"]["velocity_rad_s"][:n]), dither)
     finally:
         host.close()

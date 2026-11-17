@@ -98,7 +98,7 @@ A session ends in one of three ways. The segment's `state` becomes ended in ever
 
 The client timeout compares the host's `CLOCK_MONOTONIC` with the `written_mono_ns` stamp inside the client's latest demands record, so only new demand records keep a session alive; commands do not. A stop signal is handled at the end of the current period once the host is serving. An unexpected error in the host loop also ends the session and exits the process with a traceback.
 
-With `--persist`, a detached or lost session is followed by a new one (`RuntimeHost.new_session`) without recompiling. The host clears the faults, releases any gantry, turns the IMU noise back on and resets the robot to the start pose, which also clears the prescribed pose, the disturbances, the drive bank and the IMU history. It then creates a new segment file with a new session id, unpaused, and renames it over the same path. A client that still maps the old file sees it ended; a client that opens the path gets the new session. The feedback's `step` and `late_steps` restart from 0; plant time and the IMU sample numbers run on. A persistent host ends only on a signal or `--max-steps`, with exit code 0.
+With `--persist`, a detached or lost session is followed by a new one (`RuntimeHost.new_session`) without recompiling. The host clears the faults, releases any gantry, turns the IMU noise back on and resets the robot to the start pose, which also clears the prescribed pose, the disturbances, the drive bank and the IMU history. A new session also power-cycles the IMU: its turn-on bias and drift are drawn again (a RESET keeps them, as the sensor keeps them until its power is cycled). It then creates a new segment file with a new session id, unpaused, and renames it over the same path. A client that still maps the old file sees it ended; a client that opens the path gets the new session. The feedback's `step` and `late_steps` restart from 0; plant time and the IMU sample numbers run on. A persistent host ends only on a signal or `--max-steps`, with exit code 0.
 
 A session is tied to the segment file and outlives the client process that drove it. A client that opens the path while the session is still ready, and echoes its session id, continues that session where the previous client left it.
 
@@ -115,13 +115,24 @@ A session is tied to the segment file and outlives the client process that drove
 The runtime runs in real time only. `RuntimeHost.run` paces each physics period, 1 ms for the native V1 (`physics.period_ns` in `profiles/ethrc_v1.yaml`), to `CLOCK_MONOTONIC`: it sleeps until 100 µs before the step's deadline and spins for the rest (`SPIN_NS`). Each period does, in order (`RuntimeHost.step`):
 
 1. Handle a new mailbox command, if there is one, and write its ack.
-2. Take every demand record the client appended since the last step into the drive bank, oldest first. Each is sent at its `sent_mono_ns` mapped to plant time (the latest feedback's mapping, below), and each drive applies it its [drive model](drives.md#drive-models)'s delay later (5 ms on the V1), so the 1.5 ms bus's records, one about every step and a half at 1 ms (2 to 3 per step at a 4 ms period), each act from their own time within a step. If no new record arrives the last one stays in force. See [drives.md](drives.md#arrival-and-latency) for the arrival queue and the drive law.
+2. Take every demand record the client appended since the last step into the drive bank, oldest first. Each is sent at its `sent_mono_ns` mapped to plant time (the latest feedback's mapping, below), and each drive applies it its [drive model](drives.md#drive-models)'s delay later (5 ms on the V1) moved by the command path's jitter (uniform in ±1.2 ms on the V1, `devices.command_path.jitter_ns`, drawn per record and drive), so the 1.5 ms bus's records, one about every step and a half at 1 ms (2 to 3 per step at a 4 ms period), each act from their own time within a step. If no new record arrives the last one stays in force. See [drives.md](drives.md#arrival-and-latency) for the arrival queue and the drive law.
 3. Step the physics with the active gantry, disturbances and prescribed pose, unless paused.
-4. Publish the feedback, the truth when due, and the heartbeat.
+4. Publish the feedback, the truth when due, and the heartbeat. The feedback is what the robot's master reads: each drive's reading as the drive reports it, held between the master's samples and published after the publish delay ([Drive feedback as the master reads it](#drive-feedback-as-the-master-reads-it)).
 
 A step that starts more than one period after its deadline counts as late (`late_steps`), and the schedule restarts from that moment. A step that starts late by less than a period is not counted, and the following steps run back to back until they are on schedule again. Plant time advances by exactly one period per step and never jumps, so when the host falls behind, plant time falls behind the wall clock. `keeping_up` is 1 while no step in the last second was late (`KEEPING_UP_WINDOW_NS`). Both are in every feedback record; `late_steps` counts per session.
 
-Plant time (`sim_time_ns`, and the IMU samples' `sample_ns` and `stamp_ns`) starts at 0 when the host starts and runs on across sessions. Each feedback record maps a plant time `t` to the host's clock as `written_mono_ns - (sim_time_ns - t)`. The offset grows whenever steps are late, so take it from the latest record. `*_mono_ns` fields are `CLOCK_MONOTONIC` of the writing process, which is the same clock for every process and container on one machine.
+Plant time (`sim_time_ns`, and the IMU samples' `sample_ns` and `stamp_ns`) starts at 0 when the host starts and runs on across sessions. Each feedback record maps a plant time `t` to the host's clock as `written_mono_ns - (sim_time_ns - t)`. The mapping follows the host's schedule, not the moment it wrote the record: a step's record is stamped with the deadline of the step's end (the step's deadline plus one period), so the host's compute jitter (p99 2.3 ms on the lab host) reaches neither the plant time at which a client's demand is taken nor the IMU stamps a client maps through the record. `written_mono_ns` can therefore lead the moment of writing by up to a period and trail it when a step runs late; it rises by a period every period, paused or not. The offset grows whenever steps are late (the schedule restarts from that moment), so take it from the latest record. Without pacing (`RuntimeHost.step` called directly) it is the moment of writing. `*_mono_ns` fields are `CLOCK_MONOTONIC` of the writing process, which is the same clock for every process and container on one machine.
+
+### Drive feedback as the master reads it
+
+The robot's master does not read the drives' state at every step: a drive reports whole encoder counts, a velocity over its 400 us controller sample with dither, and a torque with noise; the master gets those at whole bus cycles 3.0 to 7.5 ms apart (5.08 ms on average) and holds the last in between; and a sample reaches the reader 2.24 ms after it was taken. The runtime feeds back the same, through the training plant's own models on the profile's measurements (`devices.encoders`, `devices.feedback_noise`, `devices.feedback_sampling`, [sensors.md](sensors.md#reporting-in-training)), with nothing to switch:
+
+- Reporting (`DriveReporting`): position in whole counts, velocity in whole counts per controller sample with the measured dither, applied torque in mNm with the measured noise. The position's one-count jitter is not added: Controls' fake drive adds its own to the counts it is given, and the other roundings are idempotent there.
+- Sampling and publish delay (`FeedbackSampler`): one draw per bus cycle count, shared by the drives, as in training. A sample is visible 2.24 ms (`devices.feedback_sampling.publish_delay_ns`) after it is taken, on the step grid. The first reading after a reset or a session's start is the new state itself.
+- The held sample is as old as the master's cycles make it: on the V1 the reading at a step is 5.3 ms old on average (3 to 8 ms from p5 to p95): the held sample's 2.8 ms and the publish delay's 2.2 ms, with the step grid rounding. The robot's reading is 8.4 ms old at the policy, the rest being Controls' own bus and control cycle, which run on top of the runtime's.
+- On CUDA the reporting and the sampling run as one captured graph, with their random streams registered with it.
+
+A robot whose profile has none of these (the G1) feeds back the plant's drive-frame state as it is. The `encoder_freeze` fault still holds the exact reading it froze at.
 
 While paused, physics, plant time and the step counter stop. Commands and demands are still taken, and the feedback (with `paused` = 1) and the heartbeat are still written every period. Disturbances and faults are timed in plant time, so they wait as well.
 
@@ -236,9 +247,9 @@ The fidelity gaps the runtime publishes:
 
 - drive current-loop dynamics and backlash absent; the output current limit and the winding I2t limit are modeled, unverified, and off unless the profile's devices.current enables them
 - upper-body passive joint parameters (waist, shoulders, elbows) are description values, not identified
-- IMU errors from the rig's model: white noise, turn-on bias, Gauss-Markov drift (SET_FIDELITY ideal turns them off); the turn-on bias is redrawn at every IMU reset, not only at power-on
-- drive delay is each family's fixed figure (actuators.yaml drive_delay_s), without per-cycle jitter
-- drive feedback is the plant's exact drive-frame state after each physics step, with the applied and demanded torque of that step: no position offset, encoder quantization, sample age (the robot's PDO samples come 3.0-7.5 ms apart), torque noise or velocity dither (the training plant has them, devices.encoders and devices.feedback_*)
+- IMU errors from the rig's model: white noise, turn-on bias (drawn at a session's start and kept through RESET), Gauss-Markov drift (SET_FIDELITY ideal turns them off) and, where the profile has one, the chip's rotation in its mount (devices.imu_mount; modeled from one at-rest capture, unconfirmed)
+- drive delay is each family's fixed figure (actuators.yaml drive_delay_s) and, where the profile has one, the command path's uniform jitter (devices.command_path.jitter_ns); not measured per family
+- drive feedback is the plant's drive-frame state after each physics step with the applied and demanded torque of that step; where the profile has the measurements (devices.encoders, devices.feedback_*; the V1 has them, the G1 does not) it is reported in whole encoder counts with velocity dither and torque noise, held between samples (3.0-7.5 ms apart, drawn independently: no lag-1 correlation) and published 2.24 ms after a sample (its median, no spread). No position offset; the position's one-count jitter is left to Controls' fake drive
 - for a robot whose description records no delay for some families (the G1's): drive delay unmeasured for those families, whose demands act when the bus delivers them
 
 ### Demands
@@ -285,7 +296,7 @@ The host writes the feedback region every period, paused or not.
 |---|---|---|
 | `step` | u64 | Physics steps taken in this session |
 | `sim_time_ns` | i64 | Plant time at the end of the last step |
-| `written_mono_ns` | u64 | The host's `CLOCK_MONOTONIC` when it wrote the record |
+| `written_mono_ns` | u64 | The host's `CLOCK_MONOTONIC` at which `sim_time_ns` falls on its schedule: the deadline of the step's end ([The clock](#the-clock)) |
 | `late_steps` | u64 | Late steps in this session (see [The clock](#the-clock)) |
 | `keeping_up` | u32 | 1 while no step in the last second was late |
 | `paused` | u32 | 1 while paused |
@@ -297,7 +308,7 @@ The host writes the feedback region every period, paused or not.
 | `drive` | `HsimDriveFeedback[32]` | Per drive: `position_rad`, `velocity_rad_s`, `applied_torque_nm`, `demanded_torque_nm` |
 | `imu` | `HsimImuSample[32]` | The latest delivered IMU samples, newest first |
 
-Drive feedback is SI in the physical drive-output frame, as Controls' `fake_bank_feedback` takes it. `applied` is the torque after the torque-speed envelope and the cap, `demanded` the control law's output before them.
+Drive feedback is SI in the physical drive-output frame, as Controls' `fake_bank_feedback` takes it, and is what the master reads ([above](#drive-feedback-as-the-master-reads-it)), not the plant's exact state. `applied` is the torque after the torque-speed envelope and the cap, `demanded` the control law's output before them.
 
 Each IMU sample has `seq` (u64), `sample_ns` (measurement time) and `stamp_ns` (host-receipt time), both plant time, then `gyro_rad_s[3]` and `specific_force_m_s2[3]` in the sensor frame. The samples arrive as the rig's IMU delivers them; on the V1, as its MTi-610 does over CAN: 400 samples per second, each as it is taken (see [sensors.md](sensors.md#delivery)). The host keeps the 32 latest delivered samples (`IMU_SAMPLES`), so on the V1 `imu_count` reaches 32 0.08 s of plant time after the IMU was reset.
 
