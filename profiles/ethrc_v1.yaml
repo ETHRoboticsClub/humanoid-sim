@@ -56,8 +56,9 @@ devices:
   # 8 HEJ90 leg drives and the 4 ankle cranks: 127,182 steps, 5.3 ms mean (cranks 5.25, HEJ90 5.31), 3.3-8.2 ms
   # p5-p95 with the feedback interval's censoring in it, 0.68 ms standard deviation with it removed. Frame stamp to
   # the controller's APPLIED is 1.1 ms of it (0.3-1.8 ms, the wait for the next 1.5 ms cycle); APPLIED to the onset
-  # lies in 3.75-5.25 ms on every drive. Arm drives were not excited.
-  command_path: {frame_to_drive_ns: 5300000}
+  # lies in 3.75-5.25 ms on every drive. Arm drives were not excited. jitter_ns: each demand's arrival is moved by a
+  # uniform draw in +-this, 1.2 ms (standard deviation 0.69 ms, the measured 0.68 ms), in training and in the runtime.
+  command_path: {frame_to_drive_ns: 5300000, jitter_ns: 1200000}
   # The IMU's path past its CAN receipt stamp to the controller's topic, mean: the training plant holds each sample
   # this long before delivery (passive /rt/imu subscriber on the idle V1, 2026-10-31, 24000 samples: 2.09 ms mean,
   # 1.25-5.12 ms p5-p95, Madgwick and the relay 0.6 ms of it). The MTi's own delay before the stamp is unmeasured
@@ -69,11 +70,21 @@ devices:
   # of drive HEJ90L1 (all drives of a frame agree to 17 us): 35,814 spacings, 5.08 ms mean, 3.0-7.5 ms p5-p95, every
   # one a whole number of cycles to 0.1 ms. The counts are the cycle numbers 1 to 10 (10: ten or more) of the two
   # captures pooled (the two differ by 0.01 in each probability). Lag-1 autocorrelation -0.40 is not modeled (the
-  # sampler draws independently). The held value is the master's feedback age; the publish delay past a sample,
-  # 2.24 ms median, 1.58-2.94 ms p5-p95 (t_publish - t_source), is not modeled here.
+  # sampler draws independently). The held value is the master's feedback age. publish_delay_ns: the publish delay
+  # past a sample, 2.24 ms median, 1.58-2.94 ms p5-p95 (t_publish - t_source, the same captures): a sample is visible
+  # to the reader this long after it was taken (its median; the spread is not modeled).
   feedback_sampling:
+    publish_delay_ns: 2240000
     cycles: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     probability: [804, 4716, 15063, 11853, 2482, 500, 259, 89, 28, 20]  # counts of 35,814, normalized on load
+  # The body IMU's mount: the chip's rotation from the description's imu_joint, a rotation vector in chip axes (the
+  # sensor's rotation in its mount, ImuDelivery.misalignment: a sample is R(this) times the ideal one). From the V1's
+  # accelerometer at rest on the gantry's bars (2026-11-05, docs/sensors.md): the chip reads the torso 1.94 deg
+  # pitched forward and 0.10 deg low on the right, a phone on the shoulders 0.94 deg and 0.57 deg, so the chip sits
+  # 1.0 deg in pitch (about chip y) and 0.5 deg in roll (about chip z) off the URDF's mount; gravity does not show yaw
+  # (0). Unconfirmed until Controls' IMU mount calibration measures it. Applied in training and in the runtime,
+  # under any randomized imu_misalignment.
+  imu_mount: {misalignment_deg: [0.0, 1.0, -0.5]}
   # What a drive's feedback carries that the quantization (above) does not: Gaussian velocity dither (sigma in counts
   # per 400 us controller sample, added before the rounding) and torque noise (Nm, before the rounding to mNm). The
   # same captures, windows of 100 PDO samples (0.5 s) in which a drive's position stayed within 2 counts: 65 windows

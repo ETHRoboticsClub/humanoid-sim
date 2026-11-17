@@ -7,9 +7,11 @@ samples, newest first, each with its measurement time and its host-receipt stamp
 * **Sampling.** Samples are measured on the sensor's own clock every ``sample_period_ns`` (a random phase per
   env), linearly interpolated between step boundaries.
 * **Errors.** Per sample: white noise of ``density · √(output rate)``. The sensor model's bias: a turn-on bias
-  drawn per env at every reset, plus an in-run drift (first-order Gauss-Markov with the model's bias instability
-  as its stationary sigma), advanced per sample. On top, per env from the plant's randomization: a bias and a
-  small misalignment rotation of the sensor in its mount.
+  drawn per env at every reset (the runtime's RESET keeps it: ``reset(..., redraw_bias=False)``, as the sensor
+  keeps it until its power is cycled), plus an in-run drift (first-order Gauss-Markov with the model's bias
+  instability as its stationary sigma), advanced per sample. On top, per env: a bias and a misalignment rotation of
+  the sensor in its mount, from the plant's randomization and the profile's measured mount
+  (:func:`mount_misalignment_rad`).
 * **Delivery.** Samples wait in the serial buffer and reach the host in bursts, every ``burst_period_ns``
   (uniform per burst), stamped on receipt ``in_burst_spacing_ns`` apart. A consumer that reads "the latest
   sample" sees it up to one burst period late. A sample is held at least ``latency_ns`` (per env, set by the
@@ -74,6 +76,19 @@ def pending_slots(cfg: ImuDeliveryCfg, latency_ns: int, step_ns: int) -> int:
     before its burst: those within the latency and a burst period, plus those a step measures before it delivers."""
     t = cfg.sample_period_ns
     return -(-(latency_ns + cfg.burst_period_ns[1]) // t) + -(-step_ns // t) + 1
+
+
+def mount_misalignment_rad(profile: dict) -> tuple[float, float, float]:
+    """The body IMU's rotation in its mount (rad, a rotation vector in chip axes): the profile's
+    ``devices.imu_mount`` ``misalignment_deg``; zero without one (the sensor sits where the description puts it)."""
+    mount = profile["devices"].get("imu_mount")
+    if mount is None:
+        return (0.0, 0.0, 0.0)
+    deg = mount["misalignment_deg"]
+    if len(deg) != 3 or not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in deg):
+        raise ValueError(f"devices.imu_mount.misalignment_deg {deg!r}: expected three finite numbers")
+    x, y, z = (math.radians(v) for v in deg)
+    return (x, y, z)
 
 
 def rotvec_matrix(v: torch.Tensor) -> torch.Tensor:
@@ -161,12 +176,15 @@ class ImuDelivery:
         return (lo + (hi - lo) * u).round().to(torch.int64)
 
     def reset(self, env_ids: torch.Tensor, t_ns: int, value: torch.Tensor | None = None, *,
-              keep_seq: bool = False) -> None:
+              keep_seq: bool = False, redraw_bias: bool = True) -> None:
         """Restart ``env_ids`` at ``t_ns``: empty buffers, random sample phase and burst phase. Sequence numbers
-        restart from 1 unless ``keep_seq`` (the runtime keeps them rising, as a client tracks the last one seen)."""
+        restart from 1 unless ``keep_seq`` (the runtime keeps them rising, as a client tracks the last one seen).
+        The model's bias (turn-on and drift) is drawn anew unless ``redraw_bias`` is False: a sensor keeps it
+        until its power is cycled, so the runtime redraws it at a session's start and not at its RESET."""
         n = len(env_ids)
-        self.turn_on[env_ids] = self._normal(n) * self._turn_on_sigma
-        self.drift[env_ids] = self._normal(n) * self._drift_sigma  # from the stationary distribution
+        if redraw_bias:
+            self.turn_on[env_ids] = self._normal(n) * self._turn_on_sigma
+            self.drift[env_ids] = self._normal(n) * self._drift_sigma  # from the stationary distribution
         self.next_sample[env_ids] = t_ns + self._uniform_ns(n, 0, self.cfg.sample_period_ns)
         self.next_burst[env_ids] = t_ns + self._uniform_ns(n, 0, self.cfg.burst_period_ns[1])
         if not keep_seq:
