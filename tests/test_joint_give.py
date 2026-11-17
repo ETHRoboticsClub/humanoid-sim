@@ -6,7 +6,14 @@ import numpy as np
 import pytest
 import torch
 
-from humanoid_sim.model.asset import asset_dir, build_asset, compliance_springs, give_springs, load_profile
+from humanoid_sim.model.asset import (
+    asset_dir,
+    build_asset,
+    compliance_springs,
+    default_give,
+    give_springs,
+    load_profile,
+)
 from humanoid_sim.model.description import Description
 from humanoid_sim.randomization import ParamSpec, Randomizer
 from humanoid_sim.transmissions import compliance
@@ -77,8 +84,11 @@ def test_the_rigid_asset_is_untouched_and_the_variant_adds_one_give_per_joint(de
     from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
     profile = load_profile(desc.robot)
-    rigid = build_asset(desc, profile, tmp_path)
-    assert rigid.parent == asset_dir(desc, profile, tmp_path) == asset_dir(desc, profile, tmp_path, joint_give=())
+    rigid = build_asset(desc, profile, tmp_path, joint_give=())
+    assert rigid.parent == asset_dir(desc, profile, tmp_path, joint_give=())
+    # Without joints named, an asset carries the profile's joint give (the V1's hips and knees).
+    assert asset_dir(desc, profile, tmp_path) == asset_dir(desc, profile, tmp_path,
+                                                           joint_give=default_give(desc, profile)) != rigid.parent
     variant = build_asset(desc, profile, tmp_path, joint_give=names)
     assert variant.parent == asset_dir(desc, profile, tmp_path, joint_give=names) != rigid.parent
     # The order of the names does not matter; a different set is a different asset.
@@ -192,14 +202,28 @@ def test_give_gains_come_from_the_profile_then_the_description_and_are_required(
     with pytest.raises(ValueError, match="damping"):
         give_gains(usd, {"joint_give": {"stiffness_nm_per_rad": 800.0}}, desc)
     assert compliance_gains(usd, physics, desc) == give_gains(usd, physics, desc)
-    # An asset without give needs nothing, and the defaults ask for nothing.
+    # An asset without give needs nothing.
     (tmp_path / "asset.json").write_text(json.dumps({"usd": "robot.usda"}))
     assert give_gains(usd, load_profile("ethrc_v1")["physics"], desc) == {}
 
 
-def test_the_defaults_keep_every_joint_rigid():
-    assert load_profile("ethrc_v1")["physics"]["joint_give"] == {"stiffness_nm_per_rad": None,
-                                                                "damping_nm_s_per_rad": None}
+def test_the_v1_gives_its_hips_and_knees_by_default_at_the_measured_values(tmp_path):
+    desc = Description.load("ethrc_v1")
+    profile = load_profile("ethrc_v1")
+    given = default_give(desc, profile)
+    assert set(given) == {f"{j}_{s}" for j in ("hip_flexion", "hip_abduction", "knee_flexion") for s in "lr"}
+    assert list(given) == [n for n in desc.joints if n in given]
+    # Every given joint has a positive stiffness and damping from the profile.
+    from humanoid_sim.physics.isaaclab import give_gains
+
+    usd = tmp_path / "robot.usda"
+    usd.write_text("")
+    (tmp_path / "asset.json").write_text(json.dumps({"usd": "robot.usda", "joint_give": {
+        "springs": {n: compliance.give_joint(n) for n in given}}}))
+    gains = give_gains(usd, profile["physics"], desc)
+    assert {k for k, _ in gains.values()} == {600.0, 950.0} and all(c == 1.2 for _, c in gains.values())
+    # A robot whose profile names none gives none.
+    assert load_profile("g1_29dof_rev_1_0")["model"]["joint_give"] == []
 
 
 def test_give_knobs_select_joints_and_draw_per_env():

@@ -35,6 +35,9 @@ model:
     # Hip flexion + abduction housings.
     - [hej90_hip_abduction_1, hej90_leg_abduction_l_1]
     - [hej90_hip_abduction_1, hej90_leg_abduction_r_1]
+  # The hips and knees give between the drive's encoder and the link (shank phone push tests, 2026-11-16,
+  # humanoid-learning #90), in every V1 asset: physics.joint_give below gives the values.
+  joint_give: ["hip_flexion_.*", "knee_flexion_.*", "hip_abduction_.*"]
   sole:
     joints: {l: ankle_inversion_l, r: ankle_inversion_r}
     box_thickness_m: 0.005
@@ -92,6 +95,16 @@ physics:
   # Resolve the light native rods and their closed-loop constraints at 1 kHz.
   # Policy/control periods are configured independently by the caller.
   period_ns: 1000000
+  # The joint give of model.joint_give. Stiffness from the shank phone push tests of 2026-11-16 (humanoid-learning
+  # #90, held out one repetition at a time): hip flexion 548 to 655 N m/rad (folds 494 to 743), knee 599 to 678 (579
+  # to 694), hip abduction 755 to 1246 (736 to 1391; the left one's roll weak). Damping is not measured: 1.2 N m s/rad,
+  # the middle of 0.5 to 3. On the floor this give brings the V1's pitch response to its hip flexion targets in the
+  # 2026-11-16 gantry walks (rope slack, v11 11400 in closed loop, the measured command path) from 43 to 55 deg RMS phase
+  # error at 3 to 12.5 Hz down to 25 (the robot scores 15 against itself); twice as stiff, 36; half, the robot falls.
+  joint_give:
+    stiffness_nm_per_rad: {hip_flexion_l: 600.0, hip_flexion_r: 600.0, knee_flexion_l: 600.0, knee_flexion_r: 600.0,
+                           hip_abduction_l: 950.0, hip_abduction_r: 950.0}
+    damping_nm_s_per_rad: 1.2
   mjwarp:
     # Contact can spin a rod about its long axis. RK4 resolves that rotational
     # motion without the energy growth of the single-step integrators.

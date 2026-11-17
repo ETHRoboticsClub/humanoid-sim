@@ -12,6 +12,9 @@ model:
   ground_friction: 1.0
   # No sole boxes (model.sole), contact excludes (model.contact_excludes) or self-collision sets
   # (model.self_collision) unless the robot's profile names them.
+  # Joints every asset of the robot gives give to (transmissions/compliance.py; joint names or regexes over the
+  # description's joints): none unless the robot's profile names them. `build-asset --joint-give` replaces them.
+  joint_give: []
 
 # Named poses (model/poses.py). home: zero (the URDF's zero) or {preset: <preset_id in position-presets.yaml>}.
 poses:

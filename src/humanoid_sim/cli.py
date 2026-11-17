@@ -94,7 +94,7 @@ def cmd_build_asset(args) -> int:
     from humanoid_sim.transmissions.compliance import resolve_give
 
     desc = Description.load(args.robot)
-    give = resolve_give(desc, args.joint_give) if args.joint_give else ()
+    give = resolve_give(desc, args.joint_give) if args.joint_give else None  # None: the profile's model.joint_give
     usd = build_asset(desc, load_profile(args.robot), Path(args.assets), force=args.force,
                       base_joints=args.base_joints, ankle_compliance=args.ankle_compliance, joint_give=give)
     print(usd)
@@ -419,9 +419,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="the variant with a spring between each ankle crank drive and its crank arm (physics."
                         "ankle_compliance gives its stiffness and damping)")
     b.add_argument("--joint-give", nargs="+", metavar="JOINT",
-                   help="the variant with a spring between each named drive joint's encoder side and its link: joint "
-                        "names or regexes over them (physics.joint_give, else the description, gives the stiffness "
-                        "and damping)")
+                   help="a spring between each named drive joint's encoder side and its link: joint names or regexes "
+                        "over them, in place of the profile's model.joint_give (physics.joint_give, else the "
+                        "description, gives the stiffness and damping)")
     b.set_defaults(func=cmd_build_asset)
 
     r = sub.add_parser("replay")

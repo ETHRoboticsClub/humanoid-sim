@@ -62,11 +62,30 @@ def asset_key(desc: Description, profile: dict, prepared: PreparedUrdf) -> str:
     return h.hexdigest()[:16]
 
 
+def default_give(desc: Description, profile: dict) -> tuple[str, ...]:
+    """The joints the profile gives give to in every asset of the robot (``model.joint_give``: joint names or regexes,
+    :func:`~humanoid_sim.transmissions.compliance.resolve_give`), in the description's order; empty when it names
+    none."""
+    patterns = profile["model"].get("joint_give") or []
+    if not patterns:
+        return ()
+    from humanoid_sim.transmissions.compliance import resolve_give
+
+    return resolve_give(desc, patterns)
+
+
+def _give(desc: Description, profile: dict, joint_give) -> tuple[str, ...]:
+    """``joint_give`` as given, or the profile's default (:func:`default_give`) for None."""
+    return default_give(desc, profile) if joint_give is None else tuple(joint_give)
+
+
 def asset_dir(desc: Description, profile: dict, out_root: Path, *, base_joints: bool = False,
-              ankle_compliance: bool = False, joint_give: tuple[str, ...] = ()) -> Path:
+              ankle_compliance: bool = False, joint_give: tuple[str, ...] | None = None) -> Path:
     """Directory of the asset for this description and profile (exists only once built). ``ankle_compliance``: the
     native USD variant with crank springs; ``joint_give``: with a give behind each named drive joint
-    (:mod:`humanoid_sim.transmissions.compliance`)."""
+    (:mod:`humanoid_sim.transmissions.compliance`); None (the default) gives the profile's ``model.joint_give``, an
+    empty tuple none."""
+    joint_give = _give(desc, profile, joint_give)
     if profile["model"].get("usd"):
         from humanoid_sim.model.usd import _checked_give
         from humanoid_sim.model.usd import asset_key as usd_key
@@ -172,8 +191,10 @@ def check_asset_robot(usd_path: Path, robot: str) -> None:
 
 def build_asset(desc: Description, profile: dict, out_root: Path, *, force: bool = False,
                 base_joints: bool = False, ankle_compliance: bool = False,
-                joint_give: tuple[str, ...] = ()) -> Path:
-    """Build (or reuse) the robot USD; returns its path. Writes ``asset.json`` with the provenance."""
+                joint_give: tuple[str, ...] | None = None) -> Path:
+    """Build (or reuse) the robot USD; returns its path. Writes ``asset.json`` with the provenance. ``joint_give``:
+    None (the default) gives the profile's ``model.joint_give``, an empty tuple none."""
+    joint_give = _give(desc, profile, joint_give)
     if profile["model"].get("usd"):
         from humanoid_sim.model.usd import build_asset as build_usd
 

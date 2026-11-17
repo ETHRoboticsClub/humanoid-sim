@@ -9,7 +9,14 @@ from pxr import Sdf, Usd, UsdPhysics
 
 from humanoid_sim.core import PlantCfg, PlantCore
 from humanoid_sim.devices.demand import DriveDemand
-from humanoid_sim.model.asset import asset_dir, asset_meta, build_asset, check_asset_robot, load_profile
+from humanoid_sim.model.asset import (
+    asset_dir,
+    asset_meta,
+    build_asset,
+    check_asset_robot,
+    give_springs,
+    load_profile,
+)
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.urdf import BASE_JOINTS
 from humanoid_sim.model.usd import crank_joints
@@ -57,7 +64,8 @@ def test_native_cranks_have_drive_stops_and_no_authored_controller(native):
     stage = Usd.Stage.Open(str(path))
     joints = {prim.GetName(): prim for prim in stage.Traverse() if prim.IsA(UsdPhysics.RevoluteJoint)}
     cranks = crank_joints(desc)
-    assert set(joints) == set(desc.joints) | set(cranks.values())
+    # The profile's joint give (test_joint_give.py) adds its give joints to every V1 asset.
+    assert set(joints) == set(desc.joints) | set(cranks.values()) | set(give_springs(path).values())
     for drive, name in cranks.items():
         joint = UsdPhysics.RevoluteJoint(joints[name])
         actual = (joint.GetLowerLimitAttr().Get(), joint.GetUpperLimitAttr().Get())
