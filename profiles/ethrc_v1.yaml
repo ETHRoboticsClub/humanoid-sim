@@ -121,9 +121,14 @@ physics:
     # that state through tree FK rather than re-solving it with regularized FK.
     use_fk_solver: false
     collapse_fixed_joints: true
-    # Keep the direct operator within int32 indexing at 4096 worlds. The plant
-    # checks actual contacts on device and stops rather than silently dropping any.
-    max_contacts_per_world: 144
+    # Kamino's dense operator holds every world's block of (its largest constraint count)^2 floats with int32
+    # offsets: worlds x rows^2 < 2^31 (4096 worlds: 724 rows). Contacts take 3 rows each of the budget, most of a
+    # world's rows (144 contacts: 432 of the rigid V1's 694; the hips' and knees' give adds 36 rows and failed at
+    # 4096). Kept contacts per world measured on 1024 worlds, 3000 to 4000 steps (runs/2026-11-17-kamino-diagnosis):
+    # standing and stepping 8 to 13, drives limp (gains x0.02) 19, limp and toppled at 4 rad/s 20. 96 is about 5x
+    # that: 550 rows rigid, 586 with the measured give, 658 with give on every candidate joint (4959 worlds). The
+    # plant checks kept contacts on device and stops rather than silently dropping any.
+    max_contacts_per_world: 96
     sparse_jacobian: true
     sparse_dynamics: false
     dynamics_solver: padmm
@@ -139,7 +144,11 @@ physics:
     padmm:
       rho_0: 0.05
       algorithm: bilateral_reduced
-      reduced_capacity: 96
+      # Non-bilateral rows the reduced path takes per world (bounded effort rows, limits, 3 per contact). A world
+      # past it sends the whole batch to the full PADMM: at 96 (the V1's 44 bounded rows leave room for 17 contacts)
+      # toppled robots fell back on 89 of 300 sampled steps, 405 s per 3000 steps on 1024 worlds; at 128, none,
+      # 96 s. Standing 4096 worlds cost 75.4 / 75.9 s per 1000 steps at 96, 84.9 at 128 (runs/2026-11-17-kamino-diagnosis).
+      reduced_capacity: 128
       reduced_ordering: rcm
       reduced_dynamic_pattern: true
       reduced_sparse_diagnostics: true

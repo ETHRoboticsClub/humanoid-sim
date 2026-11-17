@@ -202,8 +202,11 @@ def _per_joint(names, values):
     return {f"^{n}$": float(v) for n, v in zip(names, values, strict=True)}
 
 
-# The crank springs' solver effort limit: none in effect (a crank drive peaks at tens of N m).
-SPRING_EFFORT_LIMIT_NM = 1e4
+# The springs' (crank springs and joint give) solver effort limit: none. Kamino treats a limit at or above its sentinel
+# (newton kamino JOINT_TAUMAX, 1e6, Newton's default) as unbounded and carries the spring's PD in the joint's implicit
+# dynamics row; a finite one below it adds a bounded effort row per spring, which counts against the bilateral_reduced
+# path's capacity of non-bilateral rows (and 1e4 never bound: a crank drive peaks at tens of N m).
+SPRING_EFFORT_LIMIT_NM = 1e6
 
 
 def spring_gains(usd_path: Path, physics: dict) -> dict[str, tuple[float, float]]:
