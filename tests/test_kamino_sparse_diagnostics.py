@@ -13,7 +13,7 @@ def test_sparse_diagnostics_preserve_generic_dense_contract(mode):
     def fixture(candidate):
         model, problem = make()
         cfg = PADMMSolverConfig(
-            algorithm='bilateral_reduced', reduced_sparse_diagnostics=candidate,
+            algorithm='bilateral_reduced', reduced_sparse_diagnostics=candidate, reduced_original_diagnostics=True,
             max_iterations=100,
         )
         solver = PADMMSolver(model=model, config=cfg, use_graph_conditionals=True)
