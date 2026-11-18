@@ -154,6 +154,20 @@ def test_native_drive_torque_and_feedback_use_the_crank_shafts(native):
             assert props.effort_limit[index] == desc.drives[drive].effort_peak
 
 
+def test_the_scene_recorders_model_needs_no_joint_names_the_usd_lacks(native):
+    """The articulation names the linkage balls per axis ("Ball_40:0"); the USD names each ball joint once. The recorder takes meshes
+    from the model and poses from the articulation, so it builds the model without joint columns."""
+    pytest.importorskip("newton")
+    from humanoid_sim.model.kinematics import RobotKinematics
+    from humanoid_sim.signals.robot import RobotMeshes
+
+    desc, _, _, path = native
+    with pytest.raises(RuntimeError, match="USD lacks joints"):
+        RobotKinematics(path, [*desc.joints, "Ball_0:0"])
+    meshes = RobotMeshes(RobotKinematics(path, []).model)
+    assert meshes.shapes and meshes.body_names
+
+
 def test_native_reset_closes_rods_in_newton_forward_kinematics(native):
     pytest.importorskip("newton")
     from humanoid_sim.model.kinematics import RobotKinematics, _rotate
