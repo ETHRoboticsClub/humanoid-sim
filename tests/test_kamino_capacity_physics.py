@@ -65,6 +65,11 @@ def _variant(name):
     raise ValueError(name)
 
 
+# The most contacts per world the largest variant (give on every candidate joint) holds at 4096 envs: 370 other rows and
+# three per contact under the dense operator's 724.
+GIVE_ALL_CONTACTS_AT_TRAIN_SCALE = 118
+
+
 @pytest.mark.parametrize("variant", ["rigid", "default", "ankle_compliance", "give_measured", "give_all"])
 def test_every_v1_variant_fits_the_dense_operator_at_training_scale(variant):
     _cuda()
@@ -74,12 +79,24 @@ def test_every_v1_variant_fits_the_dense_operator_at_training_scale(variant):
     from humanoid_sim.physics.contact_capacity import kamino_constraint_rows
 
     usd, overrides = _variant(variant)
+    if variant == "give_all":  # a what-if variant, not the profile's asset: held to the contacts it can afford
+        overrides = {**overrides, "kamino": {"max_contacts_per_world": GIVE_ALL_CONTACTS_AT_TRAIN_SCALE}}
     _scene(2, usd, overrides)
     try:
         rows = kamino_constraint_rows(NewtonManager._solver)
     finally:
         sim_utils.SimulationContext.clear_instance()
     assert rows["max_worlds"] >= TRAIN_ENVS, f"{variant}: {rows}"
+
+
+def test_the_v1_profile_keeps_margin_under_the_dense_operator_bound():
+    """The profile's contact capacity leaves the shipped asset at least 10 % of worlds spare at 4096 envs."""
+    from humanoid_sim.model.asset import load_profile
+    from humanoid_sim.physics.contact_capacity import KAMINO_DENSE_LIMIT
+
+    contacts = load_profile("ethrc_v1")["physics"]["kamino"]["max_contacts_per_world"]
+    rows = 298 + 3 * contacts  # the shipped asset: 262 joint, limit and effort rows and 36 for the hips' and knees' give
+    assert KAMINO_DENSE_LIMIT // rows**2 >= 1.1 * TRAIN_ENVS, (contacts, rows)
 
 
 def test_the_v1_with_measured_joint_give_builds_and_steps_at_4096_envs():

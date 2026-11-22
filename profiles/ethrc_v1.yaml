@@ -138,10 +138,12 @@ physics:
     # offsets: worlds x rows^2 < 2^31 (4096 worlds: 724 rows). Contacts take 3 rows each of the budget, most of a
     # world's rows (144 contacts: 432 of the rigid V1's 694; the hips' and knees' give adds 36 rows and failed at
     # 4096). Kept contacts per world measured on 1024 worlds, 3000 to 4000 steps (runs/2026-11-17-kamino-diagnosis):
-    # standing and stepping 8 to 13, drives limp (gains x0.02) 19, limp and toppled at 4 rad/s 20. 96 is about 5x
-    # that: 550 rows rigid, 586 with the measured give, 658 with give on every candidate joint (4959 worlds). The
-    # plant checks kept contacts on device and stops rather than silently dropping any.
-    max_contacts_per_world: 96
+    # standing and stepping 8 to 13, drives limp (gains x0.02) 19, limp and toppled at 4 rad/s 20. 96 stopped the
+    # off-policy AMP walk (a thrashing early policy) within 26 iterations, so the capacity is 128: 646 rows rigid, 682
+    # with the measured give (the profile's asset, 4617 worlds), 754 with give on every candidate joint (3777 worlds:
+    # that variant needs 118 contacts or fewer at 4096). The plant checks kept contacts on device and stops rather
+    # than silently dropping any.
+    max_contacts_per_world: 128
     sparse_jacobian: true
     sparse_dynamics: false
     dynamics_solver: padmm
