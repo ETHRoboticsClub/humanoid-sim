@@ -626,9 +626,14 @@ class RobotPlant:
 
     def reset(self, env_ids: torch.Tensor, *, joint_pos: torch.Tensor | None = None,
               joint_vel: torch.Tensor | None = None, root_pose: torch.Tensor | None = None,
-              root_vel: torch.Tensor | None = None, demand: DriveDemand | None = None) -> None:
+              root_vel: torch.Tensor | None = None, demand: DriveDemand | None = None,
+              write_state: bool = True) -> None:
         """Reset ``env_ids``: state (description joint order; root pose xyzw, world), drives off (or
-        ``demand`` in force), sensors empty, device parameters redrawn."""
+        ``demand`` in force), sensors empty, device parameters redrawn. ``write_state=False`` leaves the joint state
+        to a caller that writes it (:meth:`write_joint_state`) after the reset, before physics resumes, from the
+        device parameters the reset draws: the native rods close once, at that pose, rather than also here."""
+        if not write_state and (joint_pos is not None or joint_vel is not None):
+            raise ValueError("reset: write_state=False writes no joint_pos or joint_vel")
         r = self.robot
         if root_pose is not None:
             r.write_root_pose_to_sim_index(root_pose=root_pose, env_ids=env_ids)
@@ -638,7 +643,8 @@ class RobotPlant:
             q0, qd0 = self.joint_state()
             q = q0[env_ids] if joint_pos is None else joint_pos
             qd = (qd0[env_ids] if joint_pos is None else torch.zeros_like(q)) if joint_vel is None else joint_vel
-            self.write_joint_state(env_ids, q, qd)
+            if write_state:
+                self.write_joint_state(env_ids, q, qd)
             self._targets[env_ids.unsqueeze(1), self.joint_ids.unsqueeze(0)] = q.to(self._targets.dtype)
         self.core.reset(env_ids, demand)
         self.randomizer.draw_reset(env_ids)
