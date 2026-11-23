@@ -9,7 +9,14 @@ from pxr import Sdf, Usd, UsdPhysics
 
 from humanoid_sim.core import PlantCfg, PlantCore
 from humanoid_sim.devices.demand import DriveDemand
-from humanoid_sim.model.asset import asset_dir, asset_meta, build_asset, check_asset_robot, load_profile
+from humanoid_sim.model.asset import (
+    asset_dir,
+    asset_meta,
+    build_asset,
+    check_asset_robot,
+    give_springs,
+    load_profile,
+)
 from humanoid_sim.model.description import Description
 from humanoid_sim.model.urdf import BASE_JOINTS
 from humanoid_sim.model.usd import crank_joints
@@ -57,7 +64,8 @@ def test_native_cranks_have_drive_stops_and_no_authored_controller(native):
     stage = Usd.Stage.Open(str(path))
     joints = {prim.GetName(): prim for prim in stage.Traverse() if prim.IsA(UsdPhysics.RevoluteJoint)}
     cranks = crank_joints(desc)
-    assert set(joints) == set(desc.joints) | set(cranks.values())
+    # The profile's joint give (test_joint_give.py) adds its give joints to every V1 asset.
+    assert set(joints) == set(desc.joints) | set(cranks.values()) | set(give_springs(path).values())
     for drive, name in cranks.items():
         joint = UsdPhysics.RevoluteJoint(joints[name])
         actual = (joint.GetLowerLimitAttr().Get(), joint.GetUpperLimitAttr().Get())
@@ -144,6 +152,20 @@ def test_native_drive_torque_and_feedback_use_the_crank_shafts(native):
             assert torque[0, index] == desc.drives[drive].sign * plant.last.applied[0, plant.map.drive_names.index(drive)]
             assert props.armature[index] > 0
             assert props.effort_limit[index] == desc.drives[drive].effort_peak
+
+
+def test_the_scene_recorders_model_needs_no_joint_names_the_usd_lacks(native):
+    """The articulation names the linkage balls per axis ("Ball_40:0"); the USD names each ball joint once. The recorder takes meshes
+    from the model and poses from the articulation, so it builds the model without joint columns."""
+    pytest.importorskip("newton")
+    from humanoid_sim.model.kinematics import RobotKinematics
+    from humanoid_sim.signals.robot import RobotMeshes
+
+    desc, _, _, path = native
+    with pytest.raises(RuntimeError, match="USD lacks joints"):
+        RobotKinematics(path, [*desc.joints, "Ball_0:0"])
+    meshes = RobotMeshes(RobotKinematics(path, []).model)
+    assert meshes.shapes and meshes.body_names
 
 
 def test_native_reset_closes_rods_in_newton_forward_kinematics(native):

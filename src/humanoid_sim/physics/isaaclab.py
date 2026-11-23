@@ -28,6 +28,7 @@ from humanoid_sim.physics.crank_stops import check_crank_stops
 from humanoid_sim.physics.joint_properties import JointProperties
 from humanoid_sim.physics.model_build import model_build
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.hulls import StaticHulls, add_room
 from humanoid_sim.world.objects import WorldObjects
 
 # Base-joint PD. Each joint carries the whole robot (a few kg m² about yaw, ~10 about pitch and roll at the
@@ -54,7 +55,7 @@ class IsaacLabCfg:
     solver: str = "mjwarp"
     settings: dict | None = None  # the solver's block of the profile's physics
     integrator: str | None = None  # overrides the solver block's
-    springs: dict | None = None  # crank spring joint -> (stiffness, damping), :func:`spring_gains`
+    springs: dict | None = None  # spring joint -> (stiffness, damping), :func:`compliance_gains`
     backlash: dict | None = None  # crank backlash joint -> play width (rad), :func:`backlash_widths`
     gravity_m_s2: tuple[float, float, float] | None = None  # None: Isaac Lab's default, Earth's
     fixed_base: bool = False
@@ -67,6 +68,9 @@ class IsaacLabCfg:
     extra_imus: dict | None = None  # more IMU sensors, scene name -> the URDF link each sits at
     contacts: bool = False  # a contact sensor on every body
     scene: StaticBoxes | None = None  # static boxes around the robot (every env's robot then starts at the origin)
+    # A room's convex collision pieces (world/hulls.py). With them the scene's boxes are drawn and traced by rays but
+    # do not collide; every env's robot starts at the origin as with boxes.
+    collision: StaticHulls | None = None
     # A heightfield terrain in place of the flat ground (an Isaac Lab TerrainImporterCfg, as training's
     # ``heightfield_terrain_cfg`` builds it): each env's robot starts at its tile's origin, ``base_height_m`` above it.
     terrain: object | None = None
@@ -203,8 +207,12 @@ def _per_joint(names, values):
     return {f"^{n}$": float(v) for n, v in zip(names, values, strict=True)}
 
 
-# The crank springs' and backlash joints' solver effort limit: none in effect (a crank drive peaks at tens of N m).
-SPRING_EFFORT_LIMIT_NM = 1e4
+# The springs' (crank springs and joint give) and the crank backlash joints' solver effort limit: none. Kamino treats a
+# limit at or above its sentinel (newton kamino JOINT_TAUMAX, 1e6, Newton's default) as unbounded and carries the
+# spring's PD in the joint's implicit dynamics row; a finite one below it adds a bounded effort row per spring, which
+# counts against the bilateral_reduced path's capacity of non-bilateral rows (and 1e4 never bound: a crank drive peaks
+# at tens of N m).
+SPRING_EFFORT_LIMIT_NM = 1e6
 
 
 def spring_gains(usd_path: Path, physics: dict) -> dict[str, tuple[float, float]]:
@@ -262,15 +270,48 @@ def write_backlash(robot, joint_ids: torch.Tensor, width_rad: torch.Tensor, env_
     robot.write_joint_position_limit_to_sim_index(limits=limits(width_rad.float()), joint_ids=joint_ids, **kwargs)
 
 
+def give_gains(usd_path: Path, physics: dict, desc) -> dict[str, tuple[float, float]]:
+    """``{give joint: (stiffness N m/rad, damping N m s/rad)}`` of the asset's joint give, per joint from the profile's
+    ``physics.joint_give`` (a number for every joint or a mapping by joint name; a joint the mapping omits, or a
+    ``null``, falls back to the description's ``give_stiffness_nm_per_rad`` and ``give_damping_nm_s_per_rad`` of that
+    joint); empty for an asset without give. Raises when the asset has give and neither source gives a positive value
+    for a joint."""
+    from humanoid_sim.model.asset import give_springs
+    from humanoid_sim.transmissions.compliance import give_joint
+
+    springs = give_springs(usd_path)
+    if not springs:
+        return {}
+    knobs = physics.get("joint_give") or {}
+
+    def value(key, joint, described):
+        v = knobs.get(key)
+        v = v.get(joint) if isinstance(v, dict) else v
+        v = described if v is None else v
+        if v is None or not math.isfinite(float(v)) or float(v) <= 0:
+            raise ValueError(f"{usd_path} has joint give: physics.joint_give.{key} or the description needs a positive "
+                             f"value for {joint}, not {v!r}")
+        return float(v)
+
+    return {give_joint(joint): (value("stiffness_nm_per_rad", joint, desc.joints[joint].give_stiffness),
+                                value("damping_nm_s_per_rad", joint, desc.joints[joint].give_damping))
+            for joint in springs}
+
+
+def compliance_gains(usd_path: Path, physics: dict, desc) -> dict[str, tuple[float, float]]:
+    """Every spring of the asset, crank springs (:func:`spring_gains`) and joint give (:func:`give_gains`), by joint."""
+    return {**spring_gains(usd_path, physics), **give_gains(usd_path, physics, desc)}
+
+
 def articulation_cfg(usd_path: Path, props: JointProperties, *, fixed_base: bool = False, base_joints: bool = False,
                      self_collision: bool = True, base_height_m: float = 1.0, contact_sensors: bool = False,
                      joint_pos: list[float] | None = None, springs: dict[str, tuple[float, float]] | None = None,
                      backlash: list[str] | None = None):
     """The robot as an Isaac Lab articulation: constant solver PD ``k0, d0`` and the description's passive
     properties per joint, initially at ``joint_pos`` (``props.names`` order; default: the standing pose); base
-    joints (if the asset has them) on a stiff PD; crank springs (``springs``, :func:`spring_gains`) as a PD to zero
-    with their own gains, at zero; crank backlash joints (``backlash``) free of any gain, at zero (their stops are
-    opened after spawn: :func:`write_backlash`)."""
+    joints (if the asset has them) on a stiff PD; springs (``springs``, :func:`compliance_gains`: crank springs and
+    joint give) as a PD to zero with their own gains, at zero; crank backlash joints (``backlash``) free of any gain,
+    at zero (their stops are opened after spawn: :func:`write_backlash`)."""
     import isaaclab.sim as sim_utils
     from isaaclab.actuators import ImplicitActuatorCfg
     from isaaclab.assets import ArticulationCfg
@@ -293,7 +334,7 @@ def articulation_cfg(usd_path: Path, props: JointProperties, *, fixed_base: bool
         joint_pos |= {f"^{n}$": 0.0 for n in names}
     if springs:
         names = list(springs)
-        actuators["ankle_compliance"] = ImplicitActuatorCfg(
+        actuators["springs"] = ImplicitActuatorCfg(
             joint_names_expr=[f"^{n}$" for n in names],
             stiffness=_per_joint(names, [springs[n][0] for n in names]),
             damping=_per_joint(names, [springs[n][1] for n in names]),
@@ -474,19 +515,18 @@ class IsaacLabRobot:
         class SceneCfg(InteractiveSceneCfg):
             pass
 
-        # The boxes are one set of shapes every env's world collides with, at the same coordinates.
-        spacing = 0.0 if cfg.scene is not None else cfg.env_spacing_m
+        # The boxes (or the convex pieces) are one set of shapes every env's world collides with, at the same
+        # coordinates.
+        room = cfg.scene is not None or cfg.collision is not None
+        spacing = 0.0 if room else cfg.env_spacing_m
         scene_cfg = SceneCfg(num_envs=cfg.num_envs, env_spacing=spacing, replicate_physics=True)
-        if cfg.terrain is not None and cfg.scene is not None:
+        if cfg.terrain is not None and room:
             raise ValueError("a scene's boxes stand on the flat ground: no terrain with them")
         if cfg.terrain is not None:
             scene_cfg.terrain = cfg.terrain
         else:
             scene_cfg.ground = ground_cfg(cfg.ground_friction)
-        if cfg.scene is not None:
-            from humanoid_sim.world.boxes import static_boxes_cfg
-
-            scene_cfg.static_boxes = static_boxes_cfg(cfg.scene.file, cfg.scene.spawn_m, friction=cfg.ground_friction)
+        add_room(scene_cfg, cfg.scene, cfg.collision, friction=cfg.ground_friction)
         from humanoid_sim.world.objects import add_objects
 
         add_objects(scene_cfg, cfg.objects)
@@ -583,6 +623,12 @@ class IsaacLabRobot:
         tc.set_position_index(value=target)
         tc.set_velocity_index(value=torch.zeros_like(target) if velocity is None else velocity)
         tc.set_effort_index(value=torch.zeros_like(target) if effort is None else effort)
+
+    def command_buffers(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """The solver's joint position, velocity and effort command buffers (the memory :meth:`set_targets` writes,
+        the same every step), so a captured graph can write the commands itself."""
+        tc = self.robot.actuators.target_command
+        return tc.position.torch, tc.velocity.torch, tc.effort.torch
 
     def apply_base_acceleration(self, acceleration_w: torch.Tensor) -> None:
         """Add -m*a at physical bodies' CoMs. Input is prevalidated [envs, 3].

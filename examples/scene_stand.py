@@ -31,6 +31,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--robot", default="ethrc_v1")
     p.add_argument("--scene", required=True, help="static boxes, an .npz as src/humanoid_sim/world/boxes.py describes")
+    p.add_argument("--collision", default=None, help="the room's convex collision pieces (world/hulls.py); the boxes "
+                   "then do not collide")
     p.add_argument("--spawn", nargs=2, type=float, default=(0.0, 0.0), metavar=("X", "Y"))
     p.add_argument("--seconds", type=float, default=4.0)
     p.add_argument("--fixed-base", action="store_true", help="weld the base where it starts, feet just above the floor")
@@ -51,16 +53,19 @@ def main() -> None:
     from humanoid_sim.signals.scene import SceneRecorder
     from humanoid_sim.sim import SimCore
     from humanoid_sim.world.boxes import StaticBoxes
+    from humanoid_sim.world.hulls import StaticHulls
     from humanoid_sim.world.scan import ScanFiles
 
     out = asset_dir(Description.load(args.robot), load_profile(args.robot), Path(args.assets))
     usd = out / json.loads((out / "asset.json").read_text())["usd"]
     scan = None if args.scan_mesh is None else ScanFiles.of(args.scan_mesh, args.scan_texture, args.scan_floor_texture)
     scene = StaticBoxes.load(args.scene, args.spawn, scan=scan)
-    print(json.dumps(scene.describe()))
+    collision = None if args.collision is None else StaticHulls.load(args.collision, args.spawn)
+    print(json.dumps({"scene": scene.describe(), "collision": None if collision is None else collision.describe()}))
     pose, height = initial_pose(usd, args.robot, "home")
     sim = SimCore(usd, device=args.device, robot=args.robot, base_height_m=height + STANDING_CLEARANCE_M,
-                  fixed_base=args.fixed_base, contacts=True, scene=scene)
+                  fixed_base=args.fixed_base, contacts=True, scene=scene,
+                  collision=collision)
     recorder = SceneRecorder(sim.backend, usd, rrd=args.rrd, app_id="humanoid-sim scene", scene=scene, draw=args.draw,
                              detail=args.detail, gantry=sim.gantry)
     try:

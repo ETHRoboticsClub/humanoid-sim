@@ -37,7 +37,9 @@ AXES = ("x", "y", "z")
 @dataclass(frozen=True)
 class Param:
     kind: str  # "physics" | "device"
-    target: str  # "body" | "joint" | "drive" | "crank" (ankle crank drives) | "env" | "axis" (the IMU's three axes)
+    # "body" | "joint" | "drive" | "crank" (ankle crank drives) | "give" (joints built with give) | "env" |
+    # "axis" (the IMU's three axes)
+    target: str
     width: int = 1  # values per target (3 for a CoM offset)
     unit: str = ""
     doc: str = ""
@@ -72,6 +74,13 @@ PARAMS: dict[str, Param] = {
                             doc="ankle crank backlash: width of the play between a crank drive's motor side and its "
                                 "output shaft, per crank (an asset built with ankle backlash); positive. Nominal: "
                                 "the profile's physics.ankle_backlash"),
+    "joint_give_stiffness": Param("physics", "give", unit="N m/rad",
+                                  doc="joint give: stiffness of the spring between a drive joint's encoder side and its "
+                                      "link, per joint (an asset built with joint give); positive. Nominal: the "
+                                      "profile's physics.joint_give, else the description's"),
+    "joint_give_damping": Param("physics", "give", unit="N m s/rad",
+                                doc="joint give: damping of that spring, per joint; positive. Nominal: the profile's "
+                                    "physics.joint_give, else the description's"),
     "drive_stiffness": Param("device", "drive", doc="drive's realized P gain over the demanded one"),
     "drive_damping": Param("device", "drive", doc="drive's realized D gain over the demanded one"),
     "torque_limit": Param("device", "drive", doc="scale of the torque-speed envelope and torque cap"),
@@ -84,7 +93,8 @@ PARAMS: dict[str, Param] = {
     "imu_drop_probability": Param("device", "env", doc="probability that an IMU sample is lost, in [0, 1]. Nominal: the sensor model's drop_probability (0 on the V1)"),
 }
 
-_SELECTORS = {"body": "bodies", "joint": "joints", "drive": "drives", "crank": "cranks", "shape": "shapes"}
+_SELECTORS = {"body": "bodies", "joint": "joints", "drive": "drives", "crank": "cranks", "give": "give_joints",
+              "shape": "shapes"}
 
 
 @dataclass(frozen=True)

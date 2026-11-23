@@ -169,7 +169,7 @@ def fixed_body_excludes(edges: list[tuple[str, str]]) -> list[tuple[str, str]]:
 
 
 def asset_key(desc, profile: dict, *, base_joints: bool = False, ankle_compliance: bool = False,
-              ankle_backlash: bool = False) -> str:
+              ankle_backlash: bool = False, joint_give: tuple[str, ...] = ()) -> str:
     record = {"schema": "humanoid-sim-native-usd/v6", "source": desc.usd_model.digest(),
               "description": desc.digest, "base_joints": base_joints,
               "actuators": hashlib.sha256(desc.actuators_path.read_bytes()).hexdigest(), "model": profile["model"],
@@ -181,11 +181,13 @@ def asset_key(desc, profile: dict, *, base_joints: bool = False, ankle_complianc
                                     "solref": profile["physics"]["mjwarp"]["ankle_backlash_solref"]}
         if ankle_compliance:  # the output flange's inertia: only an asset with both has a free flange
             record["ankle_backlash"]["output_inertia_kg_m2"] = output_inertia(profile)
+    if joint_give:  # likewise
+        record["joint_give"] = {"schema": GIVE_SCHEMA, "joints": sorted(joint_give)}
     return hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints=False,
-                ankle_compliance=False, ankle_backlash=False) -> Path:
+                ankle_compliance=False, ankle_backlash=False, joint_give: tuple[str, ...] = ()) -> Path:
     """Compose the delivered articulation and author simulator choices in a separate layer.
 
     Retain native crank bodies and all loop-closing joints. Weld only uncommanded
@@ -193,7 +195,8 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     With ``ankle_compliance``, the variant whose crank shafts each carry a spring between the drive's output and
     the crank arm (:func:`_author_crank_springs`); without it nothing of that is authored. With ``ankle_backlash``,
     the variant whose crank drives each turn a motor-side body with play to their output shaft
-    (:func:`_author_crank_backlash`), on its own or with the springs.
+    (:func:`_author_crank_backlash`), on its own or with the springs. ``joint_give``: a spring as for the cranks, for
+    the named drive joints, between the drive's output and the link (:func:`_author_joint_give`).
     """
     import shutil
 
@@ -205,8 +208,9 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     prune = profile["model"].get("prune_contained_hulls", False)
     if not isinstance(prune, bool):
         raise ValueError("prune_contained_hulls must be a boolean")
+    joint_give = _checked_give(desc, joint_give)
     key = asset_key(desc, profile, base_joints=base_joints, ankle_compliance=ankle_compliance,
-                    ankle_backlash=ankle_backlash)
+                    ankle_backlash=ankle_backlash, joint_give=joint_give)
     out = Path(out_root) / desc.robot / key
     meta_path = out / "asset.json"
     path = out / "robot.usda"
@@ -268,6 +272,7 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     springs = _author_crank_springs(desc, source, stage, mapped) if ankle_compliance else None
     # After the springs: the play sits on the motor side of the output flange they add.
     backlash = (_author_crank_backlash(desc, profile, source, stage, mapped) if ankle_backlash else None)
+    give = _author_joint_give(desc, source, stage, mapped, joint_give) if joint_give else None
 
     excluded = []
     fixed_pairs = []
@@ -276,7 +281,9 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
                  if name in welded or joint.GetPrim().IsA(UsdPhysics.FixedJoint)]
         fixed_pairs = fixed_body_excludes(fixed)
     contact_excludes = profile["model"].get("contact_excludes", [])
-    for a, b in sorted({tuple(sorted(pair)) for pair in [*fixed_pairs, *contact_excludes]}):
+    # The pair a give's joint kept apart before the output body came between them.
+    given = [] if give is None else list(give["adjacent_bodies"].values())
+    for a, b in sorted({tuple(sorted(pair)) for pair in [*fixed_pairs, *contact_excludes, *given]}):
         if a not in source.bodies or b not in source.bodies:
             raise ValueError(f"unknown native collision-exclusion bodies: {a}, {b}")
         pa, pb = mapped(source.bodies[a]), mapped(source.bodies[b])
@@ -327,6 +334,8 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
         meta["ankle_compliance"] = springs
     if backlash is not None:
         meta["ankle_backlash"] = backlash
+    if give is not None:
+        meta["joint_give"] = give
     meta_path.write_text(json.dumps(meta, indent=1))
     return path
 
@@ -503,6 +512,67 @@ def _author_crank_backlash(desc, profile: dict, source, stage, mapped) -> dict:
         gap.GetPrim().CreateAttribute("mjc:solreflimit", Sdf.ValueTypeNames.Float2).Set(solref)
         out["joints"][drive] = play
         out["motors"][drive] = motor_body(name)
+    return out
+
+
+GIVE_SCHEMA = "joint-give/v1"
+
+
+def _checked_give(desc, joint_give) -> tuple[str, ...]:
+    """``joint_give`` sorted, once checked: each name a joint a drive moves one to one."""
+    from humanoid_sim.transmissions.compliance import give_candidates
+
+    names = tuple(sorted(set(joint_give)))
+    bad = [n for n in names if n not in give_candidates(desc)]
+    if bad:
+        raise ValueError(f"joint give: {bad} cannot carry give; joints a drive moves one to one: "
+                         f"{give_candidates(desc)}")
+    return names
+
+
+def _author_joint_give(desc, source, stage, mapped, names: tuple[str, ...]) -> dict:
+    """Split each named drive joint into the drive's joint and the give. The joint keeps its name, limits, frames and
+    parent but turns a new output body (``<joint>_output``, a sibling of the link at the link's pose, mass on the axis);
+    a revolute joint ``<joint>_give`` on the same axis joins the output to the link, which keeps its other joints. At
+    zero give angle the assembly is the rigid one. The give's gains are joint gains set at spawn and by randomization
+    (:mod:`humanoid_sim.transmissions.compliance`). The output body is the one body between the two that were adjacent,
+    so that pair is returned to be excluded from contact as the joint did. Returns the asset metadata."""
+    from pxr import Gf, UsdGeom, UsdPhysics
+
+    from humanoid_sim.transmissions.compliance import give_joint, output_body
+
+    out = {"schema": GIVE_SCHEMA, "springs": {}, "outputs": {}, "adjacent_bodies": {}}
+    for name in names:
+        joint = source.joints[name]
+        if not joint.GetPrim().IsA(UsdPhysics.RevoluteJoint):
+            raise ValueError(f"joint give: {name} is not a revolute joint")
+        parent, link = source.joint_bodies(name)
+        link_prim = source.bodies[link]
+        target = mapped(link_prim).GetParentPath().AppendChild(output_body(name))
+        if stage.GetPrimAtPath(target):
+            raise ValueError(f"joint give: {target} already exists")
+        body = UsdGeom.Xform.Define(stage, target)
+        body.AddTransformOp().Set(UsdGeom.Xformable(link_prim).GetLocalTransformation())
+        UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
+        mass = UsdPhysics.MassAPI.Apply(body.GetPrim())
+        mass.CreateMassAttr(OUTPUT_MASS_KG)
+        mass.CreateDiagonalInertiaAttr(Gf.Vec3f(OUTPUT_INERTIA_KG_M2))
+        mass.CreateCenterOfMassAttr(Gf.Vec3f(*joint.GetLocalPos1Attr().Get()))
+        mass.CreatePrincipalAxesAttr(Gf.Quatf(1))
+        drive = UsdPhysics.RevoluteJoint(stage.GetPrimAtPath(mapped(joint.GetPrim())))
+        drive.GetBody1Rel().SetTargets([target])
+        hinge = UsdPhysics.RevoluteJoint.Define(stage,
+                                                mapped(joint.GetPrim()).GetParentPath().AppendChild(give_joint(name)))
+        hinge.CreateBody0Rel().SetTargets([target])
+        hinge.CreateBody1Rel().SetTargets([mapped(link_prim)])
+        hinge.CreateAxisAttr(UsdPhysics.RevoluteJoint(joint.GetPrim()).GetAxisAttr().Get())
+        for create in (hinge.CreateLocalPos0Attr, hinge.CreateLocalPos1Attr):
+            create(joint.GetLocalPos1Attr().Get())
+        for create in (hinge.CreateLocalRot0Attr, hinge.CreateLocalRot1Attr):
+            create(joint.GetLocalRot1Attr().Get())
+        out["springs"][name] = give_joint(name)
+        out["outputs"][name] = output_body(name)
+        out["adjacent_bodies"][name] = [parent, link]
     return out
 
 

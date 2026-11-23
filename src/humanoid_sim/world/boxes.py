@@ -182,14 +182,17 @@ def spawn_static_boxes(prim_path: str, cfg, translation=None, orientation=None, 
         cube.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Quatd(float(quat[i, 3]), *map(float, quat[i, :3])))
         cube.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*boxes.half[i]))
         cube.CreateDisplayColorAttr([Gf.Vec3f(*map(float, boxes.rgb[i]))])
-        UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
-        sim_utils.bind_physics_material(cube.GetPath(), material, stage=stage)
+        if cfg.collide:
+            UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+            sim_utils.bind_physics_material(cube.GetPath(), material, stage=stage)
     return root
 
 
-def static_boxes_cfg(file: str | Path, spawn_m: Sequence[float] = (0.0, 0.0), *, friction: float):
+def static_boxes_cfg(file: str | Path, spawn_m: Sequence[float] = (0.0, 0.0), *, friction: float,
+                     collide: bool = True):
     """The boxes in ``file`` (``spawn_m`` at the world origin) as an Isaac Lab scene entity at
-    :data:`STATIC_BOXES_PRIM`, every box with the ground's ``friction``."""
+    :data:`STATIC_BOXES_PRIM`, every box with the ground's ``friction``. Without ``collide`` they are on the stage for
+    rays and drawing only (a room whose collision comes from convex pieces, ``world/hulls.py``)."""
     from dataclasses import MISSING
 
     from isaaclab.assets import AssetBaseCfg
@@ -202,8 +205,10 @@ def static_boxes_cfg(file: str | Path, spawn_m: Sequence[float] = (0.0, 0.0), *,
         file: str = MISSING
         spawn_m: tuple[float, float] = (0.0, 0.0)
         friction: float = MISSING
+        collide: bool = True
 
-    spawn = StaticBoxesCfg(file=str(file), spawn_m=(float(spawn_m[0]), float(spawn_m[1])), friction=float(friction))
+    spawn = StaticBoxesCfg(file=str(file), spawn_m=(float(spawn_m[0]), float(spawn_m[1])), friction=float(friction),
+                           collide=bool(collide))
     return AssetBaseCfg(prim_path=STATIC_BOXES_PRIM, spawn=spawn)
 
 

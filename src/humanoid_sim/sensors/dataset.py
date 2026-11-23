@@ -7,8 +7,10 @@ Layout under the dataset directory (``humanoid-sim-sensor-dataset/v1``):
   its streams with their encoding, nominal rate, calibration (the camera feed descriptor's ``calibration``), mount and
   ``stage`` (what its rays could hit besides the room). ``passes`` lists each render that wrote to the directory: its
   sensors, render period and summary, ``complete`` only if it finished.
-* ``cameras/<camera_id>/<stream>/index.csv`` and ``<seq>.png``: ``seq,stamp_ns,file``. Mono is 8-bit grey, colour
-  8-bit RGB, depth 16-bit millimetres (0: no depth).
+* ``cameras/<camera_id>/<stream>/index.csv`` and ``<seq>.png``: ``seq,stamp_ns,file,arrival_ns``. ``arrival_ns`` is
+  when the frame reaches the robot's stack: its stamp unless the render modeled a latency (``sensors/delivery.py``);
+  a frame lost on its way is not written. Mono is 8-bit grey, colour 8-bit RGB, depth 16-bit millimetres (0: no
+  depth).
 * ``lidars/<name>/index.csv`` and ``<seq>.npz``: one sweep each: ``points_m`` ``[N, 3]`` in the sensor frame in firing
   order (zero where a ray did not return), ``hit``, ``time_s`` (each ray after the sweep start), ``start_ns`` and
   ``origin_w`` / ``rotation_w``: the sensor's world pose at the render that completed the sweep, so at the sweep's END
@@ -29,6 +31,7 @@ from pathlib import Path
 import numpy as np
 
 SCHEMA = "humanoid-sim-sensor-dataset/v1"
+CAMERA_COLUMNS = ("arrival_ns",)  # after seq, stamp_ns and file in a camera's index
 
 
 def png_bytes(image: np.ndarray) -> bytes:
@@ -53,20 +56,23 @@ def png_bytes(image: np.ndarray) -> bytes:
 
 
 class _Index:
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, extra: tuple[str, ...] = ()):
         directory.mkdir(parents=True, exist_ok=True)
         for stale in directory.glob("[0-9]*.*"):  # frames of an earlier, longer render of this stream
             stale.unlink()
         self.dir = directory
         self._file = open(directory / "index.csv", "w", newline="")
         self._csv = csv.writer(self._file)
-        self._csv.writerow(["seq", "stamp_ns", "file"])
+        self._csv.writerow(["seq", "stamp_ns", "file", *extra])
+        self.extra = extra
         self.count = 0
 
-    def add(self, stamp_ns: int, suffix: str, payload: bytes) -> None:
+    def add(self, stamp_ns: int, suffix: str, payload: bytes, *values: int) -> None:
+        if len(values) != len(self.extra):
+            raise ValueError(f"expected values for {self.extra}, got {values}")
         name = f"{self.count:06d}.{suffix}"
         (self.dir / name).write_bytes(payload)
-        self._csv.writerow([self.count, int(stamp_ns), name])
+        self._csv.writerow([self.count, int(stamp_ns), name, *(int(v) for v in values)])
         self.count += 1
 
     def close(self) -> None:
@@ -99,7 +105,7 @@ class DatasetWriter:
     def _index(self, kind: str, *parts: str) -> _Index:
         key = (kind, *parts)
         if key not in self._indexes:
-            self._indexes[key] = _Index(self.root.joinpath(kind, *parts))
+            self._indexes[key] = _Index(self.root.joinpath(kind, *parts), CAMERA_COLUMNS if kind == "cameras" else ())
         return self._indexes[key]
 
     def begin_pass(self, record: dict) -> None:
@@ -117,8 +123,13 @@ class DatasetWriter:
     def describe_lidar(self, name: str, record: dict) -> None:
         self.manifest["lidars"][name] = record
 
-    def camera_frame(self, camera_id: str, stream: str, stamp_ns: int, image: np.ndarray) -> None:
-        self._index("cameras", camera_id, stream).add(stamp_ns, "png", png_bytes(image))
+    def camera_frame(self, camera_id: str, stream: str, stamp_ns: int, image: np.ndarray,
+                     arrival_ns: int | None = None) -> None:
+        """A frame exposed at ``stamp_ns`` that reaches the robot's stack at ``arrival_ns`` (default: then)."""
+        arrival = stamp_ns if arrival_ns is None else arrival_ns
+        if arrival < stamp_ns:
+            raise ValueError(f"{camera_id}/{stream}: arrival {arrival} ns before the exposure {stamp_ns} ns")
+        self._index("cameras", camera_id, stream).add(stamp_ns, "png", png_bytes(image), arrival)
 
     def lidar_sweep(self, name: str, sweep) -> None:
         import io

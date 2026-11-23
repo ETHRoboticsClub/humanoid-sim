@@ -9,6 +9,8 @@
 * ``static_boxes``: with ``scene`` (:class:`~humanoid_sim.world.boxes.StaticBoxes`), a room's walls and furniture
   as static boxes that every env collides with. Every env's robot then starts at the world origin, the scene's
   spawn point (each env is its own solver world, so robots at one spot never touch).
+* ``static_hulls``: with ``collision`` (:class:`~humanoid_sim.world.hulls.StaticHulls`), the room's collision as
+  convex pieces fitted to its scan; the boxes then stay for rays and drawing and do not collide.
 * ``moving_objects`` and ``free_objects``: with ``objects`` (:class:`~humanoid_sim.world.objects.WorldObjects`), bodies
   on scripted paths and bodies the robot can push, one set per env, in the env's frame. Drive the moving ones with
   :class:`~humanoid_sim.world.objects.ObjectsDriver` (``update(plant.t_ns)`` before each physics step).
@@ -44,6 +46,7 @@ from humanoid_sim.model.poses import POSES, STANDING_CLEARANCE_M, initial_pose
 from humanoid_sim.physics.isaaclab import contact_sensor_cfg, imu_sensor_cfg
 from humanoid_sim.physics.joint_properties import JointProperties
 from humanoid_sim.world.boxes import StaticBoxes
+from humanoid_sim.world.hulls import StaticHulls, add_room
 from humanoid_sim.world.objects import WorldObjects
 
 __all__ = ["POSES", "STANDING_CLEARANCE_M", "initial_pose", "plant_joint_properties", "robot_build", "robot_scene_cfg",
@@ -82,24 +85,27 @@ def initial_joint_positions(desc, pose: dict[str, float]) -> dict[str, float]:
 def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_spacing: float | None = None,
                     terrain=None, ground_friction: float | None = None, imu: bool = True, contacts: bool = True,
                     self_collision: bool | None = None, pose: str = "home", scene: StaticBoxes | None = None,
-                    objects: WorldObjects | None = None, physics_overrides: dict | None = None):
+                    objects: WorldObjects | None = None, physics_overrides: dict | None = None,
+                    collision: StaticHulls | None = None):
     """Scene config with the robot, its sensors and the ground (or ``terrain``, an Isaac Lab
-    ``TerrainImporterCfg``), the robot on its feet in ``pose`` (see :data:`POSES`), ``scene``'s static boxes and
-    ``objects`` (moving and free bodies, none by default).
+    ``TerrainImporterCfg``), the robot on its feet in ``pose`` (see :data:`POSES`), ``scene``'s static boxes, a
+    room's convex ``collision`` pieces (the boxes then do not collide) and ``objects`` (moving and free bodies, none
+    by default).
     With robot friction randomized, pass ``ground_friction=0``: the solver takes the larger friction of the two
-    shapes in contact; the boxes take the ground's friction. ``env_spacing`` defaults to 2.5 m, and to 0 with a
-    ``scene``, which allows no other and no ``terrain``."""
+    shapes in contact; the boxes and pieces take the ground's friction. ``env_spacing`` defaults to 2.5 m, and to 0
+    with a ``scene`` or ``collision``, which allow no other and no ``terrain``."""
     from isaaclab.scene import InteractiveSceneCfg
     from isaaclab.utils import configclass
 
-    from humanoid_sim.physics.isaaclab import articulation_cfg, backlash_widths, ground_cfg, spring_gains
+    from humanoid_sim.physics.isaaclab import articulation_cfg, backlash_widths, compliance_gains, ground_cfg
 
     check_asset_robot(usd, robot)
-    if scene is not None and terrain is not None:
+    room = scene is not None or collision is not None
+    if room and terrain is not None:
         raise ValueError("a scene's boxes stand on the flat ground: no terrain with them")
-    if scene is not None and env_spacing not in (None, 0.0):
+    if room and env_spacing not in (None, 0.0):
         raise ValueError("a scene's robots start at its spawn point, the world origin: env_spacing 0")
-    env_spacing = (0.0 if scene is not None else 2.5) if env_spacing is None else env_spacing
+    env_spacing = (0.0 if room else 2.5) if env_spacing is None else env_spacing
     profile = load_profile(robot, physics_overrides=physics_overrides)
     q, height = initial_pose(usd, robot, pose)
     props = plant_joint_properties(robot)
@@ -110,7 +116,8 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
     class RobotSceneCfg(InteractiveSceneCfg):
         pass
 
-    springs = spring_gains(usd, profile["physics"])  # crank springs of an asset built with ankle compliance
+    # Crank springs and joint give of an asset built with them
+    springs = compliance_gains(usd, profile["physics"], Description.load(robot))
     # Crank backlash joints of an asset built with ankle backlash (their widths checked here): spawned closed, opened
     # by the plant to physics.ankle_backlash.
     backlash = list(backlash_widths(usd, profile["physics"]))
@@ -126,10 +133,7 @@ def robot_scene_cfg(num_envs: int, usd: Path, *, robot: str = "ethrc_v1", env_sp
         cfg.terrain = terrain
     else:
         cfg.ground = ground_cfg(friction)
-    if scene is not None:
-        from humanoid_sim.world.boxes import static_boxes_cfg
-
-        cfg.static_boxes = static_boxes_cfg(scene.file, scene.spawn_m, friction=friction)
+    add_room(cfg, scene, collision, friction=friction)
     from humanoid_sim.world.objects import add_objects
 
     add_objects(cfg, objects)

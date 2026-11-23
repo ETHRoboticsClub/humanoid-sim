@@ -56,7 +56,7 @@ A hash of the description files. The runtime segment carries it so a client can 
 
 ### Disturbance
 
-An external force or torque applied for a while: a push on a body (`ForcePush` in training, `APPLY_DISTURBANCE` in the runtime) or a torque on one joint outside the drive's feedback.
+An external force or torque applied for a while: a push on a body (`ForcePush` in training, `APPLY_DISTURBANCE` in the runtime) or a torque on one joint outside the drive's feedback (`JointTorquePerturbation` in training).
 
 ### Domain randomization
 

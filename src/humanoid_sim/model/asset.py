@@ -62,25 +62,48 @@ def asset_key(desc: Description, profile: dict, prepared: PreparedUrdf) -> str:
     return h.hexdigest()[:16]
 
 
+def default_give(desc: Description, profile: dict) -> tuple[str, ...]:
+    """The joints the profile gives give to in every asset of the robot (``model.joint_give``: joint names or regexes,
+    :func:`~humanoid_sim.transmissions.compliance.resolve_give`), in the description's order; empty when it names
+    none."""
+    patterns = profile["model"].get("joint_give") or []
+    if not patterns:
+        return ()
+    from humanoid_sim.transmissions.compliance import resolve_give
+
+    return resolve_give(desc, patterns)
+
+
+def _give(desc: Description, profile: dict, joint_give) -> tuple[str, ...]:
+    """``joint_give`` as given, or the profile's default (:func:`default_give`) for None."""
+    return default_give(desc, profile) if joint_give is None else tuple(joint_give)
+
+
 def asset_dir(desc: Description, profile: dict, out_root: Path, *, base_joints: bool = False,
-              ankle_compliance: bool = False, ankle_backlash: bool = False) -> Path:
+              ankle_compliance: bool = False, ankle_backlash: bool = False,
+              joint_give: tuple[str, ...] | None = None) -> Path:
     """Directory of the asset for this description and profile (exists only once built). ``ankle_compliance``: the
-    native USD variant with crank springs (:mod:`humanoid_sim.transmissions.compliance`); ``ankle_backlash``: with
-    gearbox play at each crank (:mod:`humanoid_sim.transmissions.backlash`)."""
+    native USD variant with crank springs; ``ankle_backlash``: with gearbox play at each crank
+    (:mod:`humanoid_sim.transmissions.backlash`); ``joint_give``: with a give behind each named drive joint
+    (:mod:`humanoid_sim.transmissions.compliance`); None (the default) gives the profile's ``model.joint_give``, an
+    empty tuple none."""
+    joint_give = _give(desc, profile, joint_give)
     if profile["model"].get("usd"):
+        from humanoid_sim.model.usd import _checked_give
         from humanoid_sim.model.usd import asset_key as usd_key
 
         return Path(out_root) / desc.robot / usd_key(desc, profile, base_joints=base_joints,
                                                      ankle_compliance=ankle_compliance,
-                                                     ankle_backlash=ankle_backlash)
-    _no_compliance(ankle_compliance, ankle_backlash)
+                                                     ankle_backlash=ankle_backlash,
+                                                     joint_give=_checked_give(desc, joint_give))
+    _no_compliance(ankle_compliance, joint_give, ankle_backlash)
     prepared = PreparedUrdf(desc, profile).build(base_joints=base_joints)
     return Path(out_root) / desc.robot / asset_key(desc, profile, prepared)
 
 
-def _no_compliance(ankle_compliance: bool, ankle_backlash: bool = False) -> None:
-    if ankle_compliance:
-        raise ValueError("ankle compliance needs the native ankle (a profile with model.usd)")
+def _no_compliance(ankle_compliance: bool, joint_give=(), ankle_backlash: bool = False) -> None:
+    if ankle_compliance or joint_give:
+        raise ValueError("ankle compliance and joint give need the native USD (a profile with model.usd)")
     if ankle_backlash:
         raise ValueError("ankle backlash needs the native ankle (a profile with model.usd)")
 
@@ -112,6 +135,16 @@ def backlash_output_inertia(usd_path: Path) -> float | None:
     except FileNotFoundError:
         return None
     return (meta.get("ankle_backlash") or {}).get("output_inertia_kg_m2")
+
+
+def give_springs(usd_path: Path) -> dict[str, str]:
+    """``{joint: give joint}`` of the built asset at ``usd_path`` (:mod:`humanoid_sim.transmissions.compliance`); empty
+    for an asset without give or a USD outside a built asset."""
+    try:
+        meta = asset_meta(usd_path)
+    except FileNotFoundError:
+        return {}
+    return dict((meta.get("joint_give") or {}).get("springs", {}))
 
 
 def _body_prims(stage):
@@ -181,14 +214,17 @@ def check_asset_robot(usd_path: Path, robot: str) -> None:
 
 
 def build_asset(desc: Description, profile: dict, out_root: Path, *, force: bool = False,
-                base_joints: bool = False, ankle_compliance: bool = False, ankle_backlash: bool = False) -> Path:
-    """Build (or reuse) the robot USD; returns its path. Writes ``asset.json`` with the provenance."""
+                base_joints: bool = False, ankle_compliance: bool = False, ankle_backlash: bool = False,
+                joint_give: tuple[str, ...] | None = None) -> Path:
+    """Build (or reuse) the robot USD; returns its path. Writes ``asset.json`` with the provenance. ``joint_give``:
+    None (the default) gives the profile's ``model.joint_give``, an empty tuple none."""
+    joint_give = _give(desc, profile, joint_give)
     if profile["model"].get("usd"):
         from humanoid_sim.model.usd import build_asset as build_usd
 
         return build_usd(desc, profile, out_root, force=force, base_joints=base_joints,
-                         ankle_compliance=ankle_compliance, ankle_backlash=ankle_backlash)
-    _no_compliance(ankle_compliance, ankle_backlash)
+                         ankle_compliance=ankle_compliance, ankle_backlash=ankle_backlash, joint_give=joint_give)
+    _no_compliance(ankle_compliance, joint_give, ankle_backlash)
     prepared = PreparedUrdf(desc, profile).build(base_joints=base_joints)
     key = asset_key(desc, profile, prepared)
     out = Path(out_root) / desc.robot / key

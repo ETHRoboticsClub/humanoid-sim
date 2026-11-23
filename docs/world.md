@@ -265,6 +265,74 @@ Measured on one L40S with the hangar's 470 boxes and every robot at the spawn po
 
 The hangar costs nothing in the runtime, and in training about a quarter more physics time per step for the V1 (two fifths for the G1, which has more shapes). With the plant's work around the physics, the whole step of 16,384 V1s grows from 7.5 to 8.9 ms.
 
+## Collision from the scan (convex pieces)
+
+A room can collide as convex pieces fitted to its scan instead of as its boxes. The boxes enclose the furniture by up to tens of centimetres and leave out what has no box (the gantry's posts); the pieces follow the scan. Convex shapes collide on both solvers, as boxes and the robot's own hulls do, where the scan's triangles would not ([Triangle-mesh terrain](#triangle-mesh-terrain)). The pieces stand on the flat ground, which stays the walking surface, as the boxes do. The code is in `src/humanoid_sim/world/hulls.py`.
+
+### The file
+
+An `.npz` in metres, z up, the floor at z = 0, in the scan's frame:
+
+| Array | Shape | Meaning |
+|---|---|---|
+| `points` | `[P, 3]` | Every piece's points, piece after piece; a piece is the convex hull of its points |
+| `counts` | `[N]` | Points per piece, at least 4 |
+| `rgb` | `[N, 3]`, optional | Colour in [0, 1], for drawing |
+
+`StaticHulls.load(path, spawn_m)` places the pieces as `StaticBoxes.load` places boxes (moved by `-spawn_m`) and refuses a git-lfs pointer, mismatched shapes, non-finite values and a piece thinner than 1 cm (`MIN_THICKNESS_M`: MuJoCo refuses to compile a sheet). In a scene each piece is a USD `Mesh` with the collision API and the `convexHull` approximation under `/World/StaticHulls`, outside the env namespace, so every env's world collides with one set of pieces and every env's robot starts at the spawn point.
+
+### In a scene
+
+The pieces come with the room's boxes or alone. With both, the pieces collide and the boxes stay on the stage without the collision API, for the lidar's walls ([rtx-sensors.md](rtx-sensors.md#what-each-sensor-sees-of-a-scanned-room)) and for drawing; the two must have the same spawn point. The pieces are hidden from every camera and lidar ray: the sensors see the splat and the scan.
+
+| Front end | How |
+|---|---|
+| Training | `robot_scene_cfg(n, usd, scene=boxes, collision=StaticHulls.load(path, spawn_m))`, the same rules as boxes (no terrain, `env_spacing` 0) |
+| `SimCore` | `SimCore(usd, ..., scene=boxes, collision=hulls)` |
+| Runtime | `humanoid-sim serve ... --scene BOXES --collision PIECES --spawn X Y`. A spawn point inside a piece's footprint is refused. The descriptor's `collision` names the file, its SHA-256, the number of pieces, the spawn point and its clearance. |
+| Benchmarks | `humanoid-sim bench ... --scene BOXES --collision PIECES --spawn X Y` |
+| RTX sensors | `SessionCfg(scene=..., collision=...)` |
+
+### Fitting the pieces to a scan
+
+`spikes/hangar_collision/decompose.py` builds a pieces file from a scan OBJ:
+
+1. It drops what lies entirely below 15 cm (`--low-m`): the floor's reconstruction noise and objects a foot steps over. Thickened into pieces they become slabs a foot catches on, which is why Controls replaced its first convex hulls of the hangar with boxes. It also drops what lies above 2.5 m and what is in the crop boxes of `examples/hangar_crane_parts.json`: the crane's moving parts, and the robot the scan caught hanging in the gantry (its `drop` box, taken down to the floor).
+2. It samples the triangles into a 5 cm voxel grid, thickens it by one voxel and fills enclosed holes (the scan's walls have no thickness), and extends every column that crosses 15 cm straight down to the floor, so walls and furniture legs stand on it without leaving a slab around them.
+3. It cuts the solid into square tiles, decomposes each tile's connected solids with [CoACD](https://github.com/SarahWeiii/CoACD), and drops any piece thinner than 1 cm or whose top is below 20 cm.
+4. It reports the same figures for the room's boxes.
+
+```bash
+uv run --with coacd --with trimesh --with scipy --with scikit-image python spikes/hangar_collision/decompose.py   $H/hangar_visual.obj $H/hangar_proxy.npz --drop examples/hangar_crane_parts.json --min-voxels 64 --tile-m 6   --threshold 0.4 --max-hull-vertices 32 --out hangar_hulls.npz
+```
+
+For Controls' hangar, against its 470 boxes (scan content above 15 cm):
+
+| | Pieces | Thinnest | Scan within 3 cm of a shape | Shape surface over 30 cm from the scan | Shapes under 15 cm on open floor |
+|---|---|---|---|---|---|
+| The boxes | 469 | 10 cm | 81.2 % | 52 % | 0 |
+| CoACD 0.5, 6 m tiles | 195 | 5 cm | 99.8 % | 28 % | 0 |
+| CoACD 0.4, 6 m tiles | 269 | 5 cm | 99.8 % | 23 % | 0 |
+
+The first figure is coverage (how much of the scan a robot would collide with), the second the phantom (collision with nothing scanned near it); both are measured on 200k scan vertices and on points sampled over the shapes above 15 cm. The one-voxel thickening puts every piece about 5 cm proud of the scan. `spikes/hangar_collision/low_pieces.py` lists a file's shapes whose top is under 15 cm and those on open floor (outside every box), and `spikes/hangar_collision/view.py` writes a Rerun recording of the scan, the pieces (the low ones in red) and the boxes. Before the 15 cm rule, a fit of 235 pieces had 43 slabs 14 cm high on 12 m² of open floor, made from scan bumps a few centimetres high.
+
+The cost is that nothing under 15 cm collides, as with the boxes, and an object that rests on the floor with a gap under it (a table) is collided from its top down to the floor only where it crosses 15 cm. The 269-piece fit is 1.6 m from `HANGAR_SPAWN`, (-4.42, 3.48), and 0.36 m from Controls' spawn point under the gantry, (-7.24, -2.85).
+
+### What the pieces cost
+
+Physics step time on one L4 (MJWarp, `spikes/hangar_collision/step_time.py`: every V1 at `HANGAR_SPAWN` holding its home pose, the boxes on the stage in every case with them). The 235, 600 and 2632 pieces are fits made before the 15 cm rule; the 269-piece fit was measured on another L4, with the no-room and boxes cases again, in brackets:
+
+| Robots | No room | The 470 boxes | 269 pieces (15 cm rule) | 235 pieces | 600 pieces | 2632 pieces |
+|---|---|---|---|---|---|---|
+| 1 V1, runtime host's whole step | 2.53 ms | 2.61 ms | | 2.62 ms | | 2.64 ms |
+| 1024 V1 | 7.98 ms (8.00) | 11.68 ms (11.70) | (9.95 ms) | 9.80 ms | 12.40 ms | out of GPU memory |
+
+The broadphase tests every robot shape against every static shape in every world, so the cost grows with the pieces times the envs: 235 pieces cost less than the 470 boxes, 600 about as much, and 2632 do not fit an L4's 24 GB at 1024 envs. At 4096 envs the L4 runs out of memory with the boxes as well (the boxes' figures at 4096 and 16384 envs above are an L40S's). A room's fit for training should stay in the low hundreds of pieces; the runtime's single robot does not notice the count.
+
+### Solver support
+
+`tests/test_mesh_terrain.py` stands the V1 (and the G1 on MJWarp) on the same pyramid of stairs as convex pieces, on the platform, on a lower ring and at the platform's edge, and lands the V1 on it from 0.3 m. On an L4 every piece case passed on MJWarp and on Kamino, as the boxes cases do; the triangle-mesh cases on MJWarp are the expected failures.
+
 ## Moving and free objects
 
 Two kinds of primitive body (box, capsule or cylinder) join the scene besides the static boxes. A moving object is kinematic: it follows a path you give, the solver treats it as immovable, so it pushes the robot and nothing pushes it back. People, a tug and a cart are moving objects. A free object is a dynamic rigid body with a mass and a friction that the robot can push. Both collide with the robot and the ground, and they are USD prims on the stage, so the RTX cameras and lidars see them where the physics has them ([rtx-sensors.md](rtx-sensors.md)). There are none by default. The code is in `src/humanoid_sim/world/objects.py`.
@@ -483,7 +551,36 @@ class PushedPoseOffsets(PoseOffsets):  # PoseOffsets from training.md, "A minima
         self.push.reset(torch.as_tensor(env_ids, device=self.device, dtype=torch.long), self.plant.t_ns)
 ```
 
-`Component171_1` is the upper body, the body above the waist yaw joint. Body names are the merged URDF link names described in [robot-model.md](robot-model.md). They come from the CAD export and can mislead: the right foot is `bottom_universal_joint_l_1` (it hangs from `foot_roll_r`).
+`hej90_hip_abduction_1` is the upper body's lower part, the body below the torso lateral bending joint. Body names are the merged URDF link names described in [robot-model.md](robot-model.md). They come from the CAD export and can mislead: the right foot is `bottom_universal_joint_l_1` (it hangs from `ankle_inversion_r`).
+
+### Joint torque perturbations in training
+
+`JointTorquePerturbation` (`src/humanoid_sim/world/disturbances.py`) holds a random torque on each selected revolute joint, as a robustness randomization. Per env and joint the torque is piecewise constant: uniform in `[-level * max_nm, +level * max_nm]`, held for a time uniform in `hold_s` (drawn in integer nanoseconds), then drawn again. Each draw is zero with probability `1 - active_share`. Every value is the caller's: the sim picks none.
+
+The torque `+tau` is applied about the joint's axis in the world frame, on the joint's child link, and `-tau` on its parent link, so it is a pure joint torque and the net external wrench on the robot is zero. The axis comes from the running Newton model (the joint's axis and its frame in the child body, turned by the child link's pose). The drives do not see it, and the joint's own limits, friction and give act as usual. It reaches the solver through the articulation's permanent wrench composer, so it stays applied between calls and runs on the device without host syncs.
+
+| Call | Meaning |
+|---|---|
+| `JointTorquePerturbation(robot, joints, *, max_nm, hold_s, active_share, level=1.0, seed=0)` | `joints`: a joint name or regex (full match), or a list of them, in the order given; revolute joints only. `max_nm`: one number, or one per selected joint in the order of `joint_names`. `hold_s`: `(low, high)` in s, `0 < low <= high`. `active_share`: the probability that a draw is not zero. `level`: a float or an `[E]` tensor, applied to draws made from then on |
+| `reset(env_ids, t_ns)` | Zero torque for these envs; their next draw is due at `t_ns`, so the next `step` draws afresh |
+| `step(t_ns)` | Draw for the joints whose hold has ended and write the torques; once per physics step or once per policy step |
+| `torque_nm` | `[E, J]` the torque being applied, N m, for logging and critics |
+| `joint_names` | The selected joints, the order of `torque_nm`'s columns |
+
+`max_nm` is not derived here. A caller that wants a share of each drive's peak reads the peaks from the description and passes `share * peak`. Calling `step` in `apply_actions` times the draws to the 4 ms physics step, in `process_actions` to the policy step, as for `ForcePush`.
+
+```python
+from humanoid_sim.world.disturbances import JointTorquePerturbation
+
+self.perturbation = JointTorquePerturbation(self._asset, ["knee_flexion_.*", "hip_flexion_.*"], max_nm=peaks * 0.2,
+                                            hold_s=(0.2, 0.8), active_share=0.5, level=0.5, seed=2)
+self.perturbation.reset(torch.arange(self.num_envs, device=self.device), self.plant.t_ns)
+# every step: self.perturbation.step(self.plant.t_ns); on a reset: self.perturbation.reset(env_ids, self.plant.t_ns)
+```
+
+The composer's `set_forces_and_torques_index` zeroes every body of the envs it is given before it writes, so two disturbances that each set their own wrench would erase each other. `ForcePush` and `JointTorquePerturbation` therefore each keep their wrench in a slot of the articulation's `WrenchMixer` (`wrench_mixer(robot)`), and every step writes the sum over slots on every body any of them touches. A push on a body that is also a parent or child of a perturbed joint adds to the joint's torque, in either order of the two `step` calls, and two pushes add. Other bodies of the composer are left as they are. Something else that sets the permanent composer on these bodies still replaces the sum until the next `step`.
+
+`plant.core.external_torque` (next section) is the other way to load a joint: it adds to the drive's torque inside the solver step, in joint space, with the caller writing every value. The perturbation is the randomized process, with its own holds, share and level, applied as link wrenches.
 
 ### Joint torques in training
 
@@ -500,7 +597,7 @@ A `RESET` command clears all active disturbances. Faults (`INJECT_FAULT`: encode
 
 ## What is not modeled
 
-- A room collides as boxes only. Its scan is drawn as a textured mesh but never collided (a mesh collides as terrain on Kamino, but the scan has not been tried), the Gaussian splat of the hangar is drawn only by the RTX cameras ([rtx-sensors.md](rtx-sensors.md)), and there are no other static shapes (cylinders, meshes).
+- A room collides as boxes or as convex pieces fitted to its scan ([Collision from the scan](#collision-from-the-scan-convex-pieces)); its scan's triangles are drawn and traced by the lidar but never collided, and the Gaussian splat of the hangar is drawn only by the RTX cameras ([rtx-sensors.md](rtx-sensors.md)). A piece is about 5 cm proud of the scan, nothing under 15 cm collides, and pieces stand on the flat ground: the scan's floor is not collided.
 - Objects are primitive shapes: no meshes, and a moving object's orientation is a yaw. A moving object is kinematic, so it never yields to the robot. Free objects have a constant mass and friction per scene (not per env), and replays of captures have no option for objects (a capture has none).
 - Static boxes stand on the flat ground; they cannot be combined with a heightfield terrain, and every environment of a scene with boxes starts at the spawn point.
 - Mesh terrain (stairs with vertical risers, edged ramps) collides on Kamino only; on MJWarp the V1 falls through it, so stairs there are static boxes on the flat ground.

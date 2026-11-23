@@ -12,6 +12,9 @@ model:
   ground_friction: 1.0
   # No sole boxes (model.sole), contact excludes (model.contact_excludes) or self-collision sets
   # (model.self_collision) unless the robot's profile names them.
+  # Joints every asset of the robot gives give to (transmissions/compliance.py; joint names or regexes over the
+  # description's joints): none unless the robot's profile names them. `build-asset --joint-give` replaces them.
+  joint_give: []
 
 # Named poses (model/poses.py). home: zero (the URDF's zero) or {preset: <preset_id in position-presets.yaml>}.
 poses:
@@ -23,6 +26,12 @@ poses:
 # devices.feedback_noise it adds no velocity dither or torque noise, and without devices.feedback_sampling it reports
 # the present state at every physics step instead of the drive's last sample.
 devices: {}
+
+# The runtime host (humanoid-sim serve): the client's bus cycle, written to the segment header's bus_period_ns and
+# used to size each drive's demand queue. Only for a robot whose description records no backend.control_period_s
+# (the V1's is 1.5 ms, the G1's 2 ms).
+runtime:
+  bus_period_ns: 1500000
 
 physics:
   period_ns: 4000000          # 250 Hz
@@ -107,6 +116,17 @@ physics:
     # of 3; stiffer springs need a heavier flange, which slows the shaft's travel across the play. Part of that
     # variant's asset key (read at build).
     output_inertia_kg_m2: 4.0e-4
+  # Joint give, for an asset built with `build-asset --joint-give JOINT...`: a torsional spring and damper between a
+  # drive joint's encoder side (the drive's output, what the measured position reports) and its link
+  # (transmissions/compliance.py). Per joint; a number for every joint or a mapping by joint name. A joint the block
+  # leaves null falls back to the description's give_stiffness_nm_per_rad and give_damping_nm_s_per_rad for that joint
+  # (on the joint, else its family); an asset with give refuses to spawn when neither gives a positive value. The values
+  # are the caller's (humanoid-learning fits them). An asset without give ignores this block. Kamino treats the PD
+  # implicitly; MJWarp (rk4, explicit) held 100 to 20000 N m/rad with damping up to 10 N m s/rad on the V1's hips and
+  # knees at 1 ms under a shaking load (docs/drives.md).
+  joint_give:
+    stiffness_nm_per_rad: null
+    damping_nm_s_per_rad: null
   # Kamino (beta in Newton 1.6): maximal coordinates, hard joint-limit and contact constraints, P-ADMM forward
   # dynamics, contacts from Newton's collision pipeline. Contact friction mixes by the larger coefficient, as
   # MJWarp does. Not yet checked against MJWarp or the captures (modeled).

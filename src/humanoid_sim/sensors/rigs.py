@@ -1,7 +1,7 @@
 """Each robot's sensors, as on the robot (read from the running stacks, 2026-10-20), and extra rigs that add sensors a
 robot's rig does not declare (``EXTRAS``, by name: ``examples/rtx_sensors.py --sensors NAME``). Sensors Controls does not
-read are left out of a robot's rig: the G1's torso IMU, its Mid-360's own IMU and its head D435 (on the lab unit the
-camera service finds no camera; ``g1-cameras-d435`` adds it)."""
+read are left out of a robot's rig: the G1's torso IMU, its Mid-360's own IMU and a stock G1's head D435 (the lab unit
+has none; ``g1-cameras-d435`` adds it). The cameras' factory calibrations are in ``calibration/``."""
 
 from __future__ import annotations
 
@@ -39,7 +39,8 @@ def ethrc_v1() -> Rig:
         # place and orientation are the unit's calibration, as /tf_static gives them (2026-11-02): mono_left is the
         # camera frame's origin at the nominal orientation; the rectified depth view is turned 0.38 deg from it,
         # mono_right sits 75.243 mm away, turned 0.12 deg, and rgb 37.65 mm away, turned 0.78 deg. The device's own
-        # calibration (readCalibration(), 2026-11-07: its factory calibration) agrees to 0.42 px.
+        # calibration (readCalibration(), 2026-11-07: its factory calibration;
+        # calibration/oak-d-w_19443010313B604800.json) agrees to 0.42 px.
         # The camera frame is mono_left's link, camera2_link, turned in it: no camera link is a camera frame
         # (humanoid-urdf's known gaps). The V1's USD, which places it here, points the camera links x left, y down
         # and z backward; its URDF points them x left, y up and z forward, a half turn about x from the USD's.
@@ -70,7 +71,12 @@ def ethrc_v1() -> Rig:
                                          0.4999485650548041),
                           "rgb": (0.5022736427256218, -0.5015980737137385, 0.5019821939719118, -0.49409962275329394)},
                       depth_focal_px=283.604271,
-                      link_from_camera_xyzw=(0.5, 0.5, -0.5, 0.5)),  # camera x, y, z along the link's -z, x, -y
+                      link_from_camera_xyzw=(0.5, 0.5, -0.5, 0.5),  # camera x, y, z along the link's -z, x, -y
+                      # MODELED until the unit is measured (#40): from Luxonis' 7.5 ms of a 400P mono stream over USB 3
+                      # (its frame stamp to the host's receipt, docs "Optimizing FPS & Latency") to that plus the
+                      # stereo node's time (about 15 ms with rectification, the same page's trace), for depth. No
+                      # frame loss measured: none.
+                      latency_ns=(7_500_000, 25_000_000)),
     )
 
 
@@ -87,15 +93,22 @@ def g1_cameras() -> Rig:
     IMU (a placeholder at the same frame)."""
     return Rig(
         # The helmet mount: the left eye's optical centre (the G1 URDF's camera0_camera). HD720 at 30 Hz as Controls'
-        # zed backend opens it, with the factory calibration of the lab's unit (SN19945568, as Controls'
-        # test_zed_backend.py carries it): fisheye (equidistant) lenses, the right eye's place from [STEREO]
-        # (Baseline 62.8272 mm, TY -0.181381 mm, TZ 0.233734 mm, placed as zed_backend.parse_calibration places it).
+        # zed backend opens it, with the factory calibration of the lab's unit (SN19945568, the serial the G1's
+        # camera reports, 2026-11-16; calibration/zed-mini_SN19945568.conf): fisheye (equidistant) lenses, the right
+        # eye's place and orientation from [STEREO] (Baseline 62.8272 mm, TY -0.181381 mm, TZ 0.233734 mm; the
+        # rotation vector RX -0.00267053, CV 0.00645504, RZ 0.000385081 rad, 0.40 deg), placed as
+        # zed_backend.parse_calibration places them.
         zed=ZedMini(
             "camera0_camera", width=1280, height=720, frame_period_ns=33_333_333,
             intrinsics={"left": (771.4, 771.14, 629.115, 353.0685), "right": (772.01, 771.55, 641.75, 346.6085)},
             distortion={"left": ("equidistant", (-0.0358597, 0.0185157, -0.00496448, 0.00194007)),
                         "right": ("equidistant", (-0.0368591, 0.0234426, -0.0128113, 0.00625172))},
             stream_offsets_m={"right": (0.000233734, -0.0628272, 0.000181381)},
+            stream_rotations_xyzw={"right": (-0.49895454515661564, 0.5023745986814694, -0.5008467962973987,
+                                             0.49781182298717985)},
+            # MODELED: Stereolabs gives its USB 3 cameras 3 to 4 frames from capture to display ("What is the latency
+            # of the ZED camera"); less the display, 2 to 3 frames at 30 Hz to the host. No frame loss measured: none.
+            latency_ns=(66_666_667, 100_000_000),
         ),
         # MODELED GUESS: the ZED's IMU at the left eye's optical centre, in the camera frame's axes. The real one sits
         # a few cm away (camera_imu_transform, per unit); 800 Hz is the datasheet's.
@@ -116,6 +129,9 @@ def g1_cameras_d435() -> Rig:
                         "mono_left": (337.2096, 432.9715, 320.0, 240.0),
                         "mono_right": (337.2096, 432.9715, 320.0, 240.0),
                         "depth": (337.2096, 432.9715, 320.0, 240.0)},
+            # MODELED GUESS: Intel publishes no latency; from a frame period to the 60 to 70 ms an Intel community
+            # reply gives for the depth stream. No frame loss measured: none.
+            latency_ns=(33_333_333, 70_000_000),
         ),
     ))
 

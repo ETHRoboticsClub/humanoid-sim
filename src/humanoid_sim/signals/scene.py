@@ -181,7 +181,9 @@ class SceneRecorder:
         elif connect:
             rr.connect_grpc(connect, default_blueprint=layout)
         names = list(self.robot.body_names)
-        kin = RobotKinematics(usd, list(self.robot.joint_names))
+        # The meshes come from the USD's model and every pose from the articulation's body poses, so no joint column is
+        # needed: the native V1's articulation names its linkage balls per axis ("Ball_40:0"), which the USD names once.
+        kin = RobotKinematics(usd, [])
         meshes = RobotMeshes(kin.model)
         self.visuals = []  # (articulation body index, entity path)
         for k, (b, tf, verts, tris) in enumerate(meshes.shapes):

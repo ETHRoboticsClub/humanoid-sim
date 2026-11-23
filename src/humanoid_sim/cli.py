@@ -3,11 +3,17 @@
     humanoid-sim [--solver mjwarp|kamino] <command>  Newton solver for the commands that step physics
                                                    (default: the profile's)
     humanoid-sim build-asset [--base-joints] [--ankle-compliance] [--ankle-backlash]
+                             [--joint-give JOINT ... | --no-joint-give]
                                                    robot USD from the description (Isaac Lab image)
-    humanoid-sim replay <exc-dir> [--period-ms PERIOD] [--base yaw|orientation|fixed] [--terrain FILE]
+    humanoid-sim replay <exc-dir|bag-dir> [--period-ms PERIOD] [--base yaw|orientation|fixed] [--terrain FILE]
                         [--physics-overrides YAML]
                                                    drive-level replay, scored against the capture;
-                                                   base following the capture's IMU yaw (default), or fixed
+                                                   base following the capture's IMU yaw (default), or fixed;
+                                                   a rosbag2 directory is replayed from its COMMAND frames
+                                                   (--window A B), with the metrics of `regress`
+    humanoid-sim regress [--cases FILE] [--case ID ...] [--propose]
+                                                   every sim-vs-robot case of regression/cases.yaml, pass or fail
+                                                   per metric
     humanoid-sim view-replay <replay-dir> --save x.rrd   sim and real robot + every drive signal in Rerun
     humanoid-sim view-runtime <segment> [--save x.rrd]   watch a running `serve` in Rerun (read-only)
     humanoid-sim bench --num-envs N [--train]      real-time factor / throughput (Isaac Lab / Newton); --train runs
@@ -101,15 +107,26 @@ def _usd(args, *, base_joints: bool = False) -> Path:
 def cmd_build_asset(args) -> int:
     from humanoid_sim.model.asset import build_asset, load_profile
     from humanoid_sim.model.description import Description
+    from humanoid_sim.transmissions.compliance import resolve_give
 
-    usd = build_asset(Description.load(args.robot), load_profile(args.robot), Path(args.assets), force=args.force,
+    desc = Description.load(args.robot)
+    if args.no_joint_give and args.joint_give:
+        raise SystemExit("build-asset: --no-joint-give and --joint-give exclude each other")
+    give = () if args.no_joint_give else resolve_give(desc, args.joint_give) if args.joint_give else None  # None: the profile's
+    usd = build_asset(desc, load_profile(args.robot), Path(args.assets), force=args.force,
                       base_joints=args.base_joints, ankle_compliance=args.ankle_compliance,
-                      ankle_backlash=args.ankle_backlash)
+                      ankle_backlash=args.ankle_backlash, joint_give=give)
     print(usd)
     return 0
 
 
 def cmd_replay(args) -> int:
+    from humanoid_sim.replay.regress_cli import is_bag, replay_bag
+
+    if is_bag(args.capture):
+        args.base = args.base or "orientation"
+        return replay_bag(args, _usd(args, base_joints=True))
+    args.base = args.base or "yaw"
     import numpy as np
 
     from humanoid_sim.model.asset import plant_identity
@@ -171,6 +188,12 @@ def cmd_replay(args) -> int:
     return 0
 
 
+def cmd_regress(args) -> int:
+    from humanoid_sim.replay.regress_cli import regress
+
+    return regress(args, None if args.propose else _usd(args, base_joints=True))
+
+
 def cmd_view_runtime(args) -> int:
     from humanoid_sim.runtime.view import view_runtime
 
@@ -194,43 +217,20 @@ def cmd_bench(args) -> int:
     if args.runtime:
         from humanoid_sim.bench.runner import run_runtime_bench
 
-        print(json.dumps(run_runtime_bench(args, _usd(args), scene=_scene(args), objects=_objects(args)), indent=1))
+        print(json.dumps(run_runtime_bench(args, _usd(args), scene=_scene(args), objects=_objects(args),
+                                                         collision=_collision(args)), indent=1))
         return 0
     if args.train:
         from humanoid_sim.bench.train import run_train_bench
 
-        print(json.dumps(run_train_bench(args, _usd(args), scene=_scene(args), objects=_objects(args)), indent=1))
+        print(json.dumps(run_train_bench(args, _usd(args), scene=_scene(args), objects=_objects(args),
+                                                       collision=_collision(args)), indent=1))
         return 0
     from humanoid_sim.bench.runner import run_bench
 
-    print(json.dumps(run_bench(args, _usd(args), scene=_scene(args), objects=_objects(args)), indent=1))
+    print(json.dumps(run_bench(args, _usd(args), scene=_scene(args), objects=_objects(args),
+                                 collision=_collision(args)), indent=1))
     return 0
-
-
-# Joints tied left/right for the passive fit: the upper body, the worst-replayed part of the robot.
-UPPER_BODY_GROUPS = {
-    "waist": ("torso_axial_rotation",),
-    "shoulder_flexion": ("shoulder_flexion_l", "shoulder_flexion_r"),
-    "shoulder_abduction": ("shoulder_abduction_l", "shoulder_abduction_r"),
-    "shoulder_rotation": ("shoulder_internal_rotation_l", "shoulder_internal_rotation_r"),
-    "elbow": ("elbow_flexion_l", "elbow_flexion_r"),
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _revision() -> str:
@@ -261,9 +261,22 @@ def _scene(args):
     return StaticBoxes.load(args.scene, args.spawn or (0.0, 0.0), scan=files)
 
 
+def _collision(args):
+    """The convex pieces of ``--collision`` with ``--spawn`` at the world origin, or None."""
+    if getattr(args, "collision", None) is None:
+        return None
+    if args.scene is None and args.spawn is None:
+        raise SystemExit("--collision is a room's: give its --spawn (and its --scene for rays and drawing)")
+    from humanoid_sim.world.hulls import StaticHulls
+
+    return StaticHulls.load(args.collision, args.spawn or (0.0, 0.0))
+
+
 def _add_scene_args(parser) -> None:
     parser.add_argument("--scene", default=None, help="static boxes (walls, furniture) around the robot: an .npz as "
                         "world/boxes.py describes, such as Controls' hangar_proxy.npz")
+    parser.add_argument("--collision", default=None, help="the room's collision as convex pieces fitted to its scan "
+                        "(an .npz as world/hulls.py describes); the --scene boxes then stay for rays and drawing only")
     parser.add_argument("--spawn", nargs=2, type=float, default=None, metavar=("X", "Y"),
                         help="the scene point (m) the robot starts at, placed at the world origin (default 0 0)")
 
@@ -314,7 +327,7 @@ def cmd_serve(args) -> int:
     host = retry_kernel_build(lambda: RuntimeHost(
         args.segment, usd, device=args.device, robot=args.robot, solver=args.solver,
         support=args.support, pose=args.pose, scene=scene, gantry=gantry, terrain=terrain, objects=objects,
-        bus_period_ns=int(args.bus_period_us * 1000),
+        collision=_collision(args),
         client_timeout_ns=int(args.client_timeout_ms * 1_000_000), seed=args.seed,
         sim_revision=_revision(),
         truth_every=args.truth_every or (1 if args.trajectory else 5), trajectory=args.trajectory,
@@ -342,6 +355,27 @@ def _camera_effects(text: str) -> tuple[str, ...]:
         raise argparse.ArgumentTypeError(str(error)) from error
 
 
+def _add_camera_effect_args(parser) -> None:
+    parser.add_argument("--camera-effects", type=_camera_effects, default=(),
+                        help="the cameras' effects (comma-separated, or all): exposure (time, gain, the device's auto "
+                             "exposure) and noise (shot and read; sensors/imaging.py), latency and drops (each frame's "
+                             "arrival and losses; sensors/delivery.py); default: the RTX render, delivered at once")
+    parser.add_argument("--camera-latency-ms", nargs="+", type=float, default=None, metavar="MS",
+                        help="every camera's frame latency in place of its rig's: one value, or LOW HIGH drawn "
+                             "uniformly per frame (needs the latency effect)")
+    parser.add_argument("--camera-drop-probability", type=float, default=None, metavar="P",
+                        help="every camera's chance of losing a frame in place of its rig's (needs the drops effect)")
+
+
+def _camera_delivery(args) -> dict:
+    """The session's camera delivery overrides from ``--camera-latency-ms`` and ``--camera-drop-probability``."""
+    from humanoid_sim.sensors.delivery import check_overrides, latency_from_ms
+
+    latency = latency_from_ms(args.camera_latency_ms)
+    check_overrides(args.camera_effects, latency, args.camera_drop_probability)
+    return {"camera_latency_ns": latency, "camera_drop_probability": args.camera_drop_probability}
+
+
 def cmd_render_runtime(args) -> int:
     from humanoid_sim.runtime.render import render_runtime
     from humanoid_sim.runtime.render_workers import render_runtime_workers
@@ -350,8 +384,8 @@ def cmd_render_runtime(args) -> int:
     cfg = SessionCfg(robot=args.robot, sensors=args.sensors, splat=args.splat, splat_intensity=args.splat_intensity,
                      scan_mesh=args.scan_mesh, lights=args.lights, cameras=not args.no_cameras,
                      lidar=not args.no_lidar, feeds=args.feeds, lidar_domain=args.lidar_domain, rrd=args.rrd, images=args.images,
-                     depth_noise=args.depth_noise, camera_effects=args.camera_effects, device=args.device,
-                     assets=args.assets)
+                     depth_noise=args.depth_noise, camera_effects=args.camera_effects, **_camera_delivery(args),
+                     device=args.device, assets=args.assets)
     render = render_runtime if args.combined else render_runtime_workers
     render(args.segment, cfg, seconds=args.seconds, wait_s=args.wait, summary=args.summary, window=args.window)
     return 0
@@ -365,8 +399,8 @@ def cmd_render_trajectory(args) -> int:
     cfg = SessionCfg(robot=read_header(args.trajectory)["robot"], sensors=args.sensors, scene=args.scene,
                      spawn_m=tuple(args.spawn or (0.0, 0.0)), splat=args.splat, splat_intensity=args.splat_intensity,
                      scan_mesh=args.scan_mesh, lights=args.lights, cameras=not args.no_cameras,
-                     lidar=not args.no_lidar, camera_effects=args.camera_effects, device=args.device,
-                     assets=args.assets)
+                     lidar=not args.no_lidar, camera_effects=args.camera_effects, **_camera_delivery(args),
+                     device=args.device, assets=args.assets)
     render_trajectory(args.trajectory, cfg, args.out, start_s=args.start, end_s=args.end, window=args.window)
     return 0
 
@@ -424,6 +458,12 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--ankle-backlash", action="store_true",
                    help="the variant with gearbox play between each ankle crank drive and its output shaft "
                         "(physics.ankle_backlash gives its width)")
+    b.add_argument("--joint-give", nargs="+", metavar="JOINT",
+                   help="a spring between each named drive joint's encoder side and its link: joint names or regexes "
+                        "over them, in place of the profile's model.joint_give (physics.joint_give, else the "
+                        "description, gives the stiffness and damping)")
+    b.add_argument("--no-joint-give", action="store_true",
+                   help="the variant without joint give (build_asset(joint_give=())), for a plant without it")
     b.set_defaults(func=cmd_build_asset)
 
     r = sub.add_parser("replay")
@@ -435,11 +475,16 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--integrator", default=None)
     r.add_argument("--device", default="cuda:0", help="cuda:N, or cpu (Warp's CPU device: slow)")
     r.add_argument("--duration", type=float, default=None)
-    r.add_argument("--base", choices=("yaw", "orientation", "fixed"), default="yaw",
+    r.add_argument("--base", choices=("yaw", "orientation", "fixed"), default=None,
                    help="base yaw or full orientation from the capture's IMU (asset built with --base-joints), "
-                        "or a fixed base")
+                        "or a fixed base (default: yaw; orientation for a bag)")
+    r.add_argument("--window", nargs=2, type=float, default=None, metavar=("START", "END"),
+                   help="a bag: the seconds after the bag's start to replay and score (default: from its first "
+                        "complete COMMAND frame to the end)")
+    r.add_argument("--warmup", type=float, default=2.0,
+                   help="a bag: seconds replayed before the window, so the start-up transient is not scored")
     r.add_argument("--demand-delay-ms", type=float, default=0.0,
-                   help="apply each recorded demand this much after its stamp (negative: before); see fit-delay")
+                   help="apply each recorded demand this much after its stamp (negative: before)")
     r.add_argument("--out", default="outputs/replay")
     r.add_argument("--physics-overrides", default=None,
                    help="YAML/JSON mapping (inline, or a file) merged over the profile's physics block, e.g. the play "
@@ -452,6 +497,20 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--capture-coordinates")
     _add_terrain_arg(r)
     r.set_defaults(func=cmd_replay)
+
+    g = sub.add_parser("regress", help="every sim-vs-robot case on the recorded bags: pass or fail per metric")
+    g.add_argument("--cases", default="regression/cases.yaml")
+    g.add_argument("--case", nargs="+", default=None, help="only these case ids")
+    g.add_argument("--recordings", default=None,
+                   help="the directory the cases' bag paths are under (default: $HUMANOID_SIM_RECORDINGS, else "
+                        "../../data/recordings)")
+    g.add_argument("--propose", action="store_true",
+                   help="rewrite the cases' bands from the robot's values and the file's tolerances (no sim)")
+    g.add_argument("--period-ms", type=float, default=None, help="physics period (default: the profile's)")
+    g.add_argument("--integrator", default=None)
+    g.add_argument("--device", default="cuda:0")
+    g.add_argument("--out", default="outputs/regress")
+    g.set_defaults(func=cmd_regress)
 
     v = sub.add_parser("view-replay", help="Rerun recording of a replay: sim and real robot, all drive signals")
     v.add_argument("trace", help="replay output directory (trace.npz + summary.json)")
@@ -493,9 +552,7 @@ def main(argv: list[str] | None = None) -> int:
                      help="render cameras and lidar in one Kit process instead of independent workers")
     rr_.add_argument("--depth-noise", action="store_true",
                      help="the stereo cameras' depth errors (noise, occlusion and texture holes); off: exact depth")
-    rr_.add_argument("--camera-effects", type=_camera_effects, default=(),
-                     help="the cameras' imaging (exposure, noise; comma-separated, or all): exposure time and gain, the "
-                         "device's auto exposure, shot and read noise (sensors/imaging.py); default: the RTX render")
+    _add_camera_effect_args(rr_)
     rr_.add_argument("--feeds", default=None, help="camera feed root (ethrc-camera-sim-feed/v1)")
     rr_.add_argument("--lidar-domain", type=int, default=None, help="publish the Mid-360 on Unitree's DDS domain")
     rr_.add_argument("--rrd", default=None)
@@ -523,9 +580,7 @@ def main(argv: list[str] | None = None) -> int:
                          "ambient light, a sun")
     rt.add_argument("--no-cameras", action="store_true")
     rt.add_argument("--no-lidar", action="store_true")
-    rt.add_argument("--camera-effects", type=_camera_effects, default=(),
-                    help="the cameras' imaging (exposure, noise; comma-separated, or all): exposure time and gain, the "
-                        "device's auto exposure, shot and read noise (sensors/imaging.py); default: the RTX render")
+    _add_camera_effect_args(rt)
     rt.add_argument("--start", type=float, default=None, help="first plant time to render (s)")
     rt.add_argument("--end", type=float, default=None, help="last plant time to render (s)")
     rt.add_argument("--device", default="cuda:0")
@@ -561,7 +616,6 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--pose", choices=("home", "standing"), default=None,
                     help="the pose every session starts in (default: the profile's poses.start)")
     sv.add_argument("--device", default="cuda:0")
-    sv.add_argument("--bus-period-us", type=float, default=1500.0, help="the client's bus cycle (informational)")
     sv.add_argument("--client-timeout-ms", type=float, default=500.0,
                     help="end the session when an attached client's demands are this old")
     sv.add_argument("--truth-every", type=int, default=None, help="publish the truth every this many steps (and after "

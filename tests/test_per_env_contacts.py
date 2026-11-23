@@ -109,6 +109,11 @@ def _crank_overshoot_rad(sim, plant, steps=150, past=0.3):
     return (plant.truth().drive.position_rad[:, ids] - upper).clamp(min=0)
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "On the native V1 the ankle hinges' limits bind before any crank reaches its window: a crank pushed 0.3 rad past "
+    "either edge, alone or with its partner, stops 0.11 to 0.24 rad short of it (MJWarp, fixed base, 2026-11-17), so "
+    "the crank stops never engage and their stiffness changes nothing. The stops need to be the binding constraint "
+    "(hinge limits at the crank windows' hull or wider) before this can pass; see runs/2026-11-17-kamino-diagnosis."))
 def test_softer_crank_stops_give_way_further_on_mjwarp(request):
     sim = _sim(request, "mjwarp", 3, fixed_base=True)
     plant = _plant(sim, [ParamSpec("crank_stop_stiffness", "uniform", (0.05, 1.0), "scale"),

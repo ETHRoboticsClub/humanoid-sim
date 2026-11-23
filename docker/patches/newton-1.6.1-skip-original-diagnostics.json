@@ -1,0 +1,10 @@
+{
+  "_src/solvers/kamino/config.py": {
+    "before": "98fead9dd906e1e9657c653a7c90ee37ccc5583d7d75eda9c1c056cd144efb6d",
+    "after": "8b514a1b653e2ec69464bd486b74523f6d511aa5822e67a5b32037b6c0a86d49"
+  },
+  "_src/solvers/kamino/_src/solvers/padmm/reduced_runtime.py": {
+    "before": "f329ad17dd06c01c3ea05583177e34bd0ce7d5a2e815e8e57b72ac87f9863cf9",
+    "after": "0ad09bc75bf3d501bf6bfeb3ec35ff16798d182a2c41fda1de503075239924b3"
+  }
+}

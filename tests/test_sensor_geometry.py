@@ -217,9 +217,11 @@ def test_a_point_ahead_of_each_camera_lands_on_its_principal_point(desc, rig):
             p_opt = T[:3, :3].T @ (p_torso - T[:3, 3])
             (u, v), = stream.lens.project([p_opt])
             assert (u, v) == pytest.approx((stream.lens.cx_px, stream.lens.cy_px))
-            # The optical z axis is the camera's x axis (forward), the optical x the camera's -y (right).
-            np.testing.assert_allclose(stream.optical_in_device()[:3, :3] @ [0, 0, 1], (1, 0, 0), atol=1e-12)
-            np.testing.assert_allclose(stream.optical_in_device()[:3, :3] @ [1, 0, 0], (0, -1, 0), atol=1e-12)
+            # The optical z axis is the camera's x axis (forward), the optical x the camera's -y (right); a unit's
+            # calibration turns an eye a fraction of a degree from them (the ZED's right eye: 0.40 deg).
+            tol = 1e-2 if stream.name in sensor.stream_rotations_xyzw else 1e-12
+            np.testing.assert_allclose(stream.optical_in_device()[:3, :3] @ [0, 0, 1], (1, 0, 0), atol=tol)
+            np.testing.assert_allclose(stream.optical_in_device()[:3, :3] @ [1, 0, 0], (0, -1, 0), atol=tol)
 
 
 def test_a_camera_without_every_stream_placed_is_refused(rig):

@@ -118,7 +118,10 @@ def test_extended_chain_accepts_late_overlapping_prefixes(tmp_path, starting_sta
 def test_sequence_rejects_individually_known_but_inconsistent_hashes(tmp_path):
     root = tmp_path / "package"
     root.mkdir()
-    hashes = lambda a, b: {"before": hashlib.sha256(a).hexdigest(), "after": hashlib.sha256(b).hexdigest()}
+
+    def hashes(a, b):
+        return {"before": hashlib.sha256(a).hexdigest(), "after": hashlib.sha256(b).hexdigest()}
+
     # a at stage 2, b at stage 0: each is a known hash, but no complete prefix matches.
     (root / "a.py").write_bytes(b"two\n")
     (root / "b.py").write_bytes(b"base\n")

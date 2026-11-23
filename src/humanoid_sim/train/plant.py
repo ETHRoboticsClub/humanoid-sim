@@ -44,7 +44,8 @@ from humanoid_sim.model.description import Description
 from humanoid_sim.physics.crank_stops import scaled_solref
 from humanoid_sim.randomization import PARAMS, ParamSpec, Randomizer, parse_specs
 from humanoid_sim.sensors import rigs
-from humanoid_sim.sensors.imu import ImuDelivery, ImuSamples, pending_slots
+from humanoid_sim.sensors.imu import ImuDelivery, ImuSamples, mount_misalignment_rad, pending_slots
+from humanoid_sim.timing.arrival import command_arrival_ns, command_jitter_ns
 from humanoid_sim.timing.clock import NS_PER_S
 from humanoid_sim.world.harness import resolve_harness
 from humanoid_sim.world.supports import Gantry
@@ -60,7 +61,6 @@ class TrainPlantCfg:
     reporting: bool = True  # measured drive feedback quantized as the drive reports it
     feedback_noise: bool = True  # with reporting: velocity dither and torque noise (profile devices.feedback_noise)
     feedback_sampling: bool = True  # hold the drive's last sample between samples (profile devices.feedback_sampling)
-    command_jitter_ns: int = 0  # each demand's arrival is moved by a uniform draw in ±this (no measurement: off)
     cuda_graph: bool = False  # capture drive math and IMU delivery; CUDA only
     compile: bool = False  # fuse drive and IMU math before capture; requires cuda_graph
     queue_capacity: int = 8  # demands in flight per env: ≥ (max latency + drive delay) / demand period + 1
@@ -90,6 +90,9 @@ class Truth:
     # [E, C] each crank's output shaft past its motor side (drive frame), in RobotPlant.cranks order; None without
     # ankle backlash. drive.position_rad is the output shaft; the motor side is that less this.
     ankle_backlash_rad: torch.Tensor | None = None
+    # [E, G] each give joint's link angle past the joint's reading (the drive's side, ``joint_pos``), in the joint's own
+    # coordinates, in RobotPlant.give_joints order; None without joint give. The link's angle is the sum.
+    joint_give_rad: torch.Tensor | None = None
 
 
 def command_latency_ns(profile: dict, drive_delay_ns: torch.Tensor) -> torch.Tensor:
@@ -106,20 +109,6 @@ def command_latency_ns(profile: dict, drive_delay_ns: torch.Tensor) -> torch.Ten
         raise ValueError(f"devices.command_path.frame_to_drive_ns {total} is shorter than a drive's own delay "
                          f"({int(drive_delay_ns.max())} ns)")
     return out
-
-
-def command_arrival_ns(sent_ns: torch.Tensor, latency_ns: torch.Tensor, drive_delay_ns: torch.Tensor,
-                       jitter_ns: int = 0, generator: torch.Generator | None = None) -> torch.Tensor:
-    """When a demand sent at ``sent_ns`` ``[E]`` reaches each drive ``[E, D]``: after the latency before the drive and
-    the drive's own delay, moved by a uniform integer draw in ±``jitter_ns`` per demand and drive (never before it was
-    sent). The arrival queue keeps arrivals in order, so a jittered demand never overtakes an earlier one."""
-    arrival = sent_ns.to(torch.int64).unsqueeze(1) + latency_ns + drive_delay_ns
-    if jitter_ns == 0:
-        return arrival
-    if jitter_ns < 0:
-        raise ValueError(f"command jitter {jitter_ns} ns is negative")
-    draw = torch.randint(-jitter_ns, jitter_ns + 1, arrival.shape, generator=generator, device=arrival.device)
-    return torch.maximum(arrival + draw, sent_ns.to(torch.int64).unsqueeze(1))
 
 
 def imu_latency_ns(profile: dict) -> int:
@@ -216,6 +205,13 @@ class RobotPlant:
             from humanoid_sim.transmissions.backlash import loop_encoder
 
             self.core.use_backlash(loop_encoder(self.profile["physics"]))
+        # Joint give: the asset's springs behind drive joints (transmissions/compliance.py), by joint.
+        from humanoid_sim.transmissions.compliance import give_joint
+
+        self.give_joints = [n for n in self.joints if give_joint(n) in robot.joint_names]
+        self.gives = {n: give_joint(n) for n in self.give_joints}
+        self.give_ids = torch.tensor([robot.joint_names.index(g) for g in self.gives.values()], device=self.device,
+                                     dtype=torch.long)
         self.drives = self.core.map.drive_names
         d = len(self.drives)
         self.t_ns = 0
@@ -250,11 +246,11 @@ class RobotPlant:
 
             self.sampler = FeedbackSampler.for_robot(self.desc, self.profile, e, d, device=self.device,
                                                      seed=cfg.seed + 3)
-        if cfg.command_jitter_ns < 0:
-            raise ValueError(f"command_jitter_ns {cfg.command_jitter_ns} is negative")
+        self.command_jitter_ns = command_jitter_ns(self.profile)  # the profile's measured spread of a demand's arrival
         self._jitter_generator = torch.Generator(device=self.device).manual_seed(cfg.seed + 4)
         specs = parse_specs(cfg.randomization)
         self.imu_latency_ns = imu_latency_ns(self.profile)  # nominal
+        self.imu_mount_rad = mount_misalignment_rad(self.profile)  # nominal rotation of the sensor in its mount
         self.imu = None
         if imu is not None:
             lo, hi = imu_latency_bounds(specs, self.imu_latency_ns)
@@ -266,6 +262,7 @@ class RobotPlant:
             self.imu = ImuDelivery(replace(delivery, pending=pending), e, device=self.device, seed=cfg.seed + 1)
             self.imu.reset(torch.arange(e, device=self.device), 0)
             self.imu.latency_ns.fill_(self.imu_latency_ns)
+            self.imu.misalignment.copy_(torch.tensor(self.imu_mount_rad, device=self.device))  # the profile's mount
             if sensor.output_lsb is not None:  # the host decodes counts; the runtime's client does this itself
                 gyro_lsb, accel_lsb = sensor.output_lsb
                 self.imu.lsb.copy_(torch.tensor([gyro_lsb] * 3 + [accel_lsb] * 3, device=self.device))
@@ -290,12 +287,15 @@ class RobotPlant:
             raise ValueError("randomizing ankle_backlash needs an asset built with ankle backlash")
         if self.springs and self.backlash and list(self.springs) != list(self.backlash):
             raise ValueError("the ankle springs and backlash joints are on different cranks")
+        if used & {"joint_give_stiffness", "joint_give_damping"} and not self.gives:
+            raise ValueError("randomizing joint_give_* needs an asset built with joint give")
         if {"friction", "shape_friction"} <= used:
             raise ValueError("choose per-env friction or per-shape friction, not both")
         self.randomizer = Randomizer(specs, {k: v for k, v in nominal.items() if k in used},
                                      {"body": list(robot.body_names), "joint": self.core.solver_map.joint_names,
                                       "drive": self.drives,
                                       "crank": [d for d in self.cranks if d in self.springs or d in self.backlash],
+                                      "give": self.give_joints,
                                       "shape": [f"shape_{i}" for i in range(nominal.get("shape_friction", torch.empty(e, 0)).shape[1])]},
                                      num_envs=e, device=self.device, seed=cfg.seed, level=cfg.level)
         from humanoid_sim.physics.crank_stops import StopSolref, check_crank_stops, kamino_crank_stops
@@ -369,12 +369,16 @@ class RobotPlant:
             widths = backlash_widths(self.robot.cfg.spawn.usd_path, self.profile["physics"])
             out["ankle_backlash"] = torch.tensor([widths[self.backlash[d]] for d in self.cranks if d in self.backlash],
                                                  device=self.device).expand(self.num_envs, -1).clone()
+        if self.gives:  # likewise: the gains joint give spawned with (the profile's physics.joint_give, or the description)
+            out["joint_give_stiffness"] = data.joint_stiffness.torch[:, self.give_ids].clone()
+            out["joint_give_damping"] = data.joint_damping.torch[:, self.give_ids].clone()
         return out
 
     def _device_nominal(self) -> dict[str, torch.Tensor]:
         e, d = self.num_envs, len(self.drives)
         ones = torch.ones(e, d, device=self.device)
         zeros3 = torch.zeros(e, 3, device=self.device)
+        mount = torch.tensor(self.imu_mount_rad, device=self.device)
         static = self._nominal_physics["joint_friction"][0]
         dynamic = torch.tensor([self.desc.joints[n].dynamic_friction if n in self.desc.joints else 0.0
                                 for n in self.core.solver_map.joint_names], device=self.device)
@@ -383,7 +387,8 @@ class RobotPlant:
                 "latency": (self.command_latency_ns / NS_PER_S).to(ones.dtype).expand(e, -1).clone(),
                 "encoder_offset": torch.zeros_like(ones),
                 "joint_friction_ratio": ratio.expand(e, -1).clone(),
-                "imu_gyro_bias": zeros3, "imu_accel_bias": zeros3.clone(), "imu_misalignment": zeros3.clone(),
+                "imu_gyro_bias": zeros3, "imu_accel_bias": zeros3.clone(),
+                "imu_misalignment": mount.expand(e, -1).clone(),
                 "imu_latency": torch.full((e, 1), self.imu_latency_ns / NS_PER_S, device=self.device),
                 "imu_drop_probability": torch.full(
                     (e, 1), self.imu.cfg.drop_probability if self.imu is not None else 0.0, device=self.device)}
@@ -444,6 +449,11 @@ class RobotPlant:
             from humanoid_sim.physics.isaaclab import write_backlash
 
             write_backlash(r, self.backlash_ids, v.get("ankle_backlash", self._nominal_physics["ankle_backlash"]))
+        for name, gain in (("joint_give_stiffness", "stiffness"), ("joint_give_damping", "damping")):
+            if name in v:
+                if not bool((v[name] > 0).all()):
+                    raise ValueError(f"{name} must be positive")
+                getattr(r, f"write_joint_{gain}_to_sim_index")(**{gain: v[name].float()}, joint_ids=self.give_ids)
         if "body_mass" in v:
             r.set_masses_index(masses=v["body_mass"])
         if "body_mass" in v or "body_inertia" in v:
@@ -540,7 +550,7 @@ class RobotPlant:
     def submit(self, demand: DriveDemand, sent_ns: torch.Tensor, env_mask: torch.Tensor | None = None) -> None:
         """Demands ``[E, D]`` sent at ``sent_ns`` ``[E]``; each drive applies them after the latency before it and its
         own delay."""
-        arrival = command_arrival_ns(sent_ns, self.latency_ns, self.drive_delay_ns, self.cfg.command_jitter_ns,
+        arrival = command_arrival_ns(sent_ns, self.latency_ns, self.drive_delay_ns, self.command_jitter_ns,
                                      self._jitter_generator)
         self.core.submit(demand, arrival, env_mask)
 
@@ -566,11 +576,12 @@ class RobotPlant:
         self.robot.write_joint_state_to_sim_index(
             position=torch.stack([values[n] for n in names], -1).to(q.dtype),
             velocity=torch.stack([rates[n] for n in names], -1).to(qd.dtype), joint_ids=ids, env_ids=env_ids)
-        for held in (self.spring_ids, self.backlash_ids):  # springs relaxed, play centred: the linkage closes as
-            if len(held):                                  # the rigid one does
-                zero = torch.zeros(len(env_ids), len(held), device=self.device, dtype=q.dtype)
-                self.robot.write_joint_state_to_sim_index(position=zero, velocity=zero, joint_ids=held,
-                                                          env_ids=env_ids)
+        # Crank springs and joint give relaxed, crank play centred: the linkage closes as the rigid one does.
+        relaxed = torch.cat([self.spring_ids, self.backlash_ids, self.give_ids])
+        if len(relaxed):
+            zero = torch.zeros(len(env_ids), len(relaxed), device=self.device, dtype=q.dtype)
+            self.robot.write_joint_state_to_sim_index(position=zero, velocity=zero, joint_ids=relaxed,
+                                                      env_ids=env_ids)
 
     def _write_friction(self) -> None:
         """Write the back-drive joints' solver friction (:meth:`PlantCore.joint_friction`) if a reset or a demand
@@ -662,16 +673,22 @@ class RobotPlant:
         self._read_backlash()
         drive = self.core.feedback(*self.solver_state())
         play = self.core.backlash_rad.clone() if self.backlash else None
+        give = data.joint_pos.torch[:, self.give_ids] if len(self.give_ids) else None
         return Truth(q, qd, data.root_link_pose_w.torch, data.root_com_vel_w.torch[:, :3],
-                     data.root_com_ang_vel_b.torch, drive, forces, spring, play)
+                     data.root_com_ang_vel_b.torch, drive, forces, spring, play, give)
 
     # -- reset ------------------------------------------------------------------------------------
 
     def reset(self, env_ids: torch.Tensor, *, joint_pos: torch.Tensor | None = None,
               joint_vel: torch.Tensor | None = None, root_pose: torch.Tensor | None = None,
-              root_vel: torch.Tensor | None = None, demand: DriveDemand | None = None) -> None:
+              root_vel: torch.Tensor | None = None, demand: DriveDemand | None = None,
+              write_state: bool = True) -> None:
         """Reset ``env_ids``: state (description joint order; root pose xyzw, world), drives off (or
-        ``demand`` in force), sensors empty, device parameters redrawn."""
+        ``demand`` in force), sensors empty, device parameters redrawn. ``write_state=False`` leaves the joint state
+        to a caller that writes it (:meth:`write_joint_state`) after the reset, before physics resumes, from the
+        device parameters the reset draws: the native rods close once, at that pose, rather than also here."""
+        if not write_state and (joint_pos is not None or joint_vel is not None):
+            raise ValueError("reset: write_state=False writes no joint_pos or joint_vel")
         r = self.robot
         if root_pose is not None:
             r.write_root_pose_to_sim_index(root_pose=root_pose, env_ids=env_ids)
@@ -681,7 +698,8 @@ class RobotPlant:
             q0, qd0 = self.joint_state()
             q = q0[env_ids] if joint_pos is None else joint_pos
             qd = (qd0[env_ids] if joint_pos is None else torch.zeros_like(q)) if joint_vel is None else joint_vel
-            self.write_joint_state(env_ids, q, qd)
+            if write_state:
+                self.write_joint_state(env_ids, q, qd)
             self._targets[env_ids.unsqueeze(1), self.joint_ids.unsqueeze(0)] = q.to(self._targets.dtype)
         self.core.reset(env_ids, demand)
         self.randomizer.draw_reset(env_ids)

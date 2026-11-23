@@ -17,7 +17,6 @@ def test_inertial_loading_against_static_torque_and_translating_support(tmp_path
     pytest.importorskip("isaaclab_newton")
     from isaaclab.scene import InteractiveSceneCfg
     from isaaclab.sim import SimulationContext
-    from isaaclab.sim.converters import UrdfConverter, UrdfConverterCfg
     from isaaclab.utils import configclass, instantiate
 
     from humanoid_sim.model.asset import load_profile
@@ -39,8 +38,19 @@ def test_inertial_loading_against_static_torque_and_translating_support(tmp_path
         joints += f'''<joint name="{name}" type="{kind}"><parent link="{parent}"/><child link="{child}"/>
           <axis xyz="{axis}"/><limit lower="-3" upper="3" effort="1000000" velocity="100"/></joint>'''
     urdf.write_text(f'<robot name="inertial-reference">{links}{joints}</robot>')
-    asset = UrdfConverter(UrdfConverterCfg(asset_path=str(urdf), usd_dir=str(tmp_path / "usd"),
-                                          fix_base=False, merge_fixed_joints=True, joint_drive=None))
+    # Converted in its own process, as `humanoid-sim build-asset` does: after a test in this process has built a
+    # scene, the importer's PhysxJointAPI is no longer a known schema here and the conversion fails (it passes alone;
+    # 2026-11-17).
+    import subprocess
+    import sys
+    from types import SimpleNamespace
+
+    script = ("import sys; from isaaclab.sim.converters import UrdfConverter, UrdfConverterCfg; "
+              "print(UrdfConverter(UrdfConverterCfg(asset_path=sys.argv[1], usd_dir=sys.argv[2], fix_base=False, "
+              "merge_fixed_joints=True, joint_drive=None)).usd_path)")
+    done = subprocess.run([sys.executable, "-c", script, str(urdf), str(tmp_path / "usd")], capture_output=True,
+                          text=True, check=True)
+    asset = SimpleNamespace(usd_path=done.stdout.strip().splitlines()[-1])
     props = JointProperties(["slide", "yaw", "hinge"], [20000, 20000, 40], [200, 200, 4],
                             [0] * 3, [0] * 3, [0] * 3, [1e6] * 3, [0, 0.4, 0.3])
 

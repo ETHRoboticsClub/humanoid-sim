@@ -204,7 +204,9 @@ def test_robots_in_every_env_stand_on_a_box(tmp_path, usd):
             scene.update(plant.period_ns / 1e9)
         pose = plant.truth().root_pose_w
         assert ((pose[:, 2] - (height + PLATFORM_TOP_M)).abs() < 0.03).all(), pose[:, 2]
-        assert (pose[:, 3:6].abs().amax(dim=1) < 0.05).all()  # upright
+        # upright as it stands on the floor: the native V1's root settles pitched 7.1 deg (quaternion y 0.062) on the
+        # flat floor at home too (2026-11-17), so 0.05 caught the stance, not a fall
+        assert (pose[:, 3:6].abs().amax(dim=1) < 0.09).all()
     finally:
         sim_utils.SimulationContext.clear_instance()
 

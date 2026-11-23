@@ -1,0 +1,280 @@
+diff --git a/_src/solvers/kamino/_src/dynamics/delassus.py b/_src/solvers/kamino/_src/dynamics/delassus.py
+index 1a2a274..7894650 100644
+--- a/_src/solvers/kamino/_src/dynamics/delassus.py
++++ b/_src/solvers/kamino/_src/dynamics/delassus.py
+@@ -949,6 +949,195 @@ class _BodyGroupedDelassus:
+         )
+ 
+ 
++# Blocks a row keeps in the row table of the gathered assembly; a row with more takes the scan path.
++_ROW_TABLE_BLOCKS = 2
++
++
++@wp.kernel
++def _row_tables_reset(
++    dim: wp.array[int],
++    rows: int,
++    count: wp.array[int],
++    mask: wp.array[wp.uint32],
++):
++    w, r = wp.tid()
++    if r < dim[w]:
++        count[w * rows + r] = 0
++        mask[w * rows + r] = wp.uint32(0)
++
++
++@wp.kernel
++def _row_tables_fill(
++    nzb: wp.array[int],
++    start: wp.array[int],
++    coords: wp.array2d[int],
++    dim: wp.array[int],
++    rows: int,
++    count: wp.array[int],
++    mask: wp.array[wp.uint32],
++    blocks: wp.array[int],
++):
++    w, i = wp.tid()
++    if i >= nzb[w]:
++        return
++    idx = start[w] + i
++    r = coords[idx, 0]
++    if r < 0 or r >= dim[w]:
++        return
++    row = w * rows + r
++    # One bit per body, shared by bodies 32 apart: an overlap test that may over-report, never under-report.
++    wp.atomic_or(mask, row, wp.uint32(1) << wp.uint32((coords[idx, 1] // 6) & 31))
++    slot = wp.atomic_add(count, row, 1)
++    if slot < 2:
++        blocks[2 * row + slot] = idx
++
++
++@wp.func
++def _block_pair_product(vi: vec6f, vj: vec6f, inv_m: float, inv_I: wp.mat33f):
++    Ji_v = wp.vec3f(vi[0], vi[1], vi[2])
++    Ji_w = wp.vec3f(vi[3], vi[4], vi[5])
++    Jj_v = wp.vec3f(vj[0], vj[1], vj[2])
++    Jj_w = wp.vec3f(vj[3], vj[4], vj[5])
++    return inv_m * wp.dot(Ji_v, Jj_v) + wp.dot(Ji_w, inv_I @ Jj_w)
++
++
++@wp.func
++def _gathered_entry(
++    w: int,
++    lo: int,
++    hi: int,
++    rows: int,
++    bio: wp.array[int],
++    inv_m: wp.array[float],
++    inv_I: wp.array[wp.mat33f],
++    nzb: wp.array[int],
++    start: wp.array[int],
++    coords: wp.array2d[int],
++    values: wp.array[vec6f],
++    count: wp.array[int],
++    blocks: wp.array[int],
++):
++    """J_lo M^-1 J_hi^T: the products of the two rows' blocks on the same body, the lower row index first."""
++    value = float(0.0)
++    row_lo = w * rows + lo
++    row_hi = w * rows + hi
++    n_lo = count[row_lo]
++    n_hi = count[row_hi]
++    if n_lo <= 2 and n_hi <= 2:
++        for a in range(n_lo):
++            ia = blocks[2 * row_lo + a]
++            body = coords[ia, 1] // 6
++            for b in range(n_hi):
++                ib = blocks[2 * row_hi + b]
++                if coords[ib, 1] // 6 == body:
++                    g = bio[w] + body
++                    value += _block_pair_product(values[ia], values[ib], inv_m[g], inv_I[g])
++    else:
++        first = start[w]
++        last = first + nzb[w]
++        for ia in range(first, last):
++            if coords[ia, 0] == lo:
++                body = coords[ia, 1] // 6
++                for ib in range(first, last):
++                    if coords[ib, 0] == hi and coords[ib, 1] // 6 == body:
++                        g = bio[w] + body
++                        value += _block_pair_product(values[ia], values[ib], inv_m[g], inv_I[g])
++    return value
++
++
++@wp.kernel
++def _assemble_delassus_gathered(
++    bio: wp.array[int],
++    inv_m: wp.array[float],
++    inv_I: wp.array[wp.mat33f],
++    nzb: wp.array[int],
++    start: wp.array[int],
++    coords: wp.array2d[int],
++    values: wp.array[vec6f],
++    dim: wp.array[int],
++    highwater: wp.array[int],
++    mio: wp.array[int],
++    rows: int,
++    count: wp.array[int],
++    mask: wp.array[wp.uint32],
++    blocks: wp.array[int],
++    D: wp.array[float],
++):
++    """Writes every entry of the world's active prefix once (the clear and the assembly in one pass)."""
++    w, lane = wp.tid()
++    n = dim[w]
++    base = mio[w]
++    for k in range(lane, n * n, 1024):
++        i = k // n
++        j = k - i * n
++        lo = wp.min(i, j)
++        hi = wp.max(i, j)
++        value = float(0.0)
++        if (mask[w * rows + lo] & mask[w * rows + hi]) != wp.uint32(0):
++            value = _gathered_entry(w, lo, hi, rows, bio, inv_m, inv_I, nzb, start, coords, values, count, blocks)
++        D[base + k] = value
++    # Entries a larger earlier prefix left behind lie beyond this one.
++    total = wp.max(n, highwater[w])
++    for k in range(n * n + lane, total * total, 1024):
++        D[base + k] = float(0.0)
++
++
++class _GatheredDelassus:
++    """The Delassus matrix of a sparse Jacobian, one entry at a time from the two rows' blocks.
++
++    Each entry of the dense prefix is the sum, over the bodies both rows touch, of the rows' block products
++    (a mask of bodies per row rules out the pairs that touch none). It writes the prefix and the zero tail of the
++    previous one in a single pass, with no atomics on the matrix and no bucketing of blocks by body.
++    """
++
++    def __init__(self, jacobian, num_worlds, rows, device):
++        self.jacobian = jacobian
++        self.device = device
++        self.worlds = num_worlds
++        self.rows = rows
++        self.count = wp.zeros(num_worlds * rows, dtype=int, device=device)
++        self.mask = wp.zeros(num_worlds * rows, dtype=wp.uint32, device=device)
++        self.blocks = wp.zeros(num_worlds * rows * _ROW_TABLE_BLOCKS, dtype=int, device=device)
++
++    def assemble(self, bio, inv_mass, inv_inertia, dim, highwater, mio, matrix):
++        jac = self.jacobian
++        wp.launch(
++            _row_tables_reset,
++            dim=(self.worlds, self.rows),
++            inputs=[dim, self.rows, self.count, self.mask],
++            device=self.device,
++        )
++        wp.launch(
++            _row_tables_fill,
++            dim=(self.worlds, jac.max_of_num_nzb),
++            inputs=[jac.num_nzb, jac.nzb_start, jac.nzb_coords, dim, self.rows, self.count, self.mask, self.blocks],
++            device=self.device,
++        )
++        wp.launch(
++            _assemble_delassus_gathered,
++            dim=(self.worlds, 1024),
++            inputs=[
++                bio,
++                inv_mass,
++                inv_inertia,
++                jac.num_nzb,
++                jac.nzb_start,
++                jac.nzb_coords,
++                jac.nzb_values,
++                dim,
++                highwater,
++                mio,
++                self.rows,
++                self.count,
++                self.mask,
++                self.blocks,
++                matrix,
++            ],
++            block_dim=256,
++            device=self.device,
++        )
++
++
+ @wp.kernel
+ def _clear_tracked_delassus_prefix(
+     dim: wp.array[wp.int32],
+@@ -1029,6 +1218,7 @@ class DelassusOperator:
+         self._tracked_clear_highwater: wp.array[wp.int32] | None = None
+         self._tracked_clear_capacity: wp.array[wp.int32] | None = None
+         self._body_grouped: _BodyGroupedDelassus | None = None
++        self._gathered: _GatheredDelassus | None = None
+ 
+         # Allocate the Delassus operator data if at least the model is provided
+         if model is not None:
+@@ -1154,6 +1344,7 @@ class DelassusOperator:
+         self._logical_owner = None
+         # Finalization invalidates topology and capacity dependent workspaces.
+         self._body_grouped = None
++        self._gathered = None
+ 
+         # Extract required maximum number of constraints for each world
+         maxdims = get_max_constraints_per_world(model, limits, contacts)
+@@ -1325,7 +1516,16 @@ class DelassusOperator:
+         if self._logical_owner is not None:
+             self._logical_owner.begin_build(reset_to_zero=reset_to_zero)
+ 
+-        if reset_to_zero:
++        # A tracked clear with sparse Jacobians writes the active prefix and clears in the one assembly pass.
++        gathered = (
++            reset_to_zero
++            and self._tracked_active_clear
++            and self._tracked_clear_highwater is not None
++            and not isinstance(jacobians, DenseSystemJacobians)
++        )
++        if gathered:
++            pass
++        elif reset_to_zero:
+             self._clear_for_build()
+         else:
+             self._track_active_write()
+@@ -1358,18 +1558,34 @@ class DelassusOperator:
+             )
+         else:
+             jacobian_cts = jacobians._J_cts.bsm
+-            if self._body_grouped is None or self._body_grouped.jacobian is not jacobian_cts:
+-                self._body_grouped = _BodyGroupedDelassus(
+-                    jacobian_cts, model.bodies.inv_m_i.shape[0], self._device
++            if gathered:
++                if self._gathered is None or self._gathered.jacobian is not jacobian_cts:
++                    self._gathered = _GatheredDelassus(
++                        jacobian_cts, self._num_worlds, max(self._world_maxdims, default=0), self._device
++                    )
++                self._gathered.assemble(
++                    model.info.bodies_offset,
++                    model.bodies.inv_m_i,
++                    data.bodies.inv_I_i,
++                    self._operator.info.dim,
++                    self._tracked_clear_highwater,
++                    self._operator.info.mio,
++                    self._operator.mat,
++                )
++                wp.copy(self._tracked_clear_highwater, self._operator.info.dim)
++            else:
++                if self._body_grouped is None or self._body_grouped.jacobian is not jacobian_cts:
++                    self._body_grouped = _BodyGroupedDelassus(
++                        jacobian_cts, model.bodies.inv_m_i.shape[0], self._device
++                    )
++                self._body_grouped.assemble(
++                    model.info.bodies_offset,
++                    model.bodies.inv_m_i,
++                    data.bodies.inv_I_i,
++                    self._operator.info.dim,
++                    self._operator.info.mio,
++                    self._operator.mat,
+                 )
+-            self._body_grouped.assemble(
+-                model.info.bodies_offset,
+-                model.bodies.inv_m_i,
+-                data.bodies.inv_I_i,
+-                self._operator.info.dim,
+-                self._operator.info.mio,
+-                self._operator.mat,
+-            )
+ 
+         # Add armature regularization to the upper diagonal if dynamic joint constraints are present
+         if model.size.sum_of_num_dynamic_joints > 0:

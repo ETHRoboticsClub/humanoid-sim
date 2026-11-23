@@ -1,0 +1,39 @@
+# Sim-versus-robot regression: every case of regression/cases.yaml on the default plant, a verdict per metric
+# (docs/replay-and-sysid.md, "Robot regression"). The bags are read from S3 through the /ckpt mount, at the paths and
+# with the sha256 the cases pin; the task fails (exit 1) when a case does.
+#   sky launch -y -d -c sim-regress -i 10 --down sky/regress.sky.yaml
+#   sky logs sim-regress
+#   rsync -avz sim-regress:sky_workdir/outputs/regress/ outputs/regress/      (within 10 minutes of the job ending)
+name: humanoid-sim-regress
+workdir: .
+
+resources:
+  cloud: aws
+  accelerators: L40S:1    # for a non-training check L4 does as well: sky launch --gpus L4:1
+  cpus: 8+
+  memory: 32+
+  disk_size: 200
+
+file_mounts:
+  /ckpt:
+    source: s3://ethrc-rc-humanoid-ckpts
+    mode: MOUNT
+
+envs:
+  ISAACLAB_COMMIT: 32712682b69edd488eea26689da6905c48d31037
+  UV_VERSION: 0.13.1
+
+setup: bash sky/setup.sh
+
+run: |
+  set -uo pipefail
+  export PATH="$HOME/.local/bin:$HOME/il-venv/bin:$PATH"
+  cd "$HOME/sky_workdir"
+  mkdir -p outputs/regress
+  humanoid-sim build-asset --base-joints | tail -1
+  humanoid-sim regress --recordings /ckpt/amoec/recordings --device cuda:0 --out outputs/regress \
+    2>&1 | tee outputs/regress/regress.log
+  status=${PIPESTATUS[0]}
+  echo "regress exit $status"
+  set +o pipefail
+  exit $status
