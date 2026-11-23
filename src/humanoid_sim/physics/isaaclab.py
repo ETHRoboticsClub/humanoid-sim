@@ -55,6 +55,7 @@ class IsaacLabCfg:
     settings: dict | None = None  # the solver's block of the profile's physics
     integrator: str | None = None  # overrides the solver block's
     springs: dict | None = None  # crank spring joint -> (stiffness, damping), :func:`spring_gains`
+    backlash: dict | None = None  # crank backlash joint -> play width (rad), :func:`backlash_widths`
     gravity_m_s2: tuple[float, float, float] | None = None  # None: Isaac Lab's default, Earth's
     fixed_base: bool = False
     base_height_m: float = 1.0
@@ -202,7 +203,7 @@ def _per_joint(names, values):
     return {f"^{n}$": float(v) for n, v in zip(names, values, strict=True)}
 
 
-# The crank springs' solver effort limit: none in effect (a crank drive peaks at tens of N m).
+# The crank springs' and backlash joints' solver effort limit: none in effect (a crank drive peaks at tens of N m).
 SPRING_EFFORT_LIMIT_NM = 1e4
 
 
@@ -229,13 +230,47 @@ def spring_gains(usd_path: Path, physics: dict) -> dict[str, tuple[float, float]
             for drive, joint in springs.items()}
 
 
+def backlash_widths(usd_path: Path, physics: dict) -> dict[str, float]:
+    """``{backlash joint: play width (rad)}`` of the asset's crank backlash, from the profile's
+    ``physics.ankle_backlash.width_rad`` (a number for every crank or a mapping by crank drive); empty for an asset
+    without backlash. Raises when the asset has backlash and the block gives no positive width for it."""
+    from humanoid_sim.model.asset import backlash_joints
+
+    joints = backlash_joints(usd_path)
+    if not joints:
+        return {}
+    knob = (physics.get("ankle_backlash") or {}).get("width_rad")
+
+    def value(drive):
+        v = knob.get(drive) if isinstance(knob, dict) else knob
+        if v is None or not math.isfinite(float(v)) or float(v) <= 0:
+            raise ValueError(f"{usd_path} has ankle crank backlash: physics.ankle_backlash.width_rad needs a positive "
+                             f"value for {drive}, not {v!r}")
+        return float(v)
+
+    return {joint: value(drive) for drive, joint in joints.items()}
+
+
+def write_backlash(robot, joint_ids: torch.Tensor, width_rad: torch.Tensor, env_ids: torch.Tensor | None = None):
+    """Open the backlash joints ``joint_ids`` of ``robot`` (an Isaac Lab articulation) to their play: stops at
+    ``±w/2`` for widths ``width_rad`` ``[E, C]`` (rad; all envs, or ``env_ids``). Every width must be positive."""
+    from humanoid_sim.transmissions.backlash import limits
+
+    if not bool((width_rad > 0).all()):
+        raise ValueError("ankle backlash widths must be positive")
+    kwargs = {} if env_ids is None else {"env_ids": env_ids}
+    robot.write_joint_position_limit_to_sim_index(limits=limits(width_rad.float()), joint_ids=joint_ids, **kwargs)
+
+
 def articulation_cfg(usd_path: Path, props: JointProperties, *, fixed_base: bool = False, base_joints: bool = False,
                      self_collision: bool = True, base_height_m: float = 1.0, contact_sensors: bool = False,
-                     joint_pos: list[float] | None = None, springs: dict[str, tuple[float, float]] | None = None):
+                     joint_pos: list[float] | None = None, springs: dict[str, tuple[float, float]] | None = None,
+                     backlash: list[str] | None = None):
     """The robot as an Isaac Lab articulation: constant solver PD ``k0, d0`` and the description's passive
     properties per joint, initially at ``joint_pos`` (``props.names`` order; default: the standing pose); base
     joints (if the asset has them) on a stiff PD; crank springs (``springs``, :func:`spring_gains`) as a PD to zero
-    with their own gains, at zero."""
+    with their own gains, at zero; crank backlash joints (``backlash``) free of any gain, at zero (their stops are
+    opened after spawn: :func:`write_backlash`)."""
     import isaaclab.sim as sim_utils
     from isaaclab.actuators import ImplicitActuatorCfg
     from isaaclab.assets import ArticulationCfg
@@ -263,6 +298,12 @@ def articulation_cfg(usd_path: Path, props: JointProperties, *, fixed_base: bool
             stiffness=_per_joint(names, [springs[n][0] for n in names]),
             damping=_per_joint(names, [springs[n][1] for n in names]),
             armature=0.0, friction=0.0, viscous_friction=0.0, joint_effort_limit=SPRING_EFFORT_LIMIT_NM)
+        joint_pos |= {f"^{n}$": 0.0 for n in names}
+    if backlash:
+        names = list(backlash)
+        actuators["ankle_backlash"] = ImplicitActuatorCfg(
+            joint_names_expr=[f"^{n}$" for n in names], stiffness=0.0, damping=0.0, armature=0.0, friction=0.0,
+            viscous_friction=0.0, joint_effort_limit=SPRING_EFFORT_LIMIT_NM)
         joint_pos |= {f"^{n}$": 0.0 for n in names}
     return ArticulationCfg(
         prim_path=ROBOT_PRIM,
@@ -451,7 +492,8 @@ class IsaacLabRobot:
         add_objects(scene_cfg, cfg.objects)
         scene_cfg.robot = articulation_cfg(usd_path, props, fixed_base=cfg.fixed_base, base_joints=cfg.base_joints,
                                            self_collision=cfg.self_collision, base_height_m=cfg.base_height_m,
-                                           contact_sensors=cfg.contacts, springs=cfg.springs)
+                                           contact_sensors=cfg.contacts, springs=cfg.springs,
+                                           backlash=list(cfg.backlash or {}) or None)
         if cfg.imu:
             scene_cfg.imu = imu_sensor_cfg(desc.robot)
         for name, frame in (cfg.extra_imus or {}).items():
@@ -488,6 +530,10 @@ class IsaacLabRobot:
 
         self._contact_capacity = contact_capacity_guard(physics, cfg.num_envs, cfg.device)
         self.robot = self.scene["robot"]
+        if cfg.backlash:  # the stops were authored all but closed: open them to the play
+            ids = torch.tensor([self.robot.joint_names.index(n) for n in cfg.backlash], device=cfg.device)
+            width = torch.tensor(list(cfg.backlash.values()), device=cfg.device).expand(cfg.num_envs, -1)
+            write_backlash(self.robot, ids, width)
         physical = desc.link_names()
         self._inertial_bodies = [i for i, n in enumerate(self.robot.body_names) if n in physical]
         self.gravity_w = tuple(self.sim.cfg.gravity)

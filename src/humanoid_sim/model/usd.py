@@ -168,24 +168,32 @@ def fixed_body_excludes(edges: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return sorted(pair for names in groups.values() for pair in combinations(names, 2))
 
 
-def asset_key(desc, profile: dict, *, base_joints: bool = False, ankle_compliance: bool = False) -> str:
+def asset_key(desc, profile: dict, *, base_joints: bool = False, ankle_compliance: bool = False,
+              ankle_backlash: bool = False) -> str:
     record = {"schema": "humanoid-sim-native-usd/v6", "source": desc.usd_model.digest(),
               "description": desc.digest, "base_joints": base_joints,
               "actuators": hashlib.sha256(desc.actuators_path.read_bytes()).hexdigest(), "model": profile["model"],
               "ankle_stop_solref": profile["physics"]["mjwarp"]["ankle_stop_solref"]}
     if ankle_compliance:  # only then: the rigid asset keeps its key
         record["ankle_compliance"] = COMPLIANCE_SCHEMA
+    if ankle_backlash:  # likewise
+        record["ankle_backlash"] = {"schema": BACKLASH_SCHEMA,
+                                    "solref": profile["physics"]["mjwarp"]["ankle_backlash_solref"]}
+        if ankle_compliance:  # the output flange's inertia: only an asset with both has a free flange
+            record["ankle_backlash"]["output_inertia_kg_m2"] = output_inertia(profile)
     return hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints=False,
-                ankle_compliance=False) -> Path:
+                ankle_compliance=False, ankle_backlash=False) -> Path:
     """Compose the delivered articulation and author simulator choices in a separate layer.
 
     Retain native crank bodies and all loop-closing joints. Weld only uncommanded
     revolute joints outside the ankle mechanisms; never edit the source delivery.
     With ``ankle_compliance``, the variant whose crank shafts each carry a spring between the drive's output and
-    the crank arm (:func:`_author_crank_springs`); without it nothing of that is authored.
+    the crank arm (:func:`_author_crank_springs`); without it nothing of that is authored. With ``ankle_backlash``,
+    the variant whose crank drives each turn a motor-side body with play to their output shaft
+    (:func:`_author_crank_backlash`), on its own or with the springs.
     """
     import shutil
 
@@ -197,7 +205,8 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
     prune = profile["model"].get("prune_contained_hulls", False)
     if not isinstance(prune, bool):
         raise ValueError("prune_contained_hulls must be a boolean")
-    key = asset_key(desc, profile, base_joints=base_joints, ankle_compliance=ankle_compliance)
+    key = asset_key(desc, profile, base_joints=base_joints, ankle_compliance=ankle_compliance,
+                    ankle_backlash=ankle_backlash)
     out = Path(out_root) / desc.robot / key
     meta_path = out / "asset.json"
     path = out / "robot.usda"
@@ -257,6 +266,8 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
 
     universal = _author_universal_rods(desc, profile, source, stage, mapped)
     springs = _author_crank_springs(desc, source, stage, mapped) if ankle_compliance else None
+    # After the springs: the play sits on the motor side of the output flange they add.
+    backlash = (_author_crank_backlash(desc, profile, source, stage, mapped) if ankle_backlash else None)
 
     excluded = []
     fixed_pairs = []
@@ -314,6 +325,8 @@ def build_asset(desc, profile: dict, out_root: Path, *, force=False, base_joints
             "contact_excludes": contact_excludes, "self_collision_sets": None, "self_collision_excludes": excluded}
     if springs is not None:
         meta["ankle_compliance"] = springs
+    if backlash is not None:
+        meta["ankle_backlash"] = backlash
     meta_path.write_text(json.dumps(meta, indent=1))
     return path
 
@@ -364,7 +377,9 @@ def _author_universal_rods(desc, profile: dict, source, stage, mapped) -> list[s
 
 COMPLIANCE_SCHEMA = "crank-spring/v1"
 # The drive output body behind each crank spring: the output flange, on the shaft axis. Its own inertia barely
-# matters (the drive's rotor armature sits on the same joint); a few grams keep the solvers' body inertias sane.
+# matters (the drive's rotor armature sits on the same joint); a few grams keep the solvers' body inertias sane. An
+# asset with backlash as well frees the flange from that joint and gives it the profile's inertia instead
+# (_author_crank_backlash).
 OUTPUT_MASS_KG = 0.01
 OUTPUT_INERTIA_KG_M2 = 2e-6
 
@@ -412,6 +427,82 @@ def _author_crank_springs(desc, source, stage, mapped) -> dict:
             create(joint.GetLocalRot1Attr().Get())
         out["springs"][drive] = spring
         out["outputs"][drive] = output_body(name)
+    return out
+
+
+BACKLASH_SCHEMA = "crank-backlash/v3"
+# The backlash's motor-side body: the gearbox input reflected to the output, on the shaft axis. The drive's rotor
+# armature (on the same joint) carries the motor side's inertia; this keeps the body heavy enough for Kamino to rest
+# the shaft exactly on a stop (at a few 1e-6 kg m² a shaft under a static load sits up to ~1 mrad off it). Small
+# against the armature; numerical, not a robot value.
+MOTOR_INERTIA_KG_M2 = 2e-4
+
+
+def output_inertia(profile: dict) -> float:
+    """The output flange's inertia (kg m²) for an asset with both ankle compliance and backlash: the profile's
+    ``physics.ankle_backlash.output_inertia_kg_m2``, a positive number (:func:`humanoid_sim.transmissions.backlash.
+    check_output_stability`)."""
+    v = (profile["physics"].get("ankle_backlash") or {}).get("output_inertia_kg_m2")
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+        raise ValueError(f"physics.ankle_backlash.output_inertia_kg_m2 must be a positive number, not {v!r}")
+    return float(v)
+
+
+def _author_crank_backlash(desc, profile: dict, source, stage, mapped) -> dict:
+    """Split every ankle crank drive at its gearbox. The drive's joint keeps its name, limits and frames but turns a
+    new motor-side body (``<crank joint>_motor``, a sibling of the body it turned, at that body's pose, mass on the
+    shaft axis); a revolute joint ``<crank joint>_backlash`` on the same axis joins it to the body the drive's joint
+    turned before (the crank arm, or the spring's output flange). The backlash joint has no gain; its stops are the
+    play, authored all but closed (``±AUTHORED_HALF_WIDTH_RAD``: MuJoCo refuses an empty range) and opened at spawn
+    and by randomization to the profile's ``physics.ankle_backlash`` (:mod:`humanoid_sim.transmissions.backlash`),
+    with MJWarp's limit constraint from ``physics.mjwarp.ankle_backlash_solref``. The play frees a spring's output
+    flange, which then hangs on the spring alone: it takes the profile's ``output_inertia_kg_m2``
+    (:func:`output_inertia`). At zero play angle the assembly is the one without backlash. Returns the asset
+    metadata."""
+    from pxr import Gf, Sdf, UsdGeom, UsdPhysics
+
+    from humanoid_sim.transmissions.backlash import AUTHORED_HALF_WIDTH_RAD, backlash_joints, motor_body
+    from humanoid_sim.transmissions.compliance import output_body
+
+    cranks = crank_joints(desc)
+    solref = Gf.Vec2f(*profile["physics"]["mjwarp"]["ankle_backlash_solref"])
+    out = {"schema": BACKLASH_SCHEMA, "joints": {}, "motors": {}, "motor_inertia_kg_m2": MOTOR_INERTIA_KG_M2}
+    for drive, play in backlash_joints(desc).items():
+        name = cranks[drive]
+        joint = source.joints[name]
+        if not joint.GetPrim().IsA(UsdPhysics.RevoluteJoint):
+            raise ValueError(f"ankle backlash: crank {name} is not a revolute joint")
+        crank = UsdPhysics.RevoluteJoint(stage.GetPrimAtPath(mapped(joint.GetPrim())))
+        (shaft,) = crank.GetBody1Rel().GetTargets()  # the crank arm, or the springs' output flange
+        target = shaft.GetParentPath().AppendChild(motor_body(name))
+        if stage.GetPrimAtPath(target):
+            raise ValueError(f"ankle backlash: {target} already exists")
+        body = UsdGeom.Xform.Define(stage, target)
+        body.AddTransformOp().Set(UsdGeom.Xformable(stage.GetPrimAtPath(shaft)).GetLocalTransformation())
+        UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
+        mass = UsdPhysics.MassAPI.Apply(body.GetPrim())
+        mass.CreateMassAttr(OUTPUT_MASS_KG)
+        mass.CreateDiagonalInertiaAttr(Gf.Vec3f(MOTOR_INERTIA_KG_M2))
+        mass.CreateCenterOfMassAttr(Gf.Vec3f(*joint.GetLocalPos1Attr().Get()))
+        mass.CreatePrincipalAxesAttr(Gf.Quatf(1))
+        crank.GetBody1Rel().SetTargets([target])
+        if shaft.name == output_body(name):  # with the springs: the flange, freed by the play
+            flange = output_inertia(profile)
+            UsdPhysics.MassAPI(stage.GetPrimAtPath(shaft)).GetDiagonalInertiaAttr().Set(Gf.Vec3f(flange))
+            out["output_inertia_kg_m2"] = flange
+        gap = UsdPhysics.RevoluteJoint.Define(stage, mapped(joint.GetPrim()).GetParentPath().AppendChild(play))
+        gap.CreateBody0Rel().SetTargets([target])
+        gap.CreateBody1Rel().SetTargets([shaft])
+        gap.CreateAxisAttr(UsdPhysics.RevoluteJoint(joint.GetPrim()).GetAxisAttr().Get())
+        for create in (gap.CreateLocalPos0Attr, gap.CreateLocalPos1Attr):
+            create(joint.GetLocalPos1Attr().Get())
+        for create in (gap.CreateLocalRot0Attr, gap.CreateLocalRot1Attr):
+            create(joint.GetLocalRot1Attr().Get())
+        gap.CreateLowerLimitAttr(-math.degrees(AUTHORED_HALF_WIDTH_RAD))  # USD revolute limits are in degrees
+        gap.CreateUpperLimitAttr(math.degrees(AUTHORED_HALF_WIDTH_RAD))
+        gap.GetPrim().CreateAttribute("mjc:solreflimit", Sdf.ValueTypeNames.Float2).Set(solref)
+        out["joints"][drive] = play
+        out["motors"][drive] = motor_body(name)
     return out
 
 

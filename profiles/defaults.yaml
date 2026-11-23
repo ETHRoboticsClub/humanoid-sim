@@ -62,6 +62,13 @@ physics:
     # with its 22 Nm/rad baseline spring 1 rad past a stop rests 13 mrad past it (52 mrad at the joint stops' 0.02 s).
     # The real stops are metal; their stiffness is not measured (modeled).
     ankle_stop_solref: [0.008, 1.0]
+    # The ankle crank backlash stops' constraint (MuJoCo solref, raw), for an asset built with
+    # `build-asset --ankle-backlash`: the gear teeth either side of the play. MuJoCo scales a positive solref by the
+    # DOF's inertia, which for the play is the output side's alone (crank arm and rod, about 1e-3 kg m² on the V1):
+    # 0.002 s, MuJoCo's floor at the V1's 1 ms step (it raises anything shorter to twice the step), is roughly
+    # 300 N m/rad, so a few N m push the shaft some 10 mrad past a stop, more than the play itself. Negative values
+    # are MuJoCo's direct (-stiffness, -damping). Kamino's stops are hard. Not measured (modeled).
+    ankle_backlash_solref: [0.002, 1.0]
     # Depth of the solid base under a heightfield's lowest point. Newton exports heightfields to MuJoCo with a
     # 0.1 mm base, through which a shape sinking into the lowest cells is pushed out downwards (a G1 foot sphere
     # landing on a rough tile falls through). Deeper than any shape sinks; nothing lies under the terrain.
@@ -83,6 +90,23 @@ physics:
   ankle_compliance:
     stiffness_nm_per_rad: null
     damping_nm_s_per_rad: null
+  # Ankle crank backlash, for an asset built with `build-asset --ankle-backlash`: the width (rad, total, at the crank
+  # shaft) of the play between each crank drive's motor side and its output shaft (transmissions/backlash.py). A
+  # number for every crank or a mapping by crank drive name. The values are the caller's (humanoid-learning fits
+  # them); an asset with the play refuses to spawn without them. Other assets ignore this block.
+  ankle_backlash:
+    width_rad: null
+    # The encoder a crank drive's position loop reads: motor (the drive's joint) or output (the crank shaft past the
+    # play, a dual-loop drive; its velocity loop stays on the motor encoder). The drives report the output encoder
+    # either way. Not confirmed by the drives' configuration (modeled).
+    loop_encoder: motor
+    # An asset with ankle compliance as well (build-asset --ankle-backlash --ankle-compliance): the inertia (kg m²) of
+    # each spring's output flange, which the play frees from the drive's rotor so that it hangs on the spring alone.
+    # Numerical, not measured: the plant and SimCore refuse springs with k dt²/I + 2 b dt/I >= 4 on it
+    # (transmissions/backlash.py). 4e-4 holds the nominal spring (600 N m/rad, 0.3 N m s/rad) at 1 ms with a measure
+    # of 3; stiffer springs need a heavier flange, which slows the shaft's travel across the play. Part of that
+    # variant's asset key (read at build).
+    output_inertia_kg_m2: 4.0e-4
   # Kamino (beta in Newton 1.6): maximal coordinates, hard joint-limit and contact constraints, P-ADMM forward
   # dynamics, contacts from Newton's collision pipeline. Contact friction mixes by the larger coefficient, as
   # MJWarp does. Not yet checked against MJWarp or the captures (modeled).

@@ -80,7 +80,13 @@ class SimCore:
         self.profile = load_profile(robot, physics_overrides=physics_overrides)
         phys = self.profile["physics"]
         self.period_ns = int(period_ns or phys["period_ns"])
-        from humanoid_sim.physics.isaaclab import IsaacLabCfg, IsaacLabRobot, solver_settings, spring_gains
+        from humanoid_sim.physics.isaaclab import (
+            IsaacLabCfg,
+            IsaacLabRobot,
+            backlash_widths,
+            solver_settings,
+            spring_gains,
+        )
 
         self.solver, settings = solver_settings(phys, solver)
         self.integrator = integrator or settings["integrator"]
@@ -102,6 +108,15 @@ class SimCore:
         props = joint_properties(self.plant, physical)
         self.plant.enabled_friction[:] = torch.tensor(props.friction, dtype=self.plant.cfg.dtype)
         period_s = self.period_ns / NS_PER_S
+        springs = spring_gains(usd_path, phys)
+        from humanoid_sim.model.asset import backlash_output_inertia
+
+        flange = backlash_output_inertia(usd_path)
+        if flange is not None and springs:  # before the simulation exists: an unstable flange fails here
+            from humanoid_sim.transmissions.backlash import check_output_stability
+
+            k, b = zip(*springs.values(), strict=True)
+            check_output_stability(torch.tensor(k), torch.tensor(b), flange, period_s)
         self.backend = IsaacLabRobot(self.desc, usd_path, IsaacLabCfg(
             num_envs=num_envs, device=device, period_s=period_s, solver=self.solver, settings=settings,
             integrator=self.integrator, fixed_base=fixed_base, base_height_m=base_height_m,
@@ -110,7 +125,8 @@ class SimCore:
             imu=imu, extra_imus={n: s.frame for n, s in extra_imus.items()}, contacts=contacts, rerun=rerun,
             rerun_rrd=rerun_rrd, scene=scene, objects=objects, entities=entities,
             render_each_step=render_each_step, terrain=None if self.terrain is None else self.terrain.cfg,
-            springs=spring_gains(usd_path, phys) or None, gravity_m_s2=gravity_m_s2),
+            springs=springs or None, backlash=backlash_widths(usd_path, phys) or None,
+            gravity_m_s2=gravity_m_s2),
             props=props)
         self.scene = scene
         self.ground = self.backend.ground
@@ -122,11 +138,21 @@ class SimCore:
         self._to_solver = torch.tensor([self.backend.joint_names.index(n) for n in physical], device=device)
         # Crank springs (an asset built with ankle compliance), in the description's crank drive order: held at a
         # zero target, written at zero with every state write.
-        from humanoid_sim.model.asset import compliance_springs
+        from humanoid_sim.model.asset import backlash_joints, compliance_springs
 
         self.springs = compliance_springs(usd_path)
         self._springs = torch.tensor([self.backend.joint_names.index(n) for n in self.springs.values()],
                                      device=device, dtype=torch.long)
+        # Crank backlash (an asset built with ankle backlash), in the description's crank drive order: no gain,
+        # written at zero (mid-play) with every state write; the plant reports the output shaft past it.
+        self.backlash = backlash_joints(usd_path)
+        self._backlash = torch.tensor([self.backend.joint_names.index(n) for n in self.backlash.values()],
+                                      device=device, dtype=torch.long)
+        self._held = torch.cat([self._springs, self._backlash])  # joints written at zero
+        if self.backlash:
+            from humanoid_sim.transmissions.backlash import loop_encoder
+
+            self.plant.use_backlash(loop_encoder(phys))
         if self.native_state is not None:
             self.write_joint_state(*self.joint_state())
         self._base = (torch.tensor([self.backend.joint_names.index(n) for n, _ in BASE_JOINTS],
@@ -212,8 +238,8 @@ class SimCore:
             for name in values:
                 i = self.backend.joint_names.index(name)
                 bq[:, i], bqd[:, i] = values[name].to(bq.dtype), rates[name].to(bqd.dtype)
-        bq[:, self._springs] = 0.0
-        bqd[:, self._springs] = 0.0
+        bq[:, self._held] = 0.0
+        bqd[:, self._held] = 0.0
         self.backend.write_state(bq, bqd)
         self._state_written = True
         self._feedback = None
@@ -266,8 +292,14 @@ class SimCore:
                 raise ValueError("base acceleration replay cannot use an active gantry")
         self._base_acceleration = acceleration_w
 
+    def _read_backlash(self) -> None:
+        """Hand the plant each crank's play before it computes feedback."""
+        if self.backlash:
+            self.plant.write_backlash(self.backend.joint_state()[0][:, self._backlash].to(self.plant.cfg.dtype))
+
     def step(self) -> DriveFeedback:
         q, qd = self.solver_state()
+        self._read_backlash()  # a state written since the last step is converted again before it
         if self._graphs is not None:
             target = self._graphs.pre(q, qd, refresh=self._state_written)
         else:
@@ -304,6 +336,7 @@ class SimCore:
         self.backend.step()
         self.t_ns += self.period_ns
         q, qd = self.solver_state()
+        self._read_backlash()
         self._feedback = self._graphs.post(q, qd) if self._graphs is not None else self.plant.feedback(q, qd)
         self._state_written = False
         return self.feedback

@@ -63,22 +63,26 @@ def asset_key(desc: Description, profile: dict, prepared: PreparedUrdf) -> str:
 
 
 def asset_dir(desc: Description, profile: dict, out_root: Path, *, base_joints: bool = False,
-              ankle_compliance: bool = False) -> Path:
+              ankle_compliance: bool = False, ankle_backlash: bool = False) -> Path:
     """Directory of the asset for this description and profile (exists only once built). ``ankle_compliance``: the
-    native USD variant with crank springs (:mod:`humanoid_sim.transmissions.compliance`)."""
+    native USD variant with crank springs (:mod:`humanoid_sim.transmissions.compliance`); ``ankle_backlash``: with
+    gearbox play at each crank (:mod:`humanoid_sim.transmissions.backlash`)."""
     if profile["model"].get("usd"):
         from humanoid_sim.model.usd import asset_key as usd_key
 
         return Path(out_root) / desc.robot / usd_key(desc, profile, base_joints=base_joints,
-                                                     ankle_compliance=ankle_compliance)
-    _no_compliance(ankle_compliance)
+                                                     ankle_compliance=ankle_compliance,
+                                                     ankle_backlash=ankle_backlash)
+    _no_compliance(ankle_compliance, ankle_backlash)
     prepared = PreparedUrdf(desc, profile).build(base_joints=base_joints)
     return Path(out_root) / desc.robot / asset_key(desc, profile, prepared)
 
 
-def _no_compliance(ankle_compliance: bool) -> None:
+def _no_compliance(ankle_compliance: bool, ankle_backlash: bool = False) -> None:
     if ankle_compliance:
         raise ValueError("ankle compliance needs the native ankle (a profile with model.usd)")
+    if ankle_backlash:
+        raise ValueError("ankle backlash needs the native ankle (a profile with model.usd)")
 
 
 def compliance_springs(usd_path: Path) -> dict[str, str]:
@@ -89,6 +93,25 @@ def compliance_springs(usd_path: Path) -> dict[str, str]:
     except FileNotFoundError:
         return {}
     return dict((meta.get("ankle_compliance") or {}).get("springs", {}))
+
+
+def backlash_joints(usd_path: Path) -> dict[str, str]:
+    """``{crank drive: backlash joint}`` of the built asset at ``usd_path``; empty for an asset without ankle backlash
+    or a USD outside a built asset."""
+    try:
+        meta = asset_meta(usd_path)
+    except FileNotFoundError:
+        return {}
+    return dict((meta.get("ankle_backlash") or {}).get("joints", {}))
+
+
+def backlash_output_inertia(usd_path: Path) -> float | None:
+    """The output flange's inertia (kg m²) of a built asset with both ankle compliance and backlash; None otherwise."""
+    try:
+        meta = asset_meta(usd_path)
+    except FileNotFoundError:
+        return None
+    return (meta.get("ankle_backlash") or {}).get("output_inertia_kg_m2")
 
 
 def _body_prims(stage):
@@ -158,14 +181,14 @@ def check_asset_robot(usd_path: Path, robot: str) -> None:
 
 
 def build_asset(desc: Description, profile: dict, out_root: Path, *, force: bool = False,
-                base_joints: bool = False, ankle_compliance: bool = False) -> Path:
+                base_joints: bool = False, ankle_compliance: bool = False, ankle_backlash: bool = False) -> Path:
     """Build (or reuse) the robot USD; returns its path. Writes ``asset.json`` with the provenance."""
     if profile["model"].get("usd"):
         from humanoid_sim.model.usd import build_asset as build_usd
 
         return build_usd(desc, profile, out_root, force=force, base_joints=base_joints,
-                         ankle_compliance=ankle_compliance)
-    _no_compliance(ankle_compliance)
+                         ankle_compliance=ankle_compliance, ankle_backlash=ankle_backlash)
+    _no_compliance(ankle_compliance, ankle_backlash)
     prepared = PreparedUrdf(desc, profile).build(base_joints=base_joints)
     key = asset_key(desc, profile, prepared)
     out = Path(out_root) / desc.robot / key

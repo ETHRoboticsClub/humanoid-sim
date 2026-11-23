@@ -68,6 +68,10 @@ PARAMS: dict[str, Param] = {
     "ankle_spring_damping": Param("physics", "crank", unit="N m s/rad",
                                   doc="ankle linkage compliance: damping of that spring, per crank; positive. Nominal: "
                                       "the profile's physics.ankle_compliance"),
+    "ankle_backlash": Param("physics", "crank", unit="rad",
+                            doc="ankle crank backlash: width of the play between a crank drive's motor side and its "
+                                "output shaft, per crank (an asset built with ankle backlash); positive. Nominal: "
+                                "the profile's physics.ankle_backlash"),
     "drive_stiffness": Param("device", "drive", doc="drive's realized P gain over the demanded one"),
     "drive_damping": Param("device", "drive", doc="drive's realized D gain over the demanded one"),
     "torque_limit": Param("device", "drive", doc="scale of the torque-speed envelope and torque cap"),

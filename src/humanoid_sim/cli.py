@@ -2,8 +2,10 @@
 
     humanoid-sim [--solver mjwarp|kamino] <command>  Newton solver for the commands that step physics
                                                    (default: the profile's)
-    humanoid-sim build-asset [--base-joints] [--ankle-compliance]  robot USD from the description (Isaac Lab image)
+    humanoid-sim build-asset [--base-joints] [--ankle-compliance] [--ankle-backlash]
+                                                   robot USD from the description (Isaac Lab image)
     humanoid-sim replay <exc-dir> [--period-ms PERIOD] [--base yaw|orientation|fixed] [--terrain FILE]
+                        [--physics-overrides YAML]
                                                    drive-level replay, scored against the capture;
                                                    base following the capture's IMU yaw (default), or fixed
     humanoid-sim view-replay <replay-dir> --save x.rrd   sim and real robot + every drive signal in Rerun
@@ -66,6 +68,20 @@ def retry_kernel_build(build, *, attempts: int = PCH_BUILD_ATTEMPTS, delay_s: fl
             sleep(delay_s)
 
 
+def physics_overrides(text: str | None) -> dict | None:
+    """``--physics-overrides``: a YAML or JSON mapping merged over the profile's ``physics`` block, given inline or
+    as the path of a file holding it; None without one."""
+    if text is None:
+        return None
+    import yaml
+
+    path = Path(text)
+    value = yaml.safe_load(path.read_text() if path.is_file() else text)
+    if not isinstance(value, dict):
+        raise SystemExit(f"--physics-overrides: a mapping over the profile's physics block, not {value!r}")
+    return value
+
+
 def _usd(args, *, base_joints: bool = False) -> Path:
     if args.usd:
         return Path(args.usd)
@@ -87,7 +103,8 @@ def cmd_build_asset(args) -> int:
     from humanoid_sim.model.description import Description
 
     usd = build_asset(Description.load(args.robot), load_profile(args.robot), Path(args.assets), force=args.force,
-                      base_joints=args.base_joints, ankle_compliance=args.ankle_compliance)
+                      base_joints=args.base_joints, ankle_compliance=args.ankle_compliance,
+                      ankle_backlash=args.ankle_backlash)
     print(usd)
     return 0
 
@@ -112,7 +129,8 @@ def cmd_replay(args) -> int:
     moving = args.base != "fixed"
     usd = _usd(args, base_joints=moving)
     terrain = _terrain(args)
-    sim = SimCore(usd, device=args.device, robot=args.robot,
+    overrides = physics_overrides(args.physics_overrides)
+    sim = SimCore(usd, device=args.device, robot=args.robot, physics_overrides=overrides,
                   period_ns=None if args.period_ms is None else int(round(args.period_ms * 1e6)),
                   fixed_base=not moving, base_joints=moving, solver=args.solver, integrator=args.integrator,
                   self_collision=False if args.no_self_collision else None, contacts=acceleration is not None,
@@ -137,7 +155,7 @@ def cmd_replay(args) -> int:
                         **{f"motion_{k}": v for k, v in res.motion.items()},
                         **{f"effort_{k}": v for k, v in res.effort.items()})
     summary = {"dataset_id": cap.dataset_id, "name": cap.name, "period_ns": period_ns,
-               "physics": f"isaaclab/{sim.solver}", "device": args.device, "integrator": integrator, "base": args.base,
+               "physics": f"isaaclab/{sim.solver}", "physics_overrides": overrides, "device": args.device, "integrator": integrator, "base": args.base,
                "self_collision": not args.no_self_collision and bool(sim.profile["physics"]["self_collision"]),
                "terrain": None if terrain is None else terrain.describe(),
                **plant_identity(sim, usd),
@@ -403,6 +421,9 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--ankle-compliance", action="store_true",
                    help="the variant with a spring between each ankle crank drive and its crank arm (physics."
                         "ankle_compliance gives its stiffness and damping)")
+    b.add_argument("--ankle-backlash", action="store_true",
+                   help="the variant with gearbox play between each ankle crank drive and its output shaft "
+                        "(physics.ankle_backlash gives its width)")
     b.set_defaults(func=cmd_build_asset)
 
     r = sub.add_parser("replay")
@@ -420,6 +441,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--demand-delay-ms", type=float, default=0.0,
                    help="apply each recorded demand this much after its stamp (negative: before); see fit-delay")
     r.add_argument("--out", default="outputs/replay")
+    r.add_argument("--physics-overrides", default=None,
+                   help="YAML/JSON mapping (inline, or a file) merged over the profile's physics block, e.g. the play "
+                        "of an asset built with --ankle-backlash: '{ankle_backlash: {width_rad: 0.008}}'")
     from humanoid_sim.replay.effort import add_effort_args
     from humanoid_sim.replay.inertial import add_acceleration_args
 

@@ -9,6 +9,11 @@ One physics step ``[t0, t0 + period)``:
 4. joint torque → position target for the constant solver PD (target shaping);
 5. after the solver step: drive-frame feedback (position, velocity, applied and demanded torque).
 
+Ankle crank backlash (an asset built with it, :mod:`humanoid_sim.transmissions.backlash`): the drive's position loop
+(step 2) reads the encoder the profile names (``loop_encoder``): the motor side, or the output shaft (the motor side
+plus each crank's play); its velocity loop reads the motor side either way. The reported position (step 5) is the
+output shaft. The front end writes the play (:meth:`PlantCore.write_backlash`) before feedback and the drive law.
+
 The physics backend owns stepping; this class owns no solver state. Step 1 of a step converts the state step 5
 of the previous step converted, so :meth:`PlantCore.feedback` keeps the drive-frame state and
 :meth:`PlantCore.pre_physics` takes it (``state``) instead of running the transmission again. Times may be 0-d
@@ -110,6 +115,30 @@ class PlantCore:
         # Host-side flag for the front end: the solver friction (:meth:`joint_friction`) is due to be written.
         # Set by reset and submit (not by a submit replayed from a CUDA graph: its caller sets it).
         self.friction_changed = True
+        crank = [k for k, d in enumerate(drives) if d.crank is not None]
+        self.crank_drives = torch.tensor(crank, device=dev, dtype=torch.long)
+        self._crank_sign = torch.tensor([float(drives[k].sign) for k in crank], device=dev, dtype=dt)
+        # Each crank's play [E, C] (drive frame, crank_drives order): the output shaft's angle past the motor side.
+        # None without backlash (use_backlash). Written in place (write_backlash), so captured graphs read it.
+        self.backlash_rad: torch.Tensor | None = None
+        self.loop_on_output = False  # the drives' position loop reads the output shaft (use_backlash)
+
+    def use_backlash(self, loop_encoder: str = "motor") -> None:
+        """Report each crank's output shaft (motor side plus play) from now on; the play starts at zero.
+        ``loop_encoder``: the encoder the drive's position loop reads, ``motor`` or ``output``
+        (:data:`humanoid_sim.transmissions.backlash.LOOP_ENCODERS`)."""
+        from humanoid_sim.transmissions.backlash import LOOP_ENCODERS
+
+        if loop_encoder not in LOOP_ENCODERS:
+            raise ValueError(f"loop_encoder {loop_encoder!r}: one of {', '.join(LOOP_ENCODERS)}")
+        self.loop_on_output = loop_encoder == "output"
+        if self.backlash_rad is None:
+            self.backlash_rad = torch.zeros(self.num_envs, len(self.crank_drives), device=self.cfg.device,
+                                            dtype=self.cfg.dtype)
+
+    def write_backlash(self, joint_rad: torch.Tensor) -> None:
+        """Each crank's play ``[E, C]`` from its backlash joint's coordinate (crank_drives order), before feedback."""
+        self.backlash_rad.copy_(joint_rad * self._crank_sign)
 
     # -- demands ----------------------------------------------------------------------------------
 
@@ -156,6 +185,8 @@ class PlantCore:
         """Joint position targets ``[E, J]`` for the step starting at ``t0_ns`` (velocity target 0). ``state``: the
         drive-frame state of ``q, qd`` if already computed (``DriveJointMap.drive_state``)."""
         qdrv, vdrv, self._jacs = state if state is not None else self.solver_map.drive_state(q, qd)
+        if self.loop_on_output:  # the position loop reads the output shaft; the velocity loop the motor side
+            qdrv = qdrv.index_add(1, self.crank_drives, self.backlash_rad)
         out = self._keep("last", self.bank.compute(t0_ns, t0_ns + self.cfg.physics_period_ns, qdrv, vdrv))
         tau = self.solver_map.joint_torque(out.applied, self._jacs) + self.external_torque + self._relief(qd, out)
         self.passive_effort.copy_(tau)
@@ -173,13 +204,15 @@ class PlantCore:
 
     def feedback(self, q: torch.Tensor, qd: torch.Tensor) -> DriveFeedback:
         """Drive-frame feedback after the step (state ``q, q̇``; torques of the step just taken). The drive-frame
-        state is kept as :attr:`post_state` for the next :meth:`pre_physics`."""
+        state is kept as :attr:`post_state` for the next :meth:`pre_physics`. With backlash, a crank's position is
+        its output shaft (the motor side plus :attr:`backlash_rad`) and its velocity the motor side's."""
         qdrv, vdrv, jacs = self.solver_map.drive_state(q, qd)
         self._keep("post_state", (qdrv, vdrv, tuple(jacs)))
         qdrv, vdrv, _ = self.post_state
         z = torch.zeros_like(qdrv)
         last = self.last
-        return DriveFeedback(qdrv, vdrv, last.applied if last else z, last.demanded if last else z)
+        position = qdrv if self.backlash_rad is None else qdrv.index_add(1, self.crank_drives, self.backlash_rad)
+        return DriveFeedback(position, vdrv, last.applied if last else z, last.demanded if last else z)
 
     def _keep(self, name: str, value):
         """Store a step output in buffers that persist across steps (copied in place after the first), so a

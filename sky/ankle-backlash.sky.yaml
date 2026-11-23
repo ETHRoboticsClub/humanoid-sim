@@ -1,0 +1,59 @@
+name: humanoid-sim-ankle-backlash
+workdir: .
+
+resources:
+  accelerators: L4:1
+  cpus: 8+
+  memory: 32+
+  disk_size: 150
+
+envs:
+  ISAACLAB_COMMIT: 32712682b69edd488eea26689da6905c48d31037
+  UV_VERSION: 0.13.1
+
+setup: |
+  bash sky/setup.sh
+  "$HOME/.local/bin/uv" pip install --python "$HOME/il-venv/bin/python" "pytest>=9,<10"
+
+# The ankle backlash checks alone, on the working tree: its two assets and its tests. Then the Kamino crank stop
+# checks twice, once on the working tree and once on master (a git worktree of the synced repository, its own assets),
+# to tell a failure the working tree brings from one master already has.
+run: |
+  set -euo pipefail
+  export PATH="$HOME/.local/bin:$HOME/il-venv/bin:$PATH"
+  python -c 'import torch; assert torch.cuda.is_available(), "CUDA is required for native physics checks"'
+  out="$PWD/outputs/ankle-backlash"
+  mkdir -p "$out"
+  failed=0
+  check() {  # check <label> <test file>: one pytest process per file (Isaac Lab keeps one simulation per process)
+    pytest -v -s --junitxml="$out/$1.xml" "tests/$2.py" > "$out/$1.log" 2>&1 || failed=1
+    echo "$1: $(tail -1 "$out/$1.log")"
+  }
+
+  humanoid-sim build-asset
+  humanoid-sim build-asset --ankle-compliance
+  humanoid-sim build-asset --ankle-backlash
+  humanoid-sim build-asset --ankle-backlash --ankle-compliance
+  check test_ankle_backlash test_ankle_backlash
+  check test_ankle_backlash_physics test_ankle_backlash_physics
+  check test_kamino_crank_stops_physics test_kamino_crank_stops_physics
+
+  # master: its own source on the path ahead of the editable install, the working tree's description checkout.
+  master="$HOME/master-check"
+  git worktree remove --force "$master" 2>/dev/null || rm -rf "$master"
+  git worktree prune
+  git worktree add --detach "$master" master
+  echo "master at $(git -C "$master" rev-parse --short HEAD)"
+  rm -rf "$master/third_party/humanoid-urdf"
+  ln -s "$PWD/third_party/humanoid-urdf" "$master/third_party/humanoid-urdf"
+  (
+    cd "$master"
+    export PYTHONPATH="$master/src"
+    python -c 'import humanoid_sim, sys; sys.exit(0 if humanoid_sim.__file__.startswith(sys.argv[1]) else 1)' "$master" \
+      || { echo "master: humanoid_sim does not resolve to $master"; exit 1; }
+    humanoid-sim build-asset
+    humanoid-sim build-asset --ankle-compliance
+    check master_test_kamino_crank_stops_physics test_kamino_crank_stops_physics
+    exit $failed
+  ) || failed=1
+  exit $failed

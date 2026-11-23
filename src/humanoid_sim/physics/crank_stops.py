@@ -542,6 +542,7 @@ class KaminoCrankStops:
 
     def __init__(self, robot, desc: Description, settings: KaminoStopSettings, period_s: float):
         from humanoid_sim.model.usd import crank_joints
+        from humanoid_sim.transmissions.backlash import motor_body
         from humanoid_sim.transmissions.compliance import output_body
 
         self.robot, self.settings, self.period_s = robot, settings, float(period_s)
@@ -560,7 +561,9 @@ class KaminoCrankStops:
         parents, children, axes, self._frames = [], [], [], []
         for joint in self.joints:
             parent, child = source.joint_bodies(joint)
-            child = output_body(joint) if output_body(joint) in bodies else child  # an asset with compliance
+            # The crank joint's own child: the motor side (an asset with backlash), else the springs' output flange
+            # (with compliance), else the crank arm.
+            child = next((b for b in (motor_body(joint), output_body(joint)) if b in bodies), child)
             for name in (parent, child):
                 if name not in bodies:
                     raise RuntimeError(f"crank {joint}: the articulation has no body {name!r}")

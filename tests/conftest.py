@@ -44,12 +44,14 @@ PARTS = {
 }
 
 
-def built_usd(robot: str, *, base_joints: bool = False, ankle_compliance: bool = False) -> Path:
+def built_usd(robot: str, *, base_joints: bool = False, ankle_compliance: bool = False,
+              ankle_backlash: bool = False) -> Path:
     """The built asset's USD for ``robot``; skips the test when it is not built."""
     out = asset_dir(Description.load(robot), load_profile(robot), ASSETS, base_joints=base_joints,
-                    ankle_compliance=ankle_compliance)
+                    ankle_compliance=ankle_compliance, ankle_backlash=ankle_backlash)
     if not (out / "asset.json").exists():
-        flag = " --base-joints" if base_joints else " --ankle-compliance" if ankle_compliance else ""
+        flag = "".join(f for f, on in ((" --base-joints", base_joints), (" --ankle-compliance", ankle_compliance),
+                                       (" --ankle-backlash", ankle_backlash)) if on)
         pytest.skip(f"robot asset not built ({out}); run `humanoid-sim --robot {robot} build-asset{flag}` in the "
                     "Isaac Lab image")
     return out / json.loads((out / "asset.json").read_text())["usd"]
