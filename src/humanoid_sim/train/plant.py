@@ -64,6 +64,9 @@ class TrainPlantCfg:
     compile: bool = False  # fuse drive and IMU math before capture; requires cuda_graph
     queue_capacity: int = 8  # demands in flight per env: ≥ (max latency + drive delay) / demand period + 1
     physics_overrides: dict = field(default_factory=dict)  # explicit profile overrides, shared with scene construction
+    # Kamino worlds over their contact capacity: stop the run (False), or leave them to the consumer, which reads
+    # ``physics.contact_capacity.kamino_contact_overflow()`` after each physics step and ends those episodes (True).
+    flag_contact_overflow: bool = False
 
 
 @dataclass
@@ -292,7 +295,8 @@ class RobotPlant:
         apply_heightfield_base(self.profile["physics"])
         from humanoid_sim.physics.contact_capacity import contact_capacity_guard
 
-        self._contact_capacity = contact_capacity_guard(self.profile["physics"], e, self.device)
+        self._contact_capacity = contact_capacity_guard(self.profile["physics"], e, self.device,
+                                                         strict=not cfg.flag_contact_overflow)
         if used & {"crank_stop_stiffness", "crank_stop_damping"}:
             if self._solver == "kamino":
                 self._kamino_stops = kamino_crank_stops(robot, self.desc, self.profile["physics"], self.period_ns / NS_PER_S,
