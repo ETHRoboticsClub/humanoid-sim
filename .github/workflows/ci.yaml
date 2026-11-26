@@ -77,7 +77,11 @@ jobs:
         run: uv sync --locked --python 3.12 --extra dev --extra newton --extra kinematics-check --extra viz --extra bag
       - name: Lint
         run: uv run --no-sync ruff check src tests spikes examples docs
-      - run: uv run --no-sync pytest -rs -m "not physics and not data"
+      # One worker per runner CPU, each single-threaded so torch does not oversubscribe; a file stays on one worker.
+      - run: uv run --no-sync pytest -rs -m "not physics and not data" -n auto --dist loadfile --durations=20
+        env:
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
 
   controls-pins:
     # humanoid-urdf must be at the commit Controls pins on CONTROLS_REF (a repository variable; default master).
