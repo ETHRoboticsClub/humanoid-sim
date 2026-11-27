@@ -36,6 +36,9 @@ def main() -> None:
     p.add_argument("--sensors", default=None,
                    help="an extra rig whose sensors join the robot's (humanoid_sim.sensors.rigs.EXTRAS, e.g. g1-cameras)")
     p.add_argument("--scene", default=None, help="static boxes (.npz, world/boxes.py)")
+    p.add_argument("--collision", default=None,
+                   help="the room's convex collision pieces (.npz, world/hulls.py): collided, never seen")
+    p.add_argument("--objects", default=None, help="moving and free bodies (JSON, world/objects.py)")
     p.add_argument("--spawn", nargs=2, type=float, default=(0.0, 0.0), metavar=("X", "Y"))
     p.add_argument("--splat", default=None, help="the room's Gaussian splat as USD (humanoid-sim splat-usd)")
     p.add_argument("--splat-intensity", type=float, default=1.0,
@@ -73,7 +76,8 @@ def main() -> None:
     from humanoid_sim.sensors.session import SensorSession, SessionCfg
 
     session = SensorSession(SessionCfg(
-        robot=args.robot, sensors=args.sensors, scene=args.scene, spawn_m=tuple(args.spawn), splat=args.splat,
+        robot=args.robot, sensors=args.sensors, scene=args.scene, collision=args.collision, objects=args.objects,
+        spawn_m=tuple(args.spawn), splat=args.splat,
         splat_intensity=args.splat_intensity, scan_mesh=args.scan_mesh, lights=args.lights, cameras=not args.no_cameras,
         lidar=not args.no_lidar, feeds=args.feeds, lidar_domain=args.lidar_domain, rrd=args.rrd, images=args.images,
         depth_noise=args.depth_noise, camera_effects=args.camera_effects,
