@@ -23,12 +23,16 @@ only view-dependent shading); ``half`` stores the coefficients as ``half3`` (``.
 and Newton read when the float version is absent. Physics never sees a splat: the robot collides with the boxes,
 and a lidar sees the scan mesh and the boxes.
 
+A part of the room can be kept alone (:func:`crop`, ``crop``): only the Gaussians in its boxes (PLY frame, as the parts'
+are given), for a scene that uses one corner of a large scan, such as a work table and what a robot facing it sees.
+
 Parts of the room that move, such as a gantry crane's bridge, trolley and hook, can be cut out into prims of their
 own (:func:`split`, ``parts``): each part's Gaussians go under an Xform ``/Splat/<part>`` whose translation (zero as
 written) a renderer sets to move it. Gaussians in a ``drop`` box are left out, for things the scan caught that the
 simulation draws itself (the robot hanging in the gantry, its rope). A part's boxes are given in the PLY's frame.
 
-    humanoid-sim splat-usd hangar_splat.ply hangar_splat.usdc --spawn -4.42 3.48 [--parts crane_parts.json]
+    humanoid-sim splat-usd hangar_splat.ply hangar_splat.usdc --spawn -4.42 3.48 [--parts crane_parts.json] \
+        [--crop keep.json]
 """
 
 from __future__ import annotations
@@ -172,6 +176,13 @@ def in_boxes(positions: np.ndarray, boxes: list[dict]) -> np.ndarray:
     return inside
 
 
+def crop(splat: Splat, boxes: list[dict]) -> Splat:
+    """The Gaussians whose centres lie in any of ``boxes`` (see :func:`in_boxes`)."""
+    if not boxes:
+        raise ValueError("a crop needs at least one box")
+    return select(splat, in_boxes(splat.positions, boxes))
+
+
 def split(splat: Splat, parts: dict[str, list[dict]]) -> tuple[Splat, dict[str, Splat]]:
     """The room without its parts, and each part (a name and its boxes, see :func:`in_boxes`); a Gaussian in
     several goes to the first. Gaussians in the ``drop`` part's boxes are in neither."""
@@ -244,23 +255,30 @@ def _write_gaussians(stage, path: str, splat: Splat, half: bool, material) -> No
 
 
 def convert(ply: str | Path, out: str | Path, *, spawn_m: tuple[float, float] = (0.0, 0.0),
-            sh_degree: int | None = None, half: bool = False, parts: str | Path | None = None) -> dict:
-    """Convert a 3DGS PLY to a USD splat placed with ``spawn_m`` at the origin, with the moving ``parts`` (a JSON
-    object of part names to boxes in the PLY's frame, see :func:`split`) cut out; returns what was written."""
+            sh_degree: int | None = None, half: bool = False, parts: str | Path | None = None,
+            crop_boxes: str | Path | None = None) -> dict:
+    """Convert a 3DGS PLY to a USD splat placed with ``spawn_m`` at the origin, keeping only what lies in
+    ``crop_boxes`` (a JSON list of boxes in the PLY's frame, see :func:`crop`) when given, with the moving ``parts``
+    (a JSON object of part names to boxes in the PLY's frame, see :func:`split`) cut out; returns what was written."""
     ply = Path(ply)
     h = hashlib.sha256()
     with ply.open("rb") as f:
         for block in iter(lambda: f.read(1 << 24), b""):
             h.update(block)
     room, cut = read_ply(ply), {}
+    total = len(room)
+    if crop_boxes is not None:
+        room = crop(room, json.loads(Path(crop_boxes).read_text()))
     if parts is not None:
         room, cut = split(room, json.loads(Path(parts).read_text()))
     splat = placed(room, spawn_m, sh_degree)
     cut = {name: placed(part, spawn_m, sh_degree) for name, part in cut.items()}
+    cropped = f", cropped to {Path(crop_boxes).name}" if crop_boxes is not None else ""
     path = write_usd(splat, out, half=half, parts=cut,
-                     source=f"{ply.name} sha256 {h.hexdigest()}, spawn {list(spawn_m)}, degree {splat.sh_degree}")
+                     source=f"{ply.name} sha256 {h.hexdigest()}, spawn {list(spawn_m)}, degree {splat.sh_degree}{cropped}")
     lo, hi = extent(splat)
-    return {"usd": str(path), "ply": str(ply), "ply_sha256": h.hexdigest(), "gaussians": len(splat),
+    return {"usd": str(path), "ply": str(ply), "ply_sha256": h.hexdigest(), "ply_gaussians": total,
+            "gaussians": len(splat), "crop": None if crop_boxes is None else str(crop_boxes),
             "parts": {name: len(part) for name, part in cut.items()},
             "sh_degree": splat.sh_degree, "half": half, "spawn_m": list(spawn_m), "extent_min": lo.tolist(),
             "extent_max": hi.tolist(), "bytes": path.stat().st_size}

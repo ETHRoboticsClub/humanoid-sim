@@ -409,7 +409,7 @@ def cmd_splat_usd(args) -> int:
 
     spawn = (0.0, 0.0) if args.spawn is None else tuple(args.spawn)
     print(json.dumps(convert(args.ply, args.out, spawn_m=spawn, sh_degree=args.sh_degree, half=args.half,
-                             parts=args.parts), indent=1))
+                             parts=args.parts, crop_boxes=args.crop), indent=1))
     return 0
 
 
@@ -626,6 +626,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="the scene point (m) placed at the world origin, as for --scene (default 0 0)")
     sp.add_argument("--parts", default=None, help="JSON: part names to boxes in the PLY's frame ({center, half, "
                     "yaw}); each part is written as a prim of its own that a renderer moves, 'drop' boxes are cut")
+    sp.add_argument("--crop", default=None, help="JSON: a list of boxes in the PLY's frame ({center, half, yaw}); "
+                    "only the Gaussians in one of them are kept, before --parts cuts its parts")
     sp.add_argument("--sh-degree", type=int, default=None, help="keep spherical harmonics up to this degree "
                     "(default: all the PLY has; 0 keeps each Gaussian's base colour only)")
     sp.add_argument("--half", action="store_true", help="store the coefficients as half floats")
