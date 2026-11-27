@@ -124,7 +124,7 @@ print(plant.last.demanded[0, :3])  # 7.40 Nm each: 197.4 Nm/rad · 0.05 rad over
 
 ## Drive models
 
-Each drive is a product, and `src/humanoid_sim/devices/models.py` has one class per product, as the sensors do: `Hej90`, `Hej70` and `Hej50` (maxon HEJ joints on EPOS4 controllers, `Epos4Drive`) for the ETHRC V1, and `UnitreeN7520_14`, `UnitreeN7520_22`, `UnitreeN5020` and `UnitreeW4010` (`UnitreeMotor`) for the G1. A class names its `actuators.yaml` family; its figures are robot facts, so the description holds them and an instance reads them: `Hej90(desc)` is a HEJ 90 on that robot. `drive_models(desc)` gives every drive its model and refuses a family without a class.
+Each drive is a product, and `src/humanoid_sim/devices/models.py` has one class per product, as the sensors do: `Hej90`, `Hej70` and `Hej50` (maxon HEJ joints on EPOS4 controllers, `Epos4Drive`) for the ETHRC V1, and `UnitreeN7520_14`, `UnitreeN7520_22`, `UnitreeN5020` and `UnitreeW4010` (`UnitreeMotor`) for the G1, with `UnitreeDex3Motor` for the motors of its Dex3-1 hands when the profile drives them ([robot-model.md](robot-model.md#unitree-hands)). A class names its `actuators.yaml` family; its figures are robot facts, so the description holds them and an instance reads them: `Hej90(desc)` is a HEJ 90 on that robot. `drive_models(desc)` gives every drive its model and refuses a family without a class.
 
 | Attribute | Meaning |
 |---|---|

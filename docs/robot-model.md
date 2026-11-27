@@ -50,7 +50,7 @@ third_party/humanoid-urdf/ethrc_v1/            profiles/ethrc_v1.yaml
 
 ## Robots
 
-Every directory of the description root that holds an `actuators.yaml` is a robot, named by its directory: `ethrc_v1`, the ETHRC humanoid, and the Unitree G1 as `g1_29dof_rev_1_0` and `g1_29dof_with_hand_rev_1_0` (the variant Controls runs, its hands welded here). `robots()` in `model/description.py` lists them, and the global option `--robot` (or `robot=` in the Python APIs) picks one; `ethrc_v1` is the default. Each robot's modeling choices are in `profiles/<robot>.yaml`, merged over `profiles/defaults.yaml` key by key (see [The profile](#the-profile)).
+Every directory of the description root that holds an `actuators.yaml` is a robot, named by its directory: `ethrc_v1`, the ETHRC humanoid, and the Unitree G1 as `g1_29dof_rev_1_0` and `g1_29dof_with_hand_rev_1_0` (the variant Controls runs, its Dex3-1 fingers driven: see [Unitree hands](#unitree-hands)). `robots()` in `model/description.py` lists them, and the global option `--robot` (or `robot=` in the Python APIs) picks one; `ethrc_v1` is the default. Each robot's modeling choices are in `profiles/<robot>.yaml`, merged over `profiles/defaults.yaml` key by key (see [The profile](#the-profile)).
 
 Nothing in the code names a robot. What differs between them comes from the description or the profile:
 
@@ -131,6 +131,17 @@ for name, j in d.joints.items():
 EOF
 ```
 
+### Unitree hands
+
+A description can declare Unitree hands in `unitree-hands.yaml` beside its `actuators.yaml` (schema `ethrc-unitree-hands/v1`, Controls' `ethrc_ssot/unitree_hands.py`): per side the hand's model and its motors' joints in HandCmd_ slot order, with the neutral pose and the gains its driver sends every motor. They are not body drives: `actuators.yaml` and LowCmd never carry them. `Description.hands` reads the file (empty without it).
+
+The profile's `model.unitree_hands.mode` decides what the plant does with them:
+
+- `welded` (the default): the hand motors are joints `actuators.yaml` does not list, so `weld_unlisted_joints` welds them at zero, as before.
+- `driven` (the G1 with hands): every hand motor is a joint (region `hand`) and a 1:1 drive of its own, named after its joint, in hand and slot order after the body drives. Its frame is the joint's (sign 1: the driver's q is the URDF angle), its baseline gains are the file's `kp_nm_per_rad` and `kd_nm_s_per_rad` (the solver's constant PD, so the hand driver's own gains realize exactly and up to twice them stay stable), its travel the URDF limits, its torque the URDF `effort` up to the URDF `velocity` and none beyond (`Description.drive_torque_speed`), its family the hand's model (`dex3-1`, the `UnitreeDex3Motor` drive model, timing unmeasured). The description records no finger dynamics, so the profile gives the motors' `armature_kg_m2`, `viscous_damping_nm_s_per_rad` and `friction_nm`; the G1's comment explains its modeled values. A hand motor has no `motor_index`: the runtime segment carries it as a drive, and Controls' plant host puts each hand's relayed HandCmd_ on those drives.
+
+A profile that drives the hands of a description without `unitree-hands.yaml`, or names a hand motor that is also a body drive or no limited revolute joint of the URDF, raises.
+
 ### Identity and hash checks
 
 `Description.digest` is a sha256 over the file name and bytes of `URDF_6.urdf` and `actuators.yaml` (`description_digest` in `src/humanoid_sim/runtime/abi/plant_abi.py`). `Description.revision` is the git commit of the description root, or `None` outside a git checkout. `Description.identity()` returns the robot id, digest and revision. It is recorded in every `asset.json`, in the results of `replay` and humanoid-learning fitting, and in the runtime segment's header and metadata.
@@ -170,7 +181,7 @@ Each prints the path of the USD. `--force` rebuilds an existing asset in place. 
 
 `PreparedUrdf.build` (`src/humanoid_sim/model/urdf.py`) applies the profile's modeling choices to the selected URDF, in this order. Every number comes from the meshes, the description or the profile.
 
-1. With `model.weld_unlisted_joints: true`, every movable joint without an entry in `actuators.yaml` becomes a fixed joint at its URDF zero. `URDF_6.urdf` already has its 34 hand joints fixed, so nothing is welded; on `URDF_6_orca_hands.urdf` those 34 would be, the same as Controls' `--fixed-orca-hands`. A listed joint missing from the URDF raises.
+1. With `model.weld_unlisted_joints: true`, every movable joint without an entry in `actuators.yaml` becomes a fixed joint at its URDF zero; the motors of driven Unitree hands count as listed ([Unitree hands](#unitree-hands)). `URDF_6.urdf` already has its 34 hand joints fixed, so nothing is welded; on `URDF_6_orca_hands.urdf` those 34 would be, the same as Controls' `--fixed-orca-hands`. A listed joint missing from the URDF raises.
 2. Each of the 22 joints becomes `revolute` (14 of them are `continuous` in the URDF) with the calibration travel as its range, the drive's peak `effort` and its `velocity`.
 3. Each foot gets a sole box. On the body carrying each `ankle_inversion` joint (profile `model.sole.joints`), the collision mesh with the lowest point, including meshes of links welded to that body, is the foot plate. `fit_sole_plate` fits a thin box to the plate's bottom face: it takes the vertices within 1.5 mm of the lowest point, fits the face normal by SVD, refits with the vertices within `face_depth_m` of the face (at most five rounds, until the set stops changing), and sizes the box from the face's extent along its principal in-plane axis and the axis across it. The box is `box_thickness_m` thick, its bottom face on the plate's bottom face, its x axis along the principal in-plane axis (the sole's long axis, heel to toe) and its z axis pointing up into the plate. The plate mesh's collision is removed and the box (`sole_box_l`, `sole_box_r`) is added. On the current description both boxes are about 250 x 90 x 5 mm. The algorithm is Controls' `build_mjcf.py` `sole_plate`, ported unchanged. A profile with `model.sole.fit: bounds` (the G1's) instead takes the box bounding the collision shapes of the foot body and its welded links, along the body's axes, and leaves the collision geometry as it is: the G1's box bounds its four 5 mm contact spheres, 180 x 70 x 10 mm.
 4. The physics collides convex shapes, and the URDF converter turns each collision mesh into its convex hull (the smallest convex shape enclosing it). With `model.collision_hulls: per_body`, `merge_body_collisions` first combines every remaining collision mesh of a body and of the links welded to it into one mesh in the body frame, written as `collision/<body>.stl`, so each body gets one hull: 23 hulls plus the two sole boxes. With `per_mesh` each of the 118 remaining meshes becomes its own hull. Against the ground the hull of the union reaches exactly as far as the separate hulls did; between bodies it fills the gaps between parts. Primitive colliders (the sole boxes) are left alone.
@@ -371,6 +382,7 @@ q_mirror = m.mirror_joints(q)                # knee_flexion_r 0.1 rad off standi
 | `robot` | `load_profile` | Must equal the robot id (`--robot`, default `ethrc_v1`). |
 | `model.urdf` | `PreparedUrdf` | URDF variant to build, relative to the robot's ament package. Default: the one `actuators.yaml` names. |
 | `model.weld_unlisted_joints` | `PreparedUrdf.weld_unlisted` | Weld movable joints that `actuators.yaml` does not list. Default `true`. |
+| `model.unitree_hands` | `Description.hand_plant` | `mode: welded` (default) welds the hand motors of `unitree-hands.yaml` with the other unlisted joints; `mode: driven` makes each a 1:1 drive and needs `armature_kg_m2` (positive), `viscous_damping_nm_s_per_rad` and `friction_nm` (non-negative); anything else raises. See [Unitree hands](#unitree-hands). |
 | `model.sole.joints` | `PreparedUrdf.add_sole_boxes` | Side to joint; the joint's child body gets the sole box. |
 | `model.sole.fit` | `PreparedUrdf.add_sole_boxes` | `plate` (default): fit a box to the plate face and collide with it. `bounds`: the box bounding the foot's own collision shapes, for the truth only. |
 | `model.sole.box_thickness_m` | `fit_sole_plate` | Sole box thickness (0.005), `plate` only. |
