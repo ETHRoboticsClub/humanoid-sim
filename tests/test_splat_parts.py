@@ -1,4 +1,4 @@
-"""Cutting a splat's moving parts out (``world/splat.py`` ``split``), without pxr."""
+"""Cropping a splat and cutting its moving parts out (``world/splat.py`` ``crop``, ``split``), without pxr."""
 
 import numpy as np
 import pytest
@@ -27,3 +27,13 @@ def test_parts_take_the_gaussians_in_their_boxes_and_drop_boxes_remove_them():
 def test_part_names_must_be_prim_names():
     with pytest.raises(ValueError, match="prim name"):
         sp.split(_splat([[0.0, 0.0, 0.0]]), {"the bridge": []})
+
+
+def test_a_crop_keeps_the_gaussians_in_any_of_its_boxes():
+    room = _splat([[0.0, 0.0, 0.5], [2.0, 0.0, 0.5], [0.0, 3.0, 0.5], [5.0, 5.0, 0.5]])
+    kept = sp.crop(room, [{"center": [1.0, 0.0, 0.5], "half": [1.2, 0.5, 1.0]},
+                          {"center": [0.0, 3.0, 0.5], "half": [0.1, 0.1, 0.1], "yaw": 0.3}])
+    assert kept.positions.tolist() == room.positions[:3].tolist()
+    assert kept.sh.shape == (3, *room.sh.shape[1:])
+    with pytest.raises(ValueError, match="at least one box"):
+        sp.crop(room, [])

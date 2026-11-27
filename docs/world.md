@@ -242,7 +242,7 @@ Controls' hangar also has a Gaussian splat of the room, `hangar_splat.ply` (4.5 
 humanoid-sim splat-usd $H/hangar_splat.ply outputs/rtx/hangar_splat.usdc --spawn -4.42 3.48 --half
 ```
 
-`--parts PARTS.json` cuts parts that move out of the room, each into a prim of its own (`/Splat/<part>/Gaussians` under an Xform), and leaves out Gaussians in `drop` boxes. The file maps part names to boxes in the PLY's frame, `{"center": [x, y, z], "half": [x, y, z], "yaw": rad}`; a Gaussian in several boxes goes to the first part. The render runtime moves parts named `bridge`, `trolley` and `hook` with the [gantry crane](#gantry-crane).
+`--crop BOXES.json` keeps only the Gaussians whose centres lie in one of the listed boxes (the PLY's frame, `{"center", "half", "yaw"}` as below), for a scene that uses one corner of the room, such as a work table and what a robot facing it sees; it applies before `--parts`. `--parts PARTS.json` cuts parts that move out of the room, each into a prim of its own (`/Splat/<part>/Gaussians` under an Xform), and leaves out Gaussians in `drop` boxes. The file maps part names to boxes in the PLY's frame, `{"center": [x, y, z], "half": [x, y, z], "yaw": rad}`; a Gaussian in several boxes goes to the first part. The render runtime moves parts named `bridge`, `trolley` and `hook` with the [gantry crane](#gantry-crane).
 
 `--half` stores the colour coefficients at half precision (the hangar's file is then 632 MB, written in about 10 s); `--sh-degree` drops the higher spherical-harmonic degrees, which shade by viewing direction. Physics never sees the splat. `tests/test_splat.py` writes a PLY from known Gaussians and reads the USD back through the schema and through Newton.
 
