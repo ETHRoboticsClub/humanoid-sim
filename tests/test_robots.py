@@ -37,15 +37,17 @@ def test_drives_cover_every_joint(robot):
     assert not one_to_one & linked
     for d in desc.drives.values():
         assert d.baseline_stiffness > 0 and d.baseline_damping > 0 and d.effort_peak > 0
-        assert desc.torque_speed(d.family)
+        assert desc.drive_torque_speed(d.name)
     for j in desc.joints.values():
         assert j.armature > 0 and j.damping >= 0 and j.friction >= 0
 
 
 def test_unitree_motors_keep_their_slots():
     desc = Description.load("g1_29dof_with_hand_rev_1_0")
-    slots = [d.motor_index for d in desc.drives.values()]
+    slots = [d.motor_index for name, d in desc.drives.items() if name not in desc.hand_joints]
     assert all(isinstance(i, int) and i >= 0 for i in slots) and len(set(slots)) == len(slots)
+    # A hand motor has no LowCmd slot: its hand's driver addresses it.
+    assert all(desc.drives[name].motor_index is None for name in desc.hand_joints)
 
 
 @pytest.mark.parametrize("robot", ROBOTS)
@@ -119,7 +121,11 @@ def test_the_runtime_start_pose_lies_inside_every_drive_window(robot):
     drive_map = DriveJointMap(desc, joints, dtype=torch.float64)
     at = dict(zip(drive_map.drive_names, drive_map.drive_state(q, torch.zeros_like(q))[0][0].tolist()))
     for name, d in desc.drives.items():
-        if d.crank is None:
+        if d.joints[0] in desc.hand_joints:
+            # A hand motor has no arming window; its neutral, the URDF zero, may lie on a limit.
+            lo, hi = desc.calibration_travel(d.joints[0])
+            assert lo <= pose[d.joints[0]] <= hi, name
+        elif d.crank is None:
             entry = desc.table["joints"][d.joints[0]]
             lo, hi = (float(b) + float(entry.get("standing_offset_rad", 0.0)) for b in entry["position_limit"])
             assert lo < pose[d.joints[0]] < hi, name

@@ -211,6 +211,11 @@ def test_holds_its_pose_on_a_fixed_base_against_gravity(request, robot, solver):
             continue
         j = joints.index(d.joints[0])
         k, friction = d.baseline_stiffness, desc.joints[d.joints[0]].friction
+        if d.joints[0] in desc.hand_joints:
+            # A hand motor's friction is large against its gain (a deadband of friction / k): settling arm
+            # motion leaves a finger at rest anywhere its friction holds against its spring and gravity.
+            assert abs(k * sag[j] - tau[j]) <= friction * 1.05 + 1e-4, (d.joints[0], sag[j], tau[j], k, friction)
+            continue
         most = abs(tau[j]) / k
         least = max(abs(tau[j]) - friction, 0.0) / k
         assert least * 0.8 - 1e-3 <= abs(sag[j]) <= most * 1.2 + 1e-3, (d.joints[0], sag[j], tau[j], k, friction)

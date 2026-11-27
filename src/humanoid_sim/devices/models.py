@@ -88,8 +88,17 @@ class UnitreeW4010(UnitreeMotor):
     product = "Unitree W4010, 25:1"
 
 
+class UnitreeDex3Motor(DriveModel):
+    """A motor of a Unitree Dex3-1 hand, driven through its hand driver's HandCmd_ (rt/dex3/<side>/cmd), when the
+    profile drives the hands (``model.unitree_hands``)."""
+
+    family = "dex3-1"
+    product = "Unitree Dex3-1 hand motor"
+    interface = "Unitree HandCmd_"
+
+
 MODELS: dict[str, type[DriveModel]] = {cls.family: cls for cls in (
-    Hej90, Hej70, Hej50, UnitreeN7520_14, UnitreeN7520_22, UnitreeN5020, UnitreeW4010)}
+    Hej90, Hej70, Hej50, UnitreeN7520_14, UnitreeN7520_22, UnitreeN5020, UnitreeW4010, UnitreeDex3Motor)}
 
 
 def drive_models(desc) -> dict[str, DriveModel]:

@@ -30,6 +30,15 @@ ACTUATORS_SCHEMA = "ethrc-actuators/v1"
 
 PRESETS_SCHEMA = "ethrc-position-presets/v1"
 
+# The Unitree hands a description declares, beside its actuators.yaml (Controls' ethrc_ssot/unitree_hands.py): each
+# hand's motors as its hand driver addresses them (HandCmd_ slots), not body drives.
+HANDS_SCHEMA = "ethrc-unitree-hands/v1"
+HANDS_FILE = "unitree-hands.yaml"
+# What the profile's model.unitree_hands.mode does with them: welds them at zero with every other joint actuators.yaml
+# does not list, or drives each hand motor as a 1:1 drive.
+HAND_MODES = ("welded", "driven")
+HAND_REGION = "hand"
+
 
 def robots(root: Path | None = None) -> list[str]:
     """Robot ids under a description root: its directories whose ``actuators.yaml`` commands its joints."""
@@ -103,6 +112,19 @@ class Linkage:
     joints: tuple[str, str]  # (pitch, roll) hinges
 
 
+@dataclass(frozen=True)
+class UnitreeHand:
+    """One Unitree hand the description declares (``unitree-hands.yaml``): its motors' joints in their HandCmd_ slot
+    order, its model (the drive family of its motors) and the gains its driver sends every motor."""
+
+    side: str  # "left" | "right"
+    model: str
+    joints: tuple[str, ...]
+    neutral_rad: float
+    stiffness: float  # Nm/rad
+    damping: float  # Nm s/rad
+
+
 class Description:
     def __init__(self, robot: str, root: Path):
         self.robot = robot
@@ -172,6 +194,70 @@ class Description:
     def identity(self) -> dict:
         return {"robot": self.robot, "description_digest": self.digest, "description_revision": self.revision}
 
+    # -- hands ------------------------------------------------------------------------------------
+
+    @cached_property
+    def hands(self) -> dict[str, UnitreeHand]:
+        """The Unitree hands the description declares (``unitree-hands.yaml``), by side; empty without the file."""
+        path = self.robot_dir / HANDS_FILE
+        if not path.is_file():
+            return {}
+        data = yaml.safe_load(path.read_text())
+        if data.get("schema") != HANDS_SCHEMA:
+            raise ValueError(f"{path}: schema {data.get('schema')!r} != {HANDS_SCHEMA}")
+        return {side: UnitreeHand(side=side, model=str(hand["model"]), joints=tuple(hand["motors"]),
+                                  neutral_rad=float(data["neutral_rad"]), stiffness=float(data["kp_nm_per_rad"]),
+                                  damping=float(data["kd_nm_s_per_rad"]))
+                for side, hand in data["hands"].items()}
+
+    @cached_property
+    def hand_plant(self) -> dict | None:
+        """The profile's ``model.unitree_hands`` when it drives the description's hands (``mode: driven``): the hand
+        motors' passive terms, which the description does not record. None when the hands are welded (the default)."""
+        from humanoid_sim.model.asset import load_profile
+
+        cfg = load_profile(self.robot)["model"].get("unitree_hands") or {}
+        mode = cfg.get("mode", "welded")
+        if mode not in HAND_MODES:
+            raise ValueError(f"{self.robot}: model.unitree_hands.mode {mode!r}; expected one of {HAND_MODES}")
+        if mode == "welded":
+            return None
+        if not self.hands:
+            raise ValueError(f"{self.robot}: the profile drives Unitree hands and the description declares none "
+                             f"({HANDS_FILE})")
+        for key, positive in (("armature_kg_m2", True), ("viscous_damping_nm_s_per_rad", False), ("friction_nm", False)):
+            value = cfg.get(key)
+            if value is None or not math.isfinite(float(value)) or float(value) < 0 or (positive and float(value) == 0):
+                raise ValueError(f"{self.robot}: model.unitree_hands.{key} {value!r} must be finite and "
+                                 f"{'positive' if positive else 'non-negative'}")
+        return cfg
+
+    @cached_property
+    def hand_joints(self) -> dict[str, dict[str, float]]:
+        """The URDF limits (``lower``, ``upper`` rad, ``effort`` Nm, ``velocity`` rad/s) of each driven hand motor's
+        joint, by joint in hand and slot order; empty while the hands are welded."""
+        if self.hand_plant is None:
+            return {}
+        import xml.etree.ElementTree as ET
+
+        urdf = {j.get("name"): j for j in ET.parse(self.urdf_path).getroot().findall("joint")}
+        out = {}
+        for hand in self.hands.values():
+            for name in hand.joints:
+                joint = urdf.get(name)
+                if joint is None or joint.get("type") != "revolute" or joint.find("limit") is None:
+                    raise ValueError(f"{self.robot}: hand motor {name} is no limited revolute joint of the URDF")
+                if name in self.table["joints"]:
+                    raise ValueError(f"{self.robot}: {name} is both a body drive (actuators.yaml) and a hand motor")
+                limit = joint.find("limit")
+                out[name] = {key: float(limit.get(key)) for key in ("lower", "upper", "effort", "velocity")}
+        return out
+
+    @property
+    def hand_families(self) -> set[str]:
+        """Drive families of the driven hand motors (their hands' models), which actuators.yaml does not list."""
+        return {hand.model for hand in self.hands.values()} if self.hand_plant is not None else set()
+
     # -- inventory --------------------------------------------------------------------------------
 
     @cached_property
@@ -207,6 +293,14 @@ class Description:
                 effort_peak=value("effort"), velocity=float(j["velocity"]), dynamic_friction=dynamic,
                 give_stiffness=optional("give_stiffness_nm_per_rad"), give_damping=optional("give_damping_nm_s_per_rad"),
             )
+        plant = self.hand_plant
+        for name, limit in self.hand_joints.items():
+            friction = float(plant["friction_nm"])
+            out[name] = Joint(
+                name=name, region=HAND_REGION, device=name, sign=1, standing_offset_rad=0.0,
+                armature=float(plant["armature_kg_m2"]), damping=float(plant["viscous_damping_nm_s_per_rad"]),
+                friction=friction, effort_peak=limit["effort"], velocity=limit["velocity"], dynamic_friction=friction,
+            )
         return out
 
     def preset_pose(self, preset_id: str) -> dict[str, float]:
@@ -228,7 +322,8 @@ class Description:
 
     @cached_property
     def drives(self) -> dict[str, Drive]:
-        """All drives: the 1:1 joint drives in joint order, then the linkage cranks (description order).
+        """All drives: the 1:1 joint drives in joint order, the driven hand motors (hand and slot order), then the
+        linkage cranks (description order).
 
         A joint with a ``device`` field is driven by that EtherCAT device (``device: null``: by linkage cranks
         under ``drives:``); a joint without one has its own motor, named after the joint. Baseline gains come from
@@ -256,6 +351,16 @@ class Description:
                 velocity=float(j["velocity"]), position_limit_device=None, baseline_stiffness=k, baseline_damping=d,
                 motor_index=int(j["motor_index"]) if "motor_index" in j else None,
             )
+        # A hand motor is named after its joint, in the joint frame (its driver's q is the URDF angle), with the gains
+        # the hand's driver sends as its baseline and the URDF's torque and speed.
+        for hand in self.hands.values() if self.hand_plant is not None else ():
+            for name in hand.joints:
+                limit = self.hand_joints[name]
+                out[name] = Drive(
+                    name=name, family=hand.model, joints=(name,), sign=1, crank=None, effort_peak=limit["effort"],
+                    effort_nominal=None, velocity=limit["velocity"], position_limit_device=None,
+                    baseline_stiffness=hand.stiffness, baseline_damping=hand.damping,
+                )
         for device, d in self.table.get("drives", {}).items():
             d = self.actuator_values(d)
             k, dmp = gain(device, d)
@@ -303,6 +408,8 @@ class Description:
         """A motor family's ``drive_delay_s`` in integer ns: the controller's APPLIED acknowledgement to the drive's
         position demand starting to move. None when the description records none for the family."""
         if family not in self.table.get("families", {}):
+            if family in self.hand_families:
+                return None  # the description records no hand motor timing
             raise ValueError(f"{self.robot}: no drive family {family!r}")
         value = self.family_value(family, "drive_delay_s")
         if value is None:
@@ -362,7 +469,10 @@ class Description:
     def calibration_travel(self, name: str) -> tuple[float, float]:
         """Simulated travel in URDF (calibration) radians: the recorded mechanical stop where there is one,
         else the position limit. Same rule as Controls ``ethrc_ssot/joint_travel.py``. An ankle hinge has no limit
-        of its own: its travel is the axis hull of what its cranks' stops allow (``ankle_model.bounds``)."""
+        of its own: its travel is the axis hull of what its cranks' stops allow (``ankle_model.bounds``). A hand motor's
+        joint travels its URDF limits."""
+        if name in self.hand_joints:
+            return self.hand_joints[name]["lower"], self.hand_joints[name]["upper"]
         entry = self.table["joints"][name]
         linkage = next((lk for lk in self.linkages if name in lk.joints), None)
         if linkage is not None:
@@ -416,6 +526,14 @@ class Description:
 
     def torque_speed(self, family: str) -> list[tuple[float, float]]:
         return [tuple(p) for p in self.table["families"][family]["torque_speed"]]
+
+    def drive_torque_speed(self, drive: str) -> list[tuple[float, float]]:
+        """A drive's torque-speed curve, (speed rad/s, torque Nm) points: its family's. A hand motor, whose family the
+        description does not list, gives its URDF effort up to its URDF velocity and none beyond (modeled)."""
+        d = self.drives[drive]
+        if drive in self.hand_joints:
+            return [(0.0, d.effort_peak), (d.velocity, d.effort_peak)]
+        return self.torque_speed(d.family)
 
     def family(self, family: str) -> dict:
         return self.table["families"][family]

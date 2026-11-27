@@ -65,7 +65,7 @@ class PlantCore:
                            NativeDriveJointMap(desc, solver_joint_names, device=dev, dtype=dt))
         physical_joints = self.solver_map.joint_names
         drives = [desc.drives[n] for n in self.map.drive_names]
-        self.envelope = TorqueSpeedEnvelope([desc.torque_speed(d.family) for d in drives],
+        self.envelope = TorqueSpeedEnvelope([desc.drive_torque_speed(d.name) for d in drives],
                                             braking=[desc.braking_limit(d.name) for d in drives], device=dev, dtype=dt)
         limit, winding = current_limits(desc, self.map.drive_names, output_current_limit=cfg.output_current_limit,
                                         winding_i2t=cfg.winding_i2t, device=dev, dtype=dt)

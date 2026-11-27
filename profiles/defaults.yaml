@@ -12,6 +12,11 @@ model:
   ground_friction: 1.0
   # No sole boxes (model.sole), contact excludes (model.contact_excludes) or self-collision sets
   # (model.self_collision) unless the robot's profile names them.
+  # The Unitree hands a description declares (its unitree-hands.yaml): welded at zero with the other joints
+  # actuators.yaml does not list, or driven, each hand motor a 1:1 drive named after its joint, with the hand's gains as
+  # its baseline and the URDF's torque and speed. A driven hand needs its motors' passive terms here (armature_kg_m2,
+  # viscous_damping_nm_s_per_rad, friction_nm): the description records none.
+  unitree_hands: {mode: welded}
   # Joints every asset of the robot gives give to (transmissions/compliance.py; joint names or regexes over the
   # description's joints): none unless the robot's profile names them. `build-asset --joint-give` replaces them.
   joint_give: []

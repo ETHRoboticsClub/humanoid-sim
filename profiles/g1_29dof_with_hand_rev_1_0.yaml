@@ -14,6 +14,22 @@ model:
   # Arms collide with legs and with each other, legs with each other, so the hands stop at the hips as on the
   # robot. Within a set and against the trunk nothing collides: the URDF's hulls of neighbouring links overlap at
   # rest. A set is every body at or below its joint; pelvis, waist and torso are `rest`.
+  # The Dex3-1 fingers are driven: Controls commands them through its hand segments (rt/dex3/<side>/cmd), as on the
+  # robot, and they push what they touch. Their passive terms are modeled, not measured:
+  # - armature: the reflected inertia of a small motor through its gearbox, of order 1e-7 kg m^2 times 100^2. It
+  #   also keeps the hands' 0.2 N m s/rad baseline damping (and twice that, the shaping limit) inside RK4's explicit
+  #   limit, d dt / I < 2.8, at a 4 or 5 ms step; the finger links alone (about 1e-5 kg m^2) would exceed it 10- to
+  #   70-fold.
+  # - friction: holds a passive finger in any hand orientation, as the lab unit's geared fingers hold with nobody
+  #   commanding (Controls mujoco_hand.py, 2026-10-12): the largest gravity torque on a Dex3 joint is 0.035 N m
+  #   (thumb_1, middle_0 and index_0 over their outer links' ranges).
+  # - viscous damping: Controls' kinematic Dex3 (fake_dex3.py FINGER_VISCOUS_NM_S_PER_RAD).
+  # Within each arm's set the fingers do not collide with each other or the palm (self_collision below).
+  unitree_hands:
+    mode: driven
+    armature_kg_m2: 0.001
+    viscous_damping_nm_s_per_rad: 0.01
+    friction_nm: 0.04
   self_collision:
     sets: {arm_l: left_shoulder_pitch_joint, arm_r: right_shoulder_pitch_joint,
            leg_l: left_hip_pitch_joint, leg_r: right_hip_pitch_joint}
