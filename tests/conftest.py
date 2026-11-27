@@ -45,22 +45,23 @@ PARTS = {
 
 
 def built_usd(robot: str, *, base_joints: bool = False, ankle_compliance: bool = False,
-              joint_give: tuple[str, ...] | None = None) -> Path:
+              ankle_backlash: bool = False, joint_give: tuple[str, ...] | None = None) -> Path:
     """The built asset's USD for ``robot`` (``joint_give`` None: the profile's joint give, as `build-asset` builds it;
     an empty tuple: none, built here when missing, as the CLI does not build it); skips the test when it is not
     built."""
     desc, profile = Description.load(robot), load_profile(robot)
-    out = asset_dir(desc, profile, ASSETS, base_joints=base_joints, ankle_compliance=ankle_compliance,
-                    joint_give=joint_give)
+    variant = dict(base_joints=base_joints, ankle_compliance=ankle_compliance, ankle_backlash=ankle_backlash)
+    out = asset_dir(desc, profile, ASSETS, **variant, joint_give=joint_give)
     if not (out / "asset.json").exists() and joint_give == () and asset_dir(
-            desc, profile, ASSETS, base_joints=base_joints, ankle_compliance=ankle_compliance).joinpath(
-            "asset.json").exists():
+            desc, profile, ASSETS, **variant).joinpath("asset.json").exists():
         from humanoid_sim.model.asset import build_asset
 
-        build_asset(desc, profile, ASSETS, base_joints=base_joints, ankle_compliance=ankle_compliance, joint_give=())
+        build_asset(desc, profile, ASSETS, **variant, joint_give=())
     if not (out / "asset.json").exists():
-        flag = (" --base-joints" if base_joints else " --ankle-compliance" if ankle_compliance
-                else f" --joint-give {' '.join(joint_give)}" if joint_give else "")
+        flag = "".join(f for f, on in ((" --base-joints", base_joints), (" --ankle-compliance", ankle_compliance),
+                                       (" --ankle-backlash", ankle_backlash)) if on)
+        if joint_give:
+            flag += f" --joint-give {' '.join(joint_give)}"
         pytest.skip(f"robot asset not built ({out}); run `humanoid-sim --robot {robot} build-asset{flag}` in the "
                     "Isaac Lab image")
     return out / json.loads((out / "asset.json").read_text())["usd"]

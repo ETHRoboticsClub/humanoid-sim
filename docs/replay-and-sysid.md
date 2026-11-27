@@ -129,6 +129,7 @@ The result directory is `<out>/<dataset_id>_mjwarp_<integrator>_<period in us>us
 |---|---|
 | `dataset_id`, `name` | The capture's id and display name |
 | `period_ns`, `integrator`, `device`, `physics`, `base`, `demand_delay_ns` | The run's settings |
+| `physics_overrides` | The `--physics-overrides` mapping merged over the profile's `physics` block, or null |
 | `wall_s`, `sim_s` | Wall-clock time of the replay and simulated time |
 | `drives` | Drive names, in the order of every per-drive array |
 | `rms_position_rad` | Per drive: RMS of sim minus measured position |
@@ -147,7 +148,18 @@ The result directory is `<out>/<dataset_id>_mjwarp_<integrator>_<period in us>us
 | `sim_applied`, `sim_demanded` | [T, 22] | Sim drive torque after and before the drive's torque limits, Nm |
 | `sim_joint_q` | [T, 22] | Sim URDF joint positions, in the description's joint order |
 | `sim_base_angles` | [T, 3] | Prescribed base yaw, pitch and roll (zeros on a fixed base) |
+| `sim_motor_position` | [T, 22] | Sim motor side: `sim_position` less each crank's play on an asset built with `--ankle-backlash`, `sim_position` otherwise |
 | `real_position`, `real_velocity`, `real_torque` | [T, 22] | The drive's measurements interpolated to `t_ns` |
+| `real_motor_position` | [T, 22] | The drive's motor encoder (`motor_position_rad`, its own zero), when the capture has it |
+
+`--physics-overrides` merges a YAML or JSON mapping, inline or from a file, over the profile's `physics` block. It is how a replay opens an asset whose knobs the profile leaves empty. For the [crank backlash](drives.md#crank-backlash) variant, pass `--usd` with that asset and the play's width, a number for every crank or a mapping by crank drive:
+
+```bash
+humanoid-sim --solver kamino --usd outputs/assets/ethrc_v1/<key>/robot.usda replay <exc-dir> --base fixed \
+    --physics-overrides '{ankle_backlash: {width_rad: 0.008}}'
+```
+
+Motor minus output (`*_motor_position - *_position`) against the torque then shows the play the same way on both sides: a step of the play's width where the torque changes sign. The capture's motor encoder has its own zero, so compare steps, not levels.
 
 The command also prints one JSON line (`dataset_id`, `period_ns`, `wall_s`, `sim_s`) and, per drive, the position RMS and the tracking RMS in mrad.
 

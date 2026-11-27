@@ -108,8 +108,9 @@ SUSPENDED_LIFT_M = 0.3  # a suspended robot's soles above the ground
 
 # What the runtime does not model (published in the descriptor).
 FIDELITY_GAPS = [
-    "drive current-loop dynamics and backlash absent; the output current limit and the winding I2t limit are "
+    "drive current-loop dynamics absent; the output current limit and the winding I2t limit are "
     "modeled, unverified, and off unless the profile's devices.current enables them",
+    "gearbox backlash only at the ankle cranks, and only on an asset built with ankle backlash",
     "upper-body passive joint parameters (waist, shoulders, elbows) are description values, not identified",
     "IMU errors from the rig's model: white noise, turn-on bias (drawn at a session's start and kept through RESET), "
     "Gauss-Markov drift (SET_FIDELITY ideal turns them off) and, where the profile has one, the chip's rotation in "

@@ -70,6 +70,10 @@ PARAMS: dict[str, Param] = {
     "ankle_spring_damping": Param("physics", "crank", unit="N m s/rad",
                                   doc="ankle linkage compliance: damping of that spring, per crank; positive. Nominal: "
                                       "the profile's physics.ankle_compliance"),
+    "ankle_backlash": Param("physics", "crank", unit="rad",
+                            doc="ankle crank backlash: width of the play between a crank drive's motor side and its "
+                                "output shaft, per crank (an asset built with ankle backlash); positive. Nominal: "
+                                "the profile's physics.ankle_backlash"),
     "joint_give_stiffness": Param("physics", "give", unit="N m/rad",
                                   doc="joint give: stiffness of the spring between a drive joint's encoder side and its "
                                       "link, per joint (an asset built with joint give); positive. Nominal: the "

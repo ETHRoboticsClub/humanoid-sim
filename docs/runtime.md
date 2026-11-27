@@ -249,7 +249,8 @@ The descriptor region holds one JSON object (sorted keys, at most 16,384 bytes) 
 
 The fidelity gaps the runtime publishes:
 
-- drive current-loop dynamics and backlash absent; the output current limit and the winding I2t limit are modeled, unverified, and off unless the profile's devices.current enables them
+- drive current-loop dynamics absent; the output current limit and the winding I2t limit are modeled, unverified, and off unless the profile's devices.current enables them
+- gearbox backlash only at the ankle cranks, and only on an asset built with ankle backlash
 - upper-body passive joint parameters (waist, shoulders, elbows) are description values, not identified
 - IMU errors from the rig's model: white noise, turn-on bias (drawn at a session's start and kept through RESET), Gauss-Markov drift (SET_FIDELITY ideal turns them off) and, where the profile has one, the chip's rotation in its mount (devices.imu_mount; modeled from one at-rest capture, unconfirmed)
 - drive delay is each family's fixed figure (actuators.yaml drive_delay_s) and, where the profile has one, the command path's uniform jitter (devices.command_path.jitter_ns); not measured per family

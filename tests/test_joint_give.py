@@ -255,7 +255,8 @@ def test_build_asset_builds_without_give_on_request(monkeypatch, tmp_path):
 
     seen = {}
     monkeypatch.setattr(asset, "build_asset", lambda *a, **k: seen.setdefault("give", k["joint_give"]) or tmp_path)
-    base = dict(robot="ethrc_v1", assets=str(tmp_path), force=False, base_joints=False, ankle_compliance=False)
+    base = dict(robot="ethrc_v1", assets=str(tmp_path), force=False, base_joints=False, ankle_compliance=False,
+                ankle_backlash=False)
     cli.cmd_build_asset(argparse.Namespace(**base, joint_give=None, no_joint_give=True))
     assert seen["give"] == ()
     seen.clear()

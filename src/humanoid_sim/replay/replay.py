@@ -8,7 +8,10 @@ Each drive is fed, at the recorded gains, PD law, no feed-forward or target velo
   applies demands in training (``latency_ns``, per env).
 
 The sim's drive-frame position, velocity and applied torque are scored against the drive's own measurements at
-the same times; positions as the drive reads them (its ``position_offset`` included).
+the same times; positions as the drive reads them (its ``position_offset`` included). Both sides also keep the motor
+encoder (``motor_position``): the capture's ``motor_position_rad`` (its own zero) and the sim's motor side, the
+reported position less each crank's play on an asset with ankle backlash (the reported position otherwise), so that
+motor minus output can be set against the torque as the captures show it.
 
 Base: the capture was taken on a gantry that lets the base swing, mostly in yaw (tens of degrees, IMU
 |ω| up to about 1.8 rad/s). A fixed-base replay ignores that motion; with a base mode (on the asset built with base
@@ -89,6 +92,14 @@ class ReplayResult:
         keep = self.t_ns >= self.t_ns[0] + int(skip_s * NS_PER_S)
         err = self.real["position"][keep] - self.demand[keep]
         return {d: float(np.sqrt(np.nanmean(err[:, i] ** 2))) for i, d in enumerate(self.drives)}
+
+
+def motor_side(plant: PlantCore, position: torch.Tensor, env: int = 0) -> torch.Tensor:
+    """Env ``env``'s motor-side positions ``[D]`` behind its reported ``position`` ``[D]``: each crank's reading less
+    its play on an asset with ankle backlash (:attr:`PlantCore.backlash_rad`), the reading itself otherwise."""
+    if plant.backlash_rad is None:
+        return position
+    return position.index_add(0, plant.crank_drives, -plant.backlash_rad[env].to(position.dtype))
 
 
 def initial_joint_state(plant: PlantCore, native: np.ndarray | torch.Tensor) -> torch.Tensor:
@@ -173,6 +184,8 @@ def _prepare(capture: ExcitationCapture, sim: SimCore, duration_s: float | None,
 
     real = {"position": series("native_position_rad", t_meas), "velocity": series("velocity_rad_s", t_meas),
             "torque": series("torque_nm", t_meas)}
+    if all("motor_position_rad" in getattr(pdo[d], "fields", {}) for d in drives):  # not every capture source has it
+        real["motor_position"] = series("motor_position_rad", t_meas)
     if getattr(capture, "coordinates", None) is not None:
         raw = capture.capture_pdo()
         real["capture_position"] = np.stack([
@@ -320,6 +333,7 @@ def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None
     keys = ("position_rad", "velocity_rad_s", "applied_torque_nm", "demanded_torque_nm")
     acc = {k: torch.zeros(len(run.t_grid), plant.map.num_drives, device=plant.cfg.device) for k in keys}
     acc_q = torch.zeros(len(run.t_grid), len(plant.map.joint_names), device=plant.cfg.device)
+    acc_motor = torch.zeros(len(run.t_grid), plant.map.num_drives, device=plant.cfg.device)
 
     actual_base = (torch.zeros((len(run.t_grid), 6), device=plant.cfg.device)
                    if run.acceleration is not None else None)
@@ -332,6 +346,7 @@ def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None
         for key in keys:
             acc[key][k] = getattr(fb, key)[0]
         acc["position_rad"][k] += offset0  # what the drive reads, as the capture recorded
+        acc_motor[k] = motor_side(plant, acc["position_rad"][k])
         acc_q[k] = sim.joint_state()[0][0]
         if actual_base is not None:
             aq, av = sim.base_state()
@@ -344,6 +359,7 @@ def replay(capture: ExcitationCapture, sim: SimCore, *, duration_s: float | None
     out = {name: acc[key].cpu().double().numpy() for name, key in
            zip(("position", "velocity", "applied", "demanded"), keys, strict=True)}
     out["joint_q"] = acc_q.cpu().double().numpy()
+    out["motor_position"] = acc_motor.cpu().double().numpy()
     out["base_angles"] = run.base.angles if run.base is not None else np.zeros((len(run.t_grid), 3))
     if run.command_t is None:
         demand = run.demand[:, 0] if run.demand.ndim == 3 else run.demand

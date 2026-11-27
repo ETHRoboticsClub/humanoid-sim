@@ -13,7 +13,8 @@ sits between demands and the solver:
 * :meth:`RobotPlant.measured` is what the robot's host would read: drive feedback as the drive reports it (its
   position offset included, in whole encoder counts with ±1 count of jitter, velocity per controller sample with
   its dither, torque with its noise; :class:`~humanoid_sim.devices.reporting.DriveReporting`) as the master holds it
-  between the drive's samples (:class:`~humanoid_sim.devices.sampling.FeedbackSampler`), a short per-step history of
+  between the drive's samples (:class:`~humanoid_sim.devices.sampling.FeedbackSampler`; with ankle backlash a crank
+  reports its output shaft, :mod:`~humanoid_sim.transmissions.backlash`), a short per-step history of
   it, and the raw IMU samples received so far (sensor frame, receipt stamps). :meth:`RobotPlant.truth` is everything
   else, for critics and rewards;
 * :meth:`RobotPlant.reset` writes the state of the envs being reset and redraws their device parameters;
@@ -89,6 +90,9 @@ class Truth:
     # [E, C] each crank arm's angle past its drive's reading (drive frame), in RobotPlant.cranks order; None without
     # ankle compliance. The foot's own deflection is in joint_pos.
     ankle_spring_rad: torch.Tensor | None = None
+    # [E, C] each crank's output shaft past its motor side (drive frame), in RobotPlant.cranks order; None without
+    # ankle backlash. drive.position_rad is the output shaft; the motor side is that less this.
+    ankle_backlash_rad: torch.Tensor | None = None
     # [E, G] each give joint's link angle past the joint's reading (the drive's side, ``joint_pos``), in the joint's own
     # coordinates, in RobotPlant.give_joints order; None without joint give. The link's angle is the sum.
     joint_give_rad: torch.Tensor | None = None
@@ -145,6 +149,7 @@ def imu_latency_bounds(specs, nominal_ns: int) -> tuple[float, float]:
 class RobotPlant:
     _stops = None  # StopSolref when crank_stop_stiffness or crank_stop_damping is randomized on MJWarp
     _kamino_stops = None  # KaminoCrankStops: on Kamino, when the profile or the randomization asks for soft stops
+    backlash: dict[str, str] = {}  # {crank drive: backlash joint} of an asset built with ankle backlash (never mutated)
 
     def __init__(self, robot, cfg: TrainPlantCfg | None = None, *, imu=None, contacts=None, physics_manager=None):
         """``robot``: the scene's articulation; ``imu`` / ``contacts``: its sensors (optional);
@@ -189,6 +194,20 @@ class RobotPlant:
                                         if d in self.springs], device=self.device, dtype=torch.long)
         self._spring_sign = torch.tensor([float(self.desc.drives[d].sign) for d in self.cranks if d in self.springs],
                                          device=self.device)
+        # Ankle crank backlash: the asset's play joints (transmissions/backlash.py), by crank drive.
+        from humanoid_sim.transmissions.backlash import backlash_joints
+
+        backlash = backlash_joints(self.desc) if self.native_state is not None else {}
+        present = [n in robot.joint_names for n in backlash.values()]
+        if any(present) and not all(present):
+            raise ValueError("the articulation has some of the ankle crank backlash joints, not all")
+        self.backlash = backlash if all(present) and backlash else {}
+        self.backlash_ids = torch.tensor([robot.joint_names.index(self.backlash[d]) for d in self.cranks
+                                          if d in self.backlash], device=self.device, dtype=torch.long)
+        if self.backlash:
+            from humanoid_sim.transmissions.backlash import loop_encoder
+
+            self.core.use_backlash(loop_encoder(self.profile["physics"]))
         # Joint give: the asset's springs behind drive joints (transmissions/compliance.py), by joint.
         from humanoid_sim.transmissions.compliance import give_joint
 
@@ -267,13 +286,18 @@ class RobotPlant:
             raise ValueError("randomizing imu_drop_probability needs the IMU")
         if used & {"ankle_spring_stiffness", "ankle_spring_damping"} and not self.springs:
             raise ValueError("randomizing ankle_spring_* needs an asset built with ankle compliance")
+        if "ankle_backlash" in used and not self.backlash:
+            raise ValueError("randomizing ankle_backlash needs an asset built with ankle backlash")
+        if self.springs and self.backlash and list(self.springs) != list(self.backlash):
+            raise ValueError("the ankle springs and backlash joints are on different cranks")
         if used & {"joint_give_stiffness", "joint_give_damping"} and not self.gives:
             raise ValueError("randomizing joint_give_* needs an asset built with joint give")
         if {"friction", "shape_friction"} <= used:
             raise ValueError("choose per-env friction or per-shape friction, not both")
         self.randomizer = Randomizer(specs, {k: v for k, v in nominal.items() if k in used},
                                      {"body": list(robot.body_names), "joint": self.core.solver_map.joint_names,
-                                      "drive": self.drives, "crank": [d for d in self.cranks if d in self.springs],
+                                      "drive": self.drives,
+                                      "crank": [d for d in self.cranks if d in self.springs or d in self.backlash],
                                       "give": self.give_joints,
                                       "shape": [f"shape_{i}" for i in range(nominal.get("shape_friction", torch.empty(e, 0)).shape[1])]},
                                      num_envs=e, device=self.device, seed=cfg.seed, level=cfg.level)
@@ -343,6 +367,12 @@ class RobotPlant:
         if self.springs:  # the gains the scene spawned the springs with (the profile's physics.ankle_compliance)
             out["ankle_spring_stiffness"] = data.joint_stiffness.torch[:, self.spring_ids].clone()
             out["ankle_spring_damping"] = data.joint_damping.torch[:, self.spring_ids].clone()
+        if self.backlash:  # the profile's physics.ankle_backlash, which _write_physics opens the closed stops to
+            from humanoid_sim.physics.isaaclab import backlash_widths
+
+            widths = backlash_widths(self.robot.cfg.spawn.usd_path, self.profile["physics"])
+            out["ankle_backlash"] = torch.tensor([widths[self.backlash[d]] for d in self.cranks if d in self.backlash],
+                                                 device=self.device).expand(self.num_envs, -1).clone()
         if self.gives:  # likewise: the gains joint give spawned with (the profile's physics.joint_give, or the description)
             out["joint_give_stiffness"] = data.joint_stiffness.torch[:, self.give_ids].clone()
             out["joint_give_damping"] = data.joint_damping.torch[:, self.give_ids].clone()
@@ -409,6 +439,20 @@ class RobotPlant:
                 if not bool((v[name] > 0).all()):
                     raise ValueError(f"{name} must be positive")
                 getattr(r, f"write_joint_{gain}_to_sim_index")(**{gain: v[name].float()}, joint_ids=self.spring_ids)
+        if self.backlash and self.springs:  # the play frees the springs' output flange: keep it stable
+            from humanoid_sim.model.asset import backlash_output_inertia
+            from humanoid_sim.transmissions.backlash import check_output_stability
+
+            flange = backlash_output_inertia(self.robot.cfg.spawn.usd_path)
+            if flange is None:
+                raise ValueError("an asset with ankle springs and backlash records no output flange inertia; rebuild it")
+            check_output_stability(v.get("ankle_spring_stiffness", self._nominal_physics["ankle_spring_stiffness"]),
+                                   v.get("ankle_spring_damping", self._nominal_physics["ankle_spring_damping"]),
+                                   flange, self.period_ns / NS_PER_S)
+        if self.backlash:  # every time: the scene authored the stops closed (physics.isaaclab.write_backlash)
+            from humanoid_sim.physics.isaaclab import write_backlash
+
+            write_backlash(r, self.backlash_ids, v.get("ankle_backlash", self._nominal_physics["ankle_backlash"]))
         for name, gain in (("joint_give_stiffness", "stiffness"), ("joint_give_damping", "damping")):
             if name in v:
                 if not bool((v[name] > 0).all()):
@@ -536,8 +580,9 @@ class RobotPlant:
         self.robot.write_joint_state_to_sim_index(
             position=torch.stack([values[n] for n in names], -1).to(q.dtype),
             velocity=torch.stack([rates[n] for n in names], -1).to(qd.dtype), joint_ids=ids, env_ids=env_ids)
-        relaxed = torch.cat([self.spring_ids, self.give_ids])
-        if len(relaxed):  # crank springs and joint give relaxed: the linkage closes as the rigid one does
+        # Crank springs and joint give relaxed, crank play centred: the linkage closes as the rigid one does.
+        relaxed = torch.cat([self.spring_ids, self.backlash_ids, self.give_ids])
+        if len(relaxed):
             zero = torch.zeros(len(env_ids), len(relaxed), device=self.device, dtype=q.dtype)
             self.robot.write_joint_state_to_sim_index(position=zero, velocity=zero, joint_ids=relaxed,
                                                       env_ids=env_ids)
@@ -560,6 +605,7 @@ class RobotPlant:
         if self._contact_capacity is not None:
             self._contact_capacity.check()
         q, qd = self.solver_state()
+        self._read_backlash()
         if self._drive_graph is None:
             fb = self.core.feedback(q, qd)
         else:
@@ -610,8 +656,14 @@ class RobotPlant:
             fb = self.sampler.step(self.t_ns, fb)
         return fb
 
+    def _read_backlash(self) -> None:
+        """Hand the core each crank's play before it computes feedback."""
+        if self.backlash:
+            self.core.write_backlash(self.robot.data.joint_pos.torch[:, self.backlash_ids])
+
     def measured(self) -> Measured:
         q, qd = self.solver_state()
+        self._read_backlash()
         drive = self._sample(self.core.feedback(q, qd))
         return Measured(drive, replace(self._hist), self._hist_ns, self.imu.samples if self.imu is not None else None)
 
@@ -622,9 +674,12 @@ class RobotPlant:
         spring = None
         if len(self.spring_ids):
             spring = data.joint_pos.torch[:, self.spring_ids] * self._spring_sign
+        self._read_backlash()
+        drive = self.core.feedback(*self.solver_state())
+        play = self.core.backlash_rad.clone() if self.backlash else None
         give = data.joint_pos.torch[:, self.give_ids] if len(self.give_ids) else None
         return Truth(q, qd, data.root_link_pose_w.torch, data.root_com_vel_w.torch[:, :3],
-                     data.root_com_ang_vel_b.torch, self.core.feedback(*self.solver_state()), forces, spring, give)
+                     data.root_com_ang_vel_b.torch, drive, forces, spring, play, give)
 
     # -- reset ------------------------------------------------------------------------------------
 
